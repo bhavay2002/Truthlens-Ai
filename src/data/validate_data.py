@@ -52,11 +52,16 @@ class DataValidator:
     # Null Validation
     # ------------------------------------------------
 
-    def validate_nulls(self, df: pd.DataFrame) -> bool:
+    def validate_nulls(
+        self,
+        df: pd.DataFrame,
+        max_null_ratio: float = None
+    ) -> bool:
         """Check for excessive null values"""
+        threshold = self.max_null_ratio if max_null_ratio is None else max_null_ratio
         null_ratios = df[self.required_columns].isnull().mean()
 
-        problematic = null_ratios[null_ratios > self.max_null_ratio]
+        problematic = null_ratios[null_ratios > threshold]
 
         if not problematic.empty:
             error = f"Columns with excessive nulls: {problematic.to_dict()}"

@@ -1,0 +1,36 @@
+{
+  "data_files": {
+    "fake_path": "data/raw/dataset1/Fake.csv",
+    "real_path": "data/raw/dataset1/True.csv"
+  },
+  "rows": 44689,
+  "columns": [
+    "title",
+    "text",
+    "subject",
+    "date",
+    "label",
+    "text_length",
+    "word_count",
+    "sentence_count",
+    "avg_word_length",
+    "uppercase_ratio"
+  ],
+  "label_distribution": {
+    "1": 23478,
+    "0": 21211
+  },
+  "text_length_stats": {
+    "mean": 2467.0986820022827,
+    "median": 2185.0,
+    "min": 1,
+    "max": 51794
+  },
+  "word_count_stats": {
+    "mean": 404.966501823715,
+    "median": 362.0,
+    "min": 0,
+    "max": 8135
+  },
+  "figures_dir": "reports/figures"
+}
