@@ -78,8 +78,10 @@ def evaluate_saved_model():
         
         # Plot confusion matrix
         import matplotlib.pyplot as plt
-        plot_confusion_matrix(results['confusion_matrix'])
-        plt.savefig("reports/confusion_matrix.png")
+        Path("reports").mkdir(parents=True, exist_ok=True)
+        fig, _ = plot_confusion_matrix(results['confusion_matrix'])
+        fig.savefig("reports/confusion_matrix.png")
+        plt.close(fig)
         logger.info("Confusion matrix saved to reports/confusion_matrix.png")
         
         logger.info("Evaluation complete!")

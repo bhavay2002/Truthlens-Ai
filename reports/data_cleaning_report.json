@@ -1,0 +1,15 @@
+{
+  "data_files": {
+    "fake_path": "data/raw/dataset1/Fake.csv",
+    "real_path": "data/raw/dataset1/True.csv"
+  },
+  "raw_rows": 44898,
+  "cleaned_rows": 43951,
+  "rows_removed": 947,
+  "retention_rate": 0.9789077464475032,
+  "label_distribution": {
+    "1": 22741,
+    "0": 21210
+  },
+  "cleaned_data_path": "data/processed/cleaned_dataset.csv"
+}
