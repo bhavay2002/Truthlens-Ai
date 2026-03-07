@@ -1,3 +1,15 @@
+"""
+Model Evaluation Module for TruthLens AI
+Provides comprehensive evaluation metrics and reporting
+"""
+
+import logging
+import json
+from pathlib import Path
+from typing import Dict, Any, Optional
+
+import numpy as np
+
 from sklearn.metrics import (
     accuracy_score,
     precision_score,
@@ -6,81 +18,191 @@ from sklearn.metrics import (
     confusion_matrix,
     classification_report,
     roc_auc_score,
-    roc_curve
+    roc_curve,
+    balanced_accuracy_score,
+    matthews_corrcoef
 )
-import logging
-import json
-from pathlib import Path
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def evaluate(y_true, y_pred, y_proba=None):
+# -------------------------------------------------
+# Evaluation Function
+# -------------------------------------------------
+
+def evaluate(
+    y_true,
+    y_pred,
+    y_proba: Optional[np.ndarray] = None
+) -> Dict[str, Any]:
     """
-    Comprehensive model evaluation
-    
+    Comprehensive model evaluation.
+
     Args:
-        y_true: True labels
+        y_true: Ground truth labels
         y_pred: Predicted labels
-        y_proba: Predicted probabilities (optional)
-    
+        y_proba: Predicted probabilities for positive class
+
     Returns:
-        dict: Evaluation metrics
+        dict containing evaluation metrics
     """
+
     try:
-        results = {
-            "accuracy": accuracy_score(y_true, y_pred),
-            "precision": precision_score(y_true, y_pred, average='binary'),
-            "recall": recall_score(y_true, y_pred, average='binary'),
-            "f1": f1_score(y_true, y_pred, average='binary'),
-            "confusion_matrix": confusion_matrix(y_true, y_pred).tolist()
-        }
-        
-        # Add ROC-AUC if probabilities provided
+
+        y_true = np.array(y_true)
+        y_pred = np.array(y_pred)
+
+        results = {}
+
+        # -------------------------------------------------
+        # Core Metrics
+        # -------------------------------------------------
+
+        results["accuracy"] = accuracy_score(y_true, y_pred)
+        results["balanced_accuracy"] = balanced_accuracy_score(y_true, y_pred)
+
+        results["precision"] = precision_score(
+            y_true,
+            y_pred,
+            average="binary",
+            zero_division=0
+        )
+
+        results["recall"] = recall_score(
+            y_true,
+            y_pred,
+            average="binary",
+            zero_division=0
+        )
+
+        results["f1"] = f1_score(
+            y_true,
+            y_pred,
+            average="binary",
+            zero_division=0
+        )
+
+        results["mcc"] = matthews_corrcoef(y_true, y_pred)
+
+        # -------------------------------------------------
+        # Confusion Matrix
+        # -------------------------------------------------
+
+        cm = confusion_matrix(y_true, y_pred)
+
+        results["confusion_matrix"] = cm.tolist()
+
+        # -------------------------------------------------
+        # ROC AUC
+        # -------------------------------------------------
+
         if y_proba is not None:
+
+            y_proba = np.array(y_proba)
+
             results["roc_auc"] = roc_auc_score(y_true, y_proba)
-        
-        # Classification report
-        report = classification_report(y_true, y_pred, target_names=['Real', 'Fake'])
-        results["classification_report"] = report
-        
-        logger.info("Evaluation Results:")
+
+            fpr, tpr, thresholds = roc_curve(y_true, y_proba)
+
+            results["roc_curve"] = {
+                "fpr": fpr.tolist(),
+                "tpr": tpr.tolist(),
+                "thresholds": thresholds.tolist()
+            }
+
+        # -------------------------------------------------
+        # Classification Report
+        # -------------------------------------------------
+
+        report_dict = classification_report(
+            y_true,
+            y_pred,
+            target_names=["Real", "Fake"],
+            output_dict=True
+        )
+
+        results["classification_report"] = report_dict
+
+        # -------------------------------------------------
+        # Dataset Statistics
+        # -------------------------------------------------
+
+        results["dataset_stats"] = {
+            "total_samples": int(len(y_true)),
+            "real_samples": int(np.sum(y_true == 0)),
+            "fake_samples": int(np.sum(y_true == 1))
+        }
+
+        # -------------------------------------------------
+        # Logging
+        # -------------------------------------------------
+
+        logger.info("================================================")
+        logger.info("Model Evaluation Results")
+        logger.info("================================================")
+
         logger.info(f"Accuracy: {results['accuracy']:.4f}")
+        logger.info(f"Balanced Accuracy: {results['balanced_accuracy']:.4f}")
         logger.info(f"Precision: {results['precision']:.4f}")
         logger.info(f"Recall: {results['recall']:.4f}")
         logger.info(f"F1 Score: {results['f1']:.4f}")
-        if y_proba is not None:
+        logger.info(f"MCC: {results['mcc']:.4f}")
+
+        if "roc_auc" in results:
             logger.info(f"ROC-AUC: {results['roc_auc']:.4f}")
-        logger.info(f"\nClassification Report:\n{report}")
-        
+
+        logger.info(f"Dataset size: {results['dataset_stats']['total_samples']}")
+
+        logger.info("================================================")
+
         return results
-    
+
     except Exception as e:
         logger.error(f"Error during evaluation: {e}")
         raise
 
 
-def save_evaluation_results(results, output_path="reports/evaluation_results.json"):
-    """Save evaluation results to JSON file"""
+# -------------------------------------------------
+# Save Results
+# -------------------------------------------------
+
+def save_evaluation_results(
+    results: Dict[str, Any],
+    output_path: str = "reports/evaluation_results.json"
+):
+    """
+    Save evaluation results to JSON file.
+    """
+
     try:
-        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-        
-        # Convert numpy arrays to lists for JSON serialization
-        results_serializable = {}
-        for key, value in results.items():
-            if isinstance(value, (list, str, int, float)):
-                results_serializable[key] = value
-            elif hasattr(value, 'tolist'):
-                results_serializable[key] = value.tolist()
-            else:
-                results_serializable[key] = str(value)
-        
-        with open(output_path, 'w') as f:
-            json.dump(results_serializable, f, indent=2)
-        
-        logger.info(f"Evaluation results saved to {output_path}")
-    
+
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Convert numpy objects safely
+        def convert(obj):
+
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+
+            if isinstance(obj, (np.float32, np.float64)):
+                return float(obj)
+
+            if isinstance(obj, (np.int32, np.int64)):
+                return int(obj)
+
+            return obj
+
+        serializable_results = json.loads(
+            json.dumps(results, default=convert)
+        )
+
+        with open(output_path, "w") as f:
+            json.dump(serializable_results, f, indent=4)
+
+        logger.info(f"Evaluation results saved to: {output_path}")
+
     except Exception as e:
         logger.error(f"Error saving evaluation results: {e}")
         raise

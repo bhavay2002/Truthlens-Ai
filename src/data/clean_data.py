@@ -121,6 +121,10 @@ def clean_dataframe(df, text_column="text", min_len=10):
     Professional dataset cleaning
     """
 
+    if text_column not in df.columns:
+        raise ValueError(f"Column '{text_column}' not found in dataframe")
+
+    df = df.copy()
     initial_rows = len(df)
     logger.info(f"Initial dataset size: {initial_rows}")
 
@@ -151,7 +155,8 @@ def clean_dataframe(df, text_column="text", min_len=10):
 
     logger.info(f"Final dataset size: {final_rows}")
     logger.info(f"Rows removed: {initial_rows - final_rows}")
-    logger.info(f"Retention rate: {(final_rows/initial_rows)*100:.2f}%")
+    retention = (final_rows / initial_rows) * 100 if initial_rows else 0.0
+    logger.info(f"Retention rate: {retention:.2f}%")
 
     return df
 
