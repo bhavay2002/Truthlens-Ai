@@ -205,12 +205,19 @@ class FakeNewsEDA:
 
         logger.info("\n=== FEATURE ENGINEERING ===")
 
-        self.df["avg_word_length"] = self.df["text"].apply(
-            lambda x: np.mean([len(w) for w in str(x).split()])
-        )
+        def _avg_word_len(text):
+            words = str(text).split()
+            if not words:
+                return 0.0
+            return float(np.mean([len(w) for w in words]))
+
+        self.df["avg_word_length"] = self.df["text"].apply(_avg_word_len)
 
         self.df["uppercase_ratio"] = self.df["text"].apply(
-            lambda x: sum(1 for c in str(x) if c.isupper()) / (len(str(x))+1)
+            lambda x: (
+                sum(1 for c in str(x) if c.isupper()) /
+                max(len(str(x)), 1)
+            )
         )
 
         logger.info("New features created")

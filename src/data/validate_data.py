@@ -6,7 +6,6 @@ Ensures dataset quality before ML training
 import pandas as pd
 import logging
 from typing import List, Dict, Any
-import numpy as np
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -31,6 +30,10 @@ class DataValidator:
         self.min_class_ratio = min_class_ratio
         self.min_text_length = min_text_length
         self.validation_errors = []
+
+    def _has_required_columns(self, df: pd.DataFrame) -> bool:
+        """Fast guard to avoid KeyError in downstream validators."""
+        return set(self.required_columns).issubset(df.columns)
 
     # ------------------------------------------------
     # Schema Validation
@@ -58,6 +61,12 @@ class DataValidator:
         max_null_ratio: float = None
     ) -> bool:
         """Check for excessive null values"""
+        if not self._has_required_columns(df):
+            error = "Cannot validate nulls: required columns missing"
+            logger.error(error)
+            self.validation_errors.append(error)
+            return False
+
         threshold = self.max_null_ratio if max_null_ratio is None else max_null_ratio
         null_ratios = df[self.required_columns].isnull().mean()
 
@@ -77,6 +86,12 @@ class DataValidator:
 
     def validate_duplicates(self, df: pd.DataFrame) -> bool:
         """Check duplicate texts"""
+        if "text" not in df.columns:
+            error = "Cannot validate duplicates: 'text' column missing"
+            logger.error(error)
+            self.validation_errors.append(error)
+            return False
+
         dup_count = df.duplicated(subset=["text"]).sum()
         dup_ratio = dup_count / len(df)
 
@@ -119,9 +134,9 @@ class DataValidator:
         if "text" not in df.columns:
             return True
 
-        df["text"] = df["text"].astype(str)
+        text_series = df["text"].astype(str)
 
-        short_texts = (df["text"].str.len() < self.min_text_length).sum()
+        short_texts = (text_series.str.len() < self.min_text_length).sum()
         short_ratio = short_texts / len(df)
 
         if short_ratio > 0.1:
@@ -203,7 +218,15 @@ class DataValidator:
 
         results["dataset_summary"] = self.dataset_summary(df)
 
-        all_passed = all(results.values())
+        validation_flags = [
+            results["schema_valid"],
+            results["nulls_valid"],
+            results["duplicates_valid"],
+            results["labels_valid"],
+            results["text_quality_valid"],
+            results["vocabulary_valid"],
+        ]
+        all_passed = all(validation_flags)
         results["all_passed"] = all_passed
         results["errors"] = self.validation_errors
 

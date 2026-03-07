@@ -59,11 +59,17 @@ def predict_news(request: NewsRequest):
         logger.info(f"Received prediction request for text of length: {len(request.text)}")
         
         # Get prediction
-        prob = predict(request.text)
-        
-        # Determine prediction label
-        prediction = "FAKE" if prob > 0.5 else "REAL"
-        confidence = prob if prob > 0.5 else (1 - prob)
+        prediction_result = predict(request.text)
+
+        # Backward-compatible handling if predict() returns float or dict
+        if isinstance(prediction_result, dict):
+            prob = float(prediction_result.get("fake_probability", 0.0))
+            prediction = str(prediction_result.get("label", "Fake")).upper()
+            confidence = float(prediction_result.get("confidence", max(prob, 1 - prob)))
+        else:
+            prob = float(prediction_result)
+            prediction = "FAKE" if prob > 0.5 else "REAL"
+            confidence = prob if prob > 0.5 else (1 - prob)
         
         response = NewsResponse(
             text=request.text[:100] + "..." if len(request.text) > 100 else request.text,

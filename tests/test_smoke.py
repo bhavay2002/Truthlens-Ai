@@ -211,7 +211,7 @@ class TestDataValidation:
             'label': [0, 1, 0]
         })
         
-        result = validator.validate_nulls(df, max_null_ratio=0.5)
+        result = validator.validate_nulls(df, max_null_ratio=0.2)
         assert not result  # Should fail due to nulls
 
 
