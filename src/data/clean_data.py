@@ -1,116 +1,197 @@
 import pandas as pd
 import re
 import logging
+import unicodedata
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def clean_text(text):
+# -------------------------------------------------
+# Text Normalization
+# -------------------------------------------------
+
+def normalize_unicode(text):
     """
-    Enhanced text cleaning with multiple preprocessing steps
+    Normalize unicode characters
+    Example: fancy quotes → standard quotes
     """
-    text = str(text).lower()
-    
+    return unicodedata.normalize("NFKD", text)
+
+
+def expand_contractions(text):
+    """
+    Expand contractions like don't → do not
+    """
+    try:
+        import contractions
+        return contractions.fix(text)
+    except ImportError:
+        return text
+
+
+def normalize_numbers(text):
+    """
+    Replace numbers with token <NUM>
+    """
+    return re.sub(r"\d+", "<NUM>", text)
+
+
+def remove_emojis(text):
+    """
+    Remove emojis and other unicode symbols
+    """
+    emoji_pattern = re.compile(
+        "["
+        "\U0001F600-\U0001F64F"  # emoticons
+        "\U0001F300-\U0001F5FF"  # symbols & pictographs
+        "\U0001F680-\U0001F6FF"  # transport
+        "\U0001F700-\U0001F77F"
+        "\U0001F780-\U0001F7FF"
+        "\U0001F800-\U0001F8FF"
+        "\U0001F900-\U0001F9FF"
+        "\U0001FA00-\U0001FA6F"
+        "\U0001FA70-\U0001FAFF"
+        "\U00002702-\U000027B0"
+        "\U000024C2-\U0001F251"
+        "]+",
+        flags=re.UNICODE,
+    )
+    return emoji_pattern.sub(r"", text)
+
+
+# -------------------------------------------------
+# Core Text Cleaning
+# -------------------------------------------------
+
+def clean_text(text, normalize_nums=True):
+    """
+    Professional text cleaning pipeline
+    """
+
+    text = str(text)
+
+    # Unicode normalization
+    text = normalize_unicode(text)
+
+    # Remove emojis
+    text = remove_emojis(text)
+
+    # Lowercase
+    text = text.lower()
+
+    # Expand contractions
+    text = expand_contractions(text)
+
     # Remove URLs
     text = re.sub(r"http\S+|www\S+|https\S+", "", text)
-    
-    # Remove email addresses
-    text = re.sub(r'\S+@\S+', '', text)
-    
-    # Remove mentions and hashtags (social media artifacts)
-    text = re.sub(r'@\w+|#\w+', '', text)
-    
-    # Remove HTML tags
-    text = re.sub(r'<.*?>', '', text)
-    
-    # Remove special characters but keep spaces and basic punctuation
-    text = re.sub(r"[^a-zA-Z0-9\s.,!?]", "", text)
-    
-    # Remove extra whitespace
-    text = re.sub(r'\s+', ' ', text).strip()
-    
+
+    # Remove emails
+    text = re.sub(r"\S+@\S+", "", text)
+
+    # Remove mentions / hashtags
+    text = re.sub(r"@\w+|#\w+", "", text)
+
+    # Remove HTML
+    text = re.sub(r"<.*?>", "", text)
+
+    # Normalize numbers
+    if normalize_nums:
+        text = normalize_numbers(text)
+
+    # Normalize repeated punctuation
+    text = re.sub(r"[!?]{2,}", "!", text)
+    text = re.sub(r"[.]{2,}", ".", text)
+
+    # Remove unwanted characters
+    text = re.sub(r"[^a-zA-Z0-9\s.,!?<>]", "", text)
+
+    # Normalize whitespace
+    text = re.sub(r"\s+", " ", text).strip()
+
     return text
 
 
-def clean_dataframe(df):
+# -------------------------------------------------
+# DataFrame Cleaning
+# -------------------------------------------------
+
+def clean_dataframe(df, text_column="text", min_len=10):
     """
-    Enhanced dataframe cleaning with additional checks
+    Professional dataset cleaning
     """
-    initial_len = len(df)
-    logger.info(f"Starting with {initial_len} rows")
-    
+
+    initial_rows = len(df)
+    logger.info(f"Initial dataset size: {initial_rows}")
+
     # Remove duplicates
     df = df.drop_duplicates()
-    logger.info(f"Removed {initial_len - len(df)} duplicates")
-    
-    # Remove rows with missing text
-    df = df.dropna(subset=["text"])
-    
-    # Remove rows with empty text after stripping
-    df = df[df['text'].astype(str).str.strip().str.len() > 0]
-    
-    # Remove very short texts (less than 10 characters)
-    df = df[df['text'].astype(str).str.len() >= 10]
-    logger.info(f"Removed short/empty texts")
 
-    # Clean text
-    df["text"] = df["text"].apply(clean_text)
-    
-    # Remove rows that became empty after cleaning
-    df = df[df["text"].str.len() >= 10]
-    
-    # Reset index
+    # Remove missing
+    df = df.dropna(subset=[text_column])
+
+    # Strip whitespace
+    df[text_column] = df[text_column].astype(str).str.strip()
+
+    # Remove empty rows
+    df = df[df[text_column].str.len() > 0]
+
+    # Remove short rows
+    df = df[df[text_column].str.len() >= min_len]
+
+    # Apply text cleaning
+    df[text_column] = df[text_column].apply(clean_text)
+
+    # Remove rows empty after cleaning
+    df = df[df[text_column].str.len() >= min_len]
+
     df = df.reset_index(drop=True)
-    
-    logger.info(f"Final dataset: {len(df)} rows ({len(df)/initial_len*100:.1f}% retained)")
-    
+
+    final_rows = len(df)
+
+    logger.info(f"Final dataset size: {final_rows}")
+    logger.info(f"Rows removed: {initial_rows - final_rows}")
+    logger.info(f"Retention rate: {(final_rows/initial_rows)*100:.2f}%")
+
     return df
 
 
-def advanced_text_preprocessing(text, remove_stopwords=False, lemmatize=False):
+# -------------------------------------------------
+# Advanced NLP Preprocessing
+# -------------------------------------------------
+
+def advanced_text_preprocessing(
+    text,
+    remove_stopwords=False,
+    lemmatize=False
+):
     """
-    Advanced preprocessing with optional stopword removal and lemmatization
-    Requires: pip install nltk
-    
-    Args:
-        text: Input text to process
-        remove_stopwords: Remove common English stopwords
-        lemmatize: Apply lemmatization to words
-    
-    Returns:
-        Processed text string
+    Optional advanced preprocessing
     """
+
+    text = clean_text(text)
+
     try:
         import nltk
         from nltk.corpus import stopwords
         from nltk.stem import WordNetLemmatizer
-        
-        # Download required resources (first time only)
-        try:
-            nltk.data.find('corpora/stopwords')
-        except LookupError:
-            nltk.download('stopwords', quiet=True)
-            nltk.download('wordnet', quiet=True)
-        
-        text = clean_text(text)
-        
-        # Remove stopwords
+
+        nltk.download("stopwords", quiet=True)
+        nltk.download("wordnet", quiet=True)
+
+        words = text.split()
+
         if remove_stopwords:
-            stop_words = set(stopwords.words('english'))
-            words = text.split()
-            words = [w for w in words if w.lower() not in stop_words]
-            text = ' '.join(words)
-        
-        # Lemmatization
+            stop_words = set(stopwords.words("english"))
+            words = [w for w in words if w not in stop_words]
+
         if lemmatize:
             lemmatizer = WordNetLemmatizer()
-            words = text.split()
             words = [lemmatizer.lemmatize(w) for w in words]
-            text = ' '.join(words)
-        
-        return text
-    
+
+        text = " ".join(words)
+
     except ImportError:
-        logger.warning("NLTK not available, falling back to basic cleaning")
-        return clean_text(text)
+        logger.warning("NLTK not installed, skipping advanced preprocessing")
+
+    return text
