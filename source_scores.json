@@ -1,0 +1,22 @@
+{
+  "high_credibility": {
+    "bbc.com": 0.95,
+    "reuters.com": 0.95,
+    "nytimes.com": 0.90,
+    "theguardian.com": 0.90,
+    "washingtonpost.com": 0.90,
+    "apnews.com": 0.95,
+    "npr.org": 0.90,
+    "bloomberg.com": 0.85
+  },
+  "medium_credibility": {
+    "cnn.com": 0.75,
+    "foxnews.com": 0.70,
+    "msnbc.com": 0.70,
+    "usatoday.com": 0.75,
+    "time.com": 0.80
+  },
+  "low_credibility": {
+    "unknown": 0.30
+  }
+}
