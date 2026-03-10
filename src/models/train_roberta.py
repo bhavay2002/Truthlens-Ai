@@ -307,3 +307,5 @@ def train_model(
     except Exception as e:
         logger.error("Error during training: %s", e)
         raise
+
+    
