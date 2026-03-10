@@ -1,10 +1,11 @@
 ﻿"""
 RoBERTa Training Module for TruthLens AI
-Handles dataset splitting, tokenization, training, and model saving
+Handles dataset splitting, tokenization, training, checkpointing, and model saving
 """
 
 import inspect
 import logging
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -36,10 +37,10 @@ DEFAULT_EPOCHS = SETTINGS.training.epochs
 DEFAULT_BATCH_SIZE = SETTINGS.training.batch_size
 DEFAULT_LEARNING_RATE = SETTINGS.training.learning_rate
 
-MODELS_DIR = SETTINGS.paths.models_dir
-LOGS_DIR = SETTINGS.paths.logs_dir
-MODEL_PATH = SETTINGS.model.path
-TEST_SET_PATH = SETTINGS.data.test_set_path
+MODELS_DIR = Path(SETTINGS.paths.models_dir)
+LOGS_DIR = Path(SETTINGS.paths.logs_dir)
+MODEL_PATH = Path(SETTINGS.model.path)
+TEST_SET_PATH = Path(SETTINGS.data.test_set_path)
 
 ID2LABEL = {0: "REAL", 1: "FAKE"}
 LABEL2ID = {"REAL": 0, "FAKE": 1}
@@ -91,6 +92,22 @@ def tokenize_function(example, tokenizer, text_column: str):
 
 
 # -------------------------------------------------
+# Helper — Find Latest Checkpoint
+# -------------------------------------------------
+
+def get_last_checkpoint(directory: Path):
+    if not directory.exists():
+        return None
+
+    checkpoints = list(directory.glob("checkpoint-*"))
+    if not checkpoints:
+        return None
+
+    checkpoints = sorted(checkpoints, key=lambda x: int(x.name.split("-")[-1]))
+    return str(checkpoints[-1])
+
+
+# -------------------------------------------------
 # Training Function
 # -------------------------------------------------
 
@@ -104,22 +121,6 @@ def train_model(
     try:
         ensure_dataframe(df, name="df", required_columns=[text_column, "label"], min_rows=2)
         ensure_non_empty_text_column(df, text_column, name="df")
-        if validation_df is not None:
-            ensure_dataframe(
-                validation_df,
-                name="validation_df",
-                required_columns=[text_column, "label"],
-                min_rows=1,
-            )
-            ensure_non_empty_text_column(validation_df, text_column, name="validation_df")
-        if test_df is not None:
-            ensure_dataframe(
-                test_df,
-                name="test_df",
-                required_columns=[text_column, "label"],
-                min_rows=1,
-            )
-            ensure_non_empty_text_column(test_df, text_column, name="test_df")
 
         logger.info("Starting model training...")
 
@@ -129,52 +130,34 @@ def train_model(
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info("Using device: %s", device)
 
-        # -------------------------------------------------
-        # Hyperparameters from config / Optuna overrides
-        # -------------------------------------------------
-
-        learning_rate = (
-            params.get("learning_rate", DEFAULT_LEARNING_RATE)
-            if params
-            else DEFAULT_LEARNING_RATE
-        )
-        batch_size = (
-            params.get("batch_size", DEFAULT_BATCH_SIZE)
-            if params
-            else DEFAULT_BATCH_SIZE
-        )
+        learning_rate = params.get("learning_rate", DEFAULT_LEARNING_RATE) if params else DEFAULT_LEARNING_RATE
+        batch_size = params.get("batch_size", DEFAULT_BATCH_SIZE) if params else DEFAULT_BATCH_SIZE
         epochs = params.get("epochs", DEFAULT_EPOCHS) if params else DEFAULT_EPOCHS
 
         logger.info(
-            "Training configuration -> LR: %s, Batch Size: %s, Epochs: %s, Text Column: %s",
+            "Training configuration -> LR: %s, Batch Size: %s, Epochs: %s",
             learning_rate,
             batch_size,
             epochs,
-            text_column,
         )
 
-        # -------------------------------------------------
-        # Train / Validation / Test Split
-        # -------------------------------------------------
+        # ------------------------------
+        # Dataset Split
+        # ------------------------------
 
-        if validation_df is None and test_df is None:
-            train_df, temp_df = train_test_split(
-                df,
-                test_size=0.3,
-                random_state=SEED,
-                stratify=df["label"],
-            )
+        train_df, temp_df = train_test_split(
+            df,
+            test_size=0.3,
+            random_state=SEED,
+            stratify=df["label"],
+        )
 
-            val_df, test_df = train_test_split(
-                temp_df,
-                test_size=0.5,
-                random_state=SEED,
-                stratify=temp_df["label"],
-            )
-        else:
-            train_df = df
-            val_df = validation_df if validation_df is not None else df
-            test_df = test_df if test_df is not None else val_df
+        val_df, test_df = train_test_split(
+            temp_df,
+            test_size=0.5,
+            random_state=SEED,
+            stratify=temp_df["label"],
+        )
 
         logger.info(
             "Train samples: %s, Val samples: %s, Test samples: %s",
@@ -183,34 +166,15 @@ def train_model(
             len(test_df),
         )
 
-        # -------------------------------------------------
+        # ------------------------------
         # Tokenizer
-        # -------------------------------------------------
+        # ------------------------------
 
         tokenizer = RobertaTokenizer.from_pretrained(MODEL_NAME)
-
-        # -------------------------------------------------
-        # Convert to HuggingFace Dataset
-        # -------------------------------------------------
 
         train_dataset = Dataset.from_pandas(train_df)
         val_dataset = Dataset.from_pandas(val_df)
         test_dataset = Dataset.from_pandas(test_df)
-
-        # Remove pandas index artifact column
-        for dataset_name, dataset in (
-            ("train", train_dataset),
-            ("val", val_dataset),
-            ("test", test_dataset),
-        ):
-            if "__index_level_0__" in dataset.column_names:
-                cleaned = dataset.remove_columns(["__index_level_0__"])
-                if dataset_name == "train":
-                    train_dataset = cleaned
-                elif dataset_name == "val":
-                    val_dataset = cleaned
-                else:
-                    test_dataset = cleaned
 
         train_dataset = train_dataset.map(
             lambda x: tokenize_function(x, tokenizer, text_column),
@@ -242,9 +206,9 @@ def train_model(
             columns=["input_ids", "attention_mask", "label"],
         )
 
-        # -------------------------------------------------
+        # ------------------------------
         # Model
-        # -------------------------------------------------
+        # ------------------------------
 
         model = RobertaForSequenceClassification.from_pretrained(
             MODEL_NAME,
@@ -253,13 +217,11 @@ def train_model(
             label2id=LABEL2ID,
         )
 
-        logger.info("Using label mapping: %s", model.config.id2label)
-
         model.to(device)
 
-        # -------------------------------------------------
+        # ------------------------------
         # Training Arguments
-        # -------------------------------------------------
+        # ------------------------------
 
         training_kwargs = {
             "output_dir": str(MODELS_DIR),
@@ -270,6 +232,7 @@ def train_model(
             "gradient_accumulation_steps": 2,
             "num_train_epochs": epochs,
             "save_strategy": "epoch",
+            "evaluation_strategy": "epoch",
             "logging_dir": str(LOGS_DIR),
             "logging_steps": 100,
             "load_best_model_at_end": True,
@@ -277,23 +240,13 @@ def train_model(
             "save_total_limit": 2,
             "fp16": torch.cuda.is_available(),
             "seed": SEED,
-            "dataloader_num_workers": 4,
-            "dataloader_pin_memory": True,
         }
-
-        # Compatibility with transformers versions
-        training_args_signature = inspect.signature(TrainingArguments.__init__)
-
-        if "eval_strategy" in training_args_signature.parameters:
-            training_kwargs["eval_strategy"] = "epoch"
-        else:
-            training_kwargs["evaluation_strategy"] = "epoch"
 
         training_args = TrainingArguments(**training_kwargs)
 
-        # -------------------------------------------------
+        # ------------------------------
         # Trainer
-        # -------------------------------------------------
+        # ------------------------------
 
         trainer = Trainer(
             model=model,
@@ -304,25 +257,28 @@ def train_model(
             callbacks=[EarlyStoppingCallback(early_stopping_patience=2)],
         )
 
-        # -------------------------------------------------
-        # Training
-        # -------------------------------------------------
+        # ------------------------------
+        # Resume From Checkpoint
+        # ------------------------------
 
-        logger.info("Training model...")
-        trainer.train()
+        last_checkpoint = get_last_checkpoint(MODELS_DIR)
 
-        # -------------------------------------------------
+        if last_checkpoint:
+            logger.info("Resuming training from checkpoint: %s", last_checkpoint)
+            trainer.train(resume_from_checkpoint=last_checkpoint)
+        else:
+            logger.info("No checkpoint found. Starting fresh training.")
+            trainer.train()
+
+        # ------------------------------
         # Save Model
-        # -------------------------------------------------
-
-        logger.info("Saving model...")
+        # ------------------------------
 
         MODELS_DIR.mkdir(parents=True, exist_ok=True)
         LOGS_DIR.mkdir(parents=True, exist_ok=True)
         MODEL_PATH.mkdir(parents=True, exist_ok=True)
-        TEST_SET_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-        model.save_pretrained(str(MODEL_PATH))
+        trainer.save_model(str(MODEL_PATH))
         tokenizer.save_pretrained(str(MODEL_PATH))
 
         test_df.to_csv(TEST_SET_PATH, index=False)
