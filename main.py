@@ -1,4 +1,4 @@
-from src.data.load_data import merge_datasets
+from src.data.merge_datasets import merge_datasets
 from src.data.clean_data import clean_dataframe
 from src.data.data_augmentation import augment_dataset
 from src.models.train_roberta import train_model
@@ -15,10 +15,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-# Ensure log directory exists before FileHandler initialization
+# --------------------------------------------------
+# Logging Setup
+# --------------------------------------------------
+
 Path("logs").mkdir(exist_ok=True)
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -31,29 +33,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def resolve_data_paths():
-    """Resolve supported fake/real dataset locations."""
-
-    candidates = [
-        ("data/raw/fake.csv", "data/raw/real.csv"),
-        ("data/raw/Fake.csv", "data/raw/True.csv"),
-        ("data/raw/dataset1/Fake.csv", "data/raw/dataset1/True.csv"),
-    ]
-
-    for fake_path, real_path in candidates:
-        if Path(fake_path).exists() and Path(real_path).exists():
-            return fake_path, real_path
-
-    return candidates[0]
-
+# --------------------------------------------------
+# Main Pipeline
+# --------------------------------------------------
 
 def main():
-    """Main pipeline for fake news detection model training"""
 
     try:
 
-        Path("logs").mkdir(exist_ok=True)
         Path("models").mkdir(exist_ok=True)
+        Path("data/interim").mkdir(parents=True, exist_ok=True)
         Path("data/processed").mkdir(parents=True, exist_ok=True)
         Path("reports").mkdir(parents=True, exist_ok=True)
 
@@ -62,36 +51,24 @@ def main():
         logger.info("=" * 50)
 
         # --------------------------------------------------
-        # Resolve dataset
+        # Merge datasets
         # --------------------------------------------------
 
-        fake_path, real_path = resolve_data_paths()
+        logger.info("Merging datasets (ISOT + FakeNewsNet + LIAR)...")
 
-        if not Path(fake_path).exists() or not Path(real_path).exists():
-
-            logger.error("Dataset files not found!")
-            logger.error("Download dataset from:")
-            logger.error("https://www.kaggle.com/datasets/clmentbisaillon/fake-and-real-news-dataset")
-
-            sys.exit(1)
-
-        # --------------------------------------------------
-        # Load dataset
-        # --------------------------------------------------
-
-        logger.info("Loading datasets...")
-
-        df = merge_datasets(fake_path, real_path)
+        df = merge_datasets()
 
         logger.info(f"Total samples loaded: {len(df)}")
         logger.info(f"Fake samples: {(df['label'] == 1).sum()}")
         logger.info(f"Real samples: {(df['label'] == 0).sum()}")
 
+        df.to_csv("data/interim/merged_dataset.csv", index=False)
+
         # --------------------------------------------------
         # Clean dataset
         # --------------------------------------------------
 
-        logger.info("Cleaning data...")
+        logger.info("Cleaning dataset...")
 
         before_clean = len(df)
 
@@ -100,13 +77,9 @@ def main():
         logger.info(f"Removed {before_clean - len(df)} samples during cleaning")
         logger.info(f"Dataset after cleaning: {len(df)}")
 
-        # --------------------------------------------------
-        # Save cleaned dataset
-        # --------------------------------------------------
+        cleaned_path = Path("data/processed/cleaned_dataset.csv")
 
-        cleaned_data_path = Path("data/processed/cleaned_dataset.csv")
-
-        df.to_csv(cleaned_data_path, index=False)
+        df.to_csv(cleaned_path, index=False)
 
         cleaning_report = {
             "raw_rows": int(before_clean),
@@ -122,7 +95,7 @@ def main():
         with open("reports/data_cleaning_report.json", "w") as f:
             json.dump(cleaning_report, f, indent=2)
 
-        logger.info(f"Cleaned dataset saved to {cleaned_data_path}")
+        logger.info(f"Cleaned dataset saved to {cleaned_path}")
 
         # --------------------------------------------------
         # Data Augmentation
@@ -148,27 +121,25 @@ def main():
         # Hyperparameter tuning
         # --------------------------------------------------
 
-        logger.info("Running hyperparameter tuning with Optuna...")
+        logger.info("Running Optuna hyperparameter tuning...")
 
         best_params = run_optuna(df)
 
-        logger.info(f"Best parameters found: {best_params}")
+        logger.info(f"Best parameters: {best_params}")
 
         # --------------------------------------------------
         # Final model training
         # --------------------------------------------------
 
-        logger.info("Starting final model training...")
+        logger.info("Training final model...")
 
         trainer, test_dataset = train_model(df, best_params)
 
         # --------------------------------------------------
-        # Evaluate model
+        # Model Evaluation
         # --------------------------------------------------
 
-        logger.info("Evaluating model on test set...")
-
-        results = trainer.evaluate(test_dataset)
+        logger.info("Evaluating model...")
 
         prediction_output = trainer.predict(test_dataset)
 
@@ -200,16 +171,13 @@ def main():
         logger.info("Training Complete!")
         logger.info("=" * 50)
 
-        if "eval_loss" in results:
-            logger.info(f"Test Loss: {results['eval_loss']:.4f}")
-
         logger.info("Model saved to ./models/roberta_model")
-        logger.info("You can run the API using:")
+        logger.info("Run API using:")
         logger.info("uvicorn api.app:app --reload")
 
     except Exception as e:
 
-        logger.error(f"Pipeline failed with error: {e}", exc_info=True)
+        logger.error(f"Pipeline failed: {e}", exc_info=True)
 
         sys.exit(1)
 

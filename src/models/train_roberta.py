@@ -7,7 +7,9 @@ import torch
 import numpy as np
 import logging
 import inspect
+
 from datasets import Dataset
+
 from transformers import (
     RobertaTokenizer,
     RobertaForSequenceClassification,
@@ -15,6 +17,7 @@ from transformers import (
     TrainingArguments,
     EarlyStoppingCallback
 )
+
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score
 
@@ -24,6 +27,7 @@ logger = logging.getLogger(__name__)
 MODEL_NAME = "roberta-base"
 MAX_LENGTH = 256
 SEED = 42
+
 ID2LABEL = {0: "REAL", 1: "FAKE"}
 LABEL2ID = {"REAL": 0, "FAKE": 1}
 
@@ -33,11 +37,9 @@ LABEL2ID = {"REAL": 0, "FAKE": 1}
 # -------------------------------------------------
 
 def compute_metrics(eval_pred):
-    """
-    Compute evaluation metrics
-    """
 
     logits, labels = eval_pred
+
     preds = np.argmax(logits, axis=1)
 
     precision, recall, f1, _ = precision_recall_fscore_support(
@@ -51,7 +53,7 @@ def compute_metrics(eval_pred):
     try:
         probs = torch.softmax(torch.tensor(logits), dim=1)[:, 1].numpy()
         roc_auc = roc_auc_score(labels, probs)
-    except:
+    except Exception:
         roc_auc = 0.0
 
     return {
@@ -64,10 +66,11 @@ def compute_metrics(eval_pred):
 
 
 # -------------------------------------------------
-# Tokenization Function
+# Tokenization
 # -------------------------------------------------
 
 def tokenize_function(example, tokenizer):
+
     return tokenizer(
         example["text"],
         truncation=True,
@@ -80,10 +83,7 @@ def tokenize_function(example, tokenizer):
 # Training Function
 # -------------------------------------------------
 
-def train_model(df):
-    """
-    Train RoBERTa model with proper train/validation/test splits
-    """
+def train_model(df, params=None):
 
     try:
 
@@ -94,6 +94,18 @@ def train_model(df):
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info(f"Using device: {device}")
+
+        # -------------------------------------------------
+        # Hyperparameters from Optuna
+        # -------------------------------------------------
+
+        learning_rate = params.get("learning_rate", 2e-5) if params else 2e-5
+        batch_size = params.get("batch_size", 8) if params else 8
+        epochs = params.get("epochs", 3) if params else 3
+
+        logger.info(
+            f"Training configuration → LR: {learning_rate}, Batch Size: {batch_size}, Epochs: {epochs}"
+        )
 
         # -------------------------------------------------
         # Train / Validation / Test Split
@@ -133,11 +145,13 @@ def train_model(df):
         val_dataset = Dataset.from_pandas(val_df)
         test_dataset = Dataset.from_pandas(test_df)
 
-        # Remove pandas index artifact column if present
+        # Remove pandas index artifact column
         if "__index_level_0__" in train_dataset.column_names:
             train_dataset = train_dataset.remove_columns(["__index_level_0__"])
+
         if "__index_level_0__" in val_dataset.column_names:
             val_dataset = val_dataset.remove_columns(["__index_level_0__"])
+
         if "__index_level_0__" in test_dataset.column_names:
             test_dataset = test_dataset.remove_columns(["__index_level_0__"])
 
@@ -191,25 +205,40 @@ def train_model(df):
         # -------------------------------------------------
 
         training_kwargs = {
+
             "output_dir": "./models",
-            "learning_rate": 2e-5,
+
+            "learning_rate": learning_rate,
             "weight_decay": 0.01,
-            "per_device_train_batch_size": 8,
-            "per_device_eval_batch_size": 8,
+
+            "per_device_train_batch_size": batch_size,
+            "per_device_eval_batch_size": batch_size,
+
             "gradient_accumulation_steps": 2,
-            "num_train_epochs": 3,
+
+            "num_train_epochs": epochs,
+
             "save_strategy": "epoch",
+
             "logging_dir": "./logs",
             "logging_steps": 100,
+
             "load_best_model_at_end": True,
             "metric_for_best_model": "f1",
+
             "save_total_limit": 2,
+
             "fp16": torch.cuda.is_available(),
+
             "seed": SEED,
+
+            "dataloader_num_workers": 4,
+            "dataloader_pin_memory": True
         }
 
-        # transformers>=5 uses eval_strategy; older versions use evaluation_strategy
+        # Compatibility with transformers versions
         training_args_signature = inspect.signature(TrainingArguments.__init__)
+
         if "eval_strategy" in training_args_signature.parameters:
             training_kwargs["eval_strategy"] = "epoch"
         else:
@@ -246,7 +275,6 @@ def train_model(df):
         model.save_pretrained("./models/roberta_model")
         tokenizer.save_pretrained("./models/roberta_model")
 
-        # Save test set for evaluation
         test_df.to_csv("./data/processed/test_set.csv", index=False)
 
         logger.info("Training complete!")
@@ -254,5 +282,6 @@ def train_model(df):
         return trainer, test_dataset
 
     except Exception as e:
+
         logger.error(f"Error during training: {e}")
         raise
