@@ -1,10 +1,14 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from src.models.predict import predict
+from src.utils.config_loader import get_path, load_config
+from src.utils.logging_utils import configure_logging
 import logging
 
-logging.basicConfig(level=logging.INFO)
+configure_logging()
 logger = logging.getLogger(__name__)
+CONFIG = load_config()
+MODEL_PATH = get_path(CONFIG, "model", "path", default="models/roberta_model")
 
 app = FastAPI(
     title="TruthLens AI - Fake News Detection API",
@@ -102,17 +106,21 @@ def predict_news(request: NewsRequest):
 def health_check():
     """Detailed health check"""
     try:
-        from pathlib import Path
-        model_path = Path("./models/roberta_model")
-        model_exists = model_path.exists()
+        model_exists = MODEL_PATH.exists()
         
         # Check for required model files
-        required_files = ["config.json", "model.safetensors", "tokenizer.json"]
-        model_files_exist = all((model_path / f).exists() for f in required_files) if model_exists else False
+        required_files = ["config.json", "tokenizer.json"]
+        weight_files = ["model.safetensors", "pytorch_model.bin"]
+        has_weight_file = any((MODEL_PATH / f).exists() for f in weight_files) if model_exists else False
+        model_files_exist = (
+            all((MODEL_PATH / f).exists() for f in required_files) and has_weight_file
+            if model_exists
+            else False
+        )
         
         return {
             "status": "healthy" if model_exists and model_files_exist else "degraded",
-            "model_path": str(model_path),
+            "model_path": str(MODEL_PATH),
             "model_exists": model_exists,
             "model_files_complete": model_files_exist
         }

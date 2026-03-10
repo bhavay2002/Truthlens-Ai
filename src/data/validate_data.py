@@ -7,7 +7,6 @@ import pandas as pd
 import logging
 from typing import List, Dict, Any
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 

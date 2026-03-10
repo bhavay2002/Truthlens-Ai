@@ -1,10 +1,30 @@
 model:
   name: roberta-base
   max_length: 256
+  path: models/roberta_model
 
 training:
-  epochs: 2
+  seed: 42
+  epochs: 3
   batch_size: 8
+  learning_rate: 2.0e-5
 
 features:
   tfidf_max_features: 5000
+  tfidf_top_terms_per_doc: 4
+
+data:
+  augmentation_multiplier: 2
+  cleaned_dataset_path: data/processed/cleaned_dataset.csv
+  merged_dataset_path: data/interim/merged_dataset.csv
+  test_set_path: data/processed/test_set.csv
+
+paths:
+  models_dir: models
+  logs_dir: logs
+  reports_dir: reports
+  training_log_path: logs/training.log
+  evaluation_results_path: reports/evaluation_results.json
+  confusion_matrix_path: reports/confusion_matrix.png
+  cleaning_report_path: reports/data_cleaning_report.json
+  tfidf_vectorizer_path: models/tfidf_vectorizer.joblib

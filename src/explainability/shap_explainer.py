@@ -6,8 +6,8 @@ Provides feature importance explanations for transformer predictions
 import shap
 import logging
 from typing import List, Callable
+from pathlib import Path
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # -------------------------------------------------
@@ -118,7 +118,7 @@ def plot_explanation(
 def save_explanation_html(
     predict_fn: Callable,
     text: str,
-    output_path: str = "reports/shap_explanation.html"
+    output_path: str | Path = "reports/shap_explanation.html"
 ):
     """
     Save SHAP explanation as HTML visualization
@@ -130,7 +130,9 @@ def save_explanation_html(
 
         html = shap.plots.text(shap_values[0], display=False)
 
-        with open(output_path, "w", encoding="utf-8") as f:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with output_path.open("w", encoding="utf-8") as f:
             f.write(html)
 
         logger.info(f"SHAP explanation saved to {output_path}")

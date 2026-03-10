@@ -8,7 +8,6 @@ from typing import Tuple, List
 from sklearn.feature_extraction.text import TfidfVectorizer
 from scipy.sparse import csr_matrix
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 

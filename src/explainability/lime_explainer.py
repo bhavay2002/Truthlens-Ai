@@ -5,9 +5,9 @@ Provides interpretable explanations for model predictions
 
 import logging
 from typing import Callable, Dict, Any, List
+from pathlib import Path
 from lime.lime_text import LimeTextExplainer
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # -------------------------------------------------
@@ -107,7 +107,7 @@ def explain_prediction(
 def save_explanation_html(
     predict_fn: Callable,
     text: str,
-    output_path: str = "reports/lime_explanation.html",
+    output_path: str | Path = "reports/lime_explanation.html",
     num_features: int = 10
 ):
     """
@@ -124,7 +124,9 @@ def save_explanation_html(
             num_features=num_features
         )
 
-        exp.save_to_file(output_path)
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        exp.save_to_file(str(output_path))
 
         logger.info(f"LIME explanation saved to {output_path}")
 

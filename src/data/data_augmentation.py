@@ -9,7 +9,6 @@ import nltk
 from nltk.corpus import wordnet, stopwords
 import logging
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Download required NLTK data with error handling
@@ -146,7 +145,16 @@ def augment_text(text):
 # Augment Dataset
 # ------------------------------------------------
 
-def augment_dataset(df, text_column="text", multiplier=1):
+def augment_dataset(df, text_column="text", multiplier=2):
+    """
+    Augment dataset by target multiplier.
+
+    multiplier=1 -> return original dataset unchanged
+    multiplier=2 -> roughly doubles dataset size
+    """
+    if multiplier <= 1:
+        logger.info("Augmentation multiplier <= 1, returning original dataset")
+        return df.copy()
 
     augmented_rows = []
 
@@ -154,7 +162,7 @@ def augment_dataset(df, text_column="text", multiplier=1):
 
         text = row[text_column]
 
-        for _ in range(multiplier):
+        for _ in range(multiplier - 1):
 
             aug_text = augment_text(text)
 
@@ -167,6 +175,13 @@ def augment_dataset(df, text_column="text", multiplier=1):
     augmented_df = pd.concat(
         [df, pd.DataFrame(augmented_rows)],
         ignore_index=True
+    )
+
+    logger.info(
+        "Augmentation complete: original=%s, augmented=%s, total=%s",
+        len(df),
+        len(augmented_rows),
+        len(augmented_df),
     )
 
     return augmented_df

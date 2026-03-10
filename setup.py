@@ -7,8 +7,9 @@ import sys
 from pathlib import Path
 import subprocess
 import logging
+from src.utils.logging_utils import configure_logging
 
-logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+configure_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -25,17 +26,17 @@ def check_python_version():
 def create_directories():
     """Create necessary directories"""
     dirs = [
-        "data/raw",
-        "data/processed",
-        "data/interim",
-        "models",
-        "logs",
-        "reports",
-        "experiments"
+        Path("data/raw"),
+        Path("data/processed"),
+        Path("data/interim"),
+        Path("models"),
+        Path("logs"),
+        Path("reports"),
+        Path("experiments"),
     ]
     
     for dir_path in dirs:
-        Path(dir_path).mkdir(parents=True, exist_ok=True)
+        dir_path.mkdir(parents=True, exist_ok=True)
     
     logger.info("✓ Directories created")
 

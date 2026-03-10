@@ -1,11 +1,16 @@
 import optuna
 from transformers import Trainer, TrainingArguments
 from transformers import RobertaForSequenceClassification
+from src.utils.config_loader import get_config_value, get_path, load_config
+
+CONFIG = load_config()
+MODEL_NAME = get_config_value(CONFIG, "model", "name", default="roberta-base")
+MODELS_DIR = get_path(CONFIG, "paths", "models_dir", default="models")
 
 
 def model_init():
     return RobertaForSequenceClassification.from_pretrained(
-        "roberta-base",
+        MODEL_NAME,
         num_labels=2
     )
 
@@ -21,7 +26,7 @@ def objective(trial, train_dataset, val_dataset):
     )
 
     training_args = TrainingArguments(
-        output_dir="./models",
+        output_dir=str(MODELS_DIR),
         learning_rate=learning_rate,
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=batch_size,

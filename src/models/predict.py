@@ -5,11 +5,11 @@ Loads trained model and performs fake news inference
 
 import torch
 import logging
-from pathlib import Path
 from typing import List, Dict, Union
 from transformers import RobertaTokenizer, RobertaForSequenceClassification
 
-logging.basicConfig(level=logging.INFO)
+from src.utils.config_loader import get_config_value, get_path, load_config
+
 logger = logging.getLogger(__name__)
 
 # -------------------------------------------------
@@ -20,8 +20,9 @@ _tokenizer = None
 _model = None
 _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-MODEL_PATH = Path("./models/roberta_model")
-MAX_LENGTH = 256
+CONFIG = load_config()
+MODEL_PATH = get_path(CONFIG, "model", "path", default="models/roberta_model")
+MAX_LENGTH = int(get_config_value(CONFIG, "model", "max_length", default=256))
 
 
 def _resolve_label_indices(model) -> tuple[int, int]:
@@ -60,8 +61,8 @@ def load_model_and_tokenizer():
         try:
             logger.info("Loading model and tokenizer...")
 
-            _tokenizer = RobertaTokenizer.from_pretrained(MODEL_PATH)
-            _model = RobertaForSequenceClassification.from_pretrained(MODEL_PATH)
+            _tokenizer = RobertaTokenizer.from_pretrained(str(MODEL_PATH))
+            _model = RobertaForSequenceClassification.from_pretrained(str(MODEL_PATH))
 
             _model.to(_device)
             _model.eval()
