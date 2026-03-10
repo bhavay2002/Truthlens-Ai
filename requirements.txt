@@ -22,6 +22,7 @@ seaborn>=0.12.0
 # Utilities
 joblib>=1.3.0
 pyyaml>=6.0
+contractions>=0.1.73
 
 # Development
 pytest>=7.4.0

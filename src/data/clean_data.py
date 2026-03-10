@@ -84,6 +84,7 @@ def normalize_repeated_chars(text):
 
 def clean_text(text, normalize_nums=True):
 
+    original_text = text  # Keep original for fallback
     text = str(text)
 
     text = normalize_unicode(text)
@@ -113,6 +114,10 @@ def clean_text(text, normalize_nums=True):
     text = re.sub(r"[^a-zA-Z0-9\s.,!?<>]", "", text)
 
     text = WHITESPACE_PATTERN.sub(" ", text).strip()
+
+    # Fallback: if cleaning removed everything, return original lowercased
+    if not text or len(text) < 3:
+        return str(original_text).lower().strip()
 
     return text
 
