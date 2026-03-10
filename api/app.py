@@ -103,14 +103,23 @@ def health_check():
     """Detailed health check"""
     try:
         from pathlib import Path
-        model_exists = Path("./models/roberta_model").exists()
+        model_path = Path("./models/roberta_model")
+        model_exists = model_path.exists()
+        
+        # Check for required model files
+        required_files = ["config.json", "model.safetensors", "tokenizer.json"]
+        model_files_exist = all((model_path / f).exists() for f in required_files) if model_exists else False
         
         return {
-            "status": "healthy",
-            "model_loaded": model_exists
+            "status": "healthy" if model_exists and model_files_exist else "degraded",
+            "model_path": str(model_path),
+            "model_exists": model_exists,
+            "model_files_complete": model_files_exist
         }
     except Exception as e:
+        logger.error(f"Health check failed: {e}")
         return {
             "status": "unhealthy",
-            "error": str(e)
+            "error": str(e),
+            "error_type": type(e).__name__
         }

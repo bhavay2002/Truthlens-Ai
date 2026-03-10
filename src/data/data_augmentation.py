@@ -7,11 +7,19 @@ import random
 import pandas as pd
 import nltk
 from nltk.corpus import wordnet, stopwords
+import logging
 
-nltk.download("wordnet", quiet=True)
-nltk.download("stopwords", quiet=True)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-STOPWORDS = set(stopwords.words("english"))
+# Download required NLTK data with error handling
+try:
+    nltk.download("wordnet", quiet=True)
+    nltk.download("stopwords", quiet=True)
+    STOPWORDS = set(stopwords.words("english"))
+except Exception as e:
+    logger.warning(f"Failed to download NLTK data: {e}. Using empty stopwords set.")
+    STOPWORDS = set()
 
 random.seed(42)
 

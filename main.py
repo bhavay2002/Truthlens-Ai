@@ -1,9 +1,9 @@
-from src.data.merge_datasets import merge_datasets
+from src.data.load_data import merge_datasets
 from src.data.clean_data import clean_dataframe
 from src.data.data_augmentation import augment_dataset
 from src.models.train_roberta import train_model
-from src.training.hyperparameter_tuning import run_optuna
-from src.training.cross_validation import cross_validate_model
+# from src.training.hyperparameter_tuning import run_optuna  # TODO: Fix signature mismatch
+# from src.training.cross_validation import cross_validate_model  # TODO: Fix signature mismatch
 from src.evaluation.evaluate_model import evaluate, save_evaluation_results
 from src.visualization.visualize import plot_confusion_matrix
 
@@ -95,37 +95,33 @@ def main():
         with open("reports/data_cleaning_report.json", "w") as f:
             json.dump(cleaning_report, f, indent=2)
 
-        logger.info(f"Cleaned dataset saved to {cleaned_path}")
+        logger.info(f"Cleaned dataset saved to {cleaned_data_path}")
+        logger.info(f"Data cleaning report saved to {cleaning_report_path}")
 
         # --------------------------------------------------
-        # Data Augmentation
+        # Data Augmentation (DISABLED - multiplier=1 does nothing)
         # --------------------------------------------------
-
-        logger.info("Applying data augmentation...")
-
-        df = augment_dataset(df, text_column="text", multiplier=1)
-
-        logger.info(f"Dataset size after augmentation: {len(df)}")
+        # Uncomment and increase multiplier (e.g., 2-3) to actually augment data
+        # logger.info("Applying data augmentation...")
+        # df = augment_dataset(df, text_column="text", multiplier=2)
+        # logger.info(f"Dataset size after augmentation: {len(df)}")
 
         # --------------------------------------------------
-        # Cross Validation
+        # Cross Validation (DISABLED - needs fixing)
         # --------------------------------------------------
-
-        logger.info("Running cross-validation...")
-
-        cv_score = cross_validate_model(df, train_model)
-
-        logger.info(f"Cross validation score: {cv_score:.4f}")
+        # TODO: Fix cross_validation.py to match train_model signature
+        # logger.info("Running cross-validation...")
+        # cv_score = cross_validate_model(df, train_model)
+        # logger.info(f"Cross validation score: {cv_score:.4f}")
 
         # --------------------------------------------------
-        # Hyperparameter tuning
+        # Hyperparameter tuning (DISABLED - needs fixing)
         # --------------------------------------------------
-
-        logger.info("Running Optuna hyperparameter tuning...")
-
-        best_params = run_optuna(df)
-
-        logger.info(f"Best parameters: {best_params}")
+        # TODO: Fix run_optuna to accept dataframe or prepare datasets first
+        # logger.info("Running Optuna hyperparameter tuning...")
+        # best_params = run_optuna(df)
+        # logger.info(f"Best parameters: {best_params}")
+        best_params = None  # Use defaults
 
         # --------------------------------------------------
         # Final model training

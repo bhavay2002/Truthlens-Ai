@@ -16,25 +16,40 @@ logger = logging.getLogger(__name__)
 # -------------------------------------------------
 
 def count_words(text):
+    """Count words in text, handling None/empty values"""
+    if text is None or pd.isna(text):
+        return 0
     return len(str(text).split())
 
 
 def count_sentences(text):
-    return len(re.split(r"[.!?]+", str(text))) - 1
+    """Count sentences in text, handling None/empty values"""
+    if text is None or pd.isna(text):
+        return 0
+    return max(0, len(re.split(r"[.!?]+", str(text))) - 1)
 
 
 def count_exclamations(text):
+    """Count exclamation marks, handling None/empty values"""
+    if text is None or pd.isna(text):
+        return 0
     return str(text).count("!")
 
 
 def count_questions(text):
+    """Count question marks, handling None/empty values"""
+    if text is None or pd.isna(text):
+        return 0
     return str(text).count("?")
 
 
 def uppercase_ratio(text):
+    """Calculate ratio of uppercase characters, handling None/empty values"""
+    if text is None or pd.isna(text):
+        return 0.0
     text = str(text)
     if len(text) == 0:
-        return 0
+        return 0.0
     return sum(1 for c in text if c.isupper()) / len(text)
 
 
