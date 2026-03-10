@@ -15,6 +15,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _resolve_fake_index(model) -> int:
+    """Resolve fake class index from model config; default to 1."""
+    label2id = getattr(model.config, "label2id", None) or {}
+    normalized = {str(k).strip().lower(): int(v) for k, v in label2id.items()}
+    return normalized.get("fake", 1)
+
+
 def evaluate_saved_model():
     """Evaluate the saved model on test set"""
     try:
@@ -34,6 +41,7 @@ def evaluate_saved_model():
         tokenizer = RobertaTokenizer.from_pretrained(str(model_path))
         model = RobertaForSequenceClassification.from_pretrained(str(model_path))
         model.eval()
+        fake_idx = _resolve_fake_index(model)
         
         logger.info("Loading test data...")
         test_df = pd.read_csv(test_path)
@@ -59,7 +67,7 @@ def evaluate_saved_model():
             
             probs = torch.softmax(outputs.logits, dim=1)
             pred = torch.argmax(probs, dim=1).item()
-            prob = probs[0][1].item()  # Probability of fake
+            prob = probs[0][fake_idx].item()  # Probability of fake
             
             predictions.append(pred)
             probabilities.append(prob)
