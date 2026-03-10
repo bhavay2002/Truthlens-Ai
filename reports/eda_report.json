@@ -1,14 +1,14 @@
 {
   "data_files": {
-    "fake_path": "data/raw/dataset1/Fake.csv",
-    "real_path": "data/raw/dataset1/True.csv"
+    "isot_fake": "data\\raw\\isot\\Fake.csv",
+    "isot_true": "data\\raw\\isot\\True.csv",
+    "liar_train": "data\\raw\\liar_dataset\\train.tsv",
+    "fakenewsnet_root": "data\\raw\\FakeNewsNet"
   },
-  "rows": 44689,
+  "rows": 49332,
   "columns": [
     "title",
     "text",
-    "subject",
-    "date",
     "label",
     "text_length",
     "word_count",
@@ -17,20 +17,20 @@
     "uppercase_ratio"
   ],
   "label_distribution": {
-    "1": 23478,
-    "0": 21211
+    "0": 26943,
+    "1": 22389
   },
   "text_length_stats": {
-    "mean": 2467.0986820022827,
-    "median": 2185.0,
+    "mean": 1946.8607597502635,
+    "median": 1828.0,
     "min": 1,
     "max": 51794
   },
   "word_count_stats": {
-    "mean": 404.966501823715,
-    "median": 362.0,
+    "mean": 319.6402740614611,
+    "median": 304.0,
     "min": 0,
     "max": 8135
   },
-  "figures_dir": "reports/figures"
+  "figures_dir": "reports\\figures"
 }

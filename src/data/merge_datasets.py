@@ -32,17 +32,40 @@ def load_isot():
 def load_liar():
     """Load LIAR dataset"""
 
-    df = pd.read_csv(RAW_PATH / "liar_dataset" / "train.tsv", sep="\t")
+    liar_path = RAW_PATH / "liar_dataset" / "train.tsv"
+    liar_columns = [
+        "id",
+        "label",
+        "statement",
+        "subject",
+        "speaker",
+        "speaker_job_title",
+        "state_info",
+        "party_affiliation",
+        "barely_true_counts",
+        "false_counts",
+        "half_true_counts",
+        "mostly_true_counts",
+        "pants_on_fire_counts",
+        "context",
+    ]
+
+    # LIAR TSV is typically headerless; force names to avoid KeyError on "label".
+    df = pd.read_csv(liar_path, sep="\t", header=None, names=liar_columns)
+
+    if "label" not in df.columns or "statement" not in df.columns:
+        raise ValueError("LIAR dataset missing required columns: label/statement")
 
     fake_labels = ["false", "pants-fire", "barely-true"]
 
-    df["label"] = df["label"].apply(
+    df["label"] = df["label"].astype(str).str.strip().str.lower().apply(
         lambda x: 1 if x in fake_labels else 0
     )
 
     df = df.rename(columns={"statement": "text"})
 
     df["title"] = ""
+    df["text"] = df["text"].astype(str).fillna("").str.strip()
 
     return df[["title", "text", "label"]]
 
