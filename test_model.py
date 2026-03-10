@@ -1,10 +1,10 @@
 from transformers import RobertaTokenizer, RobertaForSequenceClassification
 import torch
-from src.utils.config_loader import get_config_value, get_path, load_config
+from src.utils.settings import load_settings
 
-CONFIG = load_config()
-MODEL_PATH = get_path(CONFIG, "model", "path", default="models/roberta_model")
-MAX_LENGTH = int(get_config_value(CONFIG, "model", "max_length", default=256))
+SETTINGS = load_settings()
+MODEL_PATH = SETTINGS.model.path
+MAX_LENGTH = SETTINGS.model.max_length
 
 # Load tokenizer and model
 tokenizer = RobertaTokenizer.from_pretrained(str(MODEL_PATH))

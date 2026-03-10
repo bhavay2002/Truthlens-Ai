@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Tuple
+from typing import Tuple, Any
 
 import joblib
 import numpy as np
@@ -16,6 +16,7 @@ from src.features.text_features import (
     get_feature_names,
     tfidf_fit_transform,
 )
+from src.utils.input_validation import ensure_dataframe, ensure_non_empty_text_column, ensure_positive_int
 
 
 logger = logging.getLogger(__name__)
@@ -56,7 +57,7 @@ def _metadata_token_block(row: pd.Series) -> str:
 
 
 def _top_tfidf_terms_for_row(
-    matrix_row,
+    matrix_row: Any,
     feature_names: list[str],
     top_terms_per_doc: int,
 ) -> str:
@@ -75,8 +76,10 @@ def apply_feature_engineering(
     tfidf_max_features: int = 5000,
     top_terms_per_doc: int = 4,
 ) -> Tuple[pd.DataFrame, TfidfVectorizer]:
-    if text_column not in df.columns:
-        raise ValueError(f"Column '{text_column}' not found in dataframe")
+    ensure_dataframe(df, name="df", required_columns=[text_column], min_rows=1)
+    ensure_non_empty_text_column(df, text_column, name="df")
+    ensure_positive_int(tfidf_max_features, name="tfidf_max_features", min_value=10)
+    ensure_positive_int(top_terms_per_doc, name="top_terms_per_doc", min_value=1)
 
     logger.info("Applying source + metadata + TF-IDF feature engineering...")
 

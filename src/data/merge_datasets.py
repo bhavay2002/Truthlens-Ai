@@ -2,12 +2,12 @@ import pandas as pd
 import logging
 from pathlib import Path
 import json
-from src.utils.config_loader import get_path, load_config
+from src.utils.settings import load_settings
 
 logger = logging.getLogger(__name__)
-CONFIG = load_config()
-RAW_PATH = get_path(CONFIG, "data", "raw_dir", default="data/raw")
-INTERIM_PATH = get_path(CONFIG, "data", "interim_dir", default="data/interim")
+SETTINGS = load_settings()
+RAW_PATH = SETTINGS.data.raw_dir
+INTERIM_PATH = SETTINGS.data.interim_dir
 
 
 def load_isot():

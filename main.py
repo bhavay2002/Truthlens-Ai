@@ -3,12 +3,13 @@ from src.data.clean_data import clean_dataframe
 from src.data.data_augmentation import augment_dataset
 from src.features.feature_pipeline import apply_feature_engineering, save_vectorizer
 from src.models.train_roberta import train_model
-# from src.training.hyperparameter_tuning import run_optuna  # TODO: Fix signature mismatch
-# from src.training.cross_validation import cross_validate_model  # TODO: Fix signature mismatch
+from src.training.hyperparameter_tuning import run_optuna
+from src.training.cross_validation import cross_validate_model
 from src.evaluation.evaluate_model import evaluate, save_evaluation_results
 from src.visualization.visualize import plot_confusion_matrix
-from src.utils.config_loader import get_config_value, get_path, load_config
 from src.utils.logging_utils import configure_logging
+from src.utils.input_validation import ensure_dataframe
+from src.utils.settings import load_settings
 
 import logging
 import sys
@@ -21,54 +22,18 @@ import matplotlib.pyplot as plt
 # Logging Setup
 # --------------------------------------------------
 
-config = load_config()
-training_log_path = get_path(
-    config,
-    "paths",
-    "training_log_path",
-    default="logs/training.log",
-)
-configure_logging(log_file=training_log_path)
+SETTINGS = load_settings()
+configure_logging(log_file=SETTINGS.paths.training_log_path)
 
-models_dir = get_path(config, "paths", "models_dir", default="models")
-reports_dir = get_path(config, "paths", "reports_dir", default="reports")
-logs_dir = get_path(config, "paths", "logs_dir", default="logs")
-merged_dataset_path = get_path(
-    config,
-    "data",
-    "merged_dataset_path",
-    default="data/interim/merged_dataset.csv",
-)
-cleaned_dataset_path = get_path(
-    config,
-    "data",
-    "cleaned_dataset_path",
-    default="data/processed/cleaned_dataset.csv",
-)
-cleaning_report_path = get_path(
-    config,
-    "paths",
-    "cleaning_report_path",
-    default="reports/data_cleaning_report.json",
-)
-evaluation_results_path = get_path(
-    config,
-    "paths",
-    "evaluation_results_path",
-    default="reports/evaluation_results.json",
-)
-confusion_matrix_path = get_path(
-    config,
-    "paths",
-    "confusion_matrix_path",
-    default="reports/confusion_matrix.png",
-)
-tfidf_vectorizer_path = get_path(
-    config,
-    "paths",
-    "tfidf_vectorizer_path",
-    default="models/tfidf_vectorizer.joblib",
-)
+models_dir = SETTINGS.paths.models_dir
+reports_dir = SETTINGS.paths.reports_dir
+logs_dir = SETTINGS.paths.logs_dir
+merged_dataset_path = SETTINGS.data.merged_dataset_path
+cleaned_dataset_path = SETTINGS.data.cleaned_dataset_path
+cleaning_report_path = SETTINGS.paths.cleaning_report_path
+evaluation_results_path = SETTINGS.paths.evaluation_results_path
+confusion_matrix_path = SETTINGS.paths.confusion_matrix_path
+tfidf_vectorizer_path = SETTINGS.paths.tfidf_vectorizer_path
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +63,7 @@ def main():
         logger.info("Merging datasets (ISOT + FakeNewsNet + LIAR)...")
 
         df = merge_datasets()
+        ensure_dataframe(df, name="merged_df", required_columns=["text", "label"], min_rows=1)
 
         logger.info(f"Total samples loaded: {len(df)}")
         logger.info(f"Fake samples: {(df['label'] == 1).sum()}")
@@ -114,6 +80,7 @@ def main():
         before_clean = len(df)
 
         df = clean_dataframe(df)
+        ensure_dataframe(df, name="cleaned_df", required_columns=["text", "label"], min_rows=1)
 
         logger.info(f"Removed {before_clean - len(df)} samples during cleaning")
         logger.info(f"Dataset after cleaning: {len(df)}")
@@ -140,9 +107,7 @@ def main():
         # --------------------------------------------------
         # Data Augmentation
         # --------------------------------------------------
-        augmentation_multiplier = int(
-            get_config_value(config, "data", "augmentation_multiplier", default=2)
-        )
+        augmentation_multiplier = SETTINGS.data.augmentation_multiplier
 
         if augmentation_multiplier > 1:
             logger.info("Applying data augmentation with multiplier=%s", augmentation_multiplier)
@@ -155,12 +120,8 @@ def main():
         # Feature Engineering
         # --------------------------------------------------
 
-        tfidf_max_features = int(
-            get_config_value(config, "features", "tfidf_max_features", default=5000)
-        )
-        tfidf_top_terms = int(
-            get_config_value(config, "features", "tfidf_top_terms_per_doc", default=4)
-        )
+        tfidf_max_features = SETTINGS.features.tfidf_max_features
+        tfidf_top_terms = SETTINGS.features.tfidf_top_terms_per_doc
 
         logger.info(
             "Applying feature pipeline (tfidf_max_features=%s, top_terms_per_doc=%s)",
@@ -175,22 +136,54 @@ def main():
         )
         save_vectorizer(tfidf_vectorizer, tfidf_vectorizer_path)
 
-        # --------------------------------------------------
-        # Cross Validation (DISABLED - needs fixing)
-        # --------------------------------------------------
-        # TODO: Fix cross_validation.py to match train_model signature
-        # logger.info("Running cross-validation...")
-        # cv_score = cross_validate_model(df, train_model)
-        # logger.info(f"Cross validation score: {cv_score:.4f}")
+        text_column = SETTINGS.training.text_column
+        if text_column not in df.columns:
+            raise ValueError(
+                f"Configured text column '{text_column}' does not exist. "
+                f"Available columns: {list(df.columns)}"
+            )
 
         # --------------------------------------------------
-        # Hyperparameter tuning (DISABLED - needs fixing)
+        # Cross Validation (optional)
         # --------------------------------------------------
-        # TODO: Fix run_optuna to accept dataframe or prepare datasets first
-        # logger.info("Running Optuna hyperparameter tuning...")
-        # best_params = run_optuna(df)
-        # logger.info(f"Best parameters: {best_params}")
-        best_params = None  # Use defaults
+        if SETTINGS.training.run_cross_validation:
+            logger.info("Running cross-validation...")
+            cv_results = cross_validate_model(
+                df,
+                train_model,
+                n_splits=SETTINGS.training.cross_validation_splits,
+                text_column=text_column,
+                metric_name=SETTINGS.training.cross_validation_metric,
+            )
+            logger.info(
+                "Cross-validation %s: mean=%.4f std=%.4f folds=%s",
+                cv_results["metric_name"],
+                cv_results["mean_score"],
+                cv_results["std_score"],
+                cv_results["n_splits"],
+            )
+
+        # --------------------------------------------------
+        # Hyperparameter tuning (optional)
+        # --------------------------------------------------
+        best_params = None
+        if SETTINGS.training.run_hyperparameter_tuning:
+            logger.info("Running Optuna hyperparameter tuning...")
+            tuning_results = run_optuna(
+                df,
+                train_function=train_model,
+                text_column=text_column,
+                n_trials=SETTINGS.training.optuna_trials,
+                metric_name=SETTINGS.training.optuna_metric,
+                direction=SETTINGS.training.optuna_direction,
+            )
+            best_params = tuning_results["best_params"]
+            logger.info(
+                "Best parameters found (best_%s=%.4f): %s",
+                tuning_results["metric_name"],
+                tuning_results["best_value"],
+                best_params,
+            )
 
         # --------------------------------------------------
         # Final model training
@@ -201,7 +194,7 @@ def main():
         trainer, test_dataset = train_model(
             df,
             params=best_params,
-            text_column="engineered_text",
+            text_column=text_column,
         )
 
         # --------------------------------------------------
@@ -240,8 +233,7 @@ def main():
         logger.info("Training Complete!")
         logger.info("=" * 50)
 
-        model_path = get_path(config, "model", "path", default="models/roberta_model")
-        logger.info("Model saved to %s", model_path)
+        logger.info("Model saved to %s", SETTINGS.model.path)
         logger.info("Run API using:")
         logger.info("uvicorn api.app:app --reload")
 

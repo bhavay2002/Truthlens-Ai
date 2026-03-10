@@ -10,28 +10,18 @@ import torch
 from transformers import RobertaTokenizer, RobertaForSequenceClassification
 from src.evaluation.evaluate_model import evaluate, save_evaluation_results
 from src.visualization.visualize import plot_confusion_matrix
-from src.utils.config_loader import get_config_value, get_path, load_config
 from src.utils.logging_utils import configure_logging
+from src.utils.settings import load_settings
 
 configure_logging()
 logger = logging.getLogger(__name__)
 
-CONFIG = load_config()
-MODEL_PATH = get_path(CONFIG, "model", "path", default="models/roberta_model")
-TEST_SET_PATH = get_path(
-    CONFIG,
-    "data",
-    "test_set_path",
-    default="data/processed/test_set.csv",
-)
-MAX_LENGTH = int(get_config_value(CONFIG, "model", "max_length", default=256))
-REPORTS_DIR = get_path(CONFIG, "paths", "reports_dir", default="reports")
-CONFUSION_MATRIX_PATH = get_path(
-    CONFIG,
-    "paths",
-    "confusion_matrix_path",
-    default="reports/confusion_matrix.png",
-)
+SETTINGS = load_settings()
+MODEL_PATH = SETTINGS.model.path
+TEST_SET_PATH = SETTINGS.data.test_set_path
+MAX_LENGTH = SETTINGS.model.max_length
+REPORTS_DIR = SETTINGS.paths.reports_dir
+CONFUSION_MATRIX_PATH = SETTINGS.paths.confusion_matrix_path
 
 
 def _resolve_fake_index(model) -> int:

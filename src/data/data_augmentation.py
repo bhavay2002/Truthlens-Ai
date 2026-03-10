@@ -8,6 +8,7 @@ import pandas as pd
 import nltk
 from nltk.corpus import wordnet, stopwords
 import logging
+from src.utils.input_validation import ensure_dataframe, ensure_non_empty_text_column, ensure_positive_int
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ random.seed(42)
 # Get Synonyms
 # ------------------------------------------------
 
-def get_synonyms(word):
+def get_synonyms(word: str) -> list[str]:
 
     synonyms = set()
 
@@ -47,7 +48,7 @@ def get_synonyms(word):
 # Synonym Replacement
 # ------------------------------------------------
 
-def synonym_replacement(text, n=2):
+def synonym_replacement(text: str, n: int = 2) -> str:
 
     words = text.split()
 
@@ -87,7 +88,7 @@ def synonym_replacement(text, n=2):
 # Random Deletion
 # ------------------------------------------------
 
-def random_deletion(text, p=0.1):
+def random_deletion(text: str, p: float = 0.1) -> str:
 
     words = text.split()
 
@@ -109,7 +110,7 @@ def random_deletion(text, p=0.1):
 # Random Swap
 # ------------------------------------------------
 
-def random_swap(text):
+def random_swap(text: str) -> str:
 
     words = text.split()
 
@@ -128,7 +129,7 @@ def random_swap(text):
 # Augment Single Text
 # ------------------------------------------------
 
-def augment_text(text):
+def augment_text(text: str) -> str:
 
     operations = [
         synonym_replacement,
@@ -145,14 +146,18 @@ def augment_text(text):
 # Augment Dataset
 # ------------------------------------------------
 
-def augment_dataset(df, text_column="text", multiplier=2):
+def augment_dataset(df: pd.DataFrame, text_column: str = "text", multiplier: int = 2) -> pd.DataFrame:
     """
     Augment dataset by target multiplier.
 
     multiplier=1 -> return original dataset unchanged
     multiplier=2 -> roughly doubles dataset size
     """
-    if multiplier <= 1:
+    ensure_dataframe(df, name="df", required_columns=[text_column], min_rows=1)
+    ensure_non_empty_text_column(df, text_column, name="df")
+    ensure_positive_int(multiplier, name="multiplier", min_value=1)
+
+    if multiplier == 1:
         logger.info("Augmentation multiplier <= 1, returning original dataset")
         return df.copy()
 

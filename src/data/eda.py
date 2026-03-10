@@ -373,7 +373,7 @@ class FakeNewsEDA:
 
         report_path = self.report_dir / "eda_summary.json"
 
-        with open(report_path, "w") as f:
+        with report_path.open("w", encoding="utf-8") as f:
             json.dump(self.summary, f, indent=2)
 
         logger.info(f"EDA summary saved to {report_path}")

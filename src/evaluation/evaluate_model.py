@@ -23,7 +23,7 @@ from sklearn.metrics import (
     matthews_corrcoef
 )
 
-from src.utils.config_loader import get_path, load_config
+from src.utils.settings import load_settings
 
 logger = logging.getLogger(__name__)
 
@@ -179,13 +179,7 @@ def save_evaluation_results(
     try:
 
         if output_path is None:
-            config = load_config()
-            output_path = get_path(
-                config,
-                "paths",
-                "evaluation_results_path",
-                default="reports/evaluation_results.json",
-            )
+            output_path = load_settings().paths.evaluation_results_path
         else:
             output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)

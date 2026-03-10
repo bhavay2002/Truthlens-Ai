@@ -8,12 +8,27 @@ training:
   epochs: 3
   batch_size: 8
   learning_rate: 2.0e-5
+  text_column: engineered_text
+  run_cross_validation: false
+  cross_validation_splits: 5
+  cross_validation_metric: eval_loss
+  run_hyperparameter_tuning: false
+  optuna_trials: 10
+  optuna_direction: minimize
+  optuna_metric: eval_loss
+  optuna_learning_rate_min: 1.0e-6
+  optuna_learning_rate_max: 5.0e-5
+  optuna_batch_sizes: [8, 16]
+  optuna_epoch_choices: [2, 3]
+  optuna_validation_split: 0.2
 
 features:
   tfidf_max_features: 5000
   tfidf_top_terms_per_doc: 4
 
 data:
+  raw_dir: data/raw
+  interim_dir: data/interim
   augmentation_multiplier: 2
   cleaned_dataset_path: data/processed/cleaned_dataset.csv
   merged_dataset_path: data/interim/merged_dataset.csv
