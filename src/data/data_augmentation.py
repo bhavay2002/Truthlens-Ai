@@ -4,10 +4,37 @@ Improves generalization for fake news detection
 """
 
 import random
+import pandas as pd
 import nltk
-from nltk.corpus import wordnet
+from nltk.corpus import wordnet, stopwords
 
 nltk.download("wordnet", quiet=True)
+nltk.download("stopwords", quiet=True)
+
+STOPWORDS = set(stopwords.words("english"))
+
+random.seed(42)
+
+
+# ------------------------------------------------
+# Get Synonyms
+# ------------------------------------------------
+
+def get_synonyms(word):
+
+    synonyms = set()
+
+    for syn in wordnet.synsets(word):
+
+        for lemma in syn.lemmas():
+
+            synonym = lemma.name().replace("_", " ").lower()
+
+            if synonym != word:
+                synonyms.add(synonym)
+
+    return list(synonyms)
+
 
 # ------------------------------------------------
 # Synonym Replacement
@@ -16,26 +43,32 @@ nltk.download("wordnet", quiet=True)
 def synonym_replacement(text, n=2):
 
     words = text.split()
+
     new_words = words.copy()
 
-    random_words = list(set(words))
-    random.shuffle(random_words)
+    candidates = [
+        word for word in words
+        if word not in STOPWORDS and len(word) > 3
+    ]
+
+    random.shuffle(candidates)
 
     replaced = 0
 
-    for word in random_words:
+    for word in candidates:
 
-        synonyms = wordnet.synsets(word)
+        synonyms = get_synonyms(word)
 
-        if synonyms:
-            synonym = synonyms[0].lemmas()[0].name()
+        if len(synonyms) > 0:
 
-            if synonym != word:
-                new_words = [
-                    synonym if w == word else w
-                    for w in new_words
-                ]
-                replaced += 1
+            synonym = random.choice(synonyms)
+
+            new_words = [
+                synonym if w == word else w
+                for w in new_words
+            ]
+
+            replaced += 1
 
         if replaced >= n:
             break
@@ -51,7 +84,7 @@ def random_deletion(text, p=0.1):
 
     words = text.split()
 
-    if len(words) == 1:
+    if len(words) <= 5:
         return text
 
     new_words = [
@@ -63,6 +96,42 @@ def random_deletion(text, p=0.1):
         return random.choice(words)
 
     return " ".join(new_words)
+
+
+# ------------------------------------------------
+# Random Swap
+# ------------------------------------------------
+
+def random_swap(text):
+
+    words = text.split()
+
+    if len(words) < 3:
+        return text
+
+    idx1 = random.randint(0, len(words) - 1)
+    idx2 = random.randint(0, len(words) - 1)
+
+    words[idx1], words[idx2] = words[idx2], words[idx1]
+
+    return " ".join(words)
+
+
+# ------------------------------------------------
+# Augment Single Text
+# ------------------------------------------------
+
+def augment_text(text):
+
+    operations = [
+        synonym_replacement,
+        random_deletion,
+        random_swap
+    ]
+
+    operation = random.choice(operations)
+
+    return operation(text)
 
 
 # ------------------------------------------------
@@ -79,12 +148,17 @@ def augment_dataset(df, text_column="text", multiplier=1):
 
         for _ in range(multiplier):
 
-            aug_text = synonym_replacement(text)
+            aug_text = augment_text(text)
+
             new_row = row.copy()
+
             new_row[text_column] = aug_text
 
             augmented_rows.append(new_row)
 
-    augmented_df = df.append(augmented_rows, ignore_index=True)
+    augmented_df = pd.concat(
+        [df, pd.DataFrame(augmented_rows)],
+        ignore_index=True
+    )
 
     return augmented_df
