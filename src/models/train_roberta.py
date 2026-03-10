@@ -5,8 +5,10 @@ Handles dataset splitting, tokenization, training, and model saving
 
 import inspect
 import logging
+from typing import Any
 
 import numpy as np
+import pandas as pd
 import torch
 from datasets import Dataset
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score
@@ -19,31 +21,25 @@ from transformers import (
     TrainingArguments,
 )
 
-from src.utils.config_loader import get_config_value, get_path, load_config
+from src.utils.input_validation import ensure_dataframe, ensure_non_empty_text_column
+from src.utils.settings import load_settings
 
 
 logger = logging.getLogger(__name__)
 
-CONFIG = load_config()
+SETTINGS = load_settings()
 
-MODEL_NAME = get_config_value(CONFIG, "model", "name", default="roberta-base")
-MAX_LENGTH = int(get_config_value(CONFIG, "model", "max_length", default=256))
-SEED = int(get_config_value(CONFIG, "training", "seed", default=42))
-DEFAULT_EPOCHS = int(get_config_value(CONFIG, "training", "epochs", default=3))
-DEFAULT_BATCH_SIZE = int(get_config_value(CONFIG, "training", "batch_size", default=8))
-DEFAULT_LEARNING_RATE = float(
-    get_config_value(CONFIG, "training", "learning_rate", default=2e-5)
-)
+MODEL_NAME = SETTINGS.model.name
+MAX_LENGTH = SETTINGS.model.max_length
+SEED = SETTINGS.training.seed
+DEFAULT_EPOCHS = SETTINGS.training.epochs
+DEFAULT_BATCH_SIZE = SETTINGS.training.batch_size
+DEFAULT_LEARNING_RATE = SETTINGS.training.learning_rate
 
-MODELS_DIR = get_path(CONFIG, "paths", "models_dir", default="models")
-LOGS_DIR = get_path(CONFIG, "paths", "logs_dir", default="logs")
-MODEL_PATH = get_path(CONFIG, "model", "path", default="models/roberta_model")
-TEST_SET_PATH = get_path(
-    CONFIG,
-    "data",
-    "test_set_path",
-    default="data/processed/test_set.csv",
-)
+MODELS_DIR = SETTINGS.paths.models_dir
+LOGS_DIR = SETTINGS.paths.logs_dir
+MODEL_PATH = SETTINGS.model.path
+TEST_SET_PATH = SETTINGS.data.test_set_path
 
 ID2LABEL = {0: "REAL", 1: "FAKE"}
 LABEL2ID = {"REAL": 0, "FAKE": 1}
@@ -98,10 +94,32 @@ def tokenize_function(example, tokenizer, text_column: str):
 # Training Function
 # -------------------------------------------------
 
-def train_model(df, params=None, text_column: str = "text"):
+def train_model(
+    df: pd.DataFrame,
+    params: dict[str, Any] | None = None,
+    text_column: str = "text",
+    validation_df: pd.DataFrame | None = None,
+    test_df: pd.DataFrame | None = None,
+):
     try:
-        if text_column not in df.columns:
-            raise ValueError(f"Column '{text_column}' not found in dataframe")
+        ensure_dataframe(df, name="df", required_columns=[text_column, "label"], min_rows=2)
+        ensure_non_empty_text_column(df, text_column, name="df")
+        if validation_df is not None:
+            ensure_dataframe(
+                validation_df,
+                name="validation_df",
+                required_columns=[text_column, "label"],
+                min_rows=1,
+            )
+            ensure_non_empty_text_column(validation_df, text_column, name="validation_df")
+        if test_df is not None:
+            ensure_dataframe(
+                test_df,
+                name="test_df",
+                required_columns=[text_column, "label"],
+                min_rows=1,
+            )
+            ensure_non_empty_text_column(test_df, text_column, name="test_df")
 
         logger.info("Starting model training...")
 
@@ -139,19 +157,24 @@ def train_model(df, params=None, text_column: str = "text"):
         # Train / Validation / Test Split
         # -------------------------------------------------
 
-        train_df, temp_df = train_test_split(
-            df,
-            test_size=0.3,
-            random_state=SEED,
-            stratify=df["label"],
-        )
+        if validation_df is None and test_df is None:
+            train_df, temp_df = train_test_split(
+                df,
+                test_size=0.3,
+                random_state=SEED,
+                stratify=df["label"],
+            )
 
-        val_df, test_df = train_test_split(
-            temp_df,
-            test_size=0.5,
-            random_state=SEED,
-            stratify=temp_df["label"],
-        )
+            val_df, test_df = train_test_split(
+                temp_df,
+                test_size=0.5,
+                random_state=SEED,
+                stratify=temp_df["label"],
+            )
+        else:
+            train_df = df
+            val_df = validation_df if validation_df is not None else df
+            test_df = test_df if test_df is not None else val_df
 
         logger.info(
             "Train samples: %s, Val samples: %s, Test samples: %s",

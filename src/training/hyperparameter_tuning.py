@@ -1,65 +1,270 @@
-import optuna
-from transformers import Trainer, TrainingArguments
-from transformers import RobertaForSequenceClassification
-from src.utils.config_loader import get_config_value, get_path, load_config
+﻿from __future__ import annotations
 
-CONFIG = load_config()
-MODEL_NAME = get_config_value(CONFIG, "model", "name", default="roberta-base")
-MODELS_DIR = get_path(CONFIG, "paths", "models_dir", default="models")
+import inspect
+import logging
+from typing import Any, Callable
+
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+
+from src.models.train_roberta import train_model
+from src.utils.input_validation import ensure_dataframe, ensure_non_empty_text_column, ensure_positive_int
+from src.utils.settings import load_settings
 
 
-def model_init():
-    return RobertaForSequenceClassification.from_pretrained(
-        MODEL_NAME,
-        num_labels=2
+logger = logging.getLogger(__name__)
+SETTINGS = load_settings()
+
+
+def _resolve_metric(metrics: dict[str, Any], metric_name: str) -> float:
+    candidates = [metric_name, f"eval_{metric_name}", "eval_loss", "loss"]
+    for key in candidates:
+        if key in metrics:
+            return float(metrics[key])
+    raise KeyError(f"Unable to resolve metric '{metric_name}' from keys: {sorted(metrics.keys())}")
+
+
+def _build_train_kwargs(
+    train_function: Callable[..., tuple[Any, Any]],
+    *,
+    params: dict[str, Any],
+    text_column: str,
+    validation_df: pd.DataFrame,
+) -> dict[str, Any]:
+    train_sig = inspect.signature(train_function)
+    kwargs: dict[str, Any] = {}
+
+    if "params" in train_sig.parameters:
+        kwargs["params"] = params
+    if "text_column" in train_sig.parameters:
+        kwargs["text_column"] = text_column
+    if "validation_df" in train_sig.parameters:
+        kwargs["validation_df"] = validation_df
+    if "test_df" in train_sig.parameters:
+        kwargs["test_df"] = validation_df
+
+    return kwargs
+
+
+def _evaluate_params(
+    params: dict[str, Any],
+    *,
+    train_function: Callable[..., tuple[Any, Any]],
+    train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
+    text_column: str,
+    metric_name: str,
+) -> float:
+    train_kwargs = _build_train_kwargs(
+        train_function,
+        params=params,
+        text_column=text_column,
+        validation_df=val_df,
     )
 
+    trainer, eval_dataset = train_function(train_df, **train_kwargs)
+    metrics = trainer.evaluate(eval_dataset)
+    return _resolve_metric(metrics, metric_name)
 
-def objective(trial, train_dataset, val_dataset):
 
-    learning_rate = trial.suggest_float(
-        "learning_rate", 1e-6, 5e-5, log=True
+def _sample_params_fallback(rng: np.random.Generator) -> dict[str, Any]:
+    lr_min = np.log10(SETTINGS.training.optuna_learning_rate_min)
+    lr_max = np.log10(SETTINGS.training.optuna_learning_rate_max)
+
+    learning_rate = float(10 ** rng.uniform(lr_min, lr_max))
+    batch_size = int(rng.choice(SETTINGS.training.optuna_batch_sizes))
+    epochs = int(rng.choice(SETTINGS.training.optuna_epoch_choices))
+
+    return {
+        "learning_rate": learning_rate,
+        "batch_size": batch_size,
+        "epochs": epochs,
+    }
+
+
+def _run_fallback_tuner(
+    *,
+    train_function: Callable[..., tuple[Any, Any]],
+    train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
+    text_column: str,
+    n_trials: int,
+    metric_name: str,
+    direction: str,
+    seed: int,
+) -> dict[str, Any]:
+    rng = np.random.default_rng(seed)
+
+    best_params: dict[str, Any] | None = None
+    best_value: float | None = None
+
+    for trial_idx in range(n_trials):
+        params = _sample_params_fallback(rng)
+        value = _evaluate_params(
+            params,
+            train_function=train_function,
+            train_df=train_df,
+            val_df=val_df,
+            text_column=text_column,
+            metric_name=metric_name,
+        )
+
+        logger.info(
+            "Fallback tuning trial %s - %s: %.4f | params=%s",
+            trial_idx,
+            metric_name,
+            value,
+            params,
+        )
+
+        is_better = (
+            best_value is None
+            or (direction == "minimize" and value < best_value)
+            or (direction == "maximize" and value > best_value)
+        )
+        if is_better:
+            best_value = value
+            best_params = params
+
+    if best_params is None or best_value is None:
+        raise RuntimeError("Fallback tuner failed to produce a best trial")
+
+    return {
+        "best_params": best_params,
+        "best_value": float(best_value),
+        "metric_name": metric_name,
+        "direction": direction,
+        "trials": n_trials,
+        "backend": "fallback",
+    }
+
+
+def run_optuna(
+    df: pd.DataFrame,
+    *,
+    train_function: Callable[..., tuple[Any, Any]] = train_model,
+    validation_df: pd.DataFrame | None = None,
+    text_column: str = "text",
+    n_trials: int | None = None,
+    metric_name: str | None = None,
+    direction: str | None = None,
+    random_state: int | None = None,
+) -> dict[str, Any]:
+    """
+    Run Optuna on a DataFrame-based training pipeline.
+
+    If Optuna is unavailable, falls back to random search with same search space.
+    """
+
+    ensure_dataframe(df, name="df", required_columns=[text_column, "label"], min_rows=10)
+    ensure_non_empty_text_column(df, text_column, name="df")
+
+    if validation_df is not None:
+        ensure_dataframe(
+            validation_df,
+            name="validation_df",
+            required_columns=[text_column, "label"],
+            min_rows=1,
+        )
+        ensure_non_empty_text_column(validation_df, text_column, name="validation_df")
+
+    effective_trials = n_trials if n_trials is not None else SETTINGS.training.optuna_trials
+    ensure_positive_int(effective_trials, name="n_trials", min_value=1)
+
+    effective_metric = metric_name or SETTINGS.training.optuna_metric
+    effective_direction = direction or SETTINGS.training.optuna_direction
+    effective_seed = SETTINGS.training.seed if random_state is None else random_state
+
+    if effective_direction not in {"minimize", "maximize"}:
+        raise ValueError("direction must be 'minimize' or 'maximize'")
+
+    if validation_df is None:
+        validation_split = SETTINGS.training.optuna_validation_split
+        if not (0.0 < validation_split < 1.0):
+            raise ValueError("training.optuna_validation_split must be between 0 and 1")
+
+        train_df, val_df = train_test_split(
+            df,
+            test_size=validation_split,
+            random_state=effective_seed,
+            stratify=df["label"],
+        )
+    else:
+        train_df = df
+        val_df = validation_df
+
+    train_df = train_df.reset_index(drop=True)
+    val_df = val_df.reset_index(drop=True)
+
+    try:
+        import optuna
+    except ImportError:
+        logger.warning("Optuna is not installed; using fallback random search tuner")
+        return _run_fallback_tuner(
+            train_function=train_function,
+            train_df=train_df,
+            val_df=val_df,
+            text_column=text_column,
+            n_trials=effective_trials,
+            metric_name=effective_metric,
+            direction=effective_direction,
+            seed=effective_seed,
+        )
+
+    sampler = optuna.samplers.TPESampler(seed=effective_seed)
+    study = optuna.create_study(direction=effective_direction, sampler=sampler)
+
+    def objective(trial: optuna.Trial) -> float:
+        params = {
+            "learning_rate": trial.suggest_float(
+                "learning_rate",
+                SETTINGS.training.optuna_learning_rate_min,
+                SETTINGS.training.optuna_learning_rate_max,
+                log=True,
+            ),
+            "batch_size": trial.suggest_categorical(
+                "batch_size",
+                list(SETTINGS.training.optuna_batch_sizes),
+            ),
+            "epochs": trial.suggest_categorical(
+                "epochs",
+                list(SETTINGS.training.optuna_epoch_choices),
+            ),
+        }
+
+        score = _evaluate_params(
+            params,
+            train_function=train_function,
+            train_df=train_df,
+            val_df=val_df,
+            text_column=text_column,
+            metric_name=effective_metric,
+        )
+
+        logger.info(
+            "Optuna trial %s - %s: %.4f | params=%s",
+            trial.number,
+            effective_metric,
+            score,
+            params,
+        )
+
+        return score
+
+    study.optimize(objective, n_trials=effective_trials)
+
+    logger.info(
+        "Optuna complete | best_value=%.4f | best_params=%s",
+        study.best_value,
+        study.best_params,
     )
 
-    batch_size = trial.suggest_categorical(
-        "batch_size", [8, 16]
-    )
-
-    training_args = TrainingArguments(
-        output_dir=str(MODELS_DIR),
-        learning_rate=learning_rate,
-        per_device_train_batch_size=batch_size,
-        per_device_eval_batch_size=batch_size,
-        num_train_epochs=2,
-        evaluation_strategy="epoch",
-        save_strategy="no"
-    )
-
-    trainer = Trainer(
-        model_init=model_init,
-        args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=val_dataset
-    )
-
-    trainer.train()
-
-    metrics = trainer.evaluate()
-
-    return metrics["eval_loss"]
-
-
-def run_optuna(train_dataset, val_dataset):
-
-    study = optuna.create_study(direction="minimize")
-
-    study.optimize(
-        lambda trial: objective(
-            trial,
-            train_dataset,
-            val_dataset
-        ),
-        n_trials=10
-    )
-
-    return study.best_params
+    return {
+        "best_params": study.best_params,
+        "best_value": float(study.best_value),
+        "metric_name": effective_metric,
+        "direction": effective_direction,
+        "trials": effective_trials,
+        "backend": "optuna",
+    }

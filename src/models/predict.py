@@ -8,7 +8,7 @@ import logging
 from typing import List, Dict, Union
 from transformers import RobertaTokenizer, RobertaForSequenceClassification
 
-from src.utils.config_loader import get_config_value, get_path, load_config
+from src.utils.settings import load_settings
 
 logger = logging.getLogger(__name__)
 
@@ -20,9 +20,9 @@ _tokenizer = None
 _model = None
 _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-CONFIG = load_config()
-MODEL_PATH = get_path(CONFIG, "model", "path", default="models/roberta_model")
-MAX_LENGTH = int(get_config_value(CONFIG, "model", "max_length", default=256))
+SETTINGS = load_settings()
+MODEL_PATH = SETTINGS.model.path
+MAX_LENGTH = SETTINGS.model.max_length
 
 
 def _resolve_label_indices(model) -> tuple[int, int]:

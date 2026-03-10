@@ -1,14 +1,14 @@
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from src.models.predict import predict
-from src.utils.config_loader import get_path, load_config
 from src.utils.logging_utils import configure_logging
+from src.utils.settings import load_settings
 import logging
 
 configure_logging()
 logger = logging.getLogger(__name__)
-CONFIG = load_config()
-MODEL_PATH = get_path(CONFIG, "model", "path", default="models/roberta_model")
+SETTINGS = load_settings()
+MODEL_PATH = SETTINGS.model.path
 
 app = FastAPI(
     title="TruthLens AI - Fake News Detection API",
@@ -18,14 +18,14 @@ app = FastAPI(
 
 
 class NewsRequest(BaseModel):
-    text: str = Field(..., min_length=10, max_length=10000, description="News article text to analyze")
-    
-    class Config:
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "text": "Breaking news: Scientists discover new species in Amazon rainforest."
             }
         }
+    )
+    text: str = Field(..., min_length=10, max_length=10000, description="News article text to analyze")
 
 
 class NewsResponse(BaseModel):

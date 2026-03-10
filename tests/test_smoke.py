@@ -113,7 +113,6 @@ class TestModelUtils:
         """Test model saving and loading"""
         from src.models.model_utils import save_model, load_model
         import tempfile
-        import os
         
         # Create dummy model
         dummy_model = {"type": "test", "params": [1, 2, 3]}
@@ -128,8 +127,9 @@ class TestModelUtils:
             
             assert loaded_model == dummy_model
         finally:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
+            tmp_file = Path(tmp_path)
+            if tmp_file.exists():
+                tmp_file.unlink()
 
 
 class TestEvaluation:
