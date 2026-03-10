@@ -1,161 +1,146 @@
-# 🔍 TruthLens AI - Fake News Detection
+﻿# TruthLens AI
 
-An advanced fake news detection system using RoBERTa transformer model with explainable AI capabilities.
+TruthLens AI is a fake-news detection project built around a RoBERTa classifier, with data cleaning, optional augmentation, engineered feature tokens, evaluation reporting, and a FastAPI inference service.
 
-## ✨ Features
+## What The Project Does
 
-- **Deep Learning**: RoBERTa-based transformer model for accurate text classification
-- **Feature Engineering**: Text analysis, source credibility scoring, and metadata features
-- **Explainable AI**: SHAP and LIME integration for model interpretability
-- **REST API**: FastAPI-based API for easy integration
-- **Production Ready**: Proper error handling, logging, and validation
+- Trains a binary classifier (`REAL` vs `FAKE`) using merged datasets.
+- Applies NLP cleaning and optional data augmentation.
+- Adds feature-engineered signal (metadata, source credibility, TF-IDF keyword tokens) into the model input text.
+- Evaluates with classification metrics and confusion matrix output.
+- Serves predictions through a REST API.
+- Supports optional cross-validation and hyperparameter tuning from config.
 
-## 🚀 Quick Start
+## Current Capability Snapshot
 
-### 1. Installation
+- Training pipeline: `main.py`
+- Model training/inference: `src/models/train_roberta.py`, `src/models/predict.py`
+- Feature pipeline integration: `src/features/feature_pipeline.py`
+- Optional CV: `src/training/cross_validation.py`
+- Optional tuning: `src/training/hyperparameter_tuning.py` (Optuna backend if installed, fallback random search otherwise)
+- API: `api/app.py`
+- Evaluation: `evaluate.py` and `src/evaluation/evaluate_model.py`
+- Typed settings/config management: `src/utils/settings.py`
+
+## Architecture Overview
+
+1. Data Ingestion Layer
+- `src/data/merge_datasets.py` merges ISOT + LIAR + FakeNewsNet sources.
+
+2. Data Quality Layer
+- `src/data/clean_data.py` normalizes and filters text.
+- `src/data/validate_data.py` validates schema, nulls, duplicates, and label distribution.
+
+3. Feature Layer
+- `src/features/feature_pipeline.py` combines:
+  - source features (`src/features/source_features.py`)
+  - metadata features (`src/features/metadata_features.py`)
+  - TF-IDF signals (`src/features/text_features.py`)
+- Produces `engineered_text` and persists TF-IDF vectorizer.
+
+4. Training Layer
+- `src/models/train_roberta.py` handles split/tokenize/train/save flow.
+- `src/training/cross_validation.py` runs stratified CV against `train_model` compatible signatures.
+- `src/training/hyperparameter_tuning.py` searches training params from dataframe inputs.
+
+5. Evaluation Layer
+- `src/evaluation/evaluate_model.py` computes metrics and saves report JSON.
+- `src/visualization/visualize.py` plots confusion matrix.
+
+6. Serving Layer
+- `api/app.py` provides `/`, `/health`, and `/predict` endpoints.
+- `src/models/predict.py` lazily loads model/tokenizer and predicts.
+
+## Repository Layout
+
+```text
+Truthlens Ai/
+  api/                  # FastAPI service
+  config/               # YAML configuration
+  data/                 # Raw/interim/processed datasets
+  reports/              # Evaluation and EDA artifacts
+  src/                  # Core application modules
+  tests/                # Unit/integration tests
+  main.py               # End-to-end training pipeline
+  evaluate.py           # Standalone evaluation script
+  run_eda.py            # EDA runner
+  setup.py              # Environment setup helper
+```
+
+## Configuration
+
+Primary config file: `config/config.yaml`
+
+Important knobs:
+
+- `model.*`: model name/path/max sequence length
+- `training.*`: seed, epochs, batch size, learning rate
+- `training.run_cross_validation`: enable/disable CV
+- `training.run_hyperparameter_tuning`: enable/disable tuning
+- `features.*`: TF-IDF settings for feature pipeline
+- `data.*`: augmentation multiplier and dataset paths
+- `paths.*`: output/log/report/model artifact paths
+
+## Quick Start
+
+### 1. Install
 
 ```bash
-# Clone the repository
-git clone <your-repo-url>
-cd "Truthlens Ai"
-
-# Create virtual environment
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
+venv\Scripts\activate  # Windows PowerShell/CMD
 pip install -r requirements.txt
 ```
 
-### 2. Prepare Data
-
-Download the dataset from [Kaggle Fake and Real News Dataset](https://www.kaggle.com/datasets/clmentbisaillon/fake-and-real-news-dataset)
-
-Place the files in:
-- `data/raw/fake.csv`
-- `data/raw/real.csv`
-
-### 3. Train Model
+### 2. Train
 
 ```bash
 python main.py
 ```
 
-This will:
-- Load and clean the data
-- Split into train/validation/test sets (70/15/15)
-- Train RoBERTa model
-- Evaluate on test set
-- Save model to `./models/roberta_model/`
+### 3. Evaluate
 
-### 4. Run API
+```bash
+python evaluate.py
+```
+
+### 4. Start API
 
 ```bash
 uvicorn api.app:app --reload
 ```
 
-API will be available at: http://localhost:8000
+### 5. Run Tests
 
-## 📡 API Usage
-
-### Health Check
 ```bash
-curl http://localhost:8000/
+python -B -m pytest -q
 ```
 
-### Predict
+## API Example
 
-**Using curl:**
 ```bash
 curl -X POST "http://localhost:8000/predict" \
   -H "Content-Type: application/json" \
-  -d '{"text": "Breaking news: Scientists discover new species in Amazon rainforest."}'
+  -d '{"text":"Breaking news: Scientists discover new species in Amazon rainforest."}'
 ```
 
-**Response:**
-```json
-{
-  "text": "Breaking news: Scientists discover...",
-  "fake_probability": 0.1234,
-  "prediction": "REAL",
-  "confidence": 0.8766
-}
-```
+## Outputs
 
-### API Documentation
-Interactive docs: http://localhost:8000/docs
+Main generated artifacts:
 
-## 📊 Project Structure
+- Model: `models/roberta_model/`
+- TF-IDF vectorizer: `models/tfidf_vectorizer.joblib`
+- Training log: `logs/training.log`
+- Evaluation JSON: `reports/evaluation_results.json`
+- Confusion matrix: `reports/confusion_matrix.png`
+- Cleaning report: `reports/data_cleaning_report.json`
 
-```
-Truthlens Ai/
-├── api/                    # FastAPI application
-├── config/                 # Configuration files
-├── data/                   # Data storage
-│   ├── raw/               # Raw datasets
-│   ├── processed/         # Processed data
-│   └── interim/           # Intermediate data
-├── models/                # Saved models
-├── src/                   # Source code
-│   ├── data/             # Data processing
-│   ├── features/         # Feature engineering
-│   ├── models/           # Model training & prediction
-│   ├── evaluation/       # Model evaluation
-│   ├── explainability/   # SHAP & LIME
-│   ├── visualization/    # Plotting utilities
-│   └── utils/            # Helper functions
-├── tests/                # Unit tests
-├── logs/                 # Application logs
-├── main.py              # Training pipeline
-└── requirements.txt     # Python dependencies
-```
+## Documentation Map
 
-## 🔧 Configuration
+- Quick usage: `QUICKSTART.md`
+- Deep project knowledge and full file catalog: `KNOWLEDGE.md`
+- Contribution process: `CONTRIBUTING.md`
+- Current review/status notes: `PROJECT_REVIEW.md`
 
-Copy `.env.example` to `.env` and customize:
+## License
 
-```bash
-cp .env.example .env
-```
-
-Edit `config/config.yaml` for model hyperparameters.
-
-## 🧪 Testing
-
-```bash
-pytest tests/
-```
-
-## 📈 Model Performance
-
-The model is evaluated on:
-- Accuracy
-- Precision
-- Recall
-- F1 Score
-- Confusion Matrix
-
-Results are logged during training.
-
-## 🔮 Future Improvements
-
-- [ ] Add real-time training/fine-tuning
-- [ ] Implement cross-validation
-- [ ] Add more feature engineering (sentiment, entity recognition)
-- [ ] Integrate with fact-checking APIs
-- [ ] Deploy with Docker
-- [ ] Add model versioning (MLflow)
-- [ ] Implement A/B testing
-- [ ] Add monitoring and alerting
-
-## 📝 License
-
-MIT License (add LICENSE file)
-
-## 🤝 Contributing
-
-Contributions welcome! Please open an issue or submit a PR.
-
-## 📧 Contact
-
-For questions or support, please open an issue on GitHub.
+MIT (see `LICENSE`).

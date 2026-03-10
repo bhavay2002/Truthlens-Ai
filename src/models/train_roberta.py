@@ -119,6 +119,7 @@ def train_model(
     test_df: pd.DataFrame | None = None,
 ):
     try:
+
         ensure_dataframe(df, name="df", required_columns=[text_column, "label"], min_rows=2)
         ensure_non_empty_text_column(df, text_column, name="df")
 
@@ -130,9 +131,15 @@ def train_model(
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info("Using device: %s", device)
 
-        learning_rate = params.get("learning_rate", DEFAULT_LEARNING_RATE) if params else DEFAULT_LEARNING_RATE
-        batch_size = params.get("batch_size", DEFAULT_BATCH_SIZE) if params else DEFAULT_BATCH_SIZE
-        epochs = params.get("epochs", DEFAULT_EPOCHS) if params else DEFAULT_EPOCHS
+        # ------------------------------
+        # Safe parameter handling
+        # ------------------------------
+
+        params = params or {}
+
+        learning_rate = params.get("learning_rate", DEFAULT_LEARNING_RATE)
+        batch_size = params.get("batch_size", DEFAULT_BATCH_SIZE)
+        epochs = params.get("epochs", DEFAULT_EPOCHS)
 
         logger.info(
             "Training configuration -> LR: %s, Batch Size: %s, Epochs: %s",
@@ -175,6 +182,11 @@ def train_model(
         train_dataset = Dataset.from_pandas(train_df)
         val_dataset = Dataset.from_pandas(val_df)
         test_dataset = Dataset.from_pandas(test_df)
+
+        # Remove extra index column if present
+        for dataset in [train_dataset, val_dataset, test_dataset]:
+            if "__index_level_0__" in dataset.column_names:
+                dataset = dataset.remove_columns(["__index_level_0__"])
 
         train_dataset = train_dataset.map(
             lambda x: tokenize_function(x, tokenizer, text_column),
@@ -232,7 +244,6 @@ def train_model(
             "gradient_accumulation_steps": 2,
             "num_train_epochs": epochs,
             "save_strategy": "epoch",
-            "evaluation_strategy": "epoch",
             "logging_dir": str(LOGS_DIR),
             "logging_steps": 100,
             "load_best_model_at_end": True,
@@ -241,6 +252,12 @@ def train_model(
             "fp16": torch.cuda.is_available(),
             "seed": SEED,
         }
+
+        # Handle transformers version compatibility
+        if "evaluation_strategy" in inspect.signature(TrainingArguments).parameters:
+            training_kwargs["evaluation_strategy"] = "epoch"
+        else:
+            training_kwargs["eval_strategy"] = "epoch"
 
         training_args = TrainingArguments(**training_kwargs)
 
