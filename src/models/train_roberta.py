@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 MODEL_NAME = "roberta-base"
 MAX_LENGTH = 256
 SEED = 42
+ID2LABEL = {0: "REAL", 1: "FAKE"}
+LABEL2ID = {"REAL": 0, "FAKE": 1}
 
 
 # -------------------------------------------------
@@ -175,8 +177,12 @@ def train_model(df):
 
         model = RobertaForSequenceClassification.from_pretrained(
             MODEL_NAME,
-            num_labels=2
+            num_labels=2,
+            id2label=ID2LABEL,
+            label2id=LABEL2ID
         )
+
+        logger.info(f"Using label mapping: {model.config.id2label}")
 
         model.to(device)
 

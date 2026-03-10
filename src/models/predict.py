@@ -24,6 +24,22 @@ MODEL_PATH = Path("./models/roberta_model")
 MAX_LENGTH = 256
 
 
+def _resolve_label_indices(model) -> tuple[int, int]:
+    """Resolve (real_idx, fake_idx) from model config; fallback to (0, 1)."""
+
+    label2id = getattr(model.config, "label2id", None) or {}
+
+    normalized = {str(k).strip().lower(): int(v) for k, v in label2id.items()}
+
+    real_idx = normalized.get("real", 0)
+    fake_idx = normalized.get("fake", 1)
+
+    if real_idx == fake_idx:
+        return 0, 1
+
+    return real_idx, fake_idx
+
+
 # -------------------------------------------------
 # Model Loading
 # -------------------------------------------------
@@ -96,9 +112,10 @@ def predict(text: str) -> Dict[str, Union[str, float]]:
             outputs = model(**inputs)
 
         probs = torch.softmax(outputs.logits, dim=1)
+        real_idx, fake_idx = _resolve_label_indices(model)
 
-        fake_prob = probs[0][1].item()
-        real_prob = probs[0][0].item()
+        fake_prob = probs[0][fake_idx].item()
+        real_prob = probs[0][real_idx].item()
 
         label = "Fake" if fake_prob > real_prob else "Real"
         confidence = max(fake_prob, real_prob)
@@ -142,12 +159,13 @@ def predict_batch(texts: List[str]) -> List[Dict[str, Union[str, float]]]:
         outputs = model(**inputs)
 
     probs = torch.softmax(outputs.logits, dim=1)
+    real_idx, fake_idx = _resolve_label_indices(model)
 
     results = []
 
     for prob in probs:
-        fake_prob = prob[1].item()
-        real_prob = prob[0].item()
+        fake_prob = prob[fake_idx].item()
+        real_prob = prob[real_idx].item()
 
         label = "Fake" if fake_prob > real_prob else "Real"
         confidence = max(fake_prob, real_prob)
