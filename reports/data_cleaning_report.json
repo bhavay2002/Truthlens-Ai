@@ -1,11 +1,10 @@
 {
-  "raw_rows": 44898,
-  "cleaned_rows": 43951,
-  "rows_removed": 947,
-  "retention_rate": 0.9789077464475032,
+  "raw_rows": 55138,
+  "cleaned_rows": 38881,
+  "rows_removed": 16257,
+  "retention_rate": 0.7051579672820922,
   "label_distribution": {
-    "1": 22741,
-    "0": 21210
-  },
-  "cleaned_data_path": "data\\processed\\cleaned_dataset.csv"
+    "0": 21714,
+    "1": 17167
+  }
 }
