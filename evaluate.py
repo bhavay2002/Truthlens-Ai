@@ -2,17 +2,36 @@
 Standalone evaluation script for trained models
 Run this after training to get detailed evaluation metrics
 """
+import logging
+import sys
+
 import pandas as pd
 import torch
 from transformers import RobertaTokenizer, RobertaForSequenceClassification
 from src.evaluation.evaluate_model import evaluate, save_evaluation_results
 from src.visualization.visualize import plot_confusion_matrix
-import logging
-from pathlib import Path
-import sys
+from src.utils.config_loader import get_config_value, get_path, load_config
+from src.utils.logging_utils import configure_logging
 
-logging.basicConfig(level=logging.INFO)
+configure_logging()
 logger = logging.getLogger(__name__)
+
+CONFIG = load_config()
+MODEL_PATH = get_path(CONFIG, "model", "path", default="models/roberta_model")
+TEST_SET_PATH = get_path(
+    CONFIG,
+    "data",
+    "test_set_path",
+    default="data/processed/test_set.csv",
+)
+MAX_LENGTH = int(get_config_value(CONFIG, "model", "max_length", default=256))
+REPORTS_DIR = get_path(CONFIG, "paths", "reports_dir", default="reports")
+CONFUSION_MATRIX_PATH = get_path(
+    CONFIG,
+    "paths",
+    "confusion_matrix_path",
+    default="reports/confusion_matrix.png",
+)
 
 
 def _resolve_fake_index(model) -> int:
@@ -26,26 +45,25 @@ def evaluate_saved_model():
     """Evaluate the saved model on test set"""
     try:
         # Check if model exists
-        model_path = Path("./models/roberta_model")
-        if not model_path.exists():
+        if not MODEL_PATH.exists():
             logger.error("Model not found. Please train the model first: python main.py")
             sys.exit(1)
         
         # Check if test set exists
-        test_path = Path("./data/processed/test_set.csv")
-        if not test_path.exists():
+        if not TEST_SET_PATH.exists():
             logger.error("Test set not found. Please run training first: python main.py")
             sys.exit(1)
         
         logger.info("Loading model and tokenizer...")
-        tokenizer = RobertaTokenizer.from_pretrained(str(model_path))
-        model = RobertaForSequenceClassification.from_pretrained(str(model_path))
+        tokenizer = RobertaTokenizer.from_pretrained(str(MODEL_PATH))
+        model = RobertaForSequenceClassification.from_pretrained(str(MODEL_PATH))
         model.eval()
         fake_idx = _resolve_fake_index(model)
         
         logger.info("Loading test data...")
-        test_df = pd.read_csv(test_path)
+        test_df = pd.read_csv(TEST_SET_PATH)
         logger.info(f"Test samples: {len(test_df)}")
+        text_column = "engineered_text" if "engineered_text" in test_df.columns else "text"
         
         # Make predictions
         logger.info("Making predictions...")
@@ -53,13 +71,13 @@ def evaluate_saved_model():
         probabilities = []
         
         for idx, row in test_df.iterrows():
-            text = row['text']
+            text = row[text_column]
             inputs = tokenizer(
                 text,
                 return_tensors="pt",
                 truncation=True,
                 padding=True,
-                max_length=256
+                max_length=MAX_LENGTH
             )
             
             with torch.no_grad():
@@ -86,11 +104,11 @@ def evaluate_saved_model():
         
         # Plot confusion matrix
         import matplotlib.pyplot as plt
-        Path("reports").mkdir(parents=True, exist_ok=True)
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
         fig, _ = plot_confusion_matrix(results['confusion_matrix'])
-        fig.savefig("reports/confusion_matrix.png")
+        fig.savefig(CONFUSION_MATRIX_PATH)
         plt.close(fig)
-        logger.info("Confusion matrix saved to reports/confusion_matrix.png")
+        logger.info("Confusion matrix saved to %s", CONFUSION_MATRIX_PATH)
         
         logger.info("Evaluation complete!")
         

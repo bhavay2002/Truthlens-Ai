@@ -23,7 +23,8 @@ from sklearn.metrics import (
     matthews_corrcoef
 )
 
-logging.basicConfig(level=logging.INFO)
+from src.utils.config_loader import get_path, load_config
+
 logger = logging.getLogger(__name__)
 
 
@@ -169,7 +170,7 @@ def evaluate(
 
 def save_evaluation_results(
     results: Dict[str, Any],
-    output_path: str = "reports/evaluation_results.json"
+    output_path: str | Path | None = None
 ):
     """
     Save evaluation results to JSON file.
@@ -177,7 +178,16 @@ def save_evaluation_results(
 
     try:
 
-        output_path = Path(output_path)
+        if output_path is None:
+            config = load_config()
+            output_path = get_path(
+                config,
+                "paths",
+                "evaluation_results_path",
+                default="reports/evaluation_results.json",
+            )
+        else:
+            output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Convert numpy objects safely
@@ -198,7 +208,7 @@ def save_evaluation_results(
             json.dumps(results, default=convert)
         )
 
-        with open(output_path, "w") as f:
+        with output_path.open("w", encoding="utf-8") as f:
             json.dump(serializable_results, f, indent=4)
 
         logger.info(f"Evaluation results saved to: {output_path}")

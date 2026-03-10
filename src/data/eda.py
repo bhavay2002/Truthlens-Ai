@@ -23,7 +23,6 @@ from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
 from nltk.corpus import stopwords
 from wordcloud import WordCloud
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 sns.set_style("whitegrid")
@@ -33,7 +32,7 @@ STOPWORDS = set(stopwords.words("english"))
 
 class FakeNewsEDA:
 
-    def __init__(self, df, output_dir="reports/figures"):
+    def __init__(self, df, output_dir: str | Path = Path("reports/figures")):
 
         self.df = df.copy()
 

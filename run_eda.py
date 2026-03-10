@@ -5,34 +5,41 @@ This script loads, merges, and analyzes the fake news dataset
 import sys
 import json
 from pathlib import Path
+
 PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data.load_data import merge_datasets
 from src.data.eda import FakeNewsEDA
+from src.utils.logging_utils import configure_logging
 import logging
 
-logging.basicConfig(level=logging.INFO)
+configure_logging()
 logger = logging.getLogger(__name__)
 
 
 def resolve_data_paths():
     """Resolve supported fake/real dataset locations."""
     candidates = [
-        ("data/raw/fake.csv", "data/raw/real.csv"),
-        ("data/raw/Fake.csv", "data/raw/True.csv"),
-        ("data/raw/dataset1/Fake.csv", "data/raw/dataset1/True.csv"),
+        (Path("data/raw/fake.csv"), Path("data/raw/real.csv")),
+        (Path("data/raw/Fake.csv"), Path("data/raw/True.csv")),
+        (Path("data/raw/dataset1/Fake.csv"), Path("data/raw/dataset1/True.csv")),
     ]
 
     for fake_path, real_path in candidates:
-        if Path(fake_path).exists() and Path(real_path).exists():
+        if fake_path.exists() and real_path.exists():
             return fake_path, real_path
 
     return candidates[0]
 
 
-def save_eda_report(eda, fake_path, real_path, output_path="reports/eda_report.json"):
+def save_eda_report(
+    eda,
+    fake_path: Path,
+    real_path: Path,
+    output_path: Path = Path("reports/eda_report.json"),
+):
     """Save EDA summary report to JSON."""
     df = eda.df.copy()
 
@@ -43,8 +50,8 @@ def save_eda_report(eda, fake_path, real_path, output_path="reports/eda_report.j
 
     report = {
         "data_files": {
-            "fake_path": fake_path,
-            "real_path": real_path
+            "fake_path": str(fake_path),
+            "real_path": str(real_path)
         },
         "rows": int(len(df)),
         "columns": list(df.columns),
@@ -63,10 +70,10 @@ def save_eda_report(eda, fake_path, real_path, output_path="reports/eda_report.j
             "min": int(df["word_count"].min()),
             "max": int(df["word_count"].max()),
         } if "word_count" in df.columns and len(df) else {},
-        "figures_dir": "reports/figures",
+        "figures_dir": str(Path("reports/figures")),
     }
 
-    output_file = Path(output_path)
+    output_file = output_path
     output_file.parent.mkdir(parents=True, exist_ok=True)
     with output_file.open("w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
@@ -80,7 +87,7 @@ def main():
     # Check if data files exist
     fake_path, real_path = resolve_data_paths()
     
-    if not Path(fake_path).exists() or not Path(real_path).exists():
+    if not fake_path.exists() or not real_path.exists():
         logger.error("Data files not found!")
         logger.error("Please ensure one of the supported pairs exists:")
         logger.error("- data/raw/fake.csv + data/raw/real.csv")

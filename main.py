@@ -1,16 +1,18 @@
-from src.data.load_data import merge_datasets
+from src.data.merge_datasets import merge_datasets
 from src.data.clean_data import clean_dataframe
 from src.data.data_augmentation import augment_dataset
+from src.features.feature_pipeline import apply_feature_engineering, save_vectorizer
 from src.models.train_roberta import train_model
 # from src.training.hyperparameter_tuning import run_optuna  # TODO: Fix signature mismatch
 # from src.training.cross_validation import cross_validate_model  # TODO: Fix signature mismatch
 from src.evaluation.evaluate_model import evaluate, save_evaluation_results
 from src.visualization.visualize import plot_confusion_matrix
+from src.utils.config_loader import get_config_value, get_path, load_config
+from src.utils.logging_utils import configure_logging
 
 import logging
 import sys
 import json
-from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -19,15 +21,53 @@ import matplotlib.pyplot as plt
 # Logging Setup
 # --------------------------------------------------
 
-Path("logs").mkdir(exist_ok=True)
+config = load_config()
+training_log_path = get_path(
+    config,
+    "paths",
+    "training_log_path",
+    default="logs/training.log",
+)
+configure_logging(log_file=training_log_path)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("logs/training.log"),
-        logging.StreamHandler(sys.stdout)
-    ]
+models_dir = get_path(config, "paths", "models_dir", default="models")
+reports_dir = get_path(config, "paths", "reports_dir", default="reports")
+logs_dir = get_path(config, "paths", "logs_dir", default="logs")
+merged_dataset_path = get_path(
+    config,
+    "data",
+    "merged_dataset_path",
+    default="data/interim/merged_dataset.csv",
+)
+cleaned_dataset_path = get_path(
+    config,
+    "data",
+    "cleaned_dataset_path",
+    default="data/processed/cleaned_dataset.csv",
+)
+cleaning_report_path = get_path(
+    config,
+    "paths",
+    "cleaning_report_path",
+    default="reports/data_cleaning_report.json",
+)
+evaluation_results_path = get_path(
+    config,
+    "paths",
+    "evaluation_results_path",
+    default="reports/evaluation_results.json",
+)
+confusion_matrix_path = get_path(
+    config,
+    "paths",
+    "confusion_matrix_path",
+    default="reports/confusion_matrix.png",
+)
+tfidf_vectorizer_path = get_path(
+    config,
+    "paths",
+    "tfidf_vectorizer_path",
+    default="models/tfidf_vectorizer.joblib",
 )
 
 logger = logging.getLogger(__name__)
@@ -41,10 +81,11 @@ def main():
 
     try:
 
-        Path("models").mkdir(exist_ok=True)
-        Path("data/interim").mkdir(parents=True, exist_ok=True)
-        Path("data/processed").mkdir(parents=True, exist_ok=True)
-        Path("reports").mkdir(parents=True, exist_ok=True)
+        models_dir.mkdir(parents=True, exist_ok=True)
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        merged_dataset_path.parent.mkdir(parents=True, exist_ok=True)
+        cleaned_dataset_path.parent.mkdir(parents=True, exist_ok=True)
 
         logger.info("=" * 50)
         logger.info("Starting TruthLens AI Training Pipeline")
@@ -62,7 +103,7 @@ def main():
         logger.info(f"Fake samples: {(df['label'] == 1).sum()}")
         logger.info(f"Real samples: {(df['label'] == 0).sum()}")
 
-        df.to_csv("data/interim/merged_dataset.csv", index=False)
+        df.to_csv(merged_dataset_path, index=False)
 
         # --------------------------------------------------
         # Clean dataset
@@ -77,9 +118,7 @@ def main():
         logger.info(f"Removed {before_clean - len(df)} samples during cleaning")
         logger.info(f"Dataset after cleaning: {len(df)}")
 
-        cleaned_path = Path("data/processed/cleaned_dataset.csv")
-
-        df.to_csv(cleaned_path, index=False)
+        df.to_csv(cleaned_dataset_path, index=False)
 
         cleaning_report = {
             "raw_rows": int(before_clean),
@@ -92,19 +131,49 @@ def main():
             },
         }
 
-        with open("reports/data_cleaning_report.json", "w") as f:
+        with cleaning_report_path.open("w", encoding="utf-8") as f:
             json.dump(cleaning_report, f, indent=2)
 
-        logger.info(f"Cleaned dataset saved to {cleaned_data_path}")
+        logger.info(f"Cleaned dataset saved to {cleaned_dataset_path}")
         logger.info(f"Data cleaning report saved to {cleaning_report_path}")
 
         # --------------------------------------------------
-        # Data Augmentation (DISABLED - multiplier=1 does nothing)
+        # Data Augmentation
         # --------------------------------------------------
-        # Uncomment and increase multiplier (e.g., 2-3) to actually augment data
-        # logger.info("Applying data augmentation...")
-        # df = augment_dataset(df, text_column="text", multiplier=2)
-        # logger.info(f"Dataset size after augmentation: {len(df)}")
+        augmentation_multiplier = int(
+            get_config_value(config, "data", "augmentation_multiplier", default=2)
+        )
+
+        if augmentation_multiplier > 1:
+            logger.info("Applying data augmentation with multiplier=%s", augmentation_multiplier)
+            df = augment_dataset(df, text_column="text", multiplier=augmentation_multiplier)
+            logger.info("Dataset size after augmentation: %s", len(df))
+        else:
+            logger.info("Data augmentation skipped (multiplier <= 1)")
+
+        # --------------------------------------------------
+        # Feature Engineering
+        # --------------------------------------------------
+
+        tfidf_max_features = int(
+            get_config_value(config, "features", "tfidf_max_features", default=5000)
+        )
+        tfidf_top_terms = int(
+            get_config_value(config, "features", "tfidf_top_terms_per_doc", default=4)
+        )
+
+        logger.info(
+            "Applying feature pipeline (tfidf_max_features=%s, top_terms_per_doc=%s)",
+            tfidf_max_features,
+            tfidf_top_terms,
+        )
+        df, tfidf_vectorizer = apply_feature_engineering(
+            df,
+            text_column="text",
+            tfidf_max_features=tfidf_max_features,
+            top_terms_per_doc=tfidf_top_terms,
+        )
+        save_vectorizer(tfidf_vectorizer, tfidf_vectorizer_path)
 
         # --------------------------------------------------
         # Cross Validation (DISABLED - needs fixing)
@@ -129,7 +198,11 @@ def main():
 
         logger.info("Training final model...")
 
-        trainer, test_dataset = train_model(df, best_params)
+        trainer, test_dataset = train_model(
+            df,
+            params=best_params,
+            text_column="engineered_text",
+        )
 
         # --------------------------------------------------
         # Model Evaluation
@@ -152,12 +225,12 @@ def main():
 
         save_evaluation_results(
             evaluation_results,
-            "reports/evaluation_results.json"
+            evaluation_results_path
         )
 
         fig, _ = plot_confusion_matrix(evaluation_results["confusion_matrix"])
 
-        fig.savefig("reports/confusion_matrix.png")
+        fig.savefig(confusion_matrix_path)
 
         plt.close(fig)
 
@@ -167,7 +240,8 @@ def main():
         logger.info("Training Complete!")
         logger.info("=" * 50)
 
-        logger.info("Model saved to ./models/roberta_model")
+        model_path = get_path(config, "model", "path", default="models/roberta_model")
+        logger.info("Model saved to %s", model_path)
         logger.info("Run API using:")
         logger.info("uvicorn api.app:app --reload")
 
