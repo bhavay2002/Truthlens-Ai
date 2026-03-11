@@ -49,6 +49,9 @@ class TrainingSettings:
     epochs: int
     batch_size: int
     learning_rate: float
+    resume_from_checkpoint: bool
+    validation_size: float
+    test_size: float
     text_column: str
     run_cross_validation: bool
     cross_validation_splits: int
@@ -166,6 +169,15 @@ def load_settings() -> AppSettings:
         batch_size=int(get_config_value(config, "training", "batch_size", default=8)),
         learning_rate=float(
             get_config_value(config, "training", "learning_rate", default=2e-5)
+        ),
+        resume_from_checkpoint=bool(
+            get_config_value(config, "training", "resume_from_checkpoint", default=False)
+        ),
+        validation_size=float(
+            get_config_value(config, "training", "validation_size", default=0.15)
+        ),
+        test_size=float(
+            get_config_value(config, "training", "test_size", default=0.15)
         ),
         text_column=str(
             get_config_value(config, "training", "text_column", default="engineered_text")

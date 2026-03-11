@@ -15,6 +15,7 @@ from src.features.text_features import (
     build_tfidf_vectorizer,
     get_feature_names,
     tfidf_fit_transform,
+    tfidf_transform,
 )
 from src.utils.input_validation import ensure_dataframe, ensure_non_empty_text_column, ensure_positive_int
 
@@ -76,14 +77,31 @@ def apply_feature_engineering(
     tfidf_max_features: int = 5000,
     top_terms_per_doc: int = 4,
 ) -> Tuple[pd.DataFrame, TfidfVectorizer]:
-    ensure_dataframe(df, name="df", required_columns=[text_column], min_rows=1)
-    ensure_non_empty_text_column(df, text_column, name="df")
+    """
+    Backward-compatible helper: fits TF-IDF on provided dataframe, then engineers features.
+    """
+    return fit_feature_pipeline(
+        df,
+        text_column=text_column,
+        tfidf_max_features=tfidf_max_features,
+        top_terms_per_doc=top_terms_per_doc,
+    )
+
+
+def fit_feature_pipeline(
+    train_df: pd.DataFrame,
+    text_column: str = "text",
+    tfidf_max_features: int = 5000,
+    top_terms_per_doc: int = 4,
+) -> Tuple[pd.DataFrame, TfidfVectorizer]:
+    ensure_dataframe(train_df, name="train_df", required_columns=[text_column], min_rows=1)
+    ensure_non_empty_text_column(train_df, text_column, name="train_df")
     ensure_positive_int(tfidf_max_features, name="tfidf_max_features", min_value=10)
     ensure_positive_int(top_terms_per_doc, name="top_terms_per_doc", min_value=1)
 
-    logger.info("Applying source + metadata + TF-IDF feature engineering...")
+    logger.info("Fitting feature pipeline on training split only...")
 
-    featured_df = add_source_features(df.copy())
+    featured_df = add_source_features(train_df.copy())
     featured_df = extract_metadata_features(featured_df)
 
     vectorizer = build_tfidf_vectorizer(max_features=tfidf_max_features)
@@ -114,6 +132,45 @@ def apply_feature_engineering(
     )
 
     return featured_df, vectorizer
+
+
+def transform_feature_pipeline(
+    df: pd.DataFrame,
+    vectorizer: TfidfVectorizer,
+    text_column: str = "text",
+    top_terms_per_doc: int = 4,
+) -> pd.DataFrame:
+    ensure_dataframe(df, name="df", required_columns=[text_column], min_rows=1)
+    ensure_non_empty_text_column(df, text_column, name="df")
+    ensure_positive_int(top_terms_per_doc, name="top_terms_per_doc", min_value=1)
+
+    logger.info("Transforming split using training-fitted feature pipeline...")
+
+    featured_df = add_source_features(df.copy())
+    featured_df = extract_metadata_features(featured_df)
+
+    tfidf_matrix = tfidf_transform(
+        featured_df[text_column].astype(str).tolist(),
+        vectorizer=vectorizer,
+    )
+    feature_names = get_feature_names(vectorizer)
+
+    keyword_tokens = [
+        _top_tfidf_terms_for_row(tfidf_matrix.getrow(i), feature_names, top_terms_per_doc)
+        for i in range(tfidf_matrix.shape[0])
+    ]
+
+    metadata_tokens = featured_df.apply(_metadata_token_block, axis=1)
+    featured_df["feature_tokens"] = (
+        metadata_tokens + " " + pd.Series(keyword_tokens, index=featured_df.index)
+    ).str.strip()
+
+    featured_df["engineered_text"] = (
+        featured_df[text_column].astype(str) + " [FEATURES] " + featured_df["feature_tokens"]
+    )
+
+    logger.info("Feature transform complete: %s rows", len(featured_df))
+    return featured_df
 
 
 def save_vectorizer(vectorizer: TfidfVectorizer, output_path: str | Path) -> Path:
