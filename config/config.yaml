@@ -38,8 +38,8 @@ data:
   test_set_path: data/processed/test_set.csv
 
 paths:
-  models_dir: /content/drive/MyDrive/truthlens_checkpoints
-  logs_dir: /content/drive/MyDrive/truthlens_logs
+  models_dir: /content/drive/MyDrive/truthlens/models
+  logs_dir: /content/drive/MyDrive/truthlens/logs
   reports_dir: reports
   training_log_path: logs/training.log
   evaluation_results_path: reports/evaluation_results.json

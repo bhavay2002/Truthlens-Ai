@@ -21,6 +21,7 @@ from transformers import (
     Trainer,
     TrainingArguments,
 )
+from transformers.trainer_utils import get_last_checkpoint as hf_get_last_checkpoint
 
 from src.utils.input_validation import ensure_dataframe, ensure_non_empty_text_column
 from src.utils.settings import load_settings
@@ -96,23 +97,28 @@ def tokenize_function(example, tokenizer, text_column: str):
 
 
 # -------------------------------------------------
-# Helpers
+# Checkpoint Detection
 # -------------------------------------------------
 
 def get_last_checkpoint(directory: Path):
     if not directory.exists():
         return None
 
-    checkpoints = list(directory.glob("checkpoint-*"))
-    if not checkpoints:
+    try:
+        checkpoint = hf_get_last_checkpoint(str(directory))
+        return checkpoint
+    except Exception:
         return None
 
-    checkpoints = sorted(checkpoints, key=lambda x: int(x.name.split("-")[-1]))
-    return str(checkpoints[-1])
 
+# -------------------------------------------------
+# Dataset Split
+# -------------------------------------------------
 
-def _split_train_val_test(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def _split_train_val_test(df: pd.DataFrame):
+
     holdout_size = DEFAULT_VALIDATION_SIZE + DEFAULT_TEST_SIZE
+
     if not (0.0 < holdout_size < 1.0):
         raise ValueError("validation_size + test_size must be between 0 and 1")
 
@@ -123,10 +129,11 @@ def _split_train_val_test(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame,
         stratify=df["label"],
     )
 
-    val_fraction_within_holdout = DEFAULT_VALIDATION_SIZE / holdout_size
+    val_fraction = DEFAULT_VALIDATION_SIZE / holdout_size
+
     val_df, test_df = train_test_split(
         holdout_df,
-        test_size=(1.0 - val_fraction_within_holdout),
+        test_size=(1.0 - val_fraction),
         random_state=SEED,
         stratify=holdout_df["label"],
     )
@@ -138,15 +145,28 @@ def _split_train_val_test(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame,
     )
 
 
-def _validate_split_df(df: pd.DataFrame, name: str, text_column: str) -> None:
+# -------------------------------------------------
+# Validation
+# -------------------------------------------------
+
+def _validate_split_df(df: pd.DataFrame, name: str, text_column: str):
+
     ensure_dataframe(df, name=name, required_columns=[text_column, "label"], min_rows=2)
+
     ensure_non_empty_text_column(df, text_column, name=name)
 
 
-def _to_hf_dataset(df: pd.DataFrame) -> Dataset:
+# -------------------------------------------------
+# Convert to HuggingFace Dataset
+# -------------------------------------------------
+
+def _to_hf_dataset(df: pd.DataFrame):
+
     dataset = Dataset.from_pandas(df.reset_index(drop=True))
+
     if "__index_level_0__" in dataset.column_names:
         dataset = dataset.remove_columns(["__index_level_0__"])
+
     return dataset
 
 
@@ -161,11 +181,14 @@ def train_model(
     validation_df: pd.DataFrame | None = None,
     test_df: pd.DataFrame | None = None,
 ):
+
     try:
+
         _validate_split_df(df, "df", text_column)
 
         if validation_df is not None:
             _validate_split_df(validation_df, "validation_df", text_column)
+
         if test_df is not None:
             _validate_split_df(test_df, "test_df", text_column)
 
@@ -187,15 +210,17 @@ def train_model(
         )
 
         logger.info(
-            "Training configuration -> LR: %s, Batch Size: %s, Epochs: %s, Resume: %s",
+            "Training config -> LR:%s Batch:%s Epochs:%s Resume:%s",
             learning_rate,
             batch_size,
             epochs,
             resume_from_checkpoint,
         )
 
-        # When caller provides explicit splits, preserve them.
-        # Otherwise, perform an internal split.
+        # -------------------------------------------------
+        # Split dataset
+        # -------------------------------------------------
+
         if validation_df is None or test_df is None:
             train_df, val_df, resolved_test_df = _split_train_val_test(df)
         else:
@@ -204,11 +229,24 @@ def train_model(
             resolved_test_df = test_df.reset_index(drop=True)
 
         logger.info(
-            "Train samples: %s, Val samples: %s, Test samples: %s",
+            "Train:%s  Val:%s  Test:%s",
             len(train_df),
             len(val_df),
             len(resolved_test_df),
         )
+
+        # -------------------------------------------------
+        # Create directories
+        # -------------------------------------------------
+
+        MODELS_DIR.mkdir(parents=True, exist_ok=True)
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        MODEL_PATH.mkdir(parents=True, exist_ok=True)
+        TEST_SET_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+        # -------------------------------------------------
+        # Tokenizer
+        # -------------------------------------------------
 
         tokenizer = RobertaTokenizer.from_pretrained(MODEL_NAME)
 
@@ -220,10 +258,12 @@ def train_model(
             lambda x: tokenize_function(x, tokenizer, text_column),
             batched=True,
         )
+
         val_dataset = val_dataset.map(
             lambda x: tokenize_function(x, tokenizer, text_column),
             batched=True,
         )
+
         test_dataset = test_dataset.map(
             lambda x: tokenize_function(x, tokenizer, text_column),
             batched=True,
@@ -233,38 +273,65 @@ def train_model(
         val_dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "label"])
         test_dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "label"])
 
+        # -------------------------------------------------
+        # Model
+        # -------------------------------------------------
+
         model = RobertaForSequenceClassification.from_pretrained(
             MODEL_NAME,
             num_labels=2,
             id2label=ID2LABEL,
             label2id=LABEL2ID,
         )
+
         model.to(device)
 
+        # -------------------------------------------------
+        # Training Arguments
+        # -------------------------------------------------
+
         training_kwargs = {
+
             "output_dir": str(MODELS_DIR),
+
             "learning_rate": learning_rate,
             "weight_decay": 0.01,
+
             "per_device_train_batch_size": batch_size,
             "per_device_eval_batch_size": batch_size,
+
             "gradient_accumulation_steps": 2,
+
             "num_train_epochs": epochs,
-            "save_strategy": "epoch",
+
+            "save_strategy": "steps",
+            "save_steps": 500,
+
             "logging_dir": str(LOGS_DIR),
             "logging_steps": 100,
+
             "load_best_model_at_end": True,
             "metric_for_best_model": "f1",
-            "save_total_limit": 2,
+
+            "save_total_limit": 3,
+
             "fp16": torch.cuda.is_available(),
+
             "seed": SEED,
         }
 
         if "evaluation_strategy" in inspect.signature(TrainingArguments).parameters:
-            training_kwargs["evaluation_strategy"] = "epoch"
+            training_kwargs["evaluation_strategy"] = "steps"
+            training_kwargs["eval_steps"] = 500
         else:
-            training_kwargs["eval_strategy"] = "epoch"
+            training_kwargs["eval_strategy"] = "steps"
+            training_kwargs["eval_steps"] = 500
 
         training_args = TrainingArguments(**training_kwargs)
+
+        # -------------------------------------------------
+        # Trainer
+        # -------------------------------------------------
 
         trainer = Trainer(
             model=model,
@@ -275,22 +342,25 @@ def train_model(
             callbacks=[EarlyStoppingCallback(early_stopping_patience=2)],
         )
 
+        # -------------------------------------------------
+        # Resume Training Automatically
+        # -------------------------------------------------
+
+        last_checkpoint = None
+
         if resume_from_checkpoint:
             last_checkpoint = get_last_checkpoint(MODELS_DIR)
-            if last_checkpoint:
-                logger.info("Resuming training from checkpoint: %s", last_checkpoint)
-                trainer.train(resume_from_checkpoint=last_checkpoint)
-            else:
-                logger.info("Resume requested but no checkpoint found. Starting fresh training.")
-                trainer.train()
-        else:
-            logger.info("Starting fresh training (checkpoint auto-resume disabled).")
-            trainer.train()
 
-        MODELS_DIR.mkdir(parents=True, exist_ok=True)
-        LOGS_DIR.mkdir(parents=True, exist_ok=True)
-        MODEL_PATH.mkdir(parents=True, exist_ok=True)
-        TEST_SET_PATH.parent.mkdir(parents=True, exist_ok=True)
+        if last_checkpoint:
+            logger.info("Resuming training from checkpoint: %s", last_checkpoint)
+        else:
+            logger.info("No checkpoint found. Starting fresh training.")
+
+        trainer.train(resume_from_checkpoint=last_checkpoint)
+
+        # -------------------------------------------------
+        # Save Model
+        # -------------------------------------------------
 
         trainer.save_model(str(MODEL_PATH))
         tokenizer.save_pretrained(str(MODEL_PATH))
