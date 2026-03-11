@@ -8,6 +8,9 @@ training:
   epochs: 3
   batch_size: 8
   learning_rate: 2.0e-5
+  resume_from_checkpoint: false
+  validation_size: 0.15
+  test_size: 0.15
   text_column: engineered_text
   run_cross_validation: false
   cross_validation_splits: 5

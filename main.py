@@ -1,26 +1,28 @@
-from src.data.merge_datasets import merge_datasets
-from src.data.clean_data import clean_dataframe
-from src.data.data_augmentation import augment_dataset
-from src.features.feature_pipeline import apply_feature_engineering, save_vectorizer
-from src.models.train_roberta import train_model
-from src.training.hyperparameter_tuning import run_optuna
-from src.training.cross_validation import cross_validate_model
-from src.evaluation.evaluate_model import evaluate, save_evaluation_results
-from src.visualization.visualize import plot_confusion_matrix
-from src.utils.logging_utils import configure_logging
-from src.utils.input_validation import ensure_dataframe
-from src.utils.settings import load_settings
-
+﻿import json
 import logging
 import sys
-import json
-import numpy as np
+
 import matplotlib.pyplot as plt
+import numpy as np
+from sklearn.model_selection import train_test_split
 
+from src.data.clean_data import clean_dataframe
+from src.data.data_augmentation import augment_dataset
+from src.data.merge_datasets import merge_datasets
+from src.evaluation.evaluate_model import evaluate, save_evaluation_results
+from src.features.feature_pipeline import (
+    fit_feature_pipeline,
+    save_vectorizer,
+    transform_feature_pipeline,
+)
+from src.models.train_roberta import train_model
+from src.training.cross_validation import cross_validate_model
+from src.training.hyperparameter_tuning import run_optuna
+from src.utils.input_validation import ensure_dataframe
+from src.utils.logging_utils import configure_logging
+from src.utils.settings import load_settings
+from src.visualization.visualize import plot_confusion_matrix
 
-# --------------------------------------------------
-# Logging Setup
-# --------------------------------------------------
 
 SETTINGS = load_settings()
 configure_logging(log_file=SETTINGS.paths.training_log_path)
@@ -38,14 +40,35 @@ tfidf_vectorizer_path = SETTINGS.paths.tfidf_vectorizer_path
 logger = logging.getLogger(__name__)
 
 
-# --------------------------------------------------
-# Main Pipeline
-# --------------------------------------------------
+def _split_clean_dataset(df):
+    holdout_size = SETTINGS.training.validation_size + SETTINGS.training.test_size
+    if not (0.0 < holdout_size < 1.0):
+        raise ValueError("training.validation_size + training.test_size must be between 0 and 1")
+
+    train_df, holdout_df = train_test_split(
+        df,
+        test_size=holdout_size,
+        random_state=SETTINGS.training.seed,
+        stratify=df["label"],
+    )
+
+    val_fraction_within_holdout = SETTINGS.training.validation_size / holdout_size
+    val_df, test_df = train_test_split(
+        holdout_df,
+        test_size=(1.0 - val_fraction_within_holdout),
+        random_state=SETTINGS.training.seed,
+        stratify=holdout_df["label"],
+    )
+
+    return (
+        train_df.reset_index(drop=True),
+        val_df.reset_index(drop=True),
+        test_df.reset_index(drop=True),
+    )
+
 
 def main():
-
     try:
-
         models_dir.mkdir(parents=True, exist_ok=True)
         reports_dir.mkdir(parents=True, exist_ok=True)
         logs_dir.mkdir(parents=True, exist_ok=True)
@@ -56,35 +79,22 @@ def main():
         logger.info("Starting TruthLens AI Training Pipeline")
         logger.info("=" * 50)
 
-        # --------------------------------------------------
-        # Merge datasets
-        # --------------------------------------------------
-
         logger.info("Merging datasets (ISOT + FakeNewsNet + LIAR)...")
-
         df = merge_datasets()
         ensure_dataframe(df, name="merged_df", required_columns=["text", "label"], min_rows=1)
 
-        logger.info(f"Total samples loaded: {len(df)}")
-        logger.info(f"Fake samples: {(df['label'] == 1).sum()}")
-        logger.info(f"Real samples: {(df['label'] == 0).sum()}")
-
+        logger.info("Total samples loaded: %s", len(df))
+        logger.info("Fake samples: %s", (df["label"] == 1).sum())
+        logger.info("Real samples: %s", (df["label"] == 0).sum())
         df.to_csv(merged_dataset_path, index=False)
 
-        # --------------------------------------------------
-        # Clean dataset
-        # --------------------------------------------------
-
         logger.info("Cleaning dataset...")
-
         before_clean = len(df)
-
         df = clean_dataframe(df)
         ensure_dataframe(df, name="cleaned_df", required_columns=["text", "label"], min_rows=1)
 
-        logger.info(f"Removed {before_clean - len(df)} samples during cleaning")
-        logger.info(f"Dataset after cleaning: {len(df)}")
-
+        logger.info("Removed %s samples during cleaning", before_clean - len(df))
+        logger.info("Dataset after cleaning: %s", len(df))
         df.to_csv(cleaned_dataset_path, index=False)
 
         cleaning_report = {
@@ -97,59 +107,81 @@ def main():
                 for k, v in df["label"].value_counts().to_dict().items()
             },
         }
-
         with cleaning_report_path.open("w", encoding="utf-8") as f:
             json.dump(cleaning_report, f, indent=2)
 
-        logger.info(f"Cleaned dataset saved to {cleaned_dataset_path}")
-        logger.info(f"Data cleaning report saved to {cleaning_report_path}")
+        logger.info("Cleaned dataset saved to %s", cleaned_dataset_path)
+        logger.info("Data cleaning report saved to %s", cleaning_report_path)
 
         # --------------------------------------------------
-        # Data Augmentation
+        # Leakage-safe split BEFORE augmentation/features
+        # --------------------------------------------------
+        train_df, val_df, test_df = _split_clean_dataset(df)
+        logger.info(
+            "Leakage-safe split complete -> train=%s val=%s test=%s",
+            len(train_df),
+            len(val_df),
+            len(test_df),
+        )
+
+        # --------------------------------------------------
+        # Augmentation on train only
         # --------------------------------------------------
         augmentation_multiplier = SETTINGS.data.augmentation_multiplier
-
         if augmentation_multiplier > 1:
-            logger.info("Applying data augmentation with multiplier=%s", augmentation_multiplier)
-            df = augment_dataset(df, text_column="text", multiplier=augmentation_multiplier)
-            logger.info("Dataset size after augmentation: %s", len(df))
+            logger.info("Applying data augmentation to training split only (multiplier=%s)", augmentation_multiplier)
+            train_df = augment_dataset(train_df, text_column="text", multiplier=augmentation_multiplier)
+            logger.info("Training split size after augmentation: %s", len(train_df))
         else:
             logger.info("Data augmentation skipped (multiplier <= 1)")
 
         # --------------------------------------------------
-        # Feature Engineering
+        # Feature engineering (fit on train only)
         # --------------------------------------------------
-
         tfidf_max_features = SETTINGS.features.tfidf_max_features
         tfidf_top_terms = SETTINGS.features.tfidf_top_terms_per_doc
 
         logger.info(
-            "Applying feature pipeline (tfidf_max_features=%s, top_terms_per_doc=%s)",
+            "Applying leakage-safe feature pipeline (fit train only, transform val/test) "
+            "(tfidf_max_features=%s, top_terms_per_doc=%s)",
             tfidf_max_features,
             tfidf_top_terms,
         )
-        df, tfidf_vectorizer = apply_feature_engineering(
-            df,
+
+        train_df, tfidf_vectorizer = fit_feature_pipeline(
+            train_df,
             text_column="text",
             tfidf_max_features=tfidf_max_features,
+            top_terms_per_doc=tfidf_top_terms,
+        )
+        val_df = transform_feature_pipeline(
+            val_df,
+            vectorizer=tfidf_vectorizer,
+            text_column="text",
+            top_terms_per_doc=tfidf_top_terms,
+        )
+        test_df = transform_feature_pipeline(
+            test_df,
+            vectorizer=tfidf_vectorizer,
+            text_column="text",
             top_terms_per_doc=tfidf_top_terms,
         )
         save_vectorizer(tfidf_vectorizer, tfidf_vectorizer_path)
 
         text_column = SETTINGS.training.text_column
-        if text_column not in df.columns:
+        if text_column not in train_df.columns:
             raise ValueError(
                 f"Configured text column '{text_column}' does not exist. "
-                f"Available columns: {list(df.columns)}"
+                f"Available columns: {list(train_df.columns)}"
             )
 
         # --------------------------------------------------
-        # Cross Validation (optional)
+        # Optional CV (train split only)
         # --------------------------------------------------
         if SETTINGS.training.run_cross_validation:
-            logger.info("Running cross-validation...")
+            logger.info("Running cross-validation on training split only...")
             cv_results = cross_validate_model(
-                df,
+                train_df,
                 train_model,
                 n_splits=SETTINGS.training.cross_validation_splits,
                 text_column=text_column,
@@ -164,14 +196,15 @@ def main():
             )
 
         # --------------------------------------------------
-        # Hyperparameter tuning (optional)
+        # Optional tuning (train/val only)
         # --------------------------------------------------
         best_params = None
         if SETTINGS.training.run_hyperparameter_tuning:
-            logger.info("Running Optuna hyperparameter tuning...")
+            logger.info("Running hyperparameter tuning (train+val splits)...")
             tuning_results = run_optuna(
-                df,
+                train_df,
                 train_function=train_model,
+                validation_df=val_df,
                 text_column=text_column,
                 n_trials=SETTINGS.training.optuna_trials,
                 metric_name=SETTINGS.training.optuna_metric,
@@ -185,24 +218,16 @@ def main():
                 best_params,
             )
 
-        # --------------------------------------------------
-        # Final model training
-        # --------------------------------------------------
-
         logger.info("Training final model...")
-
         trainer, test_dataset = train_model(
-            df,
+            train_df,
             params=best_params,
             text_column=text_column,
+            validation_df=val_df,
+            test_df=test_df,
         )
 
-        # --------------------------------------------------
-        # Model Evaluation
-        # --------------------------------------------------
-
         logger.info("Evaluating model...")
-
         prediction_output = trainer.predict(test_dataset)
 
         logits = prediction_output.predictions
@@ -211,36 +236,24 @@ def main():
 
         exp_logits = np.exp(logits - np.max(logits, axis=1, keepdims=True))
         probabilities = exp_logits / exp_logits.sum(axis=1, keepdims=True)
-
         fake_probabilities = probabilities[:, 1]
 
         evaluation_results = evaluate(y_true, y_pred, fake_probabilities)
-
-        save_evaluation_results(
-            evaluation_results,
-            evaluation_results_path
-        )
+        save_evaluation_results(evaluation_results, evaluation_results_path)
 
         fig, _ = plot_confusion_matrix(evaluation_results["confusion_matrix"])
-
         fig.savefig(confusion_matrix_path)
-
         plt.close(fig)
 
         logger.info("Evaluation report saved")
-
         logger.info("=" * 50)
         logger.info("Training Complete!")
         logger.info("=" * 50)
-
         logger.info("Model saved to %s", SETTINGS.model.path)
-        logger.info("Run API using:")
-        logger.info("uvicorn api.app:app --reload")
+        logger.info("Run API using: uvicorn api.app:app --reload")
 
     except Exception as e:
-
-        logger.error(f"Pipeline failed: {e}", exc_info=True)
-
+        logger.error("Pipeline failed: %s", e, exc_info=True)
         sys.exit(1)
 
 

@@ -6,8 +6,11 @@ Loads trained model and performs fake news inference
 import torch
 import logging
 from typing import List, Dict, Union
+import pandas as pd
+import joblib
 from transformers import RobertaTokenizer, RobertaForSequenceClassification
 
+from src.features.feature_pipeline import transform_feature_pipeline
 from src.utils.settings import load_settings
 
 logger = logging.getLogger(__name__)
@@ -18,11 +21,16 @@ logger = logging.getLogger(__name__)
 
 _tokenizer = None
 _model = None
+_vectorizer = None
+_vectorizer_load_attempted = False
 _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 SETTINGS = load_settings()
 MODEL_PATH = SETTINGS.model.path
 MAX_LENGTH = SETTINGS.model.max_length
+VECTORIZER_PATH = SETTINGS.paths.tfidf_vectorizer_path
+TRAINING_TEXT_COLUMN = SETTINGS.training.text_column
+TOP_TERMS_PER_DOC = SETTINGS.features.tfidf_top_terms_per_doc
 
 
 def _resolve_label_indices(model) -> tuple[int, int]:
@@ -39,6 +47,68 @@ def _resolve_label_indices(model) -> tuple[int, int]:
         return 0, 1
 
     return real_idx, fake_idx
+
+
+def _load_vectorizer():
+    """Lazy-load TF-IDF vectorizer used by feature pipeline."""
+
+    global _vectorizer, _vectorizer_load_attempted
+
+    if _vectorizer is None and not _vectorizer_load_attempted:
+        _vectorizer_load_attempted = True
+        if not VECTORIZER_PATH.exists():
+            logger.warning(
+                "Vectorizer file not found at %s. Falling back to raw text inference.",
+                VECTORIZER_PATH,
+            )
+            return None
+
+        try:
+            _vectorizer = joblib.load(VECTORIZER_PATH)
+        except Exception as e:
+            logger.warning(
+                "Failed to load vectorizer from %s (%s). Falling back to raw text inference.",
+                VECTORIZER_PATH,
+                e,
+            )
+            return None
+
+    return _vectorizer
+
+
+def _prepare_texts_for_inference(texts: List[str]) -> List[str]:
+    """Build model input text consistent with training text column."""
+
+    df = pd.DataFrame({"text": texts})
+
+    if TRAINING_TEXT_COLUMN == "text":
+        return df["text"].astype(str).tolist()
+
+    if TRAINING_TEXT_COLUMN == "engineered_text":
+        vectorizer = _load_vectorizer()
+        if vectorizer is None:
+            return df["text"].astype(str).tolist()
+
+        try:
+            transformed_df = transform_feature_pipeline(
+                df,
+                vectorizer=vectorizer,
+                text_column="text",
+                top_terms_per_doc=TOP_TERMS_PER_DOC,
+            )
+            return transformed_df["engineered_text"].astype(str).tolist()
+        except Exception as e:
+            logger.warning(
+                "Feature transform failed during inference (%s). Falling back to raw text.",
+                e,
+            )
+            return df["text"].astype(str).tolist()
+
+    logger.warning(
+        "Configured training text column '%s' is not supported at inference. Falling back to raw text.",
+        TRAINING_TEXT_COLUMN,
+    )
+    return df["text"].astype(str).tolist()
 
 
 # -------------------------------------------------
@@ -96,11 +166,12 @@ def predict(text: str) -> Dict[str, Union[str, float]]:
         raise ValueError("Input text cannot be empty")
 
     tokenizer, model = load_model_and_tokenizer()
+    model_text = _prepare_texts_for_inference([text])[0]
 
     try:
 
         inputs = tokenizer(
-            text,
+            model_text,
             return_tensors="pt",
             truncation=True,
             padding=True,
@@ -145,9 +216,10 @@ def predict_batch(texts: List[str]) -> List[Dict[str, Union[str, float]]]:
         raise ValueError("Input list cannot be empty")
 
     tokenizer, model = load_model_and_tokenizer()
+    model_texts = _prepare_texts_for_inference(texts)
 
     inputs = tokenizer(
-        texts,
+        model_texts,
         return_tensors="pt",
         truncation=True,
         padding=True,
