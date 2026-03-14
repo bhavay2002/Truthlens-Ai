@@ -1,5 +1,0 @@
-# Update requirements.txt to include EDA dependencies
-
-# Add these lines to requirements.txt:
-wordcloud>=1.9.0
-nltk>=3.8.0
