@@ -1,7 +1,7 @@
 # TruthLens AI - Data Pipeline Configuration
 
 dataset:
-  raw_data_dir: data/raw
+  raw_data_dir: data/raw/isot
   fake_news_file: Fake.csv
   real_news_file: True.csv
   text_column: text

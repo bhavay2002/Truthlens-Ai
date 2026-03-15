@@ -100,6 +100,19 @@ def _predict_with_assets(
     }
 
 
+def _predict_for_explainability(candidate_text: str) -> Dict[str, Any]:
+    """
+    Stable predictor for explainability modules.
+
+    Using a named callable avoids per-request lambda identities and improves
+    explainer cache reuse.
+    """
+
+    normalized_text = preprocess_text(candidate_text)
+    tokenizer, model = _load_model_and_tokenizer()
+    return _predict_with_assets(normalized_text, tokenizer, model)
+
+
 def predict(text: str) -> Dict[str, Any]:
     """
     Perform fake-news prediction with bias/emotion analysis and explanations.
@@ -123,11 +136,7 @@ def predict(text: str) -> Dict[str, Any]:
 
     explanation = explain_prediction_full(
         text=clean_text,
-        predict_fn=lambda candidate: _predict_with_assets(
-            preprocess_text(candidate),
-            tokenizer,
-            model,
-        ),
+        predict_fn=_predict_for_explainability,
         model=model,
         tokenizer=tokenizer,
         use_lime=True,

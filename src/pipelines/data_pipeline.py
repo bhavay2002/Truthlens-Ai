@@ -30,21 +30,32 @@ EDA + profiling reports
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data.load_data import merge_datasets
 from src.data.validate_data import DataValidator
 from src.data.data_profiler import DataProfiler
 from src.data.clean_data import clean_dataframe
 from src.data.class_balance import balance_dataset
-from src.data.data_augmentation import augment_dataset
 from src.data.data_split import split_dataset, save_splits
 
 logger = logging.getLogger(__name__)
-DEFAULT_DATA_CONFIG_PATH = Path("config/data_config.yaml")
+DEFAULT_DATA_CONFIG_PATH = PROJECT_ROOT / "config" / "data_config.yaml"
+
+
+def _resolve_project_path(path_value: str | Path) -> Path:
+    path_obj = Path(path_value)
+    if path_obj.is_absolute():
+        return path_obj
+    return (PROJECT_ROOT / path_obj).resolve()
 
 
 def _require_keys(config: dict[str, Any], section: str, keys: tuple[str, ...]) -> None:
@@ -60,7 +71,14 @@ def _validate_config(config: dict[str, Any]) -> None:
     _require_keys(
         config,
         "dataset",
-        ("raw_data_dir", "fake_news_file", "real_news_file", "text_column", "label_column"),
+        (
+            "raw_data_dir",
+            "fake_news_file",
+            "real_news_file",
+            "text_column",
+            "title_column",
+            "label_column",
+        ),
     )
     _require_keys(
         config,
@@ -93,10 +111,7 @@ def _validate_config(config: dict[str, Any]) -> None:
 # --------------------------------------------------
 
 def load_config(config_path: str | Path = DEFAULT_DATA_CONFIG_PATH) -> dict[str, Any]:
-    config_path = Path(config_path)
-
-    if not config_path.is_absolute():
-        config_path = config_path.resolve()
+    config_path = _resolve_project_path(config_path)
 
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_path}")
@@ -120,15 +135,27 @@ def run_data_pipeline(config_path: str | Path = DEFAULT_DATA_CONFIG_PATH) -> dic
     config = load_config(config_path)
 
     dataset_cfg = config["dataset"]
+    labels_cfg = dataset_cfg.get("labels", {})
+    fake_label = int(labels_cfg.get("fake", 1))
+    real_label = int(labels_cfg.get("real", 0))
 
-    fake_path = Path(dataset_cfg["raw_data_dir"]) / dataset_cfg["fake_news_file"]
-    real_path = Path(dataset_cfg["raw_data_dir"]) / dataset_cfg["real_news_file"]
+    raw_data_dir = _resolve_project_path(dataset_cfg["raw_data_dir"])
+    fake_path = raw_data_dir / dataset_cfg["fake_news_file"]
+    real_path = raw_data_dir / dataset_cfg["real_news_file"]
 
     # --------------------------------------------------
     # Load Dataset
     # --------------------------------------------------
 
-    df = merge_datasets(fake_path, real_path)
+    df = merge_datasets(
+        fake_path,
+        real_path,
+        text_column=dataset_cfg["text_column"],
+        title_column=dataset_cfg["title_column"],
+        label_column=dataset_cfg["label_column"],
+        fake_label=fake_label,
+        real_label=real_label,
+    )
 
     if df.empty:
         raise ValueError("Merged dataset is empty; cannot continue pipeline")
@@ -160,7 +187,7 @@ def run_data_pipeline(config_path: str | Path = DEFAULT_DATA_CONFIG_PATH) -> dic
             df,
             text_column=dataset_cfg["text_column"],
             label_column=dataset_cfg["label_column"],
-            report_dir=config["profiling"]["report_dir"],
+            report_dir=_resolve_project_path(config["profiling"]["report_dir"]),
         )
 
         profiler.profile()
@@ -194,6 +221,7 @@ def run_data_pipeline(config_path: str | Path = DEFAULT_DATA_CONFIG_PATH) -> dic
     # --------------------------------------------------
 
     if config["augmentation"]["enabled"]:
+        from src.data.data_augmentation import augment_dataset
 
         df = augment_dataset(
             df,
@@ -205,7 +233,7 @@ def run_data_pipeline(config_path: str | Path = DEFAULT_DATA_CONFIG_PATH) -> dic
     # Save Processed Dataset
     # --------------------------------------------------
 
-    processed_dir = Path(config["output"]["processed_data_dir"])
+    processed_dir = _resolve_project_path(config["output"]["processed_data_dir"])
 
     processed_dir.mkdir(parents=True, exist_ok=True)
 
@@ -230,18 +258,20 @@ def run_data_pipeline(config_path: str | Path = DEFAULT_DATA_CONFIG_PATH) -> dic
         random_state=config["split"]["random_state"],
     )
 
+    splits_dir = _resolve_project_path(config["output"]["splits_dir"])
+
     save_splits(
         train_df,
         val_df,
         test_df,
-        output_dir=config["output"]["splits_dir"],
+        output_dir=splits_dir,
     )
 
     logger.info("Data pipeline completed successfully")
 
     return {
         "processed_dataset_path": str(processed_path),
-        "splits_dir": str(Path(config["output"]["splits_dir"]).resolve()),
+        "splits_dir": str(splits_dir),
         "processed_rows": int(len(df)),
         "train_rows": int(len(train_df)),
         "val_rows": int(len(val_df)),

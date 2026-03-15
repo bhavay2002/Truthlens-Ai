@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, ConfigDict
-from src.models.predict import predict
+from src.models.predict import predict, predict_batch
 from src.features.bias.bias_lexicon import compute_bias_features
 from src.features.emotion.emotion_lexicon import EmotionLexiconAnalyzer
 from src.explainability.emotion_explainer import explain_emotion
@@ -14,6 +14,9 @@ configure_logging()
 logger = logging.getLogger(__name__)
 SETTINGS = load_settings()
 MODEL_PATH = SETTINGS.model.path
+VECTORIZER_PATH = SETTINGS.paths.tfidf_vectorizer_path
+TRAINING_TEXT_COLUMN = SETTINGS.training.text_column
+LIME_NUM_SAMPLES = 256
 EMOTION_ANALYZER = EmotionLexiconAnalyzer()
 
 app = FastAPI(
@@ -123,6 +126,8 @@ def health_check():
     """Detailed health check"""
     try:
         model_exists = MODEL_PATH.exists()
+        vectorizer_required = TRAINING_TEXT_COLUMN == "engineered_text"
+        vectorizer_exists = (not vectorizer_required) or VECTORIZER_PATH.exists()
         
         # Check for required model files
         required_files = ["config.json", "tokenizer.json"]
@@ -135,10 +140,18 @@ def health_check():
         )
         
         return {
-            "status": "healthy" if model_exists and model_files_exist else "degraded",
+            "status": (
+                "healthy"
+                if model_exists and model_files_exist and vectorizer_exists
+                else "degraded"
+            ),
             "model_path": str(MODEL_PATH),
             "model_exists": model_exists,
-            "model_files_complete": model_files_exist
+            "model_files_complete": model_files_exist,
+            "training_text_column": TRAINING_TEXT_COLUMN,
+            "vectorizer_required": vectorizer_required,
+            "vectorizer_exists": vectorizer_exists,
+            "vectorizer_path": str(VECTORIZER_PATH),
         }
     except Exception as e:
         logger.error(f"Health check failed: {e}")
@@ -175,7 +188,12 @@ def analyze_news(request: NewsRequest):
 
         # LIME can fail if model assets are unavailable; keep analysis resilient.
         try:
-            lime_result = explain_prediction(predict, request.text, num_features=8)
+            lime_result = explain_prediction(
+                predict_batch,
+                request.text,
+                num_features=8,
+                num_samples=LIME_NUM_SAMPLES,
+            )
         except Exception as lime_error:
             logger.warning("LIME explanation unavailable: %s", lime_error)
             lime_result = {
