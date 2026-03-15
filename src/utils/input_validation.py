@@ -97,7 +97,10 @@ def ensure_non_empty_text_column(
 
     if text_column not in df.columns:
 
-        raise ValueError(f"{name} does not contain text column '{text_column}'")
+        raise ValueError(
+            f"{name} does not contain text column "
+            f"'{text_column}'"
+        )
 
     if df[text_column].astype(str).str.strip().eq("").all():
 
