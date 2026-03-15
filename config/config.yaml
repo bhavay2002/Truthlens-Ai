@@ -1,29 +1,44 @@
 model:
   name: roberta-base
   max_length: 256
+  num_labels: 2
   path: models/roberta_model
+  tokenizer_name: roberta-base
 
 training:
   seed: 42
+  device: auto
   epochs: 3
   batch_size: 8
+  gradient_accumulation_steps: 2
   learning_rate: 2.0e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  fp16: true
   resume_from_checkpoint: false
   validation_size: 0.15
   test_size: 0.15
   text_column: engineered_text
-  run_cross_validation: false
-  cross_validation_splits: 5
-  cross_validation_metric: eval_loss
-  run_hyperparameter_tuning: false
-  optuna_trials: 10
-  optuna_direction: minimize
-  optuna_metric: eval_loss
-  optuna_learning_rate_min: 1.0e-6
-  optuna_learning_rate_max: 5.0e-5
-  optuna_batch_sizes: [8, 16]
-  optuna_epoch_choices: [2, 3]
-  optuna_validation_split: 0.2
+  label_column: label
+  early_stopping:
+    enabled: true
+    patience: 2
+    metric: eval_loss
+
+cross_validation:
+  enabled: false
+  splits: 5
+  metric: eval_loss
+
+hyperparameter_tuning:
+  enabled: false
+  trials: 10
+  direction: minimize
+  metric: eval_loss
+  learning_rate_range: [1.0e-6, 5.0e-5]
+  batch_sizes: [8, 16]
+  epoch_choices: [2, 3]
+  validation_split: 0.2
 
 features:
   tfidf_max_features: 5000
@@ -32,17 +47,36 @@ features:
 data:
   raw_dir: data/raw
   interim_dir: data/interim
-  augmentation_multiplier: 2
+  processed_dir: data/processed
   cleaned_dataset_path: data/processed/cleaned_dataset.csv
   merged_dataset_path: data/interim/merged_dataset.csv
   test_set_path: data/processed/test_set.csv
+  augmentation_multiplier: 2
+
+evaluation:
+  metrics:
+    - accuracy
+    - precision
+    - recall
+    - f1
+    - roc_auc
+
+logging:
+  log_level: INFO
+  training_log_path: logs/training.log
+  save_steps: 500
+  eval_steps: 500
+  save_total_limit: 3
 
 paths:
-  models_dir: /content/drive/MyDrive/truthlens/models
-  logs_dir: /content/drive/MyDrive/truthlens/logs
+  models_dir: models
+  logs_dir: logs
   reports_dir: reports
-  training_log_path: logs/training.log
+  tfidf_vectorizer_path: models/tfidf_vectorizer.joblib
   evaluation_results_path: reports/evaluation_results.json
   confusion_matrix_path: reports/confusion_matrix.png
   cleaning_report_path: reports/data_cleaning_report.json
-  tfidf_vectorizer_path: models/tfidf_vectorizer.joblib
+
+inference:
+  batch_size: 16
+  device: auto

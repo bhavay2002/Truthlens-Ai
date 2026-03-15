@@ -9,6 +9,8 @@ import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 
+from src.features.bias.bias_lexicon import compute_bias_features
+from src.features.emotion.emotion_lexicon import EmotionLexiconAnalyzer
 from src.features.metadata_features import extract_metadata_features
 from src.features.source_features import add_source_features
 from src.features.text_features import (
@@ -21,6 +23,7 @@ from src.utils.input_validation import ensure_dataframe, ensure_non_empty_text_c
 
 
 logger = logging.getLogger(__name__)
+_emotion_analyzer = EmotionLexiconAnalyzer()
 
 
 def _safe_token(value: object) -> str:
@@ -71,6 +74,41 @@ def _top_tfidf_terms_for_row(
     return " ".join(tokens)
 
 
+def _clip_bin(value: float, factor: float = 10.0, max_bin: int = 20) -> int:
+    return max(0, min(int(value * factor), max_bin))
+
+
+def _bias_emotion_token_block(text: str) -> str:
+    text = str(text or "")
+
+    bias_result = compute_bias_features(text)
+    emotion_result = _emotion_analyzer.analyze(text)
+
+    dominant_emotion = _safe_token(emotion_result.dominant_emotion or "neutral")
+    media_bias = _safe_token(bias_result.media_bias or "neutral")
+
+    sorted_emotions = sorted(
+        emotion_result.emotion_scores.items(),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    top_emotions = [name for name, score in sorted_emotions if score > 0][:2]
+
+    tokens = [
+        f"sem_bias_{_clip_bin(bias_result.bias_score)}",
+        f"sem_media_{media_bias}",
+        f"sem_emotion_{dominant_emotion}",
+    ]
+
+    for token in bias_result.biased_tokens[:3]:
+        tokens.append(f"sem_bias_tok_{_safe_token(token)}")
+
+    for emotion_name in top_emotions:
+        tokens.append(f"sem_top_emo_{_safe_token(emotion_name)}")
+
+    return " ".join(tokens)
+
+
 def apply_feature_engineering(
     df: pd.DataFrame,
     text_column: str = "text",
@@ -117,8 +155,13 @@ def fit_feature_pipeline(
     ]
 
     metadata_tokens = featured_df.apply(_metadata_token_block, axis=1)
+    semantic_tokens = featured_df[text_column].astype(str).apply(_bias_emotion_token_block)
     featured_df["feature_tokens"] = (
-        metadata_tokens + " " + pd.Series(keyword_tokens, index=featured_df.index)
+        metadata_tokens
+        + " "
+        + pd.Series(keyword_tokens, index=featured_df.index)
+        + " "
+        + semantic_tokens
     ).str.strip()
 
     featured_df["engineered_text"] = (
@@ -161,8 +204,13 @@ def transform_feature_pipeline(
     ]
 
     metadata_tokens = featured_df.apply(_metadata_token_block, axis=1)
+    semantic_tokens = featured_df[text_column].astype(str).apply(_bias_emotion_token_block)
     featured_df["feature_tokens"] = (
-        metadata_tokens + " " + pd.Series(keyword_tokens, index=featured_df.index)
+        metadata_tokens
+        + " "
+        + pd.Series(keyword_tokens, index=featured_df.index)
+        + " "
+        + semantic_tokens
     ).str.strip()
 
     featured_df["engineered_text"] = (
