@@ -108,7 +108,8 @@ def _load_vectorizer():
 
         if not VECTORIZER_PATH.exists():
             logger.warning(
-                "Vectorizer file not found at %s. Falling back to raw text inference.",
+                "Vectorizer file not found at %s. "
+                "Falling back to raw text inference.",
                 VECTORIZER_PATH,
             )
             return None
@@ -117,7 +118,8 @@ def _load_vectorizer():
             _vectorizer = joblib.load(VECTORIZER_PATH)
         except Exception as e:
             logger.warning(
-                "Failed to load vectorizer from %s (%s). Falling back to raw text inference.",
+                "Failed to load vectorizer from %s (%s). "
+                "Falling back to raw text inference.",
                 VECTORIZER_PATH,
                 e,
             )
@@ -152,13 +154,15 @@ def _prepare_texts_for_inference(texts: List[str]) -> List[str]:
 
         except Exception as e:
             logger.warning(
-                "Feature transform failed during inference (%s). Falling back to raw text.",
+                "Feature transform failed during inference (%s). "
+                "Falling back to raw text.",
                 e,
             )
             return df["text"].astype(str).tolist()
 
     logger.warning(
-        "Configured training text column '%s' not supported during inference. Using raw text.",
+        "Configured training text column '%s' not supported during inference. "
+        "Using raw text.",
         TRAINING_TEXT_COLUMN,
     )
 
@@ -168,6 +172,7 @@ def _prepare_texts_for_inference(texts: List[str]) -> List[str]:
 # -------------------------------------------------
 # Model Loading
 # -------------------------------------------------
+
 
 def load_model_and_tokenizer():
     """Load model and tokenizer once using lazy loading."""
@@ -186,7 +191,9 @@ def load_model_and_tokenizer():
             logger.info("Loading model and tokenizer...")
 
             _tokenizer = RobertaTokenizer.from_pretrained(str(MODEL_PATH))
-            _model = RobertaForSequenceClassification.from_pretrained(str(MODEL_PATH))
+            _model = RobertaForSequenceClassification.from_pretrained(
+                str(MODEL_PATH)
+            )
 
             _model.to(_device)
             _model.eval()
@@ -204,6 +211,7 @@ def load_model_and_tokenizer():
 # Single Prediction
 # -------------------------------------------------
 
+
 def predict(text: str) -> Dict[str, Union[str, float]]:
     """
     Predict fake news probability for a single text.
@@ -220,7 +228,7 @@ def predict(text: str) -> Dict[str, Union[str, float]]:
         return_tensors="pt",
         truncation=True,
         padding=True,
-        max_length=MAX_LENGTH
+        max_length=MAX_LENGTH,
     )
 
     inputs = {k: v.to(_device) for k, v in inputs.items()}
@@ -241,13 +249,14 @@ def predict(text: str) -> Dict[str, Union[str, float]]:
     return {
         "label": label,
         "fake_probability": fake_prob,
-        "confidence": confidence
+        "confidence": confidence,
     }
 
 
 # -------------------------------------------------
 # Batch Prediction
 # -------------------------------------------------
+
 
 def predict_batch(texts: List[str]) -> List[Dict[str, Union[str, float]]]:
     """
@@ -265,7 +274,7 @@ def predict_batch(texts: List[str]) -> List[Dict[str, Union[str, float]]]:
         return_tensors="pt",
         truncation=True,
         padding=True,
-        max_length=MAX_LENGTH
+        max_length=MAX_LENGTH,
     )
 
     inputs = {k: v.to(_device) for k, v in inputs.items()}
@@ -286,10 +295,12 @@ def predict_batch(texts: List[str]) -> List[Dict[str, Union[str, float]]]:
         label = "Fake" if fake_prob > real_prob else "Real"
         confidence = max(fake_prob, real_prob)
 
-        results.append({
-            "label": label,
-            "fake_probability": fake_prob,
-            "confidence": confidence
-        })
+        results.append(
+            {
+                "label": label,
+                "fake_probability": fake_prob,
+                "confidence": confidence,
+            }
+        )
 
     return results

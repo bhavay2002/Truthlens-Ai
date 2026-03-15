@@ -34,7 +34,6 @@ import pandas as pd
 
 from src.utils.input_validation import ensure_dataframe
 
-
 # ---------------------------------------------------------
 # Logging Configuration
 # ---------------------------------------------------------
@@ -45,6 +44,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------
 # Helper Functions
 # ---------------------------------------------------------
+
 
 def _count_words(text: Optional[str]) -> int:
     """
@@ -113,6 +113,7 @@ def _uppercase_ratio(text: Optional[str]) -> float:
 # ---------------------------------------------------------
 # Feature Extraction Pipeline
 # ---------------------------------------------------------
+
 
 def extract_metadata_features(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -193,7 +194,7 @@ def extract_metadata_features(df: pd.DataFrame) -> pd.DataFrame:
 
         return df
 
-    except Exception as e:
+    except Exception:
 
         logger.exception("Metadata feature extraction failed")
 

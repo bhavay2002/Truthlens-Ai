@@ -33,7 +33,6 @@ from transformers import RobertaModel
 
 from src.utils.settings import load_settings
 
-
 # ---------------------------------------------------------
 # Logging
 # ---------------------------------------------------------
@@ -53,6 +52,7 @@ MODEL_NAME = SETTINGS.model.name
 # ---------------------------------------------------------
 # TruthLens Multimodal Model
 # ---------------------------------------------------------
+
 
 class TruthLensModel(nn.Module):
     """
@@ -86,14 +86,10 @@ class TruthLensModel(nn.Module):
         fusion_input_size = hidden_size + 2
 
         self.classifier = nn.Sequential(
-
             nn.Linear(fusion_input_size, 256),
-
             nn.ReLU(),
-
             nn.Dropout(0.2),
-
-            nn.Linear(256, num_labels)
+            nn.Linear(256, num_labels),
         )
 
         logger.info("TruthLens multimodal model initialized")

@@ -37,7 +37,6 @@ from collections import Counter
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
-
 # ---------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------
@@ -49,7 +48,7 @@ TECHNIQUE_LABELS = [
     "appeal_to_fear",
     "name_calling",
     "bandwagon",
-    "neutral"
+    "neutral",
 ]
 
 
@@ -58,37 +57,49 @@ TECHNIQUE_LABELS = [
 # ---------------------------------------------------------
 
 LOADED_LANGUAGE = {
-    "outrageous", "shocking", "disgraceful", "corrupt",
-    "horrible", "absurd", "catastrophic", "evil"
+    "outrageous",
+    "shocking",
+    "disgraceful",
+    "corrupt",
+    "horrible",
+    "absurd",
+    "catastrophic",
+    "evil",
 }
 
 FEAR_WORDS = {
-    "threat", "danger", "crisis", "collapse",
-    "chaos", "panic", "disaster"
+    "threat",
+    "danger",
+    "crisis",
+    "collapse",
+    "chaos",
+    "panic",
+    "disaster",
 }
 
 NAME_CALLING = {
-    "traitor", "radical", "extremist",
-    "criminal", "enemy", "corrupt"
+    "traitor",
+    "radical",
+    "extremist",
+    "criminal",
+    "enemy",
+    "corrupt",
 }
 
 BANDWAGON_PATTERNS = [
     r"everyone knows",
     r"the people agree",
     r"millions support",
-    r"the whole country"
+    r"the whole country",
 ]
 
-PROPAGANDA_LEXICON = (
-    LOADED_LANGUAGE |
-    FEAR_WORDS |
-    NAME_CALLING
-)
+PROPAGANDA_LEXICON = LOADED_LANGUAGE | FEAR_WORDS | NAME_CALLING
 
 
 # ---------------------------------------------------------
 # Data Structure
 # ---------------------------------------------------------
+
 
 @dataclass
 class PropagandaResult:
@@ -103,19 +114,30 @@ class PropagandaResult:
 # Model Loader
 # ---------------------------------------------------------
 
+
 class PropagandaModels:
+    _tokenizer = None
+    _model = None
 
-    tokenizer = AutoTokenizer.from_pretrained(PROPAGANDA_MODEL)
+    @classmethod
+    def get_tokenizer(cls):
+        if cls._tokenizer is None:
+            cls._tokenizer = AutoTokenizer.from_pretrained(PROPAGANDA_MODEL)
+        return cls._tokenizer
 
-    model = AutoModelForSequenceClassification.from_pretrained(
-        PROPAGANDA_MODEL,
-        num_labels=len(TECHNIQUE_LABELS)
-    )
+    @classmethod
+    def get_model(cls):
+        if cls._model is None:
+            cls._model = AutoModelForSequenceClassification.from_pretrained(
+                PROPAGANDA_MODEL, num_labels=len(TECHNIQUE_LABELS)
+            )
+        return cls._model
 
 
 # ---------------------------------------------------------
 # Text Processing
 # ---------------------------------------------------------
+
 
 def tokenize_sentences(text: str) -> List[str]:
 
@@ -132,6 +154,7 @@ def tokenize_words(text: str) -> List[str]:
 # ---------------------------------------------------------
 # Lexicon Detection
 # ---------------------------------------------------------
+
 
 def detect_lexicon_techniques(sentence: str) -> List[str]:
 
@@ -155,6 +178,7 @@ def detect_lexicon_techniques(sentence: str) -> List[str]:
 # Bandwagon Detection
 # ---------------------------------------------------------
 
+
 def detect_bandwagon(sentence: str) -> bool:
 
     sentence_lower = sentence.lower()
@@ -166,16 +190,14 @@ def detect_bandwagon(sentence: str) -> bool:
 # Transformer Classification
 # ---------------------------------------------------------
 
+
 def transformer_propaganda_classifier(sentence: str) -> Dict:
 
-    tokenizer = PropagandaModels.tokenizer
-    model = PropagandaModels.model
+    tokenizer = PropagandaModels.get_tokenizer()
+    model = PropagandaModels.get_model()
 
     inputs = tokenizer(
-        sentence,
-        return_tensors="pt",
-        truncation=True,
-        padding=True
+        sentence, return_tensors="pt", truncation=True, padding=True
     )
 
     with torch.no_grad():
@@ -189,15 +211,13 @@ def transformer_propaganda_classifier(sentence: str) -> Dict:
 
     confidence = probs[0][label_id].item()
 
-    return {
-        "technique": technique,
-        "confidence": round(confidence, 4)
-    }
+    return {"technique": technique, "confidence": round(confidence, 4)}
 
 
 # ---------------------------------------------------------
 # Token Highlighting
 # ---------------------------------------------------------
+
 
 def highlight_propaganda_tokens(sentence: str) -> List[Dict]:
 
@@ -209,11 +229,9 @@ def highlight_propaganda_tokens(sentence: str) -> List[Dict]:
 
         if token in PROPAGANDA_LEXICON:
 
-            highlights.append({
-                "token": token,
-                "type": "propaganda",
-                "position": idx
-            })
+            highlights.append(
+                {"token": token, "type": "propaganda", "position": idx}
+            )
 
     return highlights
 
@@ -221,6 +239,7 @@ def highlight_propaganda_tokens(sentence: str) -> List[Dict]:
 # ---------------------------------------------------------
 # Main Detection Pipeline
 # ---------------------------------------------------------
+
 
 def detect_propaganda(text: str) -> Dict:
 
@@ -232,7 +251,7 @@ def detect_propaganda(text: str) -> Dict:
             "dominant_technique": "neutral",
             "detected_techniques": {},
             "sentence_analysis": [],
-            "token_highlights": []
+            "token_highlights": [],
         }
 
     sentence_analysis = []
@@ -256,11 +275,13 @@ def detect_propaganda(text: str) -> Dict:
 
         token_highlights.extend(highlight_propaganda_tokens(sentence))
 
-        sentence_analysis.append({
-            "sentence": sentence,
-            "techniques": techniques,
-            "transformer_prediction": transformer_result
-        })
+        sentence_analysis.append(
+            {
+                "sentence": sentence,
+                "techniques": techniques,
+                "transformer_prediction": transformer_result,
+            }
+        )
 
     total = sum(technique_counter.values())
 
@@ -268,7 +289,8 @@ def detect_propaganda(text: str) -> Dict:
 
     dominant = (
         technique_counter.most_common(1)[0][0]
-        if technique_counter else "neutral"
+        if technique_counter
+        else "neutral"
     )
 
     return {
@@ -276,7 +298,7 @@ def detect_propaganda(text: str) -> Dict:
         "dominant_technique": dominant,
         "detected_techniques": dict(technique_counter),
         "sentence_analysis": sentence_analysis,
-        "token_highlights": token_highlights
+        "token_highlights": token_highlights,
     }
 
 

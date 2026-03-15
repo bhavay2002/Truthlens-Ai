@@ -52,7 +52,6 @@ from src.utils.input_validation import (
     ensure_positive_int,
 )
 
-
 # ---------------------------------------------------------
 # Logging Configuration
 # ---------------------------------------------------------
@@ -65,6 +64,7 @@ _emotion_analyzer = EmotionLexiconAnalyzer()
 # ---------------------------------------------------------
 # Utility Helpers
 # ---------------------------------------------------------
+
 
 def _safe_token(value: object) -> str:
     """
@@ -81,6 +81,7 @@ def _safe_token(value: object) -> str:
 # ---------------------------------------------------------
 # Metadata Token Generator
 # ---------------------------------------------------------
+
 
 def _metadata_token_block(row: pd.Series) -> str:
     """
@@ -119,6 +120,7 @@ def _metadata_token_block(row: pd.Series) -> str:
 # TF-IDF Keyword Extraction
 # ---------------------------------------------------------
 
+
 def _top_tfidf_terms_for_row(
     matrix_row: Any,
     feature_names: list[str],
@@ -135,7 +137,9 @@ def _top_tfidf_terms_for_row(
 
     feature_indices = matrix_row.indices[sorted_indices]
 
-    tokens = [f"kw_{_safe_token(feature_names[idx])}" for idx in feature_indices]
+    tokens = [
+        f"kw_{_safe_token(feature_names[idx])}" for idx in feature_indices
+    ]
 
     return " ".join(tokens)
 
@@ -143,6 +147,7 @@ def _top_tfidf_terms_for_row(
 # ---------------------------------------------------------
 # Bias + Emotion Tokens
 # ---------------------------------------------------------
+
 
 def _clip_bin(value: float, factor: float = 10.0, max_bin: int = 20) -> int:
     return max(0, min(int(value * factor), max_bin))
@@ -159,7 +164,9 @@ def _bias_emotion_token_block(text: str) -> str:
 
     emotion_result = _emotion_analyzer.analyze(text)
 
-    dominant_emotion = _safe_token(emotion_result.dominant_emotion or "neutral")
+    dominant_emotion = _safe_token(
+        emotion_result.dominant_emotion or "neutral"
+    )
 
     media_bias = _safe_token(bias_result.media_bias or "neutral")
 
@@ -190,6 +197,7 @@ def _bias_emotion_token_block(text: str) -> str:
 # Training Pipeline
 # ---------------------------------------------------------
 
+
 def fit_feature_pipeline(
     train_df: pd.DataFrame,
     text_column: str = "text",
@@ -204,9 +212,13 @@ def fit_feature_pipeline(
 
     ensure_non_empty_text_column(train_df, text_column, name="train_df")
 
-    ensure_positive_int(tfidf_max_features, name="tfidf_max_features", min_value=10)
+    ensure_positive_int(
+        tfidf_max_features, name="tfidf_max_features", min_value=10
+    )
 
-    ensure_positive_int(top_terms_per_doc, name="top_terms_per_doc", min_value=1)
+    ensure_positive_int(
+        top_terms_per_doc, name="top_terms_per_doc", min_value=1
+    )
 
     logger.info("Fitting feature pipeline on training split")
 
@@ -234,7 +246,9 @@ def fit_feature_pipeline(
 
     metadata_tokens = featured_df.apply(_metadata_token_block, axis=1)
 
-    semantic_tokens = featured_df[text_column].astype(str).apply(_bias_emotion_token_block)
+    semantic_tokens = (
+        featured_df[text_column].astype(str).apply(_bias_emotion_token_block)
+    )
 
     featured_df["feature_tokens"] = (
         metadata_tokens
@@ -262,6 +276,7 @@ def fit_feature_pipeline(
 # ---------------------------------------------------------
 # Transform Pipeline
 # ---------------------------------------------------------
+
 
 def transform_feature_pipeline(
     df: pd.DataFrame,
@@ -301,7 +316,9 @@ def transform_feature_pipeline(
 
     metadata_tokens = featured_df.apply(_metadata_token_block, axis=1)
 
-    semantic_tokens = featured_df[text_column].astype(str).apply(_bias_emotion_token_block)
+    semantic_tokens = (
+        featured_df[text_column].astype(str).apply(_bias_emotion_token_block)
+    )
 
     featured_df["feature_tokens"] = (
         metadata_tokens
@@ -317,7 +334,7 @@ def transform_feature_pipeline(
         + featured_df["feature_tokens"]
     )
 
-    logger.info("Feature transform completed | rows=%s", len(featureed_df))
+    logger.info("Feature transform completed | rows=%s", len(featured_df))
 
     return featured_df
 
@@ -326,7 +343,10 @@ def transform_feature_pipeline(
 # Save Vectorizer
 # ---------------------------------------------------------
 
-def save_vectorizer(vectorizer: TfidfVectorizer, output_path: str | Path) -> Path:
+
+def save_vectorizer(
+    vectorizer: TfidfVectorizer, output_path: str | Path
+) -> Path:
     """
     Persist TF-IDF vectorizer to disk.
     """
@@ -340,3 +360,21 @@ def save_vectorizer(vectorizer: TfidfVectorizer, output_path: str | Path) -> Pat
     logger.info("Saved TF-IDF vectorizer to %s", output_path)
 
     return output_path
+
+
+def apply_feature_engineering(
+    df: pd.DataFrame,
+    text_column: str = "text",
+    tfidf_max_features: int = 5000,
+    top_terms_per_doc: int = 4,
+) -> Tuple[pd.DataFrame, TfidfVectorizer]:
+    """
+    Backward-compatible wrapper for legacy tests and callers.
+    """
+
+    return fit_feature_pipeline(
+        train_df=df,
+        text_column=text_column,
+        tfidf_max_features=tfidf_max_features,
+        top_terms_per_doc=top_terms_per_doc,
+    )

@@ -29,7 +29,6 @@ import pandas as pd
 
 from src.utils.input_validation import ensure_dataframe
 
-
 # ---------------------------------------------------------
 # Logging Configuration
 # ---------------------------------------------------------
@@ -61,6 +60,7 @@ LOW_CREDIBILITY_SOURCES = {
 # Domain Extraction
 # ---------------------------------------------------------
 
+
 def _extract_domain(url: Optional[str]) -> str:
     """
     Extract domain name from a URL.
@@ -80,9 +80,13 @@ def _extract_domain(url: Optional[str]) -> str:
         if url is None or pd.isna(url):
             return ""
 
-        parsed = urlparse(str(url))
+        raw_url = str(url).strip().lower()
+        parsed = urlparse(raw_url)
 
         domain = parsed.netloc.lower()
+        if not domain:
+            # Handles bare domains like "bbc.com" without scheme.
+            domain = parsed.path.split("/")[0].lower()
 
         if domain.startswith("www."):
             domain = domain[4:]
@@ -97,6 +101,7 @@ def _extract_domain(url: Optional[str]) -> str:
 # ---------------------------------------------------------
 # Credibility Scoring
 # ---------------------------------------------------------
+
 
 def _source_credibility(domain: str) -> int:
     """
@@ -123,6 +128,7 @@ def _source_credibility(domain: str) -> int:
 # Feature Engineering Pipeline
 # ---------------------------------------------------------
 
+
 def add_source_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Add source credibility features to dataset.
@@ -145,7 +151,9 @@ def add_source_features(df: pd.DataFrame) -> pd.DataFrame:
 
         if "source" not in df.columns:
 
-            logger.warning("Column 'source' not found. Skipping source features.")
+            logger.warning(
+                "Column 'source' not found. Skipping source features."
+            )
 
             return df
 
@@ -191,6 +199,7 @@ def add_source_features(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------
 # Backward Compatibility Wrapper
 # ---------------------------------------------------------
+
 
 def add_source_feature(df: pd.DataFrame) -> pd.DataFrame:
     """

@@ -34,7 +34,6 @@ trainer : transformers.Trainer
 test_dataset : datasets.Dataset
 """
 
-import inspect
 import logging
 from pathlib import Path
 from typing import Any, Tuple
@@ -56,14 +55,15 @@ from transformers import (
     Trainer,
     TrainingArguments,
 )
-from transformers.trainer_utils import get_last_checkpoint as hf_get_last_checkpoint
+from transformers.trainer_utils import (
+    get_last_checkpoint as hf_get_last_checkpoint,
+)
 
 from src.utils.input_validation import (
     ensure_dataframe,
     ensure_non_empty_text_column,
 )
 from src.utils.settings import load_settings
-
 
 # ---------------------------------------------------------
 # Logging Configuration
@@ -109,6 +109,7 @@ LABEL2ID = {"REAL": 0, "FAKE": 1}
 # Evaluation Metrics
 # ---------------------------------------------------------
 
+
 def compute_metrics(eval_pred: Tuple[np.ndarray, np.ndarray]) -> dict:
     """
     Compute classification metrics for evaluation.
@@ -150,6 +151,7 @@ def compute_metrics(eval_pred: Tuple[np.ndarray, np.ndarray]) -> dict:
 # Tokenization
 # ---------------------------------------------------------
 
+
 def tokenize_function(example: dict, tokenizer, text_column: str):
     """
     Tokenize input text for RoBERTa.
@@ -166,6 +168,7 @@ def tokenize_function(example: dict, tokenizer, text_column: str):
 # ---------------------------------------------------------
 # Checkpoint Detection
 # ---------------------------------------------------------
+
 
 def get_last_checkpoint(directory: Path) -> str | None:
     """
@@ -184,6 +187,7 @@ def get_last_checkpoint(directory: Path) -> str | None:
 # ---------------------------------------------------------
 # Dataset Splitting
 # ---------------------------------------------------------
+
 
 def _split_train_val_test(
     df: pd.DataFrame,
@@ -224,18 +228,22 @@ def _split_train_val_test(
 # Dataset Validation
 # ---------------------------------------------------------
 
+
 def _validate_split_df(df: pd.DataFrame, name: str, text_column: str):
     """
     Validate dataframe integrity.
     """
 
-    ensure_dataframe(df, name=name, required_columns=[text_column, "label"], min_rows=2)
+    ensure_dataframe(
+        df, name=name, required_columns=[text_column, "label"], min_rows=2
+    )
     ensure_non_empty_text_column(df, text_column, name=name)
 
 
 # ---------------------------------------------------------
 # Convert DataFrame to HuggingFace Dataset
 # ---------------------------------------------------------
+
 
 def _to_hf_dataset(df: pd.DataFrame) -> Dataset:
     """
@@ -253,6 +261,7 @@ def _to_hf_dataset(df: pd.DataFrame) -> Dataset:
 # ---------------------------------------------------------
 # Training Pipeline
 # ---------------------------------------------------------
+
 
 def train_model(
     df: pd.DataFrame,
@@ -290,11 +299,15 @@ def train_model(
 
         params = params or {}
 
-        learning_rate = float(params.get("learning_rate", DEFAULT_LEARNING_RATE))
+        learning_rate = float(
+            params.get("learning_rate", DEFAULT_LEARNING_RATE)
+        )
         batch_size = int(params.get("batch_size", DEFAULT_BATCH_SIZE))
         epochs = int(params.get("epochs", DEFAULT_EPOCHS))
         resume_training = bool(
-            params.get("resume_from_checkpoint", DEFAULT_RESUME_FROM_CHECKPOINT)
+            params.get(
+                "resume_from_checkpoint", DEFAULT_RESUME_FROM_CHECKPOINT
+            )
         )
 
         # Dataset split
@@ -407,6 +420,6 @@ def train_model(
 
         return trainer, test_dataset
 
-    except Exception as e:
+    except Exception:
         logger.exception("Training pipeline failed")
         raise

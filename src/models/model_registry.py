@@ -31,7 +31,6 @@ from transformers import RobertaForSequenceClassification, RobertaTokenizer
 
 from src.utils.settings import load_settings
 
-
 # ---------------------------------------------------------
 # Logging
 # ---------------------------------------------------------
@@ -46,12 +45,13 @@ logger = logging.getLogger(__name__)
 SETTINGS = load_settings()
 
 MODEL_DIR = Path(SETTINGS.model.path)
-VECTORIZER_PATH = Path(SETTINGS.paths.models_dir) / "tfidf_vectorizer.joblib"
+VECTORIZER_PATH = Path(SETTINGS.paths.tfidf_vectorizer_path)
 
 
 # ---------------------------------------------------------
 # Model Registry
 # ---------------------------------------------------------
+
 
 class ModelRegistry:
     """
@@ -82,7 +82,9 @@ class ModelRegistry:
             # Load Model
             # -------------------------------------------------
 
-            model = RobertaForSequenceClassification.from_pretrained(model_path)
+            model = RobertaForSequenceClassification.from_pretrained(
+                model_path
+            )
 
             # -------------------------------------------------
             # Load Tokenizer
@@ -124,6 +126,7 @@ class ModelRegistry:
 # ---------------------------------------------------------
 # Convenience Helper
 # ---------------------------------------------------------
+
 
 def get_model():
     """

@@ -14,10 +14,10 @@ to ensure consistent behavior across the system.
 
 from dataclasses import dataclass
 
-
 # ---------------------------------------------------------
 # Model Configuration
 # ---------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class ModelConfig:
@@ -92,6 +92,7 @@ class ModelConfig:
 # Path Configuration
 # ---------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class ModelPaths:
     """
@@ -110,6 +111,7 @@ class ModelPaths:
 # ---------------------------------------------------------
 # Inference Configuration
 # ---------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class InferenceConfig:

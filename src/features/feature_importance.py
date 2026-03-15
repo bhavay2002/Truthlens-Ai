@@ -18,7 +18,6 @@ import logging
 from typing import Dict, List
 import numpy as np
 
-
 # ---------------------------------------------------------
 # Logging
 # ---------------------------------------------------------
@@ -30,10 +29,15 @@ logger = logging.getLogger(__name__)
 # Feature Category Mapping
 # ---------------------------------------------------------
 
+
 def categorize_feature(feature_name: str) -> str:
     """
     Determine category of a feature based on token prefix.
     """
+    if feature_name.startswith("meta_domain") or feature_name.startswith(
+        "meta_srccred"
+    ):
+        return "source"
 
     if feature_name.startswith("kw_"):
         return "keywords"
@@ -41,14 +45,13 @@ def categorize_feature(feature_name: str) -> str:
     if feature_name.startswith("sem_bias"):
         return "bias"
 
-    if feature_name.startswith("sem_emotion") or feature_name.startswith("sem_top_emo"):
+    if feature_name.startswith("sem_emotion") or feature_name.startswith(
+        "sem_top_emo"
+    ):
         return "emotion"
 
     if feature_name.startswith("meta_"):
         return "metadata"
-
-    if feature_name.startswith("meta_domain") or feature_name.startswith("meta_srccred"):
-        return "source"
 
     return "other"
 
@@ -56,6 +59,7 @@ def categorize_feature(feature_name: str) -> str:
 # ---------------------------------------------------------
 # Compute Feature Importance
 # ---------------------------------------------------------
+
 
 def compute_feature_importance(
     model,
@@ -81,7 +85,9 @@ def compute_feature_importance(
         logger.info("Computing feature importance")
 
         if not hasattr(model, "coef_"):
-            raise ValueError("Model does not support coefficient-based importance")
+            raise ValueError(
+                "Model does not support coefficient-based importance"
+            )
 
         importance = np.abs(model.coef_[0])
 
@@ -102,8 +108,7 @@ def compute_feature_importance(
         if total > 0:
 
             category_scores = {
-                k: v / total
-                for k, v in category_scores.items()
+                k: v / total for k, v in category_scores.items()
             }
 
         logger.info("Feature importance computed")
@@ -121,6 +126,7 @@ def compute_feature_importance(
 # Top Features
 # ---------------------------------------------------------
 
+
 def get_top_features(
     model,
     feature_names: List[str],
@@ -137,7 +143,4 @@ def get_top_features(
 
     indices = np.argsort(importance)[::-1][:top_k]
 
-    return [
-        (feature_names[i], float(importance[i]))
-        for i in indices
-    ]
+    return [(feature_names[i], float(importance[i])) for i in indices]

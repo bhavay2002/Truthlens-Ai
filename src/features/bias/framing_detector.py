@@ -31,7 +31,6 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import torch
 
-
 # ---------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------
@@ -48,14 +47,26 @@ FRAME_THRESHOLD_NEG = -0.15
 # ---------------------------------------------------------
 
 POSITIVE_FRAMES = {
-    "finally", "successfully", "achieved", "improved",
-    "progress", "solution", "stabilized", "boosted"
+    "finally",
+    "successfully",
+    "achieved",
+    "improved",
+    "progress",
+    "solution",
+    "stabilized",
+    "boosted",
 }
 
 NEGATIVE_FRAMES = {
-    "forced", "failed", "crisis", "collapse",
-    "scandal", "disaster", "controversy",
-    "criticism", "pressure"
+    "forced",
+    "failed",
+    "crisis",
+    "collapse",
+    "scandal",
+    "disaster",
+    "controversy",
+    "criticism",
+    "pressure",
 }
 
 
@@ -69,13 +80,14 @@ FRAME_LABELS = [
     "conflict_frame",
     "morality_frame",
     "human_interest_frame",
-    "neutral_frame"
+    "neutral_frame",
 ]
 
 
 # ---------------------------------------------------------
 # Data Structures
 # ---------------------------------------------------------
+
 
 @dataclass
 class FramingResult:
@@ -89,23 +101,46 @@ class FramingResult:
 # Model Loader (Singleton style)
 # ---------------------------------------------------------
 
+
 class FramingModels:
+    _embedding_model = None
+    _sentiment_model = None
+    _tokenizer = None
+    _roberta_model = None
 
-    embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+    @classmethod
+    def get_embedding_model(cls):
+        if cls._embedding_model is None:
+            cls._embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+        return cls._embedding_model
 
-    sentiment_model = SentimentIntensityAnalyzer()
+    @classmethod
+    def get_sentiment_model(cls):
+        if cls._sentiment_model is None:
+            cls._sentiment_model = SentimentIntensityAnalyzer()
+        return cls._sentiment_model
 
-    tokenizer = AutoTokenizer.from_pretrained(ROBERTA_FRAME_MODEL)
+    @classmethod
+    def get_tokenizer(cls):
+        if cls._tokenizer is None:
+            cls._tokenizer = AutoTokenizer.from_pretrained(ROBERTA_FRAME_MODEL)
+        return cls._tokenizer
 
-    roberta_model = AutoModelForSequenceClassification.from_pretrained(
-        ROBERTA_FRAME_MODEL,
-        num_labels=len(FRAME_LABELS)
-    )
+    @classmethod
+    def get_roberta_model(cls):
+        if cls._roberta_model is None:
+            cls._roberta_model = (
+                AutoModelForSequenceClassification.from_pretrained(
+                    ROBERTA_FRAME_MODEL, num_labels=len(FRAME_LABELS)
+                )
+            )
+        return cls._roberta_model
 
 
 # ---------------------------------------------------------
 # Text Processing
 # ---------------------------------------------------------
+
 
 def tokenize_sentences(text: str) -> List[str]:
     sentences = re.split(r"[.!?]+", text)
@@ -119,6 +154,7 @@ def tokenize_words(text: str) -> List[str]:
 # ---------------------------------------------------------
 # Cue-based Frame Detection
 # ---------------------------------------------------------
+
 
 def compute_frame_cues(sentence: str) -> float:
 
@@ -137,9 +173,10 @@ def compute_frame_cues(sentence: str) -> float:
 # Sentiment Framing
 # ---------------------------------------------------------
 
+
 def sentiment_score(sentence: str) -> float:
 
-    scores = FramingModels.sentiment_model.polarity_scores(sentence)
+    scores = FramingModels.get_sentiment_model().polarity_scores(sentence)
 
     return scores["compound"]
 
@@ -148,16 +185,14 @@ def sentiment_score(sentence: str) -> float:
 # RoBERTa Frame Classification
 # ---------------------------------------------------------
 
+
 def roberta_frame_classification(sentence: str) -> Dict:
 
-    tokenizer = FramingModels.tokenizer
-    model = FramingModels.roberta_model
+    tokenizer = FramingModels.get_tokenizer()
+    model = FramingModels.get_roberta_model()
 
     inputs = tokenizer(
-        sentence,
-        return_tensors="pt",
-        truncation=True,
-        padding=True
+        sentence, return_tensors="pt", truncation=True, padding=True
     )
 
     with torch.no_grad():
@@ -171,15 +206,13 @@ def roberta_frame_classification(sentence: str) -> Dict:
 
     confidence = probs[0][label_id].item()
 
-    return {
-        "frame": frame,
-        "confidence": round(confidence, 4)
-    }
+    return {"frame": frame, "confidence": round(confidence, 4)}
 
 
 # ---------------------------------------------------------
 # Event-Level Frame Detection
 # ---------------------------------------------------------
+
 
 def detect_event_frames(sentences: List[str]) -> List[Dict]:
     """
@@ -192,11 +225,13 @@ def detect_event_frames(sentences: List[str]) -> List[Dict]:
 
         frame_info = roberta_frame_classification(sentence)
 
-        event_frames.append({
-            "event": sentence,
-            "frame": frame_info["frame"],
-            "confidence": frame_info["confidence"]
-        })
+        event_frames.append(
+            {
+                "event": sentence,
+                "frame": frame_info["frame"],
+                "confidence": frame_info["confidence"],
+            }
+        )
 
     return event_frames
 
@@ -205,15 +240,13 @@ def detect_event_frames(sentences: List[str]) -> List[Dict]:
 # Main Framing Detection
 # ---------------------------------------------------------
 
+
 def detect_framing_bias(text: str) -> Dict:
 
     sentences = tokenize_sentences(text)
 
     if not sentences:
-        return {
-            "frame_type": "neutral_frame",
-            "framing_score": 0.0
-        }
+        return {"frame_type": "neutral_frame", "framing_score": 0.0}
 
     sentiment_scores = []
     cue_scores = []
@@ -230,24 +263,26 @@ def detect_framing_bias(text: str) -> Dict:
 
         frame_info = roberta_frame_classification(sentence)
 
-        sentence_frames.append({
-            "sentence": sentence,
-            "frame": frame_info["frame"],
-            "confidence": frame_info["confidence"]
-        })
+        sentence_frames.append(
+            {
+                "sentence": sentence,
+                "frame": frame_info["frame"],
+                "confidence": frame_info["confidence"],
+            }
+        )
 
     sentiment_avg = np.mean(sentiment_scores)
     cue_avg = np.mean(cue_scores)
 
-    embeddings = FramingModels.embedding_model.encode(sentences)
+    embeddings = FramingModels.get_embedding_model().encode(sentences)
 
     semantic_variance = np.var(embeddings)
 
     framing_score = round(
-        abs(sentiment_avg) * 0.4 +
-        abs(cue_avg) * 0.3 +
-        semantic_variance * 0.3,
-        4
+        abs(sentiment_avg) * 0.4
+        + abs(cue_avg) * 0.3
+        + semantic_variance * 0.3,
+        4,
     )
 
     # ---------------------------------------------------------
@@ -273,7 +308,7 @@ def detect_framing_bias(text: str) -> Dict:
         "frame_type": frame_type,
         "framing_score": framing_score,
         "sentence_frames": sentence_frames,
-        "event_frames": event_frames
+        "event_frames": event_frames,
     }
 
 

@@ -1,174 +1,106 @@
-"""
-File: prediction_pipeline.py
+﻿"""Production prediction pipeline for TruthLens AI."""
 
-Purpose
--------
-Production prediction pipeline for TruthLens AI.
-
-This module coordinates feature engineering, tokenization,
-model inference, and result formatting.
-
-Input
------
-text : str
-
-Output
-------
-dict
-    {
-        prediction : str
-        confidence : float
-        probabilities : dict
-    }
-"""
+from __future__ import annotations
 
 import logging
-import torch
+from typing import Any, Dict
+
 import pandas as pd
-from typing import Dict, Any
+import torch
 
-from src.models.model_registry import ModelRegistry
 from src.features.feature_pipeline import transform_feature_pipeline
-from src.utils.settings import load_settings
+from src.models.model_registry import ModelRegistry
 from src.utils.input_validation import ensure_non_empty_text
-
-
-# ---------------------------------------------------------
-# Logging
-# ---------------------------------------------------------
+from src.utils.settings import load_settings
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------
-# Settings
-# ---------------------------------------------------------
-
 SETTINGS = load_settings()
-
 MAX_LENGTH = SETTINGS.model.max_length
 
 ID2LABEL = {0: "REAL", 1: "FAKE"}
 
-
-# ---------------------------------------------------------
-# Load Model Assets
-# ---------------------------------------------------------
-
-_assets = ModelRegistry.load_model()
-
-MODEL = _assets["model"]
-TOKENIZER = _assets["tokenizer"]
-VECTORIZER = _assets["vectorizer"]
-
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-MODEL.to(DEVICE)
-MODEL.eval()
+_model = None
+_tokenizer = None
+_vectorizer = None
+_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-# ---------------------------------------------------------
-# Prediction Pipeline
-# ---------------------------------------------------------
+def _get_assets() -> tuple[Any, Any, Any]:
+    global _model, _tokenizer, _vectorizer
+
+    if _model is None or _tokenizer is None:
+        assets = ModelRegistry.load_model()
+        _model = assets["model"]
+        _tokenizer = assets["tokenizer"]
+        _vectorizer = assets.get("vectorizer")
+
+        _model.to(_device)
+        _model.eval()
+
+    return _model, _tokenizer, _vectorizer
+
+
+def _prepare_model_text(text: str, vectorizer) -> str:
+    if vectorizer is None:
+        return text
+
+    df = pd.DataFrame({"text": [text]})
+    transformed_df = transform_feature_pipeline(
+        df,
+        vectorizer=vectorizer,
+        text_column="text",
+    )
+    return str(transformed_df["engineered_text"].iloc[0])
+
 
 def predict_text(text: str) -> Dict[str, Any]:
-    """
-    Run full prediction pipeline on a single news article.
-    """
+    """Run full prediction pipeline on a single news article."""
 
-    try:
+    ensure_non_empty_text(text)
+    logger.info("Running prediction pipeline")
 
-        ensure_non_empty_text(text)
+    model, tokenizer, vectorizer = _get_assets()
 
-        logger.info("Running prediction pipeline")
+    model_text = _prepare_model_text(text, vectorizer)
 
-        # -------------------------------------------------
-        # Create dataframe for feature pipeline
-        # -------------------------------------------------
+    inputs = tokenizer(
+        model_text,
+        truncation=True,
+        padding="max_length",
+        max_length=MAX_LENGTH,
+        return_tensors="pt",
+    )
 
-        df = pd.DataFrame({"text": [text]})
+    model_inputs = {key: value.to(_device) for key, value in inputs.items()}
 
-        # -------------------------------------------------
-        # Feature engineering
-        # -------------------------------------------------
+    with torch.no_grad():
+        outputs = model(**model_inputs)
+        logits = outputs.logits
+        probs = torch.softmax(logits, dim=1)
+        confidence, pred_class = torch.max(probs, dim=1)
 
-        df = transform_feature_pipeline(
-            df,
-            vectorizer=VECTORIZER,
-            text_column="text",
-        )
+    prediction = ID2LABEL[pred_class.item()]
+    confidence_value = float(confidence.item())
 
-        engineered_text = df["engineered_text"].iloc[0]
+    probabilities = {
+        ID2LABEL[i]: float(probs[0][i].item()) for i in range(len(ID2LABEL))
+    }
 
-        # -------------------------------------------------
-        # Tokenization
-        # -------------------------------------------------
+    logger.info(
+        "Prediction completed | class=%s | confidence=%.3f",
+        prediction,
+        confidence_value,
+    )
 
-        inputs = TOKENIZER(
-            engineered_text,
-            truncation=True,
-            padding="max_length",
-            max_length=MAX_LENGTH,
-            return_tensors="pt",
-        )
+    return {
+        "prediction": prediction,
+        "confidence": confidence_value,
+        "probabilities": probabilities,
+    }
 
-        inputs = {k: v.to(DEVICE) for k, v in inputs.items()}
-
-        # -------------------------------------------------
-        # Model inference
-        # -------------------------------------------------
-
-        with torch.no_grad():
-
-            outputs = MODEL(**inputs)
-
-            logits = outputs.logits
-
-            probs = torch.softmax(logits, dim=1)
-
-            confidence, pred_class = torch.max(probs, dim=1)
-
-        prediction = ID2LABEL[pred_class.item()]
-
-        confidence = float(confidence.item())
-
-        probabilities = {
-            ID2LABEL[i]: float(probs[0][i].item())
-            for i in range(len(ID2LABEL))
-        }
-
-        logger.info(
-            "Prediction completed | class=%s | confidence=%.3f",
-            prediction,
-            confidence,
-        )
-
-        return {
-            "prediction": prediction,
-            "confidence": confidence,
-            "probabilities": probabilities,
-        }
-
-    except Exception:
-
-        logger.exception("Prediction pipeline failed")
-
-        raise
-
-
-# ---------------------------------------------------------
-# Batch Prediction
-# ---------------------------------------------------------
 
 def predict_batch(texts: list[str]) -> list[Dict[str, Any]]:
-    """
-    Run predictions on multiple texts.
-    """
+    """Run predictions on multiple texts."""
 
-    results = []
-
-    for text in texts:
-
-        results.append(predict_text(text))
-
-    return results
+    return [predict_text(text) for text in texts]
