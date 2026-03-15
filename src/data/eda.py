@@ -1,25 +1,64 @@
 """
-Advanced Professional EDA Module for Fake News Dataset
-Includes Level-1 + Extended NLP EDA
+File: src/eda/eda.py
+
+Purpose
+-------
+Advanced Exploratory Data Analysis (EDA) module for fake news datasets.
+
+Provides:
+- Dataset statistics
+- Label distribution analysis
+- Text feature analysis
+- Vocabulary analysis
+- N-gram analysis
+- TF-IDF keyword extraction
+- Word clouds
+- Automatic report generation
 
 Outputs
 -------
 reports/
- ├── figures/                (plots)
- ├── eda_summary.json        (EDA statistics)
+ ├── figures/
+ │     ├── *.png
+ │
+ └── eda_summary.json
+
+Inputs
+------
+df : pandas.DataFrame
+csv_path : str
+
+Outputs
+-------
+EDA figures + JSON summary report
+
+Dependencies
+------------
+pandas
+numpy
+matplotlib
+seaborn
+sklearn
+nltk
+wordcloud
 """
 
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from pathlib import Path
+from __future__ import annotations
+
+import json
 import logging
 import re
-import json
 from collections import Counter
+from pathlib import Path
+from typing import Dict, Any
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
+
 from nltk.corpus import stopwords
 from wordcloud import WordCloud
 
@@ -27,12 +66,33 @@ logger = logging.getLogger(__name__)
 
 sns.set_style("whitegrid")
 
-STOPWORDS = set(stopwords.words("english"))
+try:
+    STOPWORDS = set(stopwords.words("english"))
+except LookupError:
+    try:
+        import nltk
+
+        nltk.download("stopwords", quiet=True)
+        STOPWORDS = set(stopwords.words("english"))
+    except Exception:
+        logger.warning("NLTK stopwords unavailable; continuing with empty stopword list")
+        STOPWORDS = set()
 
 
 class FakeNewsEDA:
+    """
+    Modular EDA pipeline for fake news datasets.
 
-    def __init__(self, df, output_dir: str | Path = Path("reports/figures")):
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Input dataset containing 'text' and 'label'.
+
+    output_dir : Path
+        Directory for saving figures.
+    """
+
+    def __init__(self, df: pd.DataFrame, output_dir: str | Path = Path("reports/figures")):
 
         self.df = df.copy()
 
@@ -42,58 +102,50 @@ class FakeNewsEDA:
         self.report_dir = Path("reports")
         self.report_dir.mkdir(exist_ok=True)
 
-        self.summary = {}
+        self.summary: Dict[str, Any] = {}
 
     # --------------------------------------------------
     # DATASET SUMMARY
     # --------------------------------------------------
 
-    def dataset_summary(self):
+    def dataset_summary(self) -> None:
 
-        logger.info("\n=== DATASET SUMMARY ===")
+        logger.info("Running dataset summary")
 
-        self.summary["shape"] = self.df.shape
+        self.summary["shape"] = tuple(self.df.shape)
         self.summary["columns"] = list(self.df.columns)
-
-        logger.info(f"Shape: {self.df.shape}")
-        logger.info(f"Columns: {list(self.df.columns)}")
 
     # --------------------------------------------------
     # DATA TYPE CHECK
     # --------------------------------------------------
 
-    def check_data_types(self):
+    def check_data_types(self) -> None:
 
-        logger.info("\n=== DATA TYPES ===")
-        logger.info(self.df.dtypes)
+        if "label" in self.df.columns and self.df["label"].dtype == "object":
 
-        if self.df["label"].dtype == "object":
             self.df["label"] = self.df["label"].map(
                 {"real": 0, "fake": 1}
             )
 
     # --------------------------------------------------
-    # MISSING VALUES
+    # MISSING VALUE HANDLING
     # --------------------------------------------------
 
-    def handle_missing(self):
-
-        logger.info("\n=== MISSING VALUES ===")
+    def handle_missing(self) -> None:
 
         missing = self.df.isnull().sum().to_dict()
 
         self.summary["missing_values"] = missing
 
-        logger.info(missing)
-
-        self.df = self.df.dropna(subset=["text"])
+        if "text" in self.df.columns:
+            self.df = self.df.dropna(subset=["text"])
         self.df = self.df.fillna("")
 
     # --------------------------------------------------
-    # DUPLICATES
+    # DUPLICATE REMOVAL
     # --------------------------------------------------
 
-    def remove_duplicates(self):
+    def remove_duplicates(self) -> None:
 
         before = len(self.df)
 
@@ -103,13 +155,14 @@ class FakeNewsEDA:
 
         self.summary["duplicates_removed"] = removed
 
-        logger.info(f"Removed {removed} duplicates")
-
     # --------------------------------------------------
     # LABEL DISTRIBUTION
     # --------------------------------------------------
 
-    def label_distribution(self):
+    def label_distribution(self) -> None:
+        if "label" not in self.df.columns:
+            logger.warning("Skipping label distribution: label column missing")
+            return
 
         counts = self.df["label"].value_counts().to_dict()
 
@@ -126,7 +179,10 @@ class FakeNewsEDA:
     # TEXT STATISTICS
     # --------------------------------------------------
 
-    def text_statistics(self):
+    def text_statistics(self) -> None:
+        if "text" not in self.df.columns:
+            logger.warning("Skipping text statistics: text column missing")
+            return
 
         self.df["text_length"] = self.df["text"].str.len()
 
@@ -145,10 +201,12 @@ class FakeNewsEDA:
         self.summary["text_statistics"] = stats
 
     # --------------------------------------------------
-    # DOCUMENT LENGTH BY LABEL
+    # DOCUMENT LENGTH ANALYSIS
     # --------------------------------------------------
 
-    def document_length_by_label(self):
+    def document_length_by_label(self) -> None:
+        if "word_count" not in self.df.columns or "label" not in self.df.columns:
+            return
 
         sns.histplot(
             data=self.df,
@@ -163,10 +221,12 @@ class FakeNewsEDA:
         plt.close()
 
     # --------------------------------------------------
-    # SKEWNESS
+    # SKEWNESS ANALYSIS
     # --------------------------------------------------
 
-    def skewness(self):
+    def skewness(self) -> None:
+        if "text_length" not in self.df.columns or len(self.df) == 0:
+            return
 
         skew = self.df["text_length"].skew()
 
@@ -180,10 +240,12 @@ class FakeNewsEDA:
         plt.close()
 
     # --------------------------------------------------
-    # OUTLIERS
+    # OUTLIER DETECTION
     # --------------------------------------------------
 
-    def detect_outliers(self):
+    def detect_outliers(self) -> None:
+        if "text_length" not in self.df.columns or len(self.df) == 0:
+            return
 
         Q1 = self.df["text_length"].quantile(0.25)
         Q3 = self.df["text_length"].quantile(0.75)
@@ -211,12 +273,17 @@ class FakeNewsEDA:
     # FEATURE ENGINEERING
     # --------------------------------------------------
 
-    def feature_engineering(self):
+    def feature_engineering(self) -> None:
+        if "text" not in self.df.columns:
+            return
 
         def avg_word_len(text):
+
             words = str(text).split()
+
             if not words:
                 return 0
+
             return np.mean([len(w) for w in words])
 
         self.df["avg_word_length"] = self.df["text"].apply(avg_word_len)
@@ -228,21 +295,24 @@ class FakeNewsEDA:
         )
 
     # --------------------------------------------------
-    # VOCABULARY + LEXICAL DIVERSITY
+    # VOCABULARY ANALYSIS
     # --------------------------------------------------
 
-    def vocabulary_analysis(self):
+    def vocabulary_analysis(self) -> None:
+        if "text" not in self.df.columns:
+            return
 
         words = []
 
         for text in self.df["text"]:
+
             words.extend(
                 re.findall(r"\b\w+\b", str(text).lower())
             )
 
         vocab = set(words)
 
-        diversity = len(vocab) / len(words)
+        diversity = len(vocab) / max(len(words), 1)
 
         self.summary["vocab_size"] = len(vocab)
         self.summary["lexical_diversity"] = float(diversity)
@@ -251,13 +321,16 @@ class FakeNewsEDA:
     # WORD FREQUENCY
     # --------------------------------------------------
 
-    def word_frequency(self, top_n=20):
+    def word_frequency(self, top_n: int = 20) -> None:
+        if "text" not in self.df.columns:
+            return
 
         words = []
 
         for text in self.df["text"]:
 
             tokens = re.findall(r"\b[a-z]{3,}\b", str(text).lower())
+
             tokens = [w for w in tokens if w not in STOPWORDS]
 
             words.extend(tokens)
@@ -280,7 +353,9 @@ class FakeNewsEDA:
     # NGRAM ANALYSIS
     # --------------------------------------------------
 
-    def ngram_analysis(self, n=2):
+    def ngram_analysis(self, n: int = 2) -> None:
+        if "text" not in self.df.columns or len(self.df) == 0:
+            return
 
         vectorizer = CountVectorizer(
             stop_words="english",
@@ -288,7 +363,11 @@ class FakeNewsEDA:
             max_features=15
         )
 
-        X = vectorizer.fit_transform(self.df["text"])
+        try:
+            X = vectorizer.fit_transform(self.df["text"])
+        except ValueError:
+            logger.warning("Skipping %s-gram analysis: empty vocabulary", n)
+            return
 
         counts = np.asarray(X.sum(axis=0)).ravel()
 
@@ -311,14 +390,22 @@ class FakeNewsEDA:
     # TF-IDF KEYWORDS
     # --------------------------------------------------
 
-    def tfidf_keywords(self):
+    def tfidf_keywords(self) -> None:
+        if "text" not in self.df.columns or len(self.df) == 0:
+            self.summary["top_tfidf_words"] = []
+            return
 
         vectorizer = TfidfVectorizer(
             stop_words="english",
             max_features=5000
         )
 
-        X = vectorizer.fit_transform(self.df["text"])
+        try:
+            X = vectorizer.fit_transform(self.df["text"])
+        except ValueError:
+            logger.warning("Skipping TF-IDF keyword extraction: empty vocabulary")
+            self.summary["top_tfidf_words"] = []
+            return
 
         sums = np.asarray(X.sum(axis=0)).ravel()
 
@@ -330,10 +417,12 @@ class FakeNewsEDA:
         self.summary["top_tfidf_words"] = pairs[:20]
 
     # --------------------------------------------------
-    # WORDCLOUDS
+    # WORD CLOUDS
     # --------------------------------------------------
 
-    def generate_wordclouds(self):
+    def generate_wordclouds(self) -> None:
+        if "text" not in self.df.columns or "label" not in self.df.columns:
+            return
 
         fake_text = " ".join(
             self.df[self.df["label"] == 1]["text"]
@@ -342,6 +431,10 @@ class FakeNewsEDA:
         real_text = " ".join(
             self.df[self.df["label"] == 0]["text"]
         )
+
+        if not fake_text.strip() or not real_text.strip():
+            logger.warning("Skipping wordcloud generation: insufficient class text")
+            return
 
         fake_wc = WordCloud(
             width=800,
@@ -366,25 +459,26 @@ class FakeNewsEDA:
         plt.close()
 
     # --------------------------------------------------
-    # SAVE REPORT
+    # SAVE SUMMARY
     # --------------------------------------------------
 
-    def save_report(self):
+    def save_report(self) -> None:
 
         report_path = self.report_dir / "eda_summary.json"
 
         with report_path.open("w", encoding="utf-8") as f:
+
             json.dump(self.summary, f, indent=2)
 
-        logger.info(f"EDA summary saved to {report_path}")
+        logger.info(f"EDA summary saved: {report_path}")
 
     # --------------------------------------------------
-    # RUN FULL EDA
+    # RUN FULL PIPELINE
     # --------------------------------------------------
 
-    def run(self):
+    def run(self) -> None:
 
-        logger.info("Running EDA...")
+        logger.info("Starting EDA pipeline")
 
         self.dataset_summary()
         self.check_data_types()
@@ -410,21 +504,13 @@ class FakeNewsEDA:
 
         self.save_report()
 
-        logger.info("EDA COMPLETE")
+        logger.info("EDA pipeline completed")
 
 
-def run_eda(csv_path):
+def run_eda(csv_path: str) -> None:
 
     df = pd.read_csv(csv_path)
 
     eda = FakeNewsEDA(df)
 
     eda.run()
-
-
-if __name__ == "__main__":
-
-    import sys
-
-    if len(sys.argv) > 1:
-        run_eda(sys.argv[1])

@@ -1,28 +1,73 @@
 """
-Text Feature Engineering Module
-Creates TF-IDF features for machine learning models
+File: text_features.py
+
+Purpose
+-------
+Text feature engineering module for TruthLens AI.
+
+This module builds TF-IDF vector representations for text data.
+TF-IDF features are commonly used for classical machine learning
+models and baseline comparisons against transformer architectures.
+
+Input
+-----
+texts : List[str]
+
+Output
+------
+csr_matrix
+    Sparse matrix of TF-IDF features
+
+TfidfVectorizer
+    Trained vectorizer instance
 """
 
 import logging
-from typing import Tuple, List
-from sklearn.feature_extraction.text import TfidfVectorizer
+from typing import List, Tuple
+
 from scipy.sparse import csr_matrix
+from sklearn.feature_extraction.text import TfidfVectorizer
+
+from src.utils.input_validation import ensure_non_empty_text_list
+
+
+# ---------------------------------------------------------
+# Logging Configuration
+# ---------------------------------------------------------
 
 logger = logging.getLogger(__name__)
 
 
-# -------------------------------------------------
-# TF-IDF Feature Builder
-# -------------------------------------------------
+# ---------------------------------------------------------
+# TF-IDF Vectorizer Builder
+# ---------------------------------------------------------
 
 def build_tfidf_vectorizer(
     max_features: int = 5000,
     ngram_range: Tuple[int, int] = (1, 2),
     min_df: int = 1,
-    max_df: float = 0.9
+    max_df: float = 0.9,
 ) -> TfidfVectorizer:
     """
-    Create TF-IDF vectorizer with professional defaults
+    Create TF-IDF vectorizer with recommended defaults.
+
+    Parameters
+    ----------
+    max_features : int
+        Maximum vocabulary size.
+
+    ngram_range : tuple
+        N-gram range used for feature extraction.
+
+    min_df : int
+        Minimum document frequency threshold.
+
+    max_df : float
+        Maximum document frequency threshold.
+
+    Returns
+    -------
+    TfidfVectorizer
     """
 
     vectorizer = TfidfVectorizer(
@@ -31,88 +76,119 @@ def build_tfidf_vectorizer(
         ngram_range=ngram_range,
         min_df=min_df,
         max_df=max_df,
-        sublinear_tf=True
+        sublinear_tf=True,
     )
 
     logger.info(
-        f"TF-IDF vectorizer created | max_features={max_features}, "
-        f"ngram_range={ngram_range}"
+        "TF-IDF vectorizer created | max_features=%d | ngram_range=%s",
+        max_features,
+        ngram_range,
     )
 
     return vectorizer
 
 
-# -------------------------------------------------
-# Train TF-IDF
-# -------------------------------------------------
+# ---------------------------------------------------------
+# Fit TF-IDF Model
+# ---------------------------------------------------------
 
 def tfidf_fit_transform(
     texts: List[str],
-    vectorizer: TfidfVectorizer = None
+    vectorizer: TfidfVectorizer | None = None,
 ) -> Tuple[csr_matrix, TfidfVectorizer]:
     """
-    Fit TF-IDF vectorizer and transform texts
+    Fit TF-IDF vectorizer and transform text corpus.
 
-    Returns:
-        sparse matrix features
-        trained vectorizer
+    Parameters
+    ----------
+    texts : List[str]
+        Training corpus.
+
+    vectorizer : TfidfVectorizer | None
+        Optional preconfigured vectorizer.
+
+    Returns
+    -------
+    csr_matrix
+        Sparse TF-IDF feature matrix.
+
+    TfidfVectorizer
+        Trained vectorizer instance.
     """
+
+    ensure_non_empty_text_list(texts)
 
     if vectorizer is None:
         vectorizer = build_tfidf_vectorizer()
 
-    logger.info("Fitting TF-IDF vectorizer...")
+    logger.info("Fitting TF-IDF vectorizer")
 
     X = vectorizer.fit_transform(texts)
 
     logger.info(
-        f"TF-IDF matrix shape: {X.shape} | vocabulary size: {len(vectorizer.vocabulary_)}"
+        "TF-IDF matrix generated | shape=%s | vocabulary=%d",
+        X.shape,
+        len(vectorizer.vocabulary_),
     )
 
     return X, vectorizer
 
 
-# -------------------------------------------------
-# Transform New Data
-# -------------------------------------------------
+# ---------------------------------------------------------
+# Transform New Text
+# ---------------------------------------------------------
 
 def tfidf_transform(
     texts: List[str],
-    vectorizer: TfidfVectorizer
+    vectorizer: TfidfVectorizer,
 ) -> csr_matrix:
     """
-    Transform new texts using trained vectorizer
+    Transform new texts using a trained vectorizer.
+
+    Parameters
+    ----------
+    texts : List[str]
+
+    vectorizer : TfidfVectorizer
+
+    Returns
+    -------
+    csr_matrix
     """
 
-    logger.info("Transforming texts using existing TF-IDF vectorizer...")
+    ensure_non_empty_text_list(texts)
+
+    logger.info("Transforming texts using trained TF-IDF vectorizer")
 
     X = vectorizer.transform(texts)
 
     return X
 
 
-# -------------------------------------------------
-# Feature Names
-# -------------------------------------------------
+# ---------------------------------------------------------
+# Vocabulary Extraction
+# ---------------------------------------------------------
 
 def get_feature_names(vectorizer: TfidfVectorizer) -> List[str]:
     """
-    Get TF-IDF vocabulary terms
+    Return vocabulary terms from TF-IDF vectorizer.
     """
 
     return vectorizer.get_feature_names_out().tolist()
 
 
-# -------------------------------------------------
-# Backward Compatibility
-# -------------------------------------------------
+# ---------------------------------------------------------
+# Backward Compatibility Wrapper
+# ---------------------------------------------------------
 
 def tfidf_features(
     texts: List[str],
-    max_features: int = 5000
+    max_features: int = 5000,
 ) -> Tuple[csr_matrix, TfidfVectorizer]:
     """
-    Backward-compatible wrapper used by existing code/tests.
+    Backward-compatible wrapper used by legacy code/tests.
     """
+
     vectorizer = build_tfidf_vectorizer(max_features=max_features)
+
     return tfidf_fit_transform(texts, vectorizer=vectorizer)

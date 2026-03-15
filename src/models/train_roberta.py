@@ -1,18 +1,53 @@
 ﻿"""
-RoBERTa Training Module for TruthLens AI
-Handles tokenization, training, checkpointing, and model saving.
+File: train_roberta.py
+
+Purpose
+-------
+Training pipeline for the TruthLens AI RoBERTa fake news classifier.
+
+Responsibilities
+----------------
+1. Validate input datasets
+2. Split dataset into train/validation/test
+3. Tokenize text using RoBERTa tokenizer
+4. Train a transformer-based classifier
+5. Evaluate performance metrics
+6. Save trained model and tokenizer
+7. Manage checkpoints and resume training
+
+Input
+-----
+df : pandas.DataFrame
+    Must contain:
+        text : str
+        label : int (0=REAL, 1=FAKE)
+
+params : dict
+    Optional hyperparameters
+
+validation_df : pandas.DataFrame | None
+test_df : pandas.DataFrame | None
+
+Output
+------
+trainer : transformers.Trainer
+test_dataset : datasets.Dataset
 """
 
 import inspect
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Tuple
 
 import numpy as np
 import pandas as pd
 import torch
 from datasets import Dataset
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score
+from sklearn.metrics import (
+    accuracy_score,
+    precision_recall_fscore_support,
+    roc_auc_score,
+)
 from sklearn.model_selection import train_test_split
 from transformers import (
     EarlyStoppingCallback,
@@ -23,40 +58,68 @@ from transformers import (
 )
 from transformers.trainer_utils import get_last_checkpoint as hf_get_last_checkpoint
 
-from src.utils.input_validation import ensure_dataframe, ensure_non_empty_text_column
+from src.utils.input_validation import (
+    ensure_dataframe,
+    ensure_non_empty_text_column,
+)
 from src.utils.settings import load_settings
 
 
+# ---------------------------------------------------------
+# Logging Configuration
+# ---------------------------------------------------------
+
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------
+# Load Global Settings
+# ---------------------------------------------------------
 
 SETTINGS = load_settings()
 
 MODEL_NAME = SETTINGS.model.name
 MAX_LENGTH = SETTINGS.model.max_length
+
 SEED = SETTINGS.training.seed
 DEFAULT_EPOCHS = SETTINGS.training.epochs
 DEFAULT_BATCH_SIZE = SETTINGS.training.batch_size
 DEFAULT_LEARNING_RATE = SETTINGS.training.learning_rate
 DEFAULT_RESUME_FROM_CHECKPOINT = SETTINGS.training.resume_from_checkpoint
+
 DEFAULT_VALIDATION_SIZE = SETTINGS.training.validation_size
 DEFAULT_TEST_SIZE = SETTINGS.training.test_size
 
 MODELS_DIR = Path(SETTINGS.paths.models_dir)
 LOGS_DIR = Path(SETTINGS.paths.logs_dir)
+
 MODEL_PATH = Path(SETTINGS.model.path)
 TEST_SET_PATH = Path(SETTINGS.data.test_set_path)
+
+
+# ---------------------------------------------------------
+# Label Mapping
+# ---------------------------------------------------------
 
 ID2LABEL = {0: "REAL", 1: "FAKE"}
 LABEL2ID = {"REAL": 0, "FAKE": 1}
 
 
-# -------------------------------------------------
+# ---------------------------------------------------------
 # Evaluation Metrics
-# -------------------------------------------------
+# ---------------------------------------------------------
 
-def compute_metrics(eval_pred):
+def compute_metrics(eval_pred: Tuple[np.ndarray, np.ndarray]) -> dict:
+    """
+    Compute classification metrics for evaluation.
+
+    Returns
+    -------
+    dict
+        accuracy, precision, recall, f1, roc_auc
+    """
+
     logits, labels = eval_pred
-
     preds = np.argmax(logits, axis=1)
 
     precision, recall, f1, _ = precision_recall_fscore_support(
@@ -83,11 +146,15 @@ def compute_metrics(eval_pred):
     }
 
 
-# -------------------------------------------------
+# ---------------------------------------------------------
 # Tokenization
-# -------------------------------------------------
+# ---------------------------------------------------------
 
-def tokenize_function(example, tokenizer, text_column: str):
+def tokenize_function(example: dict, tokenizer, text_column: str):
+    """
+    Tokenize input text for RoBERTa.
+    """
+
     return tokenizer(
         example[text_column],
         truncation=True,
@@ -96,26 +163,34 @@ def tokenize_function(example, tokenizer, text_column: str):
     )
 
 
-# -------------------------------------------------
+# ---------------------------------------------------------
 # Checkpoint Detection
-# -------------------------------------------------
+# ---------------------------------------------------------
 
-def get_last_checkpoint(directory: Path):
+def get_last_checkpoint(directory: Path) -> str | None:
+    """
+    Detect last HuggingFace checkpoint if available.
+    """
+
     if not directory.exists():
         return None
 
     try:
-        checkpoint = hf_get_last_checkpoint(str(directory))
-        return checkpoint
+        return hf_get_last_checkpoint(str(directory))
     except Exception:
         return None
 
 
-# -------------------------------------------------
-# Dataset Split
-# -------------------------------------------------
+# ---------------------------------------------------------
+# Dataset Splitting
+# ---------------------------------------------------------
 
-def _split_train_val_test(df: pd.DataFrame):
+def _split_train_val_test(
+    df: pd.DataFrame,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Split dataset into train, validation, and test sets.
+    """
 
     holdout_size = DEFAULT_VALIDATION_SIZE + DEFAULT_TEST_SIZE
 
@@ -145,22 +220,27 @@ def _split_train_val_test(df: pd.DataFrame):
     )
 
 
-# -------------------------------------------------
-# Validation
-# -------------------------------------------------
+# ---------------------------------------------------------
+# Dataset Validation
+# ---------------------------------------------------------
 
 def _validate_split_df(df: pd.DataFrame, name: str, text_column: str):
+    """
+    Validate dataframe integrity.
+    """
 
     ensure_dataframe(df, name=name, required_columns=[text_column, "label"], min_rows=2)
-
     ensure_non_empty_text_column(df, text_column, name=name)
 
 
-# -------------------------------------------------
-# Convert to HuggingFace Dataset
-# -------------------------------------------------
+# ---------------------------------------------------------
+# Convert DataFrame to HuggingFace Dataset
+# ---------------------------------------------------------
 
-def _to_hf_dataset(df: pd.DataFrame):
+def _to_hf_dataset(df: pd.DataFrame) -> Dataset:
+    """
+    Convert pandas DataFrame to HuggingFace Dataset.
+    """
 
     dataset = Dataset.from_pandas(df.reset_index(drop=True))
 
@@ -170,9 +250,9 @@ def _to_hf_dataset(df: pd.DataFrame):
     return dataset
 
 
-# -------------------------------------------------
-# Training Function
-# -------------------------------------------------
+# ---------------------------------------------------------
+# Training Pipeline
+# ---------------------------------------------------------
 
 def train_model(
     df: pd.DataFrame,
@@ -181,8 +261,18 @@ def train_model(
     validation_df: pd.DataFrame | None = None,
     test_df: pd.DataFrame | None = None,
 ):
+    """
+    Train RoBERTa fake news classifier.
+
+    Returns
+    -------
+    Trainer
+    Dataset (test)
+    """
 
     try:
+
+        logger.info("Starting RoBERTa training pipeline")
 
         _validate_split_df(df, "df", text_column)
 
@@ -192,61 +282,39 @@ def train_model(
         if test_df is not None:
             _validate_split_df(test_df, "test_df", text_column)
 
-        logger.info("Starting model training...")
-
         torch.manual_seed(SEED)
         np.random.seed(SEED)
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        logger.info("Using device: %s", device)
+        logger.info("Training device: %s", device)
 
         params = params or {}
 
         learning_rate = float(params.get("learning_rate", DEFAULT_LEARNING_RATE))
         batch_size = int(params.get("batch_size", DEFAULT_BATCH_SIZE))
         epochs = int(params.get("epochs", DEFAULT_EPOCHS))
-        resume_from_checkpoint = bool(
+        resume_training = bool(
             params.get("resume_from_checkpoint", DEFAULT_RESUME_FROM_CHECKPOINT)
         )
 
-        logger.info(
-            "Training config -> LR:%s Batch:%s Epochs:%s Resume:%s",
-            learning_rate,
-            batch_size,
-            epochs,
-            resume_from_checkpoint,
-        )
-
-        # -------------------------------------------------
-        # Split dataset
-        # -------------------------------------------------
-
+        # Dataset split
         if validation_df is None or test_df is None:
             train_df, val_df, resolved_test_df = _split_train_val_test(df)
         else:
-            train_df = df.reset_index(drop=True)
-            val_df = validation_df.reset_index(drop=True)
-            resolved_test_df = test_df.reset_index(drop=True)
+            train_df = df
+            val_df = validation_df
+            resolved_test_df = test_df
 
         logger.info(
-            "Train:%s  Val:%s  Test:%s",
+            "Dataset sizes -> Train:%d Val:%d Test:%d",
             len(train_df),
             len(val_df),
             len(resolved_test_df),
         )
 
-        # -------------------------------------------------
-        # Create directories
-        # -------------------------------------------------
-
         MODELS_DIR.mkdir(parents=True, exist_ok=True)
         LOGS_DIR.mkdir(parents=True, exist_ok=True)
         MODEL_PATH.mkdir(parents=True, exist_ok=True)
-        TEST_SET_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-        # -------------------------------------------------
-        # Tokenizer
-        # -------------------------------------------------
 
         tokenizer = RobertaTokenizer.from_pretrained(MODEL_NAME)
 
@@ -269,13 +337,20 @@ def train_model(
             batched=True,
         )
 
-        train_dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "label"])
-        val_dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "label"])
-        test_dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "label"])
+        train_dataset.set_format(
+            type="torch",
+            columns=["input_ids", "attention_mask", "label"],
+        )
 
-        # -------------------------------------------------
-        # Model
-        # -------------------------------------------------
+        val_dataset.set_format(
+            type="torch",
+            columns=["input_ids", "attention_mask", "label"],
+        )
+
+        test_dataset.set_format(
+            type="torch",
+            columns=["input_ids", "attention_mask", "label"],
+        )
 
         model = RobertaForSequenceClassification.from_pretrained(
             MODEL_NAME,
@@ -286,52 +361,26 @@ def train_model(
 
         model.to(device)
 
-        # -------------------------------------------------
-        # Training Arguments
-        # -------------------------------------------------
-
-        training_kwargs = {
-
-            "output_dir": str(MODELS_DIR),
-
-            "learning_rate": learning_rate,
-            "weight_decay": 0.01,
-
-            "per_device_train_batch_size": batch_size,
-            "per_device_eval_batch_size": batch_size,
-
-            "gradient_accumulation_steps": 2,
-
-            "num_train_epochs": epochs,
-
-            "save_strategy": "steps",
-            "save_steps": 500,
-
-            "logging_dir": str(LOGS_DIR),
-            "logging_steps": 100,
-
-            "load_best_model_at_end": True,
-            "metric_for_best_model": "f1",
-
-            "save_total_limit": 3,
-
-            "fp16": torch.cuda.is_available(),
-
-            "seed": SEED,
-        }
-
-        if "evaluation_strategy" in inspect.signature(TrainingArguments).parameters:
-            training_kwargs["evaluation_strategy"] = "steps"
-            training_kwargs["eval_steps"] = 500
-        else:
-            training_kwargs["eval_strategy"] = "steps"
-            training_kwargs["eval_steps"] = 500
-
-        training_args = TrainingArguments(**training_kwargs)
-
-        # -------------------------------------------------
-        # Trainer
-        # -------------------------------------------------
+        training_args = TrainingArguments(
+            output_dir=str(MODELS_DIR),
+            learning_rate=learning_rate,
+            weight_decay=0.01,
+            per_device_train_batch_size=batch_size,
+            per_device_eval_batch_size=batch_size,
+            gradient_accumulation_steps=2,
+            num_train_epochs=epochs,
+            logging_dir=str(LOGS_DIR),
+            logging_steps=100,
+            save_strategy="steps",
+            save_steps=500,
+            evaluation_strategy="steps",
+            eval_steps=500,
+            load_best_model_at_end=True,
+            metric_for_best_model="f1",
+            save_total_limit=3,
+            fp16=torch.cuda.is_available(),
+            seed=SEED,
+        )
 
         trainer = Trainer(
             model=model,
@@ -342,35 +391,22 @@ def train_model(
             callbacks=[EarlyStoppingCallback(early_stopping_patience=2)],
         )
 
-        # -------------------------------------------------
-        # Resume Training Automatically
-        # -------------------------------------------------
-
         last_checkpoint = None
 
-        if resume_from_checkpoint:
+        if resume_training:
             last_checkpoint = get_last_checkpoint(MODELS_DIR)
 
-        if last_checkpoint:
-            logger.info("Resuming training from checkpoint: %s", last_checkpoint)
-        else:
-            logger.info("No checkpoint found. Starting fresh training.")
-
         trainer.train(resume_from_checkpoint=last_checkpoint)
-
-        # -------------------------------------------------
-        # Save Model
-        # -------------------------------------------------
 
         trainer.save_model(str(MODEL_PATH))
         tokenizer.save_pretrained(str(MODEL_PATH))
 
         resolved_test_df.to_csv(TEST_SET_PATH, index=False)
 
-        logger.info("Training complete!")
+        logger.info("Training completed successfully")
 
         return trainer, test_dataset
 
     except Exception as e:
-        logger.error("Error during training: %s", e)
+        logger.exception("Training pipeline failed")
         raise

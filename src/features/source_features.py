@@ -1,17 +1,45 @@
 """
-Source Credibility Feature Engineering
-Used to estimate reliability of news sources
+File: source_features.py
+
+Purpose
+-------
+Source credibility feature engineering module for TruthLens AI.
+
+This module extracts domain-level credibility signals from news sources
+to help detect misinformation originating from unreliable outlets.
+
+Input
+-----
+df : pandas.DataFrame
+
+Required columns:
+    source : str (URL or domain)
+
+Output
+------
+pandas.DataFrame
+    Original dataframe augmented with source credibility features.
 """
 
-import pandas as pd
 import logging
 from urllib.parse import urlparse
+from typing import Optional
+
+import pandas as pd
+
+from src.utils.input_validation import ensure_dataframe
+
+
+# ---------------------------------------------------------
+# Logging Configuration
+# ---------------------------------------------------------
 
 logger = logging.getLogger(__name__)
 
-# -------------------------------------------------
+
+# ---------------------------------------------------------
 # Known Source Lists
-# -------------------------------------------------
+# ---------------------------------------------------------
 
 HIGH_CREDIBILITY_SOURCES = {
     "bbc.com",
@@ -19,27 +47,41 @@ HIGH_CREDIBILITY_SOURCES = {
     "nytimes.com",
     "theguardian.com",
     "apnews.com",
-    "wsj.com"
+    "wsj.com",
 }
 
 LOW_CREDIBILITY_SOURCES = {
     "infowars.com",
     "beforeitsnews.com",
-    "naturalnews.com"
+    "naturalnews.com",
 }
 
 
-# -------------------------------------------------
+# ---------------------------------------------------------
 # Domain Extraction
-# -------------------------------------------------
+# ---------------------------------------------------------
 
-def extract_domain(url):
+def _extract_domain(url: Optional[str]) -> str:
     """
-    Extract domain name from URL
+    Extract domain name from a URL.
+
+    Parameters
+    ----------
+    url : str
+
+    Returns
+    -------
+    str
+        Cleaned domain name.
     """
 
     try:
+
+        if url is None or pd.isna(url):
+            return ""
+
         parsed = urlparse(str(url))
+
         domain = parsed.netloc.lower()
 
         if domain.startswith("www."):
@@ -48,20 +90,24 @@ def extract_domain(url):
         return domain
 
     except Exception:
+
         return ""
 
 
-# -------------------------------------------------
-# Source Credibility Score
-# -------------------------------------------------
+# ---------------------------------------------------------
+# Credibility Scoring
+# ---------------------------------------------------------
 
-def source_credibility(domain):
+def _source_credibility(domain: str) -> int:
     """
-    Assign credibility score to domain
+    Assign credibility score to domain.
 
-    1  = high credibility
-    0  = unknown
-    -1 = low credibility
+    Returns
+    -------
+    int
+        1  = high credibility
+        0  = unknown
+        -1 = low credibility
     """
 
     if domain in HIGH_CREDIBILITY_SOURCES:
@@ -73,49 +119,82 @@ def source_credibility(domain):
     return 0
 
 
-# -------------------------------------------------
-# Feature Engineering
-# -------------------------------------------------
+# ---------------------------------------------------------
+# Feature Engineering Pipeline
+# ---------------------------------------------------------
 
 def add_source_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Add source credibility features to dataframe
+    Add source credibility features to dataset.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+
+    Returns
+    -------
+    pandas.DataFrame
+        Dataset with additional source credibility features.
     """
 
     try:
 
-        logger.info("Extracting source credibility features...")
+        ensure_dataframe(df, name="df")
+
+        logger.info("Starting source credibility feature extraction")
 
         if "source" not in df.columns:
-            logger.warning("No 'source' column found. Skipping source features.")
+
+            logger.warning("Column 'source' not found. Skipping source features.")
+
             return df
 
-        # Extract domain
-        df["domain"] = df["source"].apply(extract_domain)
+        # -------------------------------------------------
+        # Domain Extraction
+        # -------------------------------------------------
 
-        # Credibility score
-        df["source_credibility"] = df["domain"].apply(source_credibility)
+        df["domain"] = df["source"].apply(_extract_domain)
 
-        # Binary high credibility feature
+        # -------------------------------------------------
+        # Credibility Score
+        # -------------------------------------------------
+
+        df["source_credibility"] = df["domain"].apply(_source_credibility)
+
+        # -------------------------------------------------
+        # Binary Credibility Signals
+        # -------------------------------------------------
+
         df["is_high_credibility"] = (df["source_credibility"] == 1).astype(int)
 
-        # Binary low credibility feature
         df["is_low_credibility"] = (df["source_credibility"] == -1).astype(int)
 
-        # Domain frequency feature
+        # -------------------------------------------------
+        # Domain Frequency
+        # -------------------------------------------------
+
         domain_counts = df["domain"].value_counts()
+
         df["domain_frequency"] = df["domain"].map(domain_counts)
 
-        logger.info("Source feature extraction completed")
+        logger.info("Source credibility feature extraction completed")
 
         return df
 
-    except Exception as e:
+    except Exception:
 
-        logger.error(f"Source feature extraction failed: {e}")
+        logger.exception("Source credibility feature extraction failed")
+
         raise
 
 
+# ---------------------------------------------------------
+# Backward Compatibility Wrapper
+# ---------------------------------------------------------
+
 def add_source_feature(df: pd.DataFrame) -> pd.DataFrame:
-    """Backward-compatible wrapper."""
+    """
+    Backward-compatible wrapper for legacy code.
+    """
+
     return add_source_features(df)

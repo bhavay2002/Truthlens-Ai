@@ -1,4 +1,21 @@
-﻿from __future__ import annotations
+﻿"""
+File: src/training/hyperparameter_tuning.py
+
+Purpose
+-------
+Automated hyperparameter tuning for TruthLens AI models.
+
+Supports:
+• Optuna-based Bayesian optimization
+• Random-search fallback tuner
+• Flexible training function interfaces
+
+Outputs
+-------
+Best hyperparameters and evaluation metric score.
+"""
+
+from __future__ import annotations
 
 import inspect
 import logging
@@ -9,20 +26,44 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 
 from src.models.train_roberta import train_model
-from src.utils.input_validation import ensure_dataframe, ensure_non_empty_text_column, ensure_positive_int
+from src.utils.input_validation import (
+    ensure_dataframe,
+    ensure_non_empty_text_column,
+    ensure_positive_int,
+)
 from src.utils.settings import load_settings
-
 
 logger = logging.getLogger(__name__)
 SETTINGS = load_settings()
 
+_VALID_OPTIMIZATION_DIRECTIONS = {"minimize", "maximize"}
 
-def _resolve_metric(metrics: dict[str, Any], metric_name: str) -> float:
-    candidates = [metric_name, f"eval_{metric_name}", "eval_loss", "loss"]
+
+def _resolve_metric(
+    metrics: dict[str, Any],
+    metric_name: str,
+) -> float:
+    if not isinstance(metrics, dict):
+        raise TypeError(
+            "trainer.evaluate(...) must return a dictionary, "
+            f"received: {type(metrics).__name__}."
+        )
+
+    candidates = [
+        metric_name,
+        f"eval_{metric_name}",
+        "eval_loss",
+        "loss",
+    ]
+
     for key in candidates:
         if key in metrics:
             return float(metrics[key])
-    raise KeyError(f"Unable to resolve metric '{metric_name}' from keys: {sorted(metrics.keys())}")
+
+    raise KeyError(
+        f"Unable to resolve metric '{metric_name}' "
+        f"from keys: {sorted(metrics.keys())}"
+    )
 
 
 def _build_train_kwargs(
@@ -33,6 +74,7 @@ def _build_train_kwargs(
     validation_df: pd.DataFrame,
 ) -> dict[str, Any]:
     train_sig = inspect.signature(train_function)
+
     kwargs: dict[str, Any] = {}
 
     if "params" in train_sig.parameters:
@@ -63,12 +105,19 @@ def _evaluate_params(
         validation_df=val_df,
     )
 
-    trainer, eval_dataset = train_function(train_df, **train_kwargs)
+    train_result = train_function(train_df, **train_kwargs)
+    if not isinstance(train_result, tuple) or len(train_result) != 2:
+        raise TypeError("train_function must return (trainer, eval_dataset).")
+
+    trainer, eval_dataset = train_result
     metrics = trainer.evaluate(eval_dataset)
+
     return _resolve_metric(metrics, metric_name)
 
 
-def _sample_params_fallback(rng: np.random.Generator) -> dict[str, Any]:
+def _sample_params_fallback(
+    rng: np.random.Generator,
+) -> dict[str, Any]:
     lr_min = np.log10(SETTINGS.training.optuna_learning_rate_min)
     lr_max = np.log10(SETTINGS.training.optuna_learning_rate_max)
 
@@ -99,8 +148,9 @@ def _run_fallback_tuner(
     best_params: dict[str, Any] | None = None
     best_value: float | None = None
 
-    for trial_idx in range(n_trials):
+    for trial_idx in range(1, n_trials + 1):
         params = _sample_params_fallback(rng)
+
         value = _evaluate_params(
             params,
             train_function=train_function,
@@ -111,8 +161,9 @@ def _run_fallback_tuner(
         )
 
         logger.info(
-            "Fallback tuning trial %s - %s: %.4f | params=%s",
+            "Fallback trial %s/%s | %s=%.4f | params=%s",
             trial_idx,
+            n_trials,
             metric_name,
             value,
             params,
@@ -123,12 +174,15 @@ def _run_fallback_tuner(
             or (direction == "minimize" and value < best_value)
             or (direction == "maximize" and value > best_value)
         )
+
         if is_better:
             best_value = value
             best_params = params
 
-    if best_params is None or best_value is None:
-        raise RuntimeError("Fallback tuner failed to produce a best trial")
+    if best_value is None or best_params is None:
+        raise RuntimeError(
+            "Fallback tuner failed to produce any trial results."
+        )
 
     return {
         "best_params": best_params,
@@ -151,46 +205,60 @@ def run_optuna(
     direction: str | None = None,
     random_state: int | None = None,
 ) -> dict[str, Any]:
-    """
-    Run Optuna on a DataFrame-based training pipeline.
+    """Run Optuna-based hyperparameter optimization (with fallback)."""
 
-    If Optuna is unavailable, falls back to random search with same search space.
-    """
+    ensure_dataframe(
+        df,
+        name="df",
+        required_columns=[text_column, "label"],
+        min_rows=10,
+    )
+    ensure_non_empty_text_column(
+        df,
+        text_column,
+        name="df",
+    )
 
-    ensure_dataframe(df, name="df", required_columns=[text_column, "label"], min_rows=10)
-    ensure_non_empty_text_column(df, text_column, name="df")
-
-    if validation_df is not None:
-        ensure_dataframe(
-            validation_df,
-            name="validation_df",
-            required_columns=[text_column, "label"],
-            min_rows=1,
-        )
-        ensure_non_empty_text_column(validation_df, text_column, name="validation_df")
-
-    effective_trials = n_trials if n_trials is not None else SETTINGS.training.optuna_trials
-    ensure_positive_int(effective_trials, name="n_trials", min_value=1)
+    effective_trials = (
+        n_trials if n_trials is not None else SETTINGS.training.optuna_trials
+    )
+    ensure_positive_int(
+        effective_trials,
+        name="n_trials",
+        min_value=1,
+    )
 
     effective_metric = metric_name or SETTINGS.training.optuna_metric
     effective_direction = direction or SETTINGS.training.optuna_direction
-    effective_seed = SETTINGS.training.seed if random_state is None else random_state
+    if effective_direction not in _VALID_OPTIMIZATION_DIRECTIONS:
+        raise ValueError(
+            "direction must be either 'minimize' or 'maximize', "
+            f"received: {effective_direction!r}."
+        )
 
-    if effective_direction not in {"minimize", "maximize"}:
-        raise ValueError("direction must be 'minimize' or 'maximize'")
+    effective_seed = (
+        SETTINGS.training.seed if random_state is None else random_state
+    )
 
     if validation_df is None:
-        validation_split = SETTINGS.training.optuna_validation_split
-        if not (0.0 < validation_split < 1.0):
-            raise ValueError("training.optuna_validation_split must be between 0 and 1")
-
         train_df, val_df = train_test_split(
             df,
-            test_size=validation_split,
+            test_size=SETTINGS.training.optuna_validation_split,
             random_state=effective_seed,
             stratify=df["label"],
         )
     else:
+        ensure_dataframe(
+            validation_df,
+            name="validation_df",
+            required_columns=[text_column, "label"],
+            min_rows=2,
+        )
+        ensure_non_empty_text_column(
+            validation_df,
+            text_column,
+            name="validation_df",
+        )
         train_df = df
         val_df = validation_df
 
@@ -200,7 +268,7 @@ def run_optuna(
     try:
         import optuna
     except ImportError:
-        logger.warning("Optuna is not installed; using fallback random search tuner")
+        logger.warning("Optuna not installed, using fallback tuner")
         return _run_fallback_tuner(
             train_function=train_function,
             train_df=train_df,
@@ -213,9 +281,13 @@ def run_optuna(
         )
 
     sampler = optuna.samplers.TPESampler(seed=effective_seed)
-    study = optuna.create_study(direction=effective_direction, sampler=sampler)
 
-    def objective(trial: optuna.Trial) -> float:
+    study = optuna.create_study(
+        direction=effective_direction,
+        sampler=sampler,
+    )
+
+    def objective(trial) -> float:
         params = {
             "learning_rate": trial.suggest_float(
                 "learning_rate",
@@ -243,7 +315,7 @@ def run_optuna(
         )
 
         logger.info(
-            "Optuna trial %s - %s: %.4f | params=%s",
+            "Optuna trial %s | %s=%.4f | params=%s",
             trial.number,
             effective_metric,
             score,
@@ -252,10 +324,13 @@ def run_optuna(
 
         return score
 
-    study.optimize(objective, n_trials=effective_trials)
+    study.optimize(
+        objective,
+        n_trials=effective_trials,
+    )
 
     logger.info(
-        "Optuna complete | best_value=%.4f | best_params=%s",
+        "Optuna best score %.4f | params=%s",
         study.best_value,
         study.best_params,
     )

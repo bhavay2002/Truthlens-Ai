@@ -1,0 +1,67 @@
+# TruthLens AI - Data Pipeline Configuration
+
+dataset:
+  raw_data_dir: data/raw
+  fake_news_file: Fake.csv
+  real_news_file: True.csv
+  text_column: text
+  title_column: title
+  label_column: label
+  labels:
+    fake: 1
+    real: 0
+
+validation:
+  required_columns:
+    - text
+    - label
+  max_null_ratio: 0.10
+  max_duplicate_ratio: 0.20
+  min_class_ratio: 0.20
+  min_text_length: 10
+
+cleaning:
+  normalize_numbers: true
+  remove_emojis: true
+  normalize_unicode: true
+  expand_contractions: true
+  min_word_count: 30
+
+balancing:
+  enabled: true
+  method: oversample
+  random_state: 42
+
+augmentation:
+  enabled: true
+  multiplier: 2
+  synonym_replacement: true
+  random_deletion: true
+  random_swap: true
+
+split:
+  train_ratio: 0.70
+  validation_ratio: 0.15
+  test_ratio: 0.15
+  stratified: true
+  random_state: 42
+
+profiling:
+  enabled: true
+  report_dir: reports
+  save_json: true
+  save_markdown: true
+
+eda:
+  enabled: true
+  figures_dir: reports/figures
+  top_words: 20
+  max_tfidf_features: 5000
+  ngrams:
+    - 2
+    - 3
+
+output:
+  processed_data_dir: data/processed
+  splits_dir: data/splits
+  logs_dir: logs
