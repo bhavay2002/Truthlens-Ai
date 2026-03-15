@@ -61,32 +61,75 @@ def get_explainer() -> LimeTextExplainer:
     return _explainer
 
 
+def _extract_fake_probabilities_from_batch(
+    batch_result: Any,
+    expected_size: int,
+) -> list[float] | None:
+    """Extract fake probabilities from batch-style predictor output."""
+    if (
+        not isinstance(batch_result, Sequence)
+        or isinstance(batch_result, (str, bytes))
+        or len(batch_result) != expected_size
+    ):
+        return None
+
+    probs: list[float] = []
+    for item in batch_result:
+        try:
+            probs.append(_extract_fake_probability(item))
+        except Exception:
+            return None
+    return probs
+
+
 def lime_predict_wrapper(
     texts: Sequence[str],
-    predict_fn: Callable[[str], Dict[str, Any]],
+    predict_fn: Callable[[Any], Any],
 ) -> np.ndarray:
     """
-    Convert prediction function output to a LIME-compatible probability matrix.
-    """
-    probs: list[list[float]] = []
+    Convert predictor output to a LIME-compatible probability matrix.
 
-    for text in texts:
-        result = predict_fn(text)
-        fake_prob = _extract_fake_probability(result)
-        real_prob = 1.0 - fake_prob
-        probs.append([real_prob, fake_prob])
+    Supports both:
+    - single-text predictors: predict_fn(text) -> {"fake_probability": ...}
+    - batch predictors: predict_fn(list[str]) -> list[{"fake_probability": ...}]
+    """
+    text_list = [str(text) for text in texts]
+
+    # Fast path: try batch prediction first.
+    batch_fake_probs: list[float] | None = None
+    try:
+        batch_result = predict_fn(text_list)
+        batch_fake_probs = _extract_fake_probabilities_from_batch(
+            batch_result,
+            expected_size=len(text_list),
+        )
+    except Exception:
+        batch_fake_probs = None
+
+    probs: list[list[float]] = []
+    if batch_fake_probs is not None:
+        for fake_prob in batch_fake_probs:
+            probs.append([1.0 - fake_prob, fake_prob])
+    else:
+        for text in text_list:
+            result = predict_fn(text)
+            fake_prob = _extract_fake_probability(result)
+            probs.append([1.0 - fake_prob, fake_prob])
 
     return np.asarray(probs, dtype=float)
 
 
 def explain_prediction(
-    predict_fn: Callable[[str], Dict[str, Any]],
+    predict_fn: Callable[[Any], Any],
     text: str,
     num_features: int = 10,
+    num_samples: int = 256,
 ) -> Dict[str, Any]:
     """Generate a LIME explanation for one text sample."""
     if not text.strip():
         raise ValueError("text cannot be empty.")
+    if num_samples <= 0:
+        raise ValueError("num_samples must be greater than 0.")
 
     explainer = get_explainer()
 
@@ -94,6 +137,7 @@ def explain_prediction(
         text,
         lambda x: lime_predict_wrapper(x, predict_fn),
         num_features=num_features,
+        num_samples=num_samples,
     )
 
     explanation = {
@@ -106,14 +150,17 @@ def explain_prediction(
 
 
 def save_explanation_html(
-    predict_fn: Callable[[str], Dict[str, Any]],
+    predict_fn: Callable[[Any], Any],
     text: str,
     output_path: str | Path = "reports/lime_explanation.html",
     num_features: int = 10,
+    num_samples: int = 256,
 ) -> Path:
     """Save an interactive LIME explanation to HTML and return file path."""
     if not text.strip():
         raise ValueError("text cannot be empty.")
+    if num_samples <= 0:
+        raise ValueError("num_samples must be greater than 0.")
 
     explainer = get_explainer()
 
@@ -121,6 +168,7 @@ def save_explanation_html(
         text,
         lambda x: lime_predict_wrapper(x, predict_fn),
         num_features=num_features,
+        num_samples=num_samples,
     )
 
     output_path = Path(output_path)

@@ -125,6 +125,20 @@ def _as_int_tuple(value: Any, fallback: tuple[int, ...]) -> tuple[int, ...]:
     return tuple(int(v) for v in value)
 
 
+def _first_defined(
+    config: dict[str, Any],
+    key_paths: tuple[tuple[str, ...], ...],
+    default: Any,
+) -> Any:
+    """Return the first configured value across multiple key paths."""
+    sentinel = object()
+    for key_path in key_paths:
+        value = get_config_value(config, *key_path, default=sentinel)
+        if value is not sentinel:
+            return value
+    return default
+
+
 # ---------------------------------------------------------
 # Load Settings
 # ---------------------------------------------------------
@@ -258,6 +272,142 @@ def load_settings() -> AppSettings:
         ),
     )
 
+    run_cross_validation = bool(
+        _first_defined(
+            config,
+            (
+                ("training", "run_cross_validation"),
+                ("cross_validation", "enabled"),
+            ),
+            False,
+        )
+    )
+    cross_validation_splits = int(
+        _first_defined(
+            config,
+            (
+                ("training", "cross_validation_splits"),
+                ("cross_validation", "splits"),
+            ),
+            5,
+        )
+    )
+    cross_validation_metric = str(
+        _first_defined(
+            config,
+            (
+                ("training", "cross_validation_metric"),
+                ("cross_validation", "metric"),
+            ),
+            "eval_loss",
+        )
+    )
+
+    run_hyperparameter_tuning = bool(
+        _first_defined(
+            config,
+            (
+                ("training", "run_hyperparameter_tuning"),
+                ("hyperparameter_tuning", "enabled"),
+            ),
+            False,
+        )
+    )
+    optuna_trials = int(
+        _first_defined(
+            config,
+            (
+                ("training", "optuna_trials"),
+                ("hyperparameter_tuning", "trials"),
+            ),
+            10,
+        )
+    )
+    optuna_direction = str(
+        _first_defined(
+            config,
+            (
+                ("training", "optuna_direction"),
+                ("hyperparameter_tuning", "direction"),
+            ),
+            "minimize",
+        )
+    )
+    optuna_metric = str(
+        _first_defined(
+            config,
+            (
+                ("training", "optuna_metric"),
+                ("hyperparameter_tuning", "metric"),
+            ),
+            "eval_loss",
+        )
+    )
+    optuna_batch_sizes = _as_int_tuple(
+        _first_defined(
+            config,
+            (
+                ("training", "optuna_batch_sizes"),
+                ("hyperparameter_tuning", "batch_sizes"),
+            ),
+            [8, 16],
+        ),
+        (8, 16),
+    )
+    optuna_epoch_choices = _as_int_tuple(
+        _first_defined(
+            config,
+            (
+                ("training", "optuna_epoch_choices"),
+                ("hyperparameter_tuning", "epoch_choices"),
+            ),
+            [2, 3],
+        ),
+        (2, 3),
+    )
+    optuna_validation_split = float(
+        _first_defined(
+            config,
+            (
+                ("training", "optuna_validation_split"),
+                ("hyperparameter_tuning", "validation_split"),
+            ),
+            0.2,
+        )
+    )
+
+    sentinel = object()
+    optuna_lr_min = get_config_value(
+        config,
+        "training",
+        "optuna_learning_rate_min",
+        default=sentinel,
+    )
+    optuna_lr_max = get_config_value(
+        config,
+        "training",
+        "optuna_learning_rate_max",
+        default=sentinel,
+    )
+    if optuna_lr_min is sentinel or optuna_lr_max is sentinel:
+        optuna_lr_range = _first_defined(
+            config,
+            (
+                ("training", "optuna_learning_rate_range"),
+                ("hyperparameter_tuning", "learning_rate_range"),
+            ),
+            [1e-6, 5e-5],
+        )
+        if (
+            not isinstance(optuna_lr_range, list)
+            or len(optuna_lr_range) < 2
+        ):
+            optuna_lr_range = [1e-6, 5e-5]
+        if optuna_lr_min is sentinel:
+            optuna_lr_min = optuna_lr_range[0]
+        if optuna_lr_max is sentinel:
+            optuna_lr_max = optuna_lr_range[1]
+
     training = TrainingSettings(
         seed=int(get_config_value(config, "training", "seed", default=42)),
         epochs=int(get_config_value(config, "training", "epochs", default=3)),
@@ -294,99 +444,18 @@ def load_settings() -> AppSettings:
                 default="engineered_text",
             )
         ),
-        run_cross_validation=bool(
-            get_config_value(
-                config,
-                "training",
-                "run_cross_validation",
-                default=False,
-            )
-        ),
-        cross_validation_splits=int(
-            get_config_value(
-                config,
-                "training",
-                "cross_validation_splits",
-                default=5,
-            )
-        ),
-        cross_validation_metric=str(
-            get_config_value(
-                config,
-                "training",
-                "cross_validation_metric",
-                default="eval_loss",
-            )
-        ),
-        run_hyperparameter_tuning=bool(
-            get_config_value(
-                config,
-                "training",
-                "run_hyperparameter_tuning",
-                default=False,
-            )
-        ),
-        optuna_trials=int(
-            get_config_value(config, "training", "optuna_trials", default=10)
-        ),
-        optuna_direction=str(
-            get_config_value(
-                config,
-                "training",
-                "optuna_direction",
-                default="minimize",
-            )
-        ),
-        optuna_metric=str(
-            get_config_value(
-                config,
-                "training",
-                "optuna_metric",
-                default="eval_loss",
-            )
-        ),
-        optuna_learning_rate_min=float(
-            get_config_value(
-                config,
-                "training",
-                "optuna_learning_rate_min",
-                default=1e-6,
-            )
-        ),
-        optuna_learning_rate_max=float(
-            get_config_value(
-                config,
-                "training",
-                "optuna_learning_rate_max",
-                default=5e-5,
-            )
-        ),
-        optuna_batch_sizes=_as_int_tuple(
-            get_config_value(
-                config,
-                "training",
-                "optuna_batch_sizes",
-                default=[8, 16],
-            ),
-            (8, 16),
-        ),
-        optuna_epoch_choices=_as_int_tuple(
-            get_config_value(
-                config,
-                "training",
-                "optuna_epoch_choices",
-                default=[2, 3],
-            ),
-            (2, 3),
-        ),
-        optuna_validation_split=float(
-            get_config_value(
-                config,
-                "training",
-                "optuna_validation_split",
-                default=0.2,
-            )
-        ),
+        run_cross_validation=run_cross_validation,
+        cross_validation_splits=cross_validation_splits,
+        cross_validation_metric=cross_validation_metric,
+        run_hyperparameter_tuning=run_hyperparameter_tuning,
+        optuna_trials=optuna_trials,
+        optuna_direction=optuna_direction,
+        optuna_metric=optuna_metric,
+        optuna_learning_rate_min=float(optuna_lr_min),
+        optuna_learning_rate_max=float(optuna_lr_max),
+        optuna_batch_sizes=optuna_batch_sizes,
+        optuna_epoch_choices=optuna_epoch_choices,
+        optuna_validation_split=optuna_validation_split,
     )
 
     return AppSettings(

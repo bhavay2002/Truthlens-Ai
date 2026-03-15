@@ -16,6 +16,7 @@ interactive visualization
 
 from __future__ import annotations
 
+from collections import OrderedDict
 import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, Sequence
@@ -29,7 +30,8 @@ except ImportError:  # pragma: no cover - environment-dependent
 
 logger = logging.getLogger(__name__)
 
-_EXPLAINER_CACHE: dict[int, Any] = {}
+_MAX_EXPLAINER_CACHE_SIZE = 8
+_EXPLAINER_CACHE: "OrderedDict[tuple[Any, ...], Any]" = OrderedDict()
 
 
 def _extract_fake_probability(result: Any) -> float:
@@ -61,6 +63,31 @@ def shap_predict_wrapper(
     return np.asarray(outputs, dtype=float)
 
 
+def _cache_key_for_predict_fn(
+    predict_fn: Callable[[str], Dict[str, Any]],
+) -> tuple[Any, ...]:
+    """Build a stable cache key for reusable predictor callables."""
+    module_name = getattr(predict_fn, "__module__", None)
+    qual_name = getattr(predict_fn, "__qualname__", None)
+    bound_instance = getattr(predict_fn, "__self__", None)
+
+    if module_name and qual_name and "<lambda>" not in qual_name:
+        if bound_instance is not None:
+            return ("bound_method", module_name, qual_name, id(bound_instance))
+        return ("function", module_name, qual_name)
+
+    return ("ephemeral", id(predict_fn))
+
+
+def _set_cache_entry(cache_key: tuple[Any, ...], explainer: Any) -> None:
+    _EXPLAINER_CACHE[cache_key] = explainer
+    _EXPLAINER_CACHE.move_to_end(cache_key)
+
+    while len(_EXPLAINER_CACHE) > _MAX_EXPLAINER_CACHE_SIZE:
+        evicted_key, _ = _EXPLAINER_CACHE.popitem(last=False)
+        logger.debug("Evicted SHAP explainer cache key: %s", evicted_key)
+
+
 def get_explainer(
     predict_fn: Callable[[str], Dict[str, Any]],
 ):
@@ -71,15 +98,17 @@ def get_explainer(
             "explainability functions in src.explainability.shap_explainer."
         )
 
-    cache_key = id(predict_fn)
+    cache_key = _cache_key_for_predict_fn(predict_fn)
     if cache_key not in _EXPLAINER_CACHE:
         logger.info("Initializing SHAP explainer")
         masker = shap.maskers.Text()
-        _EXPLAINER_CACHE[cache_key] = shap.Explainer(
+        explainer = shap.Explainer(
             lambda x: shap_predict_wrapper(x, predict_fn),
             masker,
         )
-
+        _set_cache_entry(cache_key, explainer)
+    else:
+        _EXPLAINER_CACHE.move_to_end(cache_key)
     return _EXPLAINER_CACHE[cache_key]
 
 

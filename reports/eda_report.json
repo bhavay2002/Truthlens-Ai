@@ -5,7 +5,7 @@
     "liar_train": "data\\raw\\liar_dataset\\train.tsv",
     "fakenewsnet_root": "data\\raw\\FakeNewsNet"
   },
-  "rows": 49332,
+  "rows": 48883,
   "columns": [
     "title",
     "text",
@@ -17,19 +17,19 @@
     "uppercase_ratio"
   ],
   "label_distribution": {
-    "0": 26943,
-    "1": 22389
+    "0": 26941,
+    "1": 21942
   },
   "text_length_stats": {
-    "mean": 1946.8607597502635,
-    "median": 1828.0,
-    "min": 1,
-    "max": 51794
+    "mean": 1963.8105476341468,
+    "median": 1845.0,
+    "min": 5,
+    "max": 51793
   },
   "word_count_stats": {
-    "mean": 319.6402740614611,
-    "median": 304.0,
-    "min": 0,
+    "mean": 322.5378966102735,
+    "median": 307.0,
+    "min": 1,
     "max": 8135
   },
   "figures_dir": "reports\\figures"
