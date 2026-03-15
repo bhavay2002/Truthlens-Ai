@@ -23,7 +23,6 @@ torch.Tensor
 import logging
 import torch
 
-
 # ---------------------------------------------------------
 # Logging
 # ---------------------------------------------------------
@@ -34,6 +33,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------
 # Feature Fusion Function
 # ---------------------------------------------------------
+
 
 def fuse_features(
     cls_embedding: torch.Tensor,
@@ -81,7 +81,7 @@ def fuse_features(
 
         return fused_features
 
-    except Exception as e:
+    except Exception:
 
         logger.exception("Feature fusion failed")
 

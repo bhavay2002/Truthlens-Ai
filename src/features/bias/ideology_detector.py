@@ -32,19 +32,13 @@ from collections import Counter
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
-
 # ---------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------
 
 IDEOLOGY_MODEL = "roberta-base"
 
-IDEOLOGY_LABELS = [
-    "left",
-    "right",
-    "centrist",
-    "neutral"
-]
+IDEOLOGY_LABELS = ["left", "right", "centrist", "neutral"]
 
 
 # ---------------------------------------------------------
@@ -58,7 +52,7 @@ LEFT_LEXICON = {
     "systemic racism",
     "corporate greed",
     "income inequality",
-    "progressive policy"
+    "progressive policy",
 }
 
 RIGHT_LEXICON = {
@@ -68,7 +62,7 @@ RIGHT_LEXICON = {
     "globalist agenda",
     "border security",
     "traditional values",
-    "patriot movement"
+    "patriot movement",
 }
 
 CENTRIST_LEXICON = {
@@ -76,7 +70,7 @@ CENTRIST_LEXICON = {
     "moderate policy",
     "balanced approach",
     "compromise",
-    "middle ground"
+    "middle ground",
 }
 
 
@@ -88,20 +82,21 @@ LEFT_NARRATIVES = {
     "oppression",
     "inequality",
     "corporate power",
-    "climate crisis"
+    "climate crisis",
 }
 
 RIGHT_NARRATIVES = {
     "national decline",
     "government overreach",
     "cultural decay",
-    "security threat"
+    "security threat",
 }
 
 
 # ---------------------------------------------------------
 # Data Structure
 # ---------------------------------------------------------
+
 
 @dataclass
 class IdeologyResult:
@@ -116,19 +111,30 @@ class IdeologyResult:
 # Model Loader
 # ---------------------------------------------------------
 
+
 class IdeologyModels:
+    _tokenizer = None
+    _model = None
 
-    tokenizer = AutoTokenizer.from_pretrained(IDEOLOGY_MODEL)
+    @classmethod
+    def get_tokenizer(cls):
+        if cls._tokenizer is None:
+            cls._tokenizer = AutoTokenizer.from_pretrained(IDEOLOGY_MODEL)
+        return cls._tokenizer
 
-    model = AutoModelForSequenceClassification.from_pretrained(
-        IDEOLOGY_MODEL,
-        num_labels=len(IDEOLOGY_LABELS)
-    )
+    @classmethod
+    def get_model(cls):
+        if cls._model is None:
+            cls._model = AutoModelForSequenceClassification.from_pretrained(
+                IDEOLOGY_MODEL, num_labels=len(IDEOLOGY_LABELS)
+            )
+        return cls._model
 
 
 # ---------------------------------------------------------
 # Text Processing
 # ---------------------------------------------------------
+
 
 def tokenize_sentences(text: str) -> List[str]:
 
@@ -140,6 +146,7 @@ def tokenize_sentences(text: str) -> List[str]:
 # ---------------------------------------------------------
 # Lexicon Ideology Detection
 # ---------------------------------------------------------
+
 
 def detect_lexicon_ideology(sentence: str) -> str:
 
@@ -160,6 +167,7 @@ def detect_lexicon_ideology(sentence: str) -> str:
 # ---------------------------------------------------------
 # Narrative Detection
 # ---------------------------------------------------------
+
 
 def detect_ideological_narratives(text: str) -> Dict:
 
@@ -184,16 +192,14 @@ def detect_ideological_narratives(text: str) -> Dict:
 # Transformer Ideology Classifier
 # ---------------------------------------------------------
 
+
 def transformer_ideology_classifier(sentence: str) -> Dict:
 
-    tokenizer = IdeologyModels.tokenizer
-    model = IdeologyModels.model
+    tokenizer = IdeologyModels.get_tokenizer()
+    model = IdeologyModels.get_model()
 
     inputs = tokenizer(
-        sentence,
-        return_tensors="pt",
-        truncation=True,
-        padding=True
+        sentence, return_tensors="pt", truncation=True, padding=True
     )
 
     with torch.no_grad():
@@ -207,15 +213,13 @@ def transformer_ideology_classifier(sentence: str) -> Dict:
 
     confidence = probs[0][label_id].item()
 
-    return {
-        "ideology": ideology,
-        "confidence": round(confidence, 4)
-    }
+    return {"ideology": ideology, "confidence": round(confidence, 4)}
 
 
 # ---------------------------------------------------------
 # Partisan Frame Detection
 # ---------------------------------------------------------
+
 
 def detect_partisan_frame(left_count: int, right_count: int) -> str:
 
@@ -232,6 +236,7 @@ def detect_partisan_frame(left_count: int, right_count: int) -> str:
 # Main Detection Pipeline
 # ---------------------------------------------------------
 
+
 def detect_ideology(text: str) -> Dict:
 
     sentences = tokenize_sentences(text)
@@ -243,7 +248,7 @@ def detect_ideology(text: str) -> Dict:
             "ideology_score": 0.0,
             "partisan_frame": "neutral_frame",
             "ideological_narratives": {},
-            "sentence_analysis": []
+            "sentence_analysis": [],
         }
 
     ideology_counter = Counter()
@@ -259,11 +264,13 @@ def detect_ideology(text: str) -> Dict:
         ideology_counter[lexicon_ideology] += 1
         ideology_counter[transformer_result["ideology"]] += 1
 
-        sentence_analysis.append({
-            "sentence": sentence,
-            "lexicon_ideology": lexicon_ideology,
-            "transformer_prediction": transformer_result
-        })
+        sentence_analysis.append(
+            {
+                "sentence": sentence,
+                "lexicon_ideology": lexicon_ideology,
+                "transformer_prediction": transformer_result,
+            }
+        )
 
     narratives = detect_ideological_narratives(text)
 
@@ -274,12 +281,12 @@ def detect_ideology(text: str) -> Dict:
 
     dominant_ideology = (
         ideology_counter.most_common(1)[0][0]
-        if ideology_counter else "neutral"
+        if ideology_counter
+        else "neutral"
     )
 
     ideology_score = round(
-        max(left_count, right_count) / max(len(sentences), 1),
-        4
+        max(left_count, right_count) / max(len(sentences), 1), 4
     )
 
     return {
@@ -287,7 +294,7 @@ def detect_ideology(text: str) -> Dict:
         "ideology_score": ideology_score,
         "partisan_frame": partisan_frame,
         "ideological_narratives": narratives,
-        "sentence_analysis": sentence_analysis
+        "sentence_analysis": sentence_analysis,
     }
 
 

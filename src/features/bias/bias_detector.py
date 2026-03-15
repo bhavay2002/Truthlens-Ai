@@ -25,15 +25,13 @@ bias_components
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-from typing import Dict, List
+from dataclasses import asdict, dataclass
 from statistics import mean
-from collections import Counter
+from typing import Dict, List
 
 from .bias_lexicon import compute_bias_features
 from .framing_detector import detect_framing_bias
 from .narrative_patterns import detect_narrative_patterns
-
 
 # ---------------------------------------------------------
 # Configuration
@@ -54,16 +52,27 @@ SENTENCE_BIAS_THRESHOLD = 0.08
 # ---------------------------------------------------------
 
 SUBJECTIVE_WORDS = {
-    "clearly", "obviously", "undoubtedly", "certainly",
-    "terrible", "amazing", "horrible", "fantastic",
-    "unbelievable", "ridiculous", "absurd", "disgraceful",
-    "shocking", "disturbing"
+    "clearly",
+    "obviously",
+    "undoubtedly",
+    "certainly",
+    "terrible",
+    "amazing",
+    "horrible",
+    "fantastic",
+    "unbelievable",
+    "ridiculous",
+    "absurd",
+    "disgraceful",
+    "shocking",
+    "disturbing",
 }
 
 
 # ---------------------------------------------------------
 # Result Data Structures
 # ---------------------------------------------------------
+
 
 @dataclass
 class BiasDetectionResult:
@@ -77,6 +86,7 @@ class BiasDetectionResult:
 # ---------------------------------------------------------
 # Text Processing Utilities
 # ---------------------------------------------------------
+
 
 def tokenize_words(text: str) -> List[str]:
     """
@@ -97,6 +107,7 @@ def tokenize_sentences(text: str) -> List[str]:
 # Subjectivity Detection
 # ---------------------------------------------------------
 
+
 def compute_subjectivity_score(text: str) -> float:
     """
     Estimate subjectivity using lexicon density.
@@ -107,9 +118,7 @@ def compute_subjectivity_score(text: str) -> float:
     if not words:
         return 0.0
 
-    subjective_count = sum(
-        1 for word in words if word in SUBJECTIVE_WORDS
-    )
+    subjective_count = sum(1 for word in words if word in SUBJECTIVE_WORDS)
 
     score = subjective_count / len(words)
 
@@ -119,6 +128,7 @@ def compute_subjectivity_score(text: str) -> float:
 # ---------------------------------------------------------
 # Sentence-Level Bias Detection
 # ---------------------------------------------------------
+
 
 def compute_sentence_bias(text: str) -> List[Dict]:
     """
@@ -135,10 +145,7 @@ def compute_sentence_bias(text: str) -> List[Dict]:
 
         score = lexicon_result.bias_score
 
-        sentence_scores.append({
-            "sentence": sentence,
-            "bias_score": score
-        })
+        sentence_scores.append({"sentence": sentence, "bias_score": score})
 
     return sentence_scores
 
@@ -147,11 +154,12 @@ def compute_sentence_bias(text: str) -> List[Dict]:
 # Bias Type Classification
 # ---------------------------------------------------------
 
+
 def determine_bias_type(
     lexicon_score: float,
     subjectivity_score: float,
     framing_score: float,
-    narrative_score: float
+    narrative_score: float,
 ) -> str:
     """
     Determine dominant bias signal.
@@ -161,7 +169,7 @@ def determine_bias_type(
         "lexical_bias": lexicon_score,
         "subjective_bias": subjectivity_score,
         "framing_bias": framing_score,
-        "narrative_bias": narrative_score
+        "narrative_bias": narrative_score,
     }
 
     dominant_bias = max(scores, key=scores.get)
@@ -172,6 +180,7 @@ def determine_bias_type(
 # ---------------------------------------------------------
 # Main Bias Detection Pipeline
 # ---------------------------------------------------------
+
 
 class BiasDetector:
     """
@@ -195,9 +204,11 @@ class BiasDetector:
             if s["bias_score"] > SENTENCE_BIAS_THRESHOLD
         ]
 
-        avg_sentence_bias = mean(
-            s["bias_score"] for s in sentence_scores
-        ) if sentence_scores else 0.0
+        avg_sentence_bias = (
+            mean(s["bias_score"] for s in sentence_scores)
+            if sentence_scores
+            else 0.0
+        )
 
         # ----------------------------------------------
         # Lexicon Bias
@@ -231,10 +242,10 @@ class BiasDetector:
         # ----------------------------------------------
 
         bias_score = (
-            BIAS_WEIGHTS["lexicon"] * lexicon_bias +
-            BIAS_WEIGHTS["subjectivity"] * subjectivity_score +
-            BIAS_WEIGHTS["framing"] * framing_score +
-            BIAS_WEIGHTS["narrative"] * narrative_score
+            BIAS_WEIGHTS["lexicon"] * lexicon_bias
+            + BIAS_WEIGHTS["subjectivity"] * subjectivity_score
+            + BIAS_WEIGHTS["framing"] * framing_score
+            + BIAS_WEIGHTS["narrative"] * narrative_score
         )
 
         bias_score = round(bias_score, 4)
@@ -244,10 +255,7 @@ class BiasDetector:
         # ----------------------------------------------
 
         bias_type = determine_bias_type(
-            lexicon_bias,
-            subjectivity_score,
-            framing_score,
-            narrative_score
+            lexicon_bias, subjectivity_score, framing_score, narrative_score
         )
 
         # ----------------------------------------------
@@ -259,7 +267,7 @@ class BiasDetector:
             "subjectivity": round(subjectivity_score, 4),
             "framing_bias": round(framing_score, 4),
             "narrative_bias": round(narrative_score, 4),
-            "sentence_bias": round(avg_sentence_bias, 4)
+            "sentence_bias": round(avg_sentence_bias, 4),
         }
 
         return BiasDetectionResult(
@@ -267,8 +275,18 @@ class BiasDetector:
             bias_type=bias_type,
             biased_sentences=biased_sentences,
             bias_components=bias_components,
-            sentence_bias_scores=sentence_scores
+            sentence_bias_scores=sentence_scores,
         )
+
+
+def detect_bias(text: str) -> Dict:
+    """
+    Backward-compatible helper for callers that expect a dict response.
+    """
+
+    result = BiasDetector().analyze(text)
+
+    return asdict(result)
 
 
 # ---------------------------------------------------------

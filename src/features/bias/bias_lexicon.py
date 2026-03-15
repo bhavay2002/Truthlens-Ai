@@ -22,12 +22,8 @@ Outputs:
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Tuple
 from dataclasses import dataclass
-from collections import defaultdict
-
-import numpy as np
-
+from typing import Dict, List, Tuple
 
 # ---------------------------------------------------------
 # Bias Lexicons with Weights
@@ -48,7 +44,6 @@ BIAS_LEXICON = {
     "catastrophic": 2.1,
     "absurd": 1.5,
     "disturbing": 1.6,
-
     # Propaganda framing
     "regime": 1.5,
     "propaganda": 1.9,
@@ -64,7 +59,6 @@ BIAS_LEXICON = {
     "traitor": 2.2,
     "enemy": 1.6,
     "fake": 1.5,
-
     # Opinion indicators
     "clearly": 1.3,
     "obviously": 1.4,
@@ -86,19 +80,26 @@ BIAS_LEXICON = {
 # ---------------------------------------------------------
 
 LEFT_LEXICON = {
-    "climate justice", "systemic inequality", "wealth tax",
-    "social justice", "corporate greed"
+    "climate justice",
+    "systemic inequality",
+    "wealth tax",
+    "social justice",
+    "corporate greed",
 }
 
 RIGHT_LEXICON = {
-    "deep state", "radical left", "fake news",
-    "illegal immigrants", "globalist agenda"
+    "deep state",
+    "radical left",
+    "fake news",
+    "illegal immigrants",
+    "globalist agenda",
 }
 
 
 # ---------------------------------------------------------
 # Data Classes
 # ---------------------------------------------------------
+
 
 @dataclass
 class BiasResult:
@@ -112,6 +113,7 @@ class BiasResult:
 # ---------------------------------------------------------
 # Tokenization
 # ---------------------------------------------------------
+
 
 def tokenize(text: str) -> List[str]:
     """
@@ -132,6 +134,7 @@ def split_sentences(text: str) -> List[str]:
 # ---------------------------------------------------------
 # Weighted Bias Scoring
 # ---------------------------------------------------------
+
 
 def compute_weighted_bias(tokens: List[str]) -> Tuple[float, Dict[str, float]]:
     """
@@ -162,6 +165,7 @@ def compute_weighted_bias(tokens: List[str]) -> Tuple[float, Dict[str, float]]:
 # Sentence Heatmap
 # ---------------------------------------------------------
 
+
 def compute_sentence_heatmap(text: str) -> List[Dict]:
     """
     Compute sentence-level bias heatmap.
@@ -177,10 +181,7 @@ def compute_sentence_heatmap(text: str) -> List[Dict]:
 
         score, _ = compute_weighted_bias(tokens)
 
-        heatmap.append({
-            "sentence": sentence,
-            "bias_score": score
-        })
+        heatmap.append({"sentence": sentence, "bias_score": score})
 
     return heatmap
 
@@ -188,6 +189,7 @@ def compute_sentence_heatmap(text: str) -> List[Dict]:
 # ---------------------------------------------------------
 # Media Bias Classification
 # ---------------------------------------------------------
+
 
 def classify_media_bias(text: str) -> str:
     """
@@ -211,6 +213,7 @@ def classify_media_bias(text: str) -> str:
 # Main Bias Detection Pipeline
 # ---------------------------------------------------------
 
+
 def compute_bias_features(text: str) -> BiasResult:
     """
     Main entry point used by TruthLens pipeline.
@@ -231,13 +234,14 @@ def compute_bias_features(text: str) -> BiasResult:
         biased_tokens=biased_tokens,
         token_weights=token_weights,
         sentence_heatmap=sentence_heatmap,
-        media_bias=media_bias
+        media_bias=media_bias,
     )
 
 
 # ---------------------------------------------------------
 # Optional: BERT Bias Classifier Hook
 # ---------------------------------------------------------
+
 
 def bert_bias_classifier(text: str, model=None, tokenizer=None) -> Dict:
     """
@@ -258,9 +262,7 @@ def bert_bias_classifier(text: str, model=None, tokenizer=None) -> Dict:
 
     bias_prob = probs[0][1].item()
 
-    return {
-        "bias_probability": round(bias_prob, 4)
-    }
+    return {"bias_probability": round(bias_prob, 4)}
 
 
 # ---------------------------------------------------------

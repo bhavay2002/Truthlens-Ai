@@ -25,24 +25,15 @@ disgust
 from __future__ import annotations
 
 import re
-from typing import Dict, List
+from collections import Counter, defaultdict
 from dataclasses import dataclass
-from collections import defaultdict, Counter
-from statistics import mean
-
+from typing import Dict, List
 
 # ---------------------------------------------------------
 # Emotion Categories
 # ---------------------------------------------------------
 
-EMOTIONS = [
-    "fear",
-    "anger",
-    "joy",
-    "sadness",
-    "surprise",
-    "disgust"
-]
+EMOTIONS = ["fear", "anger", "joy", "sadness", "surprise", "disgust"]
 
 
 # ---------------------------------------------------------
@@ -50,42 +41,64 @@ EMOTIONS = [
 # ---------------------------------------------------------
 
 DEFAULT_NRC_LEXICON = {
-
     "fear": {
-        "fear", "threat", "terror", "danger", "panic",
-        "risk", "crisis", "afraid", "scared", "fright"
+        "fear",
+        "threat",
+        "terror",
+        "danger",
+        "panic",
+        "risk",
+        "crisis",
+        "afraid",
+        "scared",
+        "fright",
     },
-
     "anger": {
-        "anger", "rage", "furious", "outrage", "hate",
-        "hostile", "violent", "attack", "fight"
+        "anger",
+        "rage",
+        "furious",
+        "outrage",
+        "hate",
+        "hostile",
+        "violent",
+        "attack",
+        "fight",
     },
-
     "joy": {
-        "joy", "happy", "celebrate", "success",
-        "victory", "delight", "excited", "pleased"
+        "joy",
+        "happy",
+        "celebrate",
+        "success",
+        "victory",
+        "delight",
+        "excited",
+        "pleased",
     },
-
     "sadness": {
-        "sad", "grief", "sorrow", "loss", "tragic",
-        "depressed", "cry", "mourning"
+        "sad",
+        "grief",
+        "sorrow",
+        "loss",
+        "tragic",
+        "depressed",
+        "cry",
+        "mourning",
     },
-
     "surprise": {
-        "surprise", "unexpected", "suddenly",
-        "shocking", "astonishing"
+        "surprise",
+        "unexpected",
+        "suddenly",
+        "shocking",
+        "astonishing",
     },
-
-    "disgust": {
-        "disgust", "repulsive", "dirty",
-        "corrupt", "filthy", "gross"
-    }
+    "disgust": {"disgust", "repulsive", "dirty", "corrupt", "filthy", "gross"},
 }
 
 
 # ---------------------------------------------------------
 # Data Structures
 # ---------------------------------------------------------
+
 
 @dataclass
 class EmotionResult:
@@ -99,6 +112,7 @@ class EmotionResult:
 # ---------------------------------------------------------
 # Utility Functions
 # ---------------------------------------------------------
+
 
 def tokenize_words(text: str) -> List[str]:
     """
@@ -118,6 +132,7 @@ def tokenize_sentences(text: str) -> List[str]:
 # ---------------------------------------------------------
 # NRC Lexicon Loader
 # ---------------------------------------------------------
+
 
 def load_nrc_lexicon(path: str) -> Dict[str, set]:
     """
@@ -145,6 +160,7 @@ def load_nrc_lexicon(path: str) -> Dict[str, set]:
 # Emotion Analyzer
 # ---------------------------------------------------------
 
+
 class EmotionLexiconAnalyzer:
     """
     Emotion detection engine using NRC lexicon.
@@ -170,11 +186,9 @@ class EmotionLexiconAnalyzer:
 
                     emotion_counts[emotion] += 1
 
-                    emotion_tokens.append({
-                        "token": token,
-                        "emotion": emotion,
-                        "position": idx
-                    })
+                    emotion_tokens.append(
+                        {"token": token, "emotion": emotion, "position": idx}
+                    )
 
         return emotion_counts, emotion_tokens
 
@@ -208,10 +222,9 @@ class EmotionLexiconAnalyzer:
 
             score = sum(counts.values()) / max(len(tokens), 1)
 
-            results.append({
-                "sentence": sentence,
-                "emotion_intensity": round(score, 4)
-            })
+            results.append(
+                {"sentence": sentence, "emotion_intensity": round(score, 4)}
+            )
 
         return results
 
@@ -229,9 +242,7 @@ class EmotionLexiconAnalyzer:
         scores = self._compute_scores(emotion_counts, len(tokens))
 
         dominant_emotion = (
-            max(scores, key=scores.get)
-            if any(scores.values())
-            else "neutral"
+            max(scores, key=scores.get) if any(scores.values()) else "neutral"
         )
 
         sentence_analysis = self._sentence_level_analysis(text)
@@ -241,7 +252,7 @@ class EmotionLexiconAnalyzer:
             dominant_emotion=dominant_emotion,
             emotion_distribution=dict(emotion_counts),
             sentence_emotions=sentence_analysis,
-            emotion_tokens=emotion_tokens
+            emotion_tokens=emotion_tokens,
         )
 
 

@@ -24,17 +24,24 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import Dict, List
-from collections import Counter
-
 
 # ---------------------------------------------------------
 # Intensifier Lexicon
 # ---------------------------------------------------------
 
 INTENSIFIER_ADVERBS = {
-    "very", "extremely", "incredibly", "highly",
-    "deeply", "absolutely", "totally", "completely",
-    "remarkably", "terribly", "really", "so"
+    "very",
+    "extremely",
+    "incredibly",
+    "highly",
+    "deeply",
+    "absolutely",
+    "totally",
+    "completely",
+    "remarkably",
+    "terribly",
+    "really",
+    "so",
 }
 
 
@@ -46,13 +53,14 @@ WEIGHTS = {
     "caps": 0.35,
     "exclamation": 0.30,
     "intensifier": 0.20,
-    "repeated_punctuation": 0.15
+    "repeated_punctuation": 0.15,
 }
 
 
 # ---------------------------------------------------------
 # Data Structures
 # ---------------------------------------------------------
+
 
 @dataclass
 class EmotionIntensityResult:
@@ -65,6 +73,7 @@ class EmotionIntensityResult:
 # ---------------------------------------------------------
 # Text Processing Utilities
 # ---------------------------------------------------------
+
 
 def tokenize_words(text: str) -> List[str]:
 
@@ -82,12 +91,10 @@ def tokenize_sentences(text: str) -> List[str]:
 # Signal Detection
 # ---------------------------------------------------------
 
+
 def detect_caps_words(tokens: List[str]) -> int:
 
-    return sum(
-        1 for token in tokens
-        if token.isupper() and len(token) > 2
-    )
+    return sum(1 for token in tokens if token.isupper() and len(token) > 2)
 
 
 def detect_exclamations(text: str) -> int:
@@ -118,6 +125,7 @@ def detect_repeated_punctuation(text: str) -> int:
 # Sentence-Level Intensity
 # ---------------------------------------------------------
 
+
 def compute_sentence_intensity(sentence: str) -> float:
 
     tokens = tokenize_words(sentence)
@@ -129,11 +137,7 @@ def compute_sentence_intensity(sentence: str) -> float:
     intensifiers = len(detect_intensifiers(tokens))
     exclamations = sentence.count("!")
 
-    score = (
-        caps * 0.4 +
-        intensifiers * 0.35 +
-        exclamations * 0.25
-    )
+    score = caps * 0.4 + intensifiers * 0.35 + exclamations * 0.25
 
     return round(score / len(tokens), 4)
 
@@ -142,8 +146,8 @@ def compute_sentence_intensity(sentence: str) -> float:
 # Emotion Intensity Analyzer
 # ---------------------------------------------------------
 
-class EmotionIntensityAnalyzer:
 
+class EmotionIntensityAnalyzer:
     """
     Detects emotional amplification signals in text.
     """
@@ -158,7 +162,7 @@ class EmotionIntensityAnalyzer:
                 intensity_score=0.0,
                 signal_breakdown={},
                 sentence_intensity=[],
-                highlighted_tokens=[]
+                highlighted_tokens=[],
             )
 
         total_words = len(tokens)
@@ -179,10 +183,10 @@ class EmotionIntensityAnalyzer:
 
         # Weighted intensity score
         intensity_score = (
-            WEIGHTS["caps"] * caps_ratio +
-            WEIGHTS["exclamation"] * exclamation_ratio +
-            WEIGHTS["intensifier"] * intensifier_ratio +
-            WEIGHTS["repeated_punctuation"] * repeated_ratio
+            WEIGHTS["caps"] * caps_ratio
+            + WEIGHTS["exclamation"] * exclamation_ratio
+            + WEIGHTS["intensifier"] * intensifier_ratio
+            + WEIGHTS["repeated_punctuation"] * repeated_ratio
         )
 
         intensity_score = round(intensity_score, 4)
@@ -196,34 +200,29 @@ class EmotionIntensityAnalyzer:
 
             score = compute_sentence_intensity(sentence)
 
-            sentence_scores.append({
-                "sentence": sentence,
-                "intensity": score
-            })
+            sentence_scores.append({"sentence": sentence, "intensity": score})
 
         # Token highlights
         highlights = []
 
         for pos in intensifier_positions:
 
-            highlights.append({
-                "token": tokens[pos],
-                "type": "intensifier",
-                "position": pos
-            })
+            highlights.append(
+                {"token": tokens[pos], "type": "intensifier", "position": pos}
+            )
 
         signal_breakdown = {
             "caps_ratio": round(caps_ratio, 4),
             "exclamation_ratio": round(exclamation_ratio, 4),
             "intensifier_ratio": round(intensifier_ratio, 4),
-            "repeated_punctuation_ratio": round(repeated_ratio, 4)
+            "repeated_punctuation_ratio": round(repeated_ratio, 4),
         }
 
         return EmotionIntensityResult(
             intensity_score=intensity_score,
             signal_breakdown=signal_breakdown,
             sentence_intensity=sentence_scores,
-            highlighted_tokens=highlights
+            highlighted_tokens=highlights,
         )
 
 
@@ -236,7 +235,8 @@ if __name__ == "__main__":
     analyzer = EmotionIntensityAnalyzer()
 
     text = """
-    THIS is absolutely shocking!!! The government has made an incredibly terrible decision!!!
+    THIS is absolutely shocking!!!
+    The government has made an incredibly terrible decision!!!
     """
 
     result = analyzer.analyze(text)

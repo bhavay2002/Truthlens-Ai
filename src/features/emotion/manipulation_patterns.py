@@ -33,13 +33,19 @@ import spacy
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
-
 # ---------------------------------------------------------
 # NLP Model
 # ---------------------------------------------------------
 
 NLP_MODEL = "en_core_web_sm"
-nlp = spacy.load(NLP_MODEL)
+_nlp = None
+
+
+def _get_nlp():
+    global _nlp
+    if _nlp is None:
+        _nlp = spacy.load(NLP_MODEL)
+    return _nlp
 
 
 # ---------------------------------------------------------
@@ -53,18 +59,27 @@ MANIPULATION_LABELS = [
     "outrage_trigger",
     "urgency_trigger",
     "conspiracy_cue",
-    "neutral"
+    "neutral",
 ]
 
 
 class ManipulationModels:
+    _tokenizer = None
+    _model = None
 
-    tokenizer = AutoTokenizer.from_pretrained(TRANSFORMER_MODEL)
+    @classmethod
+    def get_tokenizer(cls):
+        if cls._tokenizer is None:
+            cls._tokenizer = AutoTokenizer.from_pretrained(TRANSFORMER_MODEL)
+        return cls._tokenizer
 
-    model = AutoModelForSequenceClassification.from_pretrained(
-        TRANSFORMER_MODEL,
-        num_labels=len(MANIPULATION_LABELS)
-    )
+    @classmethod
+    def get_model(cls):
+        if cls._model is None:
+            cls._model = AutoModelForSequenceClassification.from_pretrained(
+                TRANSFORMER_MODEL, num_labels=len(MANIPULATION_LABELS)
+            )
+        return cls._model
 
 
 # ---------------------------------------------------------
@@ -76,7 +91,7 @@ FEAR_PATTERNS = {
     "mass panic",
     "nation in danger",
     "catastrophic failure",
-    "existential threat"
+    "existential threat",
 }
 
 OUTRAGE_PATTERNS = {
@@ -84,7 +99,7 @@ OUTRAGE_PATTERNS = {
     "outrageous truth",
     "people are furious",
     "scandal exposed",
-    "disgusting behavior"
+    "disgusting behavior",
 }
 
 URGENCY_PATTERNS = {
@@ -92,7 +107,7 @@ URGENCY_PATTERNS = {
     "act now",
     "urgent warning",
     "last chance",
-    "don't miss this"
+    "don't miss this",
 }
 
 CONSPIRACY_PATTERNS = {
@@ -100,7 +115,7 @@ CONSPIRACY_PATTERNS = {
     "hidden truth",
     "mainstream media won't tell you",
     "secret plan",
-    "cover-up"
+    "cover-up",
 }
 
 CLICKBAIT_PATTERNS = {
@@ -108,13 +123,14 @@ CLICKBAIT_PATTERNS = {
     "what happens next",
     "this changes everything",
     "the truth revealed",
-    "shocking secret"
+    "shocking secret",
 }
 
 
 # ---------------------------------------------------------
 # Data Structure
 # ---------------------------------------------------------
+
 
 @dataclass
 class ManipulationResult:
@@ -129,6 +145,7 @@ class ManipulationResult:
 # Sentence Tokenization
 # ---------------------------------------------------------
 
+
 def tokenize_sentences(text: str) -> List[str]:
 
     sentences = re.split(r"[.!?]+", text)
@@ -140,9 +157,10 @@ def tokenize_sentences(text: str) -> List[str]:
 # Dependency-Based Persuasive Pattern Detection
 # ---------------------------------------------------------
 
+
 def detect_persuasive_structure(sentence: str) -> List[str]:
 
-    doc = nlp(sentence)
+    doc = _get_nlp()(sentence)
 
     patterns = []
 
@@ -164,6 +182,7 @@ def detect_persuasive_structure(sentence: str) -> List[str]:
 # Rhetorical Device Detection
 # ---------------------------------------------------------
 
+
 def detect_rhetorical_devices(sentence: str) -> List[str]:
 
     devices = []
@@ -181,16 +200,14 @@ def detect_rhetorical_devices(sentence: str) -> List[str]:
 # Transformer Manipulation Classifier
 # ---------------------------------------------------------
 
+
 def transformer_manipulation_classifier(sentence: str) -> Dict:
 
-    tokenizer = ManipulationModels.tokenizer
-    model = ManipulationModels.model
+    tokenizer = ManipulationModels.get_tokenizer()
+    model = ManipulationModels.get_model()
 
     inputs = tokenizer(
-        sentence,
-        return_tensors="pt",
-        truncation=True,
-        padding=True
+        sentence, return_tensors="pt", truncation=True, padding=True
     )
 
     with torch.no_grad():
@@ -204,15 +221,13 @@ def transformer_manipulation_classifier(sentence: str) -> Dict:
 
     confidence = probs[0][label_id].item()
 
-    return {
-        "technique": technique,
-        "confidence": round(confidence, 4)
-    }
+    return {"technique": technique, "confidence": round(confidence, 4)}
 
 
 # ---------------------------------------------------------
 # Pattern Matching
 # ---------------------------------------------------------
+
 
 def match_patterns(sentence: str, patterns: set) -> List[str]:
 
@@ -231,6 +246,7 @@ def match_patterns(sentence: str, patterns: set) -> List[str]:
 # Main Detection Pipeline
 # ---------------------------------------------------------
 
+
 def detect_emotion_manipulation(text: str) -> Dict:
 
     sentences = tokenize_sentences(text)
@@ -239,7 +255,7 @@ def detect_emotion_manipulation(text: str) -> Dict:
         return {
             "manipulation_type": "none",
             "manipulation_score": 0.0,
-            "detected_patterns": []
+            "detected_patterns": [],
         }
 
     pattern_counts = Counter()
@@ -264,33 +280,28 @@ def detect_emotion_manipulation(text: str) -> Dict:
         transformer_result = transformer_manipulation_classifier(sentence)
 
         for match in matches:
-            detected_patterns.append({
-                "sentence": sentence,
-                "pattern": match
-            })
+            detected_patterns.append({"sentence": sentence, "pattern": match})
             pattern_counts[match] += 1
 
-        rhetorical_devices.extend([
-            {"sentence": sentence, "device": d} for d in rhetorical
-        ])
+        rhetorical_devices.extend(
+            [{"sentence": sentence, "device": d} for d in rhetorical]
+        )
 
-        sentence_analysis.append({
-            "sentence": sentence,
-            "patterns": matches,
-            "persuasive_structures": persuasive,
-            "transformer_prediction": transformer_result
-        })
+        sentence_analysis.append(
+            {
+                "sentence": sentence,
+                "patterns": matches,
+                "persuasive_structures": persuasive,
+                "transformer_prediction": transformer_result,
+            }
+        )
 
     total_patterns = sum(pattern_counts.values())
 
-    manipulation_score = round(
-        total_patterns / max(len(sentences), 1),
-        4
-    )
+    manipulation_score = round(total_patterns / max(len(sentences), 1), 4)
 
     dominant_type = (
-        pattern_counts.most_common(1)[0][0]
-        if pattern_counts else "none"
+        pattern_counts.most_common(1)[0][0] if pattern_counts else "none"
     )
 
     return {
@@ -298,7 +309,7 @@ def detect_emotion_manipulation(text: str) -> Dict:
         "manipulation_score": manipulation_score,
         "detected_patterns": detected_patterns,
         "rhetorical_devices": rhetorical_devices,
-        "sentence_analysis": sentence_analysis
+        "sentence_analysis": sentence_analysis,
     }
 
 

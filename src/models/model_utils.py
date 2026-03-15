@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from typing import Any
 
@@ -54,3 +55,12 @@ def load_model(path: str | Path) -> Any:
 
     # Load and return the model
     return joblib.load(path_obj)
+
+
+def preprocess_text(text: str) -> str:
+    """
+    Basic text normalization for inference.
+    """
+    normalized = str(text).replace("\n", " ").replace("\t", " ")
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized

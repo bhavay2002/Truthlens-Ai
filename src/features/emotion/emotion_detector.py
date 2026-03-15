@@ -20,18 +20,18 @@ Capabilities
 
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass
 from typing import Dict
-from dataclasses import dataclass
 import math
 
 from .emotion_lexicon import EmotionLexiconAnalyzer
 from .emotion_intensity import EmotionIntensityAnalyzer
 from .manipulation_patterns import detect_emotion_manipulation
 
-
 # ---------------------------------------------------------
 # Result Structure
 # ---------------------------------------------------------
+
 
 @dataclass
 class EmotionDetectionResult:
@@ -46,6 +46,7 @@ class EmotionDetectionResult:
 # ---------------------------------------------------------
 # Utility Functions
 # ---------------------------------------------------------
+
 
 def compute_emotion_entropy(emotion_scores: Dict[str, float]) -> float:
     """
@@ -81,6 +82,7 @@ def get_dominant_emotion(emotion_scores: Dict[str, float]) -> str:
 # ---------------------------------------------------------
 # Emotion Detection Pipeline
 # ---------------------------------------------------------
+
 
 class EmotionDetector:
     """
@@ -148,8 +150,21 @@ class EmotionDetector:
             emotion_entropy=entropy,
             emotion_intensity=intensity_score,
             manipulation_score=manipulation_score,
-            manipulation_type=manipulation_type
+            manipulation_type=manipulation_type,
         )
+
+
+def detect_emotion(text: str) -> Dict:
+    """
+    Backward-compatible helper for callers that expect dict output.
+    """
+
+    result = EmotionDetector().analyze(text)
+    result_dict = asdict(result)
+    result_dict["emotion_score"] = float(
+        max(result.emotion_scores.values()) if result.emotion_scores else 0.0
+    )
+    return result_dict
 
 
 # ---------------------------------------------------------

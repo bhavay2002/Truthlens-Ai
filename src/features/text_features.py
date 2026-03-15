@@ -30,7 +30,6 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 
 from src.utils.input_validation import ensure_non_empty_text_list
 
-
 # ---------------------------------------------------------
 # Logging Configuration
 # ---------------------------------------------------------
@@ -41,6 +40,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------
 # TF-IDF Vectorizer Builder
 # ---------------------------------------------------------
+
 
 def build_tfidf_vectorizer(
     max_features: int = 5000,
@@ -92,6 +92,7 @@ def build_tfidf_vectorizer(
 # Fit TF-IDF Model
 # ---------------------------------------------------------
 
+
 def tfidf_fit_transform(
     texts: List[str],
     vectorizer: TfidfVectorizer | None = None,
@@ -138,6 +139,7 @@ def tfidf_fit_transform(
 # Transform New Text
 # ---------------------------------------------------------
 
+
 def tfidf_transform(
     texts: List[str],
     vectorizer: TfidfVectorizer,
@@ -169,6 +171,7 @@ def tfidf_transform(
 # Vocabulary Extraction
 # ---------------------------------------------------------
 
+
 def get_feature_names(vectorizer: TfidfVectorizer) -> List[str]:
     """
     Return vocabulary terms from TF-IDF vectorizer.
@@ -180,6 +183,7 @@ def get_feature_names(vectorizer: TfidfVectorizer) -> List[str]:
 # ---------------------------------------------------------
 # Backward Compatibility Wrapper
 # ---------------------------------------------------------
+
 
 def tfidf_features(
     texts: List[str],

@@ -29,13 +29,19 @@ from collections import Counter
 
 import spacy
 
-
 # ---------------------------------------------------------
 # Load NLP Model
 # ---------------------------------------------------------
 
 NLP_MODEL = "en_core_web_sm"
-nlp = spacy.load(NLP_MODEL)
+_nlp = None
+
+
+def _get_nlp():
+    global _nlp
+    if _nlp is None:
+        _nlp = spacy.load(NLP_MODEL)
+    return _nlp
 
 
 # ---------------------------------------------------------
@@ -43,36 +49,57 @@ nlp = spacy.load(NLP_MODEL)
 # ---------------------------------------------------------
 
 VICTIM_WORDS = {
-    "victim", "suffer", "oppressed", "abused", "targeted",
-    "marginalized", "hurt", "persecuted"
+    "victim",
+    "suffer",
+    "oppressed",
+    "abused",
+    "targeted",
+    "marginalized",
+    "hurt",
+    "persecuted",
 }
 
 ENEMY_WORDS = {
-    "corrupt", "evil", "traitor", "enemy", "criminal",
-    "dangerous", "radical", "extremist", "destructive"
+    "corrupt",
+    "evil",
+    "traitor",
+    "enemy",
+    "criminal",
+    "dangerous",
+    "radical",
+    "extremist",
+    "destructive",
 }
 
 FEAR_WORDS = {
-    "crisis", "threat", "danger", "disaster",
-    "collapse", "chaos", "panic", "catastrophe"
+    "crisis",
+    "threat",
+    "danger",
+    "disaster",
+    "collapse",
+    "chaos",
+    "panic",
+    "catastrophe",
 }
 
 HERO_WORDS = {
-    "hero", "savior", "rescued", "defended",
-    "protect", "brave", "leader", "champion"
+    "hero",
+    "savior",
+    "rescued",
+    "defended",
+    "protect",
+    "brave",
+    "leader",
+    "champion",
 }
 
-BIAS_LEXICON = (
-    VICTIM_WORDS |
-    ENEMY_WORDS |
-    FEAR_WORDS |
-    HERO_WORDS
-)
+BIAS_LEXICON = VICTIM_WORDS | ENEMY_WORDS | FEAR_WORDS | HERO_WORDS
 
 
 # ---------------------------------------------------------
 # Data Structures
 # ---------------------------------------------------------
+
 
 @dataclass
 class NarrativeResult:
@@ -87,6 +114,7 @@ class NarrativeResult:
 # Sentence Tokenization
 # ---------------------------------------------------------
 
+
 def split_sentences(text: str) -> List[str]:
     sentences = re.split(r"[.!?]+", text)
     return [s.strip() for s in sentences if s.strip()]
@@ -96,6 +124,7 @@ def split_sentences(text: str) -> List[str]:
 # Entity Extraction
 # ---------------------------------------------------------
 
+
 def extract_entities(doc) -> List[str]:
     return [ent.text for ent in doc.ents]
 
@@ -103,6 +132,7 @@ def extract_entities(doc) -> List[str]:
 # ---------------------------------------------------------
 # Event Extraction
 # ---------------------------------------------------------
+
 
 def extract_events(doc) -> List[Dict]:
     """
@@ -127,11 +157,9 @@ def extract_events(doc) -> List[Dict]:
                 if child.dep_ in {"dobj", "pobj"}:
                     target = child.text
 
-            events.append({
-                "actor": actor,
-                "action": token.lemma_,
-                "target": target
-            })
+            events.append(
+                {"actor": actor, "action": token.lemma_, "target": target}
+            )
 
     return events
 
@@ -139,6 +167,7 @@ def extract_events(doc) -> List[Dict]:
 # ---------------------------------------------------------
 # Narrative Role Classification
 # ---------------------------------------------------------
+
 
 def classify_event(event: Dict) -> str:
 
@@ -166,6 +195,7 @@ def classify_event(event: Dict) -> str:
 # Token-Level Bias Heatmap
 # ---------------------------------------------------------
 
+
 def generate_bias_heatmap(doc) -> List[Dict]:
 
     heatmap = []
@@ -174,11 +204,13 @@ def generate_bias_heatmap(doc) -> List[Dict]:
 
         if token.text.lower() in BIAS_LEXICON:
 
-            heatmap.append({
-                "token": token.text,
-                "bias_type": "narrative_bias",
-                "position": token.i
-            })
+            heatmap.append(
+                {
+                    "token": token.text,
+                    "bias_type": "narrative_bias",
+                    "position": token.i,
+                }
+            )
 
     return heatmap
 
@@ -186,6 +218,7 @@ def generate_bias_heatmap(doc) -> List[Dict]:
 # ---------------------------------------------------------
 # Narrative Pattern Detection
 # ---------------------------------------------------------
+
 
 def detect_narrative_patterns(text: str) -> Dict:
 
@@ -199,7 +232,7 @@ def detect_narrative_patterns(text: str) -> Dict:
 
     for sentence in sentences:
 
-        doc = nlp(sentence)
+        doc = _get_nlp()(sentence)
 
         events = extract_events(doc)
 
@@ -209,18 +242,19 @@ def detect_narrative_patterns(text: str) -> Dict:
 
             if narrative_type != "neutral":
 
-                detected_patterns.append({
-                    "sentence": sentence,
-                    "pattern": narrative_type
-                })
+                detected_patterns.append(
+                    {"sentence": sentence, "pattern": narrative_type}
+                )
 
                 pattern_counter[narrative_type] += 1
 
-                narrative_events.append({
-                    "sentence": sentence,
-                    "event": event,
-                    "narrative": narrative_type
-                })
+                narrative_events.append(
+                    {
+                        "sentence": sentence,
+                        "event": event,
+                        "narrative": narrative_type,
+                    }
+                )
 
         bias_heatmap.extend(generate_bias_heatmap(doc))
 
@@ -230,14 +264,13 @@ def detect_narrative_patterns(text: str) -> Dict:
             "narrative_score": 0.0,
             "detected_patterns": [],
             "narrative_events": [],
-            "bias_heatmap": []
+            "bias_heatmap": [],
         }
 
     dominant_narrative = pattern_counter.most_common(1)[0][0]
 
     narrative_score = round(
-        sum(pattern_counter.values()) / max(len(sentences), 1),
-        4
+        sum(pattern_counter.values()) / max(len(sentences), 1), 4
     )
 
     return {
@@ -245,7 +278,7 @@ def detect_narrative_patterns(text: str) -> Dict:
         "narrative_score": narrative_score,
         "detected_patterns": detected_patterns,
         "narrative_events": narrative_events,
-        "bias_heatmap": bias_heatmap
+        "bias_heatmap": bias_heatmap,
     }
 
 

@@ -10,9 +10,9 @@ and cleaning training checkpoints.
 """
 
 import logging
+import shutil
 from pathlib import Path
 from typing import Optional, List
-
 
 # ---------------------------------------------------------
 # Logging
@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------
 # Checkpoint Manager
 # ---------------------------------------------------------
+
 
 class CheckpointManager:
     """
@@ -113,10 +114,7 @@ class CheckpointManager:
 
                 logger.info("Removing old checkpoint: %s", checkpoint)
 
-                for item in checkpoint.glob("*"):
-                    item.unlink()
-
-                checkpoint.rmdir()
+                shutil.rmtree(checkpoint, ignore_errors=False)
 
         except Exception:
 
@@ -128,6 +126,7 @@ class CheckpointManager:
 # ---------------------------------------------------------
 # Convenience Helper
 # ---------------------------------------------------------
+
 
 def get_last_checkpoint(checkpoint_dir: str | Path) -> Optional[Path]:
     """
