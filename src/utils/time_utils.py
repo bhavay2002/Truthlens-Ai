@@ -57,7 +57,11 @@ def current_datetime() -> datetime:
 # Runtime Measurement
 # ---------------------------------------------------------
 
-def measure_runtime(func: Callable[..., Any], *args, **kwargs) -> tuple[Any, float]:
+def measure_runtime(
+    func: Callable[..., Any],
+    *args,
+    **kwargs,
+) -> tuple[Any, float]:
     """
     Measure execution time of a function.
 
@@ -79,6 +83,10 @@ def measure_runtime(func: Callable[..., Any], *args, **kwargs) -> tuple[Any, flo
 
     runtime = end_time - start_time
 
-    logger.info("Function '%s' executed in %.3f seconds", func.__name__, runtime)
+    logger.info(
+        "Function '%s' executed in %.3f seconds",
+        func.__name__,
+        runtime,
+    )
 
     return result, runtime

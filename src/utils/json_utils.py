@@ -153,7 +153,10 @@ def append_json(
 
             if not isinstance(data, list):
 
-                raise ValueError("JSON file must contain a list to append entries")
+                raise ValueError(
+                    "JSON file must contain a list "
+                    "to append entries"
+                )
 
         else:
 
