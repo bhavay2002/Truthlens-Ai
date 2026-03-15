@@ -1,3 +1,14 @@
+"""
+File: settings.py
+
+Purpose
+-------
+Central settings system for TruthLens AI.
+
+This module loads configuration from config.yaml and converts
+it into structured dataclasses used across the project.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -5,8 +16,16 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from src.utils.config_loader import get_config_value, get_path, load_config
+from src.utils.config_loader import (
+    get_config_value,
+    get_path,
+    load_config,
+)
 
+
+# ---------------------------------------------------------
+# Model Settings
+# ---------------------------------------------------------
 
 @dataclass(frozen=True)
 class ModelSettings:
@@ -15,11 +34,19 @@ class ModelSettings:
     path: Path
 
 
+# ---------------------------------------------------------
+# Feature Settings
+# ---------------------------------------------------------
+
 @dataclass(frozen=True)
 class FeaturesSettings:
     tfidf_max_features: int
     tfidf_top_terms_per_doc: int
 
+
+# ---------------------------------------------------------
+# Data Settings
+# ---------------------------------------------------------
 
 @dataclass(frozen=True)
 class DataSettings:
@@ -30,6 +57,10 @@ class DataSettings:
     merged_dataset_path: Path
     test_set_path: Path
 
+
+# ---------------------------------------------------------
+# Paths Settings
+# ---------------------------------------------------------
 
 @dataclass(frozen=True)
 class PathsSettings:
@@ -42,6 +73,10 @@ class PathsSettings:
     cleaning_report_path: Path
     tfidf_vectorizer_path: Path
 
+
+# ---------------------------------------------------------
+# Training Settings
+# ---------------------------------------------------------
 
 @dataclass(frozen=True)
 class TrainingSettings:
@@ -67,6 +102,10 @@ class TrainingSettings:
     optuna_validation_split: float
 
 
+# ---------------------------------------------------------
+# Root Settings Object
+# ---------------------------------------------------------
+
 @dataclass(frozen=True)
 class AppSettings:
     model: ModelSettings
@@ -76,14 +115,26 @@ class AppSettings:
     training: TrainingSettings
 
 
+# ---------------------------------------------------------
+# Helper
+# ---------------------------------------------------------
+
 def _as_int_tuple(value: Any, fallback: tuple[int, ...]) -> tuple[int, ...]:
     if not isinstance(value, list) or not value:
         return fallback
     return tuple(int(v) for v in value)
 
 
+# ---------------------------------------------------------
+# Load Settings
+# ---------------------------------------------------------
+
 @lru_cache(maxsize=1)
 def load_settings() -> AppSettings:
+    """
+    Load application settings from config.yaml.
+    """
+
     config = load_config()
 
     model = ModelSettings(
@@ -108,22 +159,16 @@ def load_settings() -> AppSettings:
             get_config_value(config, "data", "augmentation_multiplier", default=2)
         ),
         cleaned_dataset_path=get_path(
-            config,
-            "data",
-            "cleaned_dataset_path",
-            default="data/processed/cleaned_dataset.csv",
+            config, "data", "cleaned_dataset_path",
+            default="data/processed/cleaned_dataset.csv"
         ),
         merged_dataset_path=get_path(
-            config,
-            "data",
-            "merged_dataset_path",
-            default="data/interim/merged_dataset.csv",
+            config, "data", "merged_dataset_path",
+            default="data/interim/merged_dataset.csv"
         ),
         test_set_path=get_path(
-            config,
-            "data",
-            "test_set_path",
-            default="data/processed/test_set.csv",
+            config, "data", "test_set_path",
+            default="data/processed/test_set.csv"
         ),
     )
 
@@ -132,34 +177,23 @@ def load_settings() -> AppSettings:
         logs_dir=get_path(config, "paths", "logs_dir", default="logs"),
         reports_dir=get_path(config, "paths", "reports_dir", default="reports"),
         training_log_path=get_path(
-            config,
-            "paths",
-            "training_log_path",
-            default="logs/training.log",
+            config, "paths", "training_log_path", default="logs/training.log"
         ),
         evaluation_results_path=get_path(
-            config,
-            "paths",
-            "evaluation_results_path",
-            default="reports/evaluation_results.json",
+            config, "paths", "evaluation_results_path",
+            default="reports/evaluation_results.json"
         ),
         confusion_matrix_path=get_path(
-            config,
-            "paths",
-            "confusion_matrix_path",
-            default="reports/confusion_matrix.png",
+            config, "paths", "confusion_matrix_path",
+            default="reports/confusion_matrix.png"
         ),
         cleaning_report_path=get_path(
-            config,
-            "paths",
-            "cleaning_report_path",
-            default="reports/data_cleaning_report.json",
+            config, "paths", "cleaning_report_path",
+            default="reports/data_cleaning_report.json"
         ),
         tfidf_vectorizer_path=get_path(
-            config,
-            "paths",
-            "tfidf_vectorizer_path",
-            default="models/tfidf_vectorizer.joblib",
+            config, "paths", "tfidf_vectorizer_path",
+            default="models/tfidf_vectorizer.joblib"
         ),
     )
 
