@@ -1,3 +1,29 @@
+"""
+File: feature_pipeline.py
+
+Purpose
+-------
+Unified feature engineering pipeline for TruthLens AI.
+
+This module combines multiple feature sources into a single
+tokenized representation appended to the original text.
+
+Features integrated:
+- TF-IDF keywords
+- Metadata signals
+- Source credibility
+- Bias lexicon features
+- Emotion lexicon features
+
+Input
+-----
+train_df : pandas.DataFrame
+
+Output
+------
+Tuple[pandas.DataFrame, TfidfVectorizer]
+"""
+
 from __future__ import annotations
 
 import logging
@@ -19,20 +45,48 @@ from src.features.text_features import (
     tfidf_fit_transform,
     tfidf_transform,
 )
-from src.utils.input_validation import ensure_dataframe, ensure_non_empty_text_column, ensure_positive_int
 
+from src.utils.input_validation import (
+    ensure_dataframe,
+    ensure_non_empty_text_column,
+    ensure_positive_int,
+)
+
+
+# ---------------------------------------------------------
+# Logging Configuration
+# ---------------------------------------------------------
 
 logger = logging.getLogger(__name__)
+
 _emotion_analyzer = EmotionLexiconAnalyzer()
 
 
+# ---------------------------------------------------------
+# Utility Helpers
+# ---------------------------------------------------------
+
 def _safe_token(value: object) -> str:
+    """
+    Normalize tokens for safe feature insertion.
+    """
+
     token = str(value).strip().lower()
+
     token = token.replace(" ", "_").replace(".", "_").replace("-", "_")
+
     return "".join(ch for ch in token if ch.isalnum() or ch == "_")
 
 
+# ---------------------------------------------------------
+# Metadata Token Generator
+# ---------------------------------------------------------
+
 def _metadata_token_block(row: pd.Series) -> str:
+    """
+    Convert metadata features into token strings.
+    """
+
     word_count = int(row.get("word_count", 0))
     sentence_count = int(row.get("sentence_count", 0))
     exclamation_count = int(row.get("exclamation_count", 0))
@@ -43,6 +97,7 @@ def _metadata_token_block(row: pd.Series) -> str:
     is_low_credibility = int(row.get("is_low_credibility", 0))
 
     domain = row.get("domain", "unknown")
+
     domain_token = _safe_token(domain) or "unknown"
 
     return " ".join(
@@ -60,31 +115,52 @@ def _metadata_token_block(row: pd.Series) -> str:
     )
 
 
+# ---------------------------------------------------------
+# TF-IDF Keyword Extraction
+# ---------------------------------------------------------
+
 def _top_tfidf_terms_for_row(
     matrix_row: Any,
     feature_names: list[str],
     top_terms_per_doc: int,
 ) -> str:
+    """
+    Extract top TF-IDF keywords for a document.
+    """
+
     if matrix_row.nnz == 0:
         return ""
 
     sorted_indices = np.argsort(matrix_row.data)[::-1][:top_terms_per_doc]
+
     feature_indices = matrix_row.indices[sorted_indices]
+
     tokens = [f"kw_{_safe_token(feature_names[idx])}" for idx in feature_indices]
+
     return " ".join(tokens)
 
+
+# ---------------------------------------------------------
+# Bias + Emotion Tokens
+# ---------------------------------------------------------
 
 def _clip_bin(value: float, factor: float = 10.0, max_bin: int = 20) -> int:
     return max(0, min(int(value * factor), max_bin))
 
 
 def _bias_emotion_token_block(text: str) -> str:
+    """
+    Convert bias and emotion signals into token features.
+    """
+
     text = str(text or "")
 
     bias_result = compute_bias_features(text)
+
     emotion_result = _emotion_analyzer.analyze(text)
 
     dominant_emotion = _safe_token(emotion_result.dominant_emotion or "neutral")
+
     media_bias = _safe_token(bias_result.media_bias or "neutral")
 
     sorted_emotions = sorted(
@@ -92,6 +168,7 @@ def _bias_emotion_token_block(text: str) -> str:
         key=lambda item: item[1],
         reverse=True,
     )
+
     top_emotions = [name for name, score in sorted_emotions if score > 0][:2]
 
     tokens = [
@@ -109,22 +186,9 @@ def _bias_emotion_token_block(text: str) -> str:
     return " ".join(tokens)
 
 
-def apply_feature_engineering(
-    df: pd.DataFrame,
-    text_column: str = "text",
-    tfidf_max_features: int = 5000,
-    top_terms_per_doc: int = 4,
-) -> Tuple[pd.DataFrame, TfidfVectorizer]:
-    """
-    Backward-compatible helper: fits TF-IDF on provided dataframe, then engineers features.
-    """
-    return fit_feature_pipeline(
-        df,
-        text_column=text_column,
-        tfidf_max_features=tfidf_max_features,
-        top_terms_per_doc=top_terms_per_doc,
-    )
-
+# ---------------------------------------------------------
+# Training Pipeline
+# ---------------------------------------------------------
 
 def fit_feature_pipeline(
     train_df: pd.DataFrame,
@@ -132,30 +196,46 @@ def fit_feature_pipeline(
     tfidf_max_features: int = 5000,
     top_terms_per_doc: int = 4,
 ) -> Tuple[pd.DataFrame, TfidfVectorizer]:
-    ensure_dataframe(train_df, name="train_df", required_columns=[text_column], min_rows=1)
+    """
+    Fit feature pipeline on training dataset only.
+    """
+
+    ensure_dataframe(train_df, name="train_df", required_columns=[text_column])
+
     ensure_non_empty_text_column(train_df, text_column, name="train_df")
+
     ensure_positive_int(tfidf_max_features, name="tfidf_max_features", min_value=10)
+
     ensure_positive_int(top_terms_per_doc, name="top_terms_per_doc", min_value=1)
 
-    logger.info("Fitting feature pipeline on training split only...")
+    logger.info("Fitting feature pipeline on training split")
 
     featured_df = add_source_features(train_df.copy())
+
     featured_df = extract_metadata_features(featured_df)
 
     vectorizer = build_tfidf_vectorizer(max_features=tfidf_max_features)
+
     tfidf_matrix, vectorizer = tfidf_fit_transform(
         featured_df[text_column].astype(str).tolist(),
         vectorizer=vectorizer,
     )
+
     feature_names = get_feature_names(vectorizer)
 
     keyword_tokens = [
-        _top_tfidf_terms_for_row(tfidf_matrix.getrow(i), feature_names, top_terms_per_doc)
+        _top_tfidf_terms_for_row(
+            tfidf_matrix.getrow(i),
+            feature_names,
+            top_terms_per_doc,
+        )
         for i in range(tfidf_matrix.shape[0])
     ]
 
     metadata_tokens = featured_df.apply(_metadata_token_block, axis=1)
+
     semantic_tokens = featured_df[text_column].astype(str).apply(_bias_emotion_token_block)
+
     featured_df["feature_tokens"] = (
         metadata_tokens
         + " "
@@ -165,11 +245,13 @@ def fit_feature_pipeline(
     ).str.strip()
 
     featured_df["engineered_text"] = (
-        featured_df[text_column].astype(str) + " [FEATURES] " + featured_df["feature_tokens"]
+        featured_df[text_column].astype(str)
+        + " [FEATURES] "
+        + featured_df["feature_tokens"]
     )
 
     logger.info(
-        "Feature engineering complete: %s rows, %s TF-IDF terms",
+        "Feature pipeline completed | rows=%s | tfidf_terms=%s",
         len(featured_df),
         len(feature_names),
     )
@@ -177,34 +259,50 @@ def fit_feature_pipeline(
     return featured_df, vectorizer
 
 
+# ---------------------------------------------------------
+# Transform Pipeline
+# ---------------------------------------------------------
+
 def transform_feature_pipeline(
     df: pd.DataFrame,
     vectorizer: TfidfVectorizer,
     text_column: str = "text",
     top_terms_per_doc: int = 4,
 ) -> pd.DataFrame:
-    ensure_dataframe(df, name="df", required_columns=[text_column], min_rows=1)
-    ensure_non_empty_text_column(df, text_column, name="df")
-    ensure_positive_int(top_terms_per_doc, name="top_terms_per_doc", min_value=1)
+    """
+    Apply trained feature pipeline to new dataset.
+    """
 
-    logger.info("Transforming split using training-fitted feature pipeline...")
+    ensure_dataframe(df, name="df", required_columns=[text_column])
+
+    ensure_non_empty_text_column(df, text_column, name="df")
+
+    logger.info("Applying trained feature pipeline")
 
     featured_df = add_source_features(df.copy())
+
     featured_df = extract_metadata_features(featured_df)
 
     tfidf_matrix = tfidf_transform(
         featured_df[text_column].astype(str).tolist(),
         vectorizer=vectorizer,
     )
+
     feature_names = get_feature_names(vectorizer)
 
     keyword_tokens = [
-        _top_tfidf_terms_for_row(tfidf_matrix.getrow(i), feature_names, top_terms_per_doc)
+        _top_tfidf_terms_for_row(
+            tfidf_matrix.getrow(i),
+            feature_names,
+            top_terms_per_doc,
+        )
         for i in range(tfidf_matrix.shape[0])
     ]
 
     metadata_tokens = featured_df.apply(_metadata_token_block, axis=1)
+
     semantic_tokens = featured_df[text_column].astype(str).apply(_bias_emotion_token_block)
+
     featured_df["feature_tokens"] = (
         metadata_tokens
         + " "
@@ -214,16 +312,31 @@ def transform_feature_pipeline(
     ).str.strip()
 
     featured_df["engineered_text"] = (
-        featured_df[text_column].astype(str) + " [FEATURES] " + featured_df["feature_tokens"]
+        featured_df[text_column].astype(str)
+        + " [FEATURES] "
+        + featured_df["feature_tokens"]
     )
 
-    logger.info("Feature transform complete: %s rows", len(featured_df))
+    logger.info("Feature transform completed | rows=%s", len(featureed_df))
+
     return featured_df
 
 
+# ---------------------------------------------------------
+# Save Vectorizer
+# ---------------------------------------------------------
+
 def save_vectorizer(vectorizer: TfidfVectorizer, output_path: str | Path) -> Path:
+    """
+    Persist TF-IDF vectorizer to disk.
+    """
+
     output_path = Path(output_path)
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
     joblib.dump(vectorizer, output_path)
+
     logger.info("Saved TF-IDF vectorizer to %s", output_path)
+
     return output_path

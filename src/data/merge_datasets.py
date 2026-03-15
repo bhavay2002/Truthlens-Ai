@@ -8,31 +8,55 @@ logger = logging.getLogger(__name__)
 SETTINGS = load_settings()
 RAW_PATH = SETTINGS.data.raw_dir
 INTERIM_PATH = SETTINGS.data.interim_dir
+REQUIRED_COLUMNS = ["title", "text", "label"]
+
+
+def _ensure_schema(df: pd.DataFrame) -> pd.DataFrame:
+    prepared = df.copy()
+
+    if "title" not in prepared.columns:
+        prepared["title"] = ""
+    if "text" not in prepared.columns:
+        raise ValueError("Dataset is missing required 'text' column")
+    if "label" not in prepared.columns:
+        raise ValueError("Dataset is missing required 'label' column")
+
+    prepared["title"] = prepared["title"].astype(str).fillna("").str.strip()
+    prepared["text"] = prepared["text"].astype(str).fillna("").str.strip()
+    prepared["label"] = prepared["label"].astype(int)
+
+    prepared = prepared[prepared["text"].str.len() > 0].reset_index(drop=True)
+    return prepared[REQUIRED_COLUMNS]
 
 
 def load_isot():
     """Load ISOT dataset"""
 
-    fake = pd.read_csv(RAW_PATH / "isot" / "Fake.csv")
-    true = pd.read_csv(RAW_PATH / "isot" / "True.csv")
+    fake_path = RAW_PATH / "isot" / "Fake.csv"
+    true_path = RAW_PATH / "isot" / "True.csv"
+
+    if not fake_path.exists():
+        raise FileNotFoundError(f"Missing ISOT fake file: {fake_path}")
+    if not true_path.exists():
+        raise FileNotFoundError(f"Missing ISOT true file: {true_path}")
+
+    fake = pd.read_csv(fake_path)
+    true = pd.read_csv(true_path)
 
     fake["label"] = 1
     true["label"] = 0
 
     df = pd.concat([fake, true], ignore_index=True)
-
-    df = df.rename(columns={
-        "title": "title",
-        "text": "text"
-    })
-
-    return df[["title", "text", "label"]]
+    return _ensure_schema(df)
 
 
 def load_liar():
     """Load LIAR dataset"""
 
     liar_path = RAW_PATH / "liar_dataset" / "train.tsv"
+    if not liar_path.exists():
+        raise FileNotFoundError(f"Missing LIAR file: {liar_path}")
+
     liar_columns = [
         "id",
         "label",
@@ -56,7 +80,7 @@ def load_liar():
     if "label" not in df.columns or "statement" not in df.columns:
         raise ValueError("LIAR dataset missing required columns: label/statement")
 
-    fake_labels = ["false", "pants-fire", "barely-true"]
+    fake_labels = {"false", "pants-fire", "pants on fire", "barely-true"}
 
     df["label"] = df["label"].astype(str).str.strip().str.lower().apply(
         lambda x: 1 if x in fake_labels else 0
@@ -67,7 +91,7 @@ def load_liar():
     df["title"] = ""
     df["text"] = df["text"].astype(str).fillna("").str.strip()
 
-    return df[["title", "text", "label"]]
+    return _ensure_schema(df)
 
 
 def load_fakenewsnet():
@@ -76,6 +100,9 @@ def load_fakenewsnet():
     rows = []
     source_roots = [RAW_PATH / "FakeNewsNet", RAW_PATH / "fakenewsnet"]
     source_root = next((path for path in source_roots if path.exists()), source_roots[0])
+    if not source_root.exists():
+        logger.warning("FakeNewsNet source directory not found: %s", source_root)
+        return pd.DataFrame(columns=REQUIRED_COLUMNS)
 
     for file in source_root.rglob("news content.json"):
 
@@ -86,30 +113,47 @@ def load_fakenewsnet():
             rows.append({
                 "title": data.get("title"),
                 "text": data.get("text"),
-                "label": 1 if "fake" in str(file) else 0
+                "label": 1 if "fake" in str(file).lower() else 0
             })
 
         except Exception:
             continue
 
-    return pd.DataFrame(rows)
+    if not rows:
+        return pd.DataFrame(columns=REQUIRED_COLUMNS)
+
+    return _ensure_schema(pd.DataFrame(rows))
 
 
 def merge_datasets():
     """Merge all datasets"""
 
-    logger.info("Loading ISOT dataset...")
-    isot = load_isot()
+    datasets = []
 
-    logger.info("Loading LIAR dataset...")
-    liar = load_liar()
+    for name, loader in [
+        ("ISOT", load_isot),
+        ("LIAR", load_liar),
+        ("FakeNewsNet", load_fakenewsnet),
+    ]:
+        try:
+            logger.info("Loading %s dataset...", name)
+            loaded = loader()
+            if loaded.empty:
+                logger.warning("%s dataset is empty and will be skipped", name)
+                continue
+            datasets.append(loaded)
+        except FileNotFoundError as error:
+            logger.warning("Skipping %s dataset: %s", name, error)
+        except Exception as error:
+            logger.warning("Skipping %s dataset due to load error: %s", name, error)
 
-    logger.info("Loading FakeNewsNet dataset...")
-    fakenewsnet = load_fakenewsnet()
+    if not datasets:
+        raise FileNotFoundError("No datasets could be loaded from configured raw paths")
 
-    df = pd.concat([isot, liar, fakenewsnet], ignore_index=True)
+    df = pd.concat(datasets, ignore_index=True)
+    df = _ensure_schema(df)
 
-    logger.info("Total samples: %s", len(df))
+    logger.info("Total samples after merge: %s", len(df))
 
     return df
 

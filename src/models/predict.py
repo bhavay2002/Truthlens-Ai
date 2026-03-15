@@ -1,6 +1,56 @@
 """
-Prediction module for TruthLens AI
-Loads trained model and performs fake news inference
+File: src/models/predict.py
+
+Purpose
+-------
+Provides inference utilities for the TruthLens AI fake news detection system.
+Loads the trained RoBERTa model and performs prediction on input news text.
+
+The module ensures that inference follows the same preprocessing pipeline
+used during training. If engineered text was used during training,
+the TF-IDF feature pipeline is applied before model inference.
+
+Key Features
+------------
+- Lazy loading of RoBERTa model and tokenizer
+- Optional TF-IDF feature transformation
+- Automatic CPU/GPU device selection
+- Supports both single-text and batch prediction
+
+Inputs
+------
+text : str
+    A single news article or headline.
+
+texts : List[str]
+    List of news texts for batch prediction.
+
+Outputs
+-------
+For single prediction:
+Dict[str, Union[str, float]]
+
+{
+    "label": "Fake" | "Real",
+    "fake_probability": float,
+    "confidence": float
+}
+
+For batch prediction:
+List[Dict[str, Union[str, float]]]
+
+Dependencies
+------------
+torch
+transformers
+pandas
+joblib
+logging
+
+Internal Modules
+----------------
+src.features.feature_pipeline
+src.utils.settings
 """
 
 import torch
@@ -37,7 +87,6 @@ def _resolve_label_indices(model) -> tuple[int, int]:
     """Resolve (real_idx, fake_idx) from model config; fallback to (0, 1)."""
 
     label2id = getattr(model.config, "label2id", None) or {}
-
     normalized = {str(k).strip().lower(): int(v) for k, v in label2id.items()}
 
     real_idx = normalized.get("real", 0)
@@ -56,6 +105,7 @@ def _load_vectorizer():
 
     if _vectorizer is None and not _vectorizer_load_attempted:
         _vectorizer_load_attempted = True
+
         if not VECTORIZER_PATH.exists():
             logger.warning(
                 "Vectorizer file not found at %s. Falling back to raw text inference.",
@@ -77,7 +127,7 @@ def _load_vectorizer():
 
 
 def _prepare_texts_for_inference(texts: List[str]) -> List[str]:
-    """Build model input text consistent with training text column."""
+    """Prepare input text consistent with training feature pipeline."""
 
     df = pd.DataFrame({"text": texts})
 
@@ -86,6 +136,7 @@ def _prepare_texts_for_inference(texts: List[str]) -> List[str]:
 
     if TRAINING_TEXT_COLUMN == "engineered_text":
         vectorizer = _load_vectorizer()
+
         if vectorizer is None:
             return df["text"].astype(str).tolist()
 
@@ -96,7 +147,9 @@ def _prepare_texts_for_inference(texts: List[str]) -> List[str]:
                 text_column="text",
                 top_terms_per_doc=TOP_TERMS_PER_DOC,
             )
+
             return transformed_df["engineered_text"].astype(str).tolist()
+
         except Exception as e:
             logger.warning(
                 "Feature transform failed during inference (%s). Falling back to raw text.",
@@ -105,9 +158,10 @@ def _prepare_texts_for_inference(texts: List[str]) -> List[str]:
             return df["text"].astype(str).tolist()
 
     logger.warning(
-        "Configured training text column '%s' is not supported at inference. Falling back to raw text.",
+        "Configured training text column '%s' not supported during inference. Using raw text.",
         TRAINING_TEXT_COLUMN,
     )
+
     return df["text"].astype(str).tolist()
 
 
@@ -116,7 +170,7 @@ def _prepare_texts_for_inference(texts: List[str]) -> List[str]:
 # -------------------------------------------------
 
 def load_model_and_tokenizer():
-    """Load model and tokenizer once (lazy loading)"""
+    """Load model and tokenizer once using lazy loading."""
 
     global _tokenizer, _model
 
@@ -147,19 +201,12 @@ def load_model_and_tokenizer():
 
 
 # -------------------------------------------------
-# Text Prediction
+# Single Prediction
 # -------------------------------------------------
 
 def predict(text: str) -> Dict[str, Union[str, float]]:
     """
     Predict fake news probability for a single text.
-
-    Returns:
-        {
-            "label": "Fake" or "Real",
-            "fake_probability": float,
-            "confidence": float
-        }
     """
 
     if not text or not text.strip():
@@ -168,39 +215,34 @@ def predict(text: str) -> Dict[str, Union[str, float]]:
     tokenizer, model = load_model_and_tokenizer()
     model_text = _prepare_texts_for_inference([text])[0]
 
-    try:
+    inputs = tokenizer(
+        model_text,
+        return_tensors="pt",
+        truncation=True,
+        padding=True,
+        max_length=MAX_LENGTH
+    )
 
-        inputs = tokenizer(
-            model_text,
-            return_tensors="pt",
-            truncation=True,
-            padding=True,
-            max_length=MAX_LENGTH
-        )
+    inputs = {k: v.to(_device) for k, v in inputs.items()}
 
-        inputs = {k: v.to(_device) for k, v in inputs.items()}
+    with torch.no_grad():
+        outputs = model(**inputs)
 
-        with torch.no_grad():
-            outputs = model(**inputs)
+    probs = torch.softmax(outputs.logits, dim=1)
 
-        probs = torch.softmax(outputs.logits, dim=1)
-        real_idx, fake_idx = _resolve_label_indices(model)
+    real_idx, fake_idx = _resolve_label_indices(model)
 
-        fake_prob = probs[0][fake_idx].item()
-        real_prob = probs[0][real_idx].item()
+    fake_prob = probs[0][fake_idx].item()
+    real_prob = probs[0][real_idx].item()
 
-        label = "Fake" if fake_prob > real_prob else "Real"
-        confidence = max(fake_prob, real_prob)
+    label = "Fake" if fake_prob > real_prob else "Real"
+    confidence = max(fake_prob, real_prob)
 
-        return {
-            "label": label,
-            "fake_probability": fake_prob,
-            "confidence": confidence
-        }
-
-    except Exception as e:
-        logger.error(f"Prediction error: {e}")
-        raise
+    return {
+        "label": label,
+        "fake_probability": fake_prob,
+        "confidence": confidence
+    }
 
 
 # -------------------------------------------------
@@ -209,7 +251,7 @@ def predict(text: str) -> Dict[str, Union[str, float]]:
 
 def predict_batch(texts: List[str]) -> List[Dict[str, Union[str, float]]]:
     """
-    Predict fake news probability for multiple texts
+    Predict fake news probability for multiple texts.
     """
 
     if not texts:
@@ -232,6 +274,7 @@ def predict_batch(texts: List[str]) -> List[Dict[str, Union[str, float]]]:
         outputs = model(**inputs)
 
     probs = torch.softmax(outputs.logits, dim=1)
+
     real_idx, fake_idx = _resolve_label_indices(model)
 
     results = []

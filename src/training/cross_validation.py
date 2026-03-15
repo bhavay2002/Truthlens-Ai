@@ -1,4 +1,22 @@
-﻿from __future__ import annotations
+﻿"""
+File: src/training/cross_validation.py
+
+Purpose
+-------
+Provide stratified cross-validation utilities for training pipelines.
+
+Supports flexible training functions compatible with HuggingFace
+Trainer-based pipelines or custom training functions.
+
+Features
+--------
+• StratifiedKFold splitting
+• Dynamic parameter handling
+• Automatic metric extraction
+• Robust validation
+"""
+
+from __future__ import annotations
 
 import inspect
 import logging
@@ -8,20 +26,43 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import StratifiedKFold
 
-from src.utils.input_validation import ensure_dataframe, ensure_non_empty_text_column, ensure_positive_int
+from src.utils.input_validation import (
+    ensure_dataframe,
+    ensure_non_empty_text_column,
+    ensure_positive_int,
+)
 from src.utils.settings import load_settings
-
 
 logger = logging.getLogger(__name__)
 SETTINGS = load_settings()
 
 
-def _resolve_metric(metrics: dict[str, Any], metric_name: str) -> float:
-    candidates = [metric_name, f"eval_{metric_name}", "eval_loss", "loss"]
+def _resolve_metric(
+    metrics: dict[str, Any],
+    metric_name: str,
+) -> float:
+    """Resolve metric name from trainer output dictionary."""
+    if not isinstance(metrics, dict):
+        raise TypeError(
+            "trainer.evaluate(...) must return a dictionary, "
+            f"received: {type(metrics).__name__}."
+        )
+
+    candidates = [
+        metric_name,
+        f"eval_{metric_name}",
+        "eval_loss",
+        "loss",
+    ]
+
     for key in candidates:
         if key in metrics:
             return float(metrics[key])
-    raise KeyError(f"Unable to resolve metric '{metric_name}' from keys: {sorted(metrics.keys())}")
+
+    raise KeyError(
+        f"Unable to resolve metric '{metric_name}' "
+        f"from keys: {sorted(metrics.keys())}"
+    )
 
 
 def cross_validate_model(
@@ -34,28 +75,48 @@ def cross_validate_model(
     metric_name: str | None = None,
     random_state: int | None = None,
 ) -> dict[str, Any]:
-    """
-    Run stratified cross-validation using a train function compatible with train_model().
+    """Run stratified cross-validation and return summary metrics."""
 
-    Notes:
-    - If `train_function` supports `validation_df` and `test_df`, fold validation data is passed in.
-    - Otherwise, `train_function` is called with training fold only and evaluates on the returned dataset.
-    """
+    ensure_dataframe(
+        df,
+        name="df",
+        required_columns=[text_column, "label"],
+        min_rows=3,
+    )
+    ensure_non_empty_text_column(
+        df,
+        text_column,
+        name="df",
+    )
 
-    ensure_dataframe(df, name="df", required_columns=[text_column, "label"], min_rows=3)
-    ensure_non_empty_text_column(df, text_column, name="df")
-
-    effective_splits = n_splits if n_splits is not None else SETTINGS.training.cross_validation_splits
-    ensure_positive_int(effective_splits, name="n_splits", min_value=2)
+    effective_splits = (
+        n_splits
+        if n_splits is not None
+        else SETTINGS.training.cross_validation_splits
+    )
+    ensure_positive_int(
+        effective_splits,
+        name="n_splits",
+        min_value=2,
+    )
 
     if df["label"].nunique() < 2:
-        raise ValueError("Cross-validation requires at least 2 classes in 'label'")
-
+        raise ValueError("Cross-validation requires at least 2 classes")
     if len(df) < effective_splits:
         raise ValueError("n_splits cannot exceed number of rows")
 
+    minimum_class_size = int(df["label"].value_counts().min())
+    if minimum_class_size < effective_splits:
+        raise ValueError(
+            "Each class must contain at least n_splits samples for stratified "
+            f"cross-validation. Smallest class has {minimum_class_size}, "
+            f"n_splits is {effective_splits}."
+        )
+
     effective_metric = metric_name or SETTINGS.training.cross_validation_metric
-    effective_seed = SETTINGS.training.seed if random_state is None else random_state
+    effective_seed = (
+        SETTINGS.training.seed if random_state is None else random_state
+    )
 
     skf = StratifiedKFold(
         n_splits=effective_splits,
@@ -88,9 +149,14 @@ def cross_validate_model(
         if supports_test_df:
             train_kwargs["test_df"] = fold_val_df
 
-        trainer, eval_dataset = train_function(fold_train_df, **train_kwargs)
-        metrics = trainer.evaluate(eval_dataset)
+        train_result = train_function(fold_train_df, **train_kwargs)
+        if not isinstance(train_result, tuple) or len(train_result) != 2:
+            raise TypeError(
+                "train_function must return (trainer, eval_dataset)."
+            )
 
+        trainer, eval_dataset = train_result
+        metrics = trainer.evaluate(eval_dataset)
         score = _resolve_metric(metrics, effective_metric)
         fold_scores.append(score)
 
