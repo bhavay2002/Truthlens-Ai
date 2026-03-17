@@ -81,12 +81,16 @@ def _extract_domain(url: Optional[str]) -> str:
             return ""
 
         raw_url = str(url).strip().lower()
-        parsed = urlparse(raw_url)
 
-        domain = parsed.netloc.lower()
-        if not domain:
-            # Handles bare domains like "bbc.com" without scheme.
-            domain = parsed.path.split("/")[0].lower()
+        if not raw_url:
+            return ""
+
+        # Ensure bare domains (e.g., "bbc.com") are parsed as hostnames.
+        candidate = raw_url if "://" in raw_url else f"http://{raw_url}"
+        parsed = urlparse(candidate)
+
+        # hostname safely strips credentials and ports.
+        domain = (parsed.hostname or "").strip().strip(".")
 
         if domain.startswith("www."):
             domain = domain[4:]

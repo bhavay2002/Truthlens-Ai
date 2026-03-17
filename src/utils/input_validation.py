@@ -102,7 +102,19 @@ def ensure_non_empty_text_column(
             f"'{text_column}'"
         )
 
-    if df[text_column].astype(str).str.strip().eq("").all():
+    def _normalize(value: object) -> str:
+        if value is None:
+            return ""
+
+        try:
+            if bool(pd.isna(value)):
+                return ""
+        except Exception:
+            pass
+
+        return str(value).strip()
+
+    if df[text_column].map(_normalize).eq("").all():
 
         raise ValueError(f"{name}.{text_column} cannot be entirely empty")
 
@@ -144,7 +156,21 @@ def ensure_non_empty_text_list(
     Validate list of text inputs.
     """
 
-    text_list = [str(item) for item in texts]
+    text_list: list[str] = []
+
+    for item in texts:
+        if item is None:
+            text_list.append("")
+            continue
+
+        try:
+            if bool(pd.isna(item)):
+                text_list.append("")
+                continue
+        except Exception:
+            pass
+
+        text_list.append(str(item))
 
     if not text_list:
 

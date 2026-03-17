@@ -124,10 +124,35 @@ class TruthLensModel(nn.Module):
         # Feature Fusion
         # -------------------------------------------------
 
-        extra_features = torch.stack(
-            [bias_score, emotion_score],
-            dim=1,
+        def _normalize_feature_shape(
+            feature: torch.Tensor,
+            feature_name: str,
+        ) -> torch.Tensor:
+            if feature.dim() == 1:
+                return feature
+
+            if feature.dim() == 2 and feature.size(1) == 1:
+                return feature.squeeze(1)
+
+            raise ValueError(
+                f"{feature_name} must have shape (batch,) or (batch, 1)"
+            )
+
+        bias_feature = _normalize_feature_shape(bias_score, "bias_score")
+        emotion_feature = _normalize_feature_shape(
+            emotion_score, "emotion_score"
         )
+
+        bias_feature = bias_feature.to(
+            cls_embedding.device,
+            dtype=cls_embedding.dtype,
+        )
+        emotion_feature = emotion_feature.to(
+            cls_embedding.device,
+            dtype=cls_embedding.dtype,
+        )
+
+        extra_features = torch.stack([bias_feature, emotion_feature], dim=1)
 
         fused_vector = torch.cat(
             [cls_embedding, extra_features],
