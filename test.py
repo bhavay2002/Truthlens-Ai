@@ -43,7 +43,7 @@ model = AutoModelForSequenceClassification.from_pretrained(MODEL_PATH)
 # Device setup
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(device)
-model.eval()
+model.eval()    
 
 print("Model loaded successfully on", device)
 

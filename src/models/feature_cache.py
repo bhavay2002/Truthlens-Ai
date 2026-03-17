@@ -10,6 +10,7 @@ results to avoid redundant processing during training and evaluation.
 """
 
 import logging
+import re
 from pathlib import Path
 from typing import Any, Optional
 
@@ -42,9 +43,20 @@ class FeatureCache:
     # Cache Path
     # -------------------------------------------------
 
+    @staticmethod
+    def _normalize_key(key: str) -> str:
+        normalized = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(key).strip())
+        normalized = normalized.strip("._")
+
+        if not normalized:
+            raise ValueError("Cache key must contain at least one valid token")
+
+        return normalized
+
     def _get_cache_path(self, key: str) -> Path:
 
-        filename = f"{key}.joblib"
+        safe_key = self._normalize_key(key)
+        filename = f"{safe_key}.joblib"
 
         return self.cache_dir / filename
 

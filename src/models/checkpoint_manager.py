@@ -41,6 +41,18 @@ class CheckpointManager:
     # Find Latest Checkpoint
     # -------------------------------------------------
 
+    @staticmethod
+    def _checkpoint_step(path: Path) -> int | None:
+        name = path.name
+        if not name.startswith("checkpoint-"):
+            return None
+
+        suffix = name.split("-", 1)[-1]
+        if not suffix.isdigit():
+            return None
+
+        return int(suffix)
+
     def get_latest_checkpoint(self) -> Optional[Path]:
         """
         Return the most recent checkpoint directory.
@@ -48,18 +60,13 @@ class CheckpointManager:
 
         try:
 
-            checkpoints = list(self.checkpoint_dir.glob("checkpoint-*"))
+            checkpoints = self.list_checkpoints()
 
             if not checkpoints:
 
                 logger.info("No checkpoints found")
 
                 return None
-
-            checkpoints = sorted(
-                checkpoints,
-                key=lambda p: int(p.name.split("-")[-1]),
-            )
 
             latest = checkpoints[-1]
 
@@ -82,12 +89,16 @@ class CheckpointManager:
         Return all checkpoint directories.
         """
 
-        checkpoints = list(self.checkpoint_dir.glob("checkpoint-*"))
+        checkpoint_pairs = []
 
-        checkpoints = sorted(
-            checkpoints,
-            key=lambda p: int(p.name.split("-")[-1]),
-        )
+        for checkpoint in self.checkpoint_dir.glob("checkpoint-*"):
+            step = self._checkpoint_step(checkpoint)
+            if step is not None:
+                checkpoint_pairs.append((step, checkpoint))
+
+        checkpoint_pairs.sort(key=lambda item: item[0])
+
+        checkpoints = [checkpoint for _, checkpoint in checkpoint_pairs]
 
         return checkpoints
 
@@ -101,6 +112,8 @@ class CheckpointManager:
         """
 
         try:
+            if max_checkpoints < 1:
+                raise ValueError("max_checkpoints must be >= 1")
 
             checkpoints = self.list_checkpoints()
 

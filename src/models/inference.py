@@ -29,14 +29,28 @@ _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def _resolve_label_indices(model) -> tuple[int, int]:
-    label2id = getattr(model.config, "label2id", None) or {}
-    normalized = {str(k).strip().lower(): int(v) for k, v in label2id.items()}
+    num_labels = int(getattr(model.config, "num_labels", 2) or 2)
 
+    label2id = getattr(model.config, "label2id", None) or {}
+    normalized = {}
+
+    for key, value in label2id.items():
+        try:
+            normalized[str(key).strip().lower()] = int(value)
+        except (TypeError, ValueError):
+            continue
+
+    fallback_fake = 1 if num_labels > 1 else 0
     real_idx = normalized.get("real", 0)
-    fake_idx = normalized.get("fake", 1)
+    fake_idx = normalized.get("fake", fallback_fake)
+
+    if real_idx < 0 or real_idx >= num_labels:
+        real_idx = 0
+    if fake_idx < 0 or fake_idx >= num_labels:
+        fake_idx = fallback_fake
 
     if real_idx == fake_idx:
-        return 0, 1
+        return (0, fallback_fake)
 
     return real_idx, fake_idx
 

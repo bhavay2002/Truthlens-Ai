@@ -10,7 +10,10 @@ import torch
 
 from src.features.feature_pipeline import transform_feature_pipeline
 from src.models.model_registry import ModelRegistry
-from src.utils.input_validation import ensure_non_empty_text
+from src.utils.input_validation import (
+    ensure_non_empty_text,
+    ensure_non_empty_text_list,
+)
 from src.utils.settings import load_settings
 
 logger = logging.getLogger(__name__)
@@ -18,7 +21,7 @@ logger = logging.getLogger(__name__)
 SETTINGS = load_settings()
 MAX_LENGTH = SETTINGS.model.max_length
 
-ID2LABEL = {0: "REAL", 1: "FAKE"}
+DEFAULT_ID2LABEL = {0: "REAL", 1: "FAKE"}
 
 _model = None
 _tokenizer = None
@@ -39,6 +42,33 @@ def _get_assets() -> tuple[Any, Any, Any]:
         _model.eval()
 
     return _model, _tokenizer, _vectorizer
+
+
+def _resolve_id2label(model: Any) -> dict[int, str]:
+    id2label = getattr(model.config, "id2label", None) or {}
+    resolved: dict[int, str] = {}
+
+    for key, value in id2label.items():
+        try:
+            resolved[int(key)] = str(value).upper()
+        except (TypeError, ValueError):
+            continue
+
+    if resolved:
+        return resolved
+
+    label2id = getattr(model.config, "label2id", None) or {}
+    for label, idx in label2id.items():
+        try:
+            resolved[int(idx)] = str(label).upper()
+        except (TypeError, ValueError):
+            continue
+
+    return resolved or dict(DEFAULT_ID2LABEL)
+
+
+def _label_for_index(index: int, mapping: dict[int, str]) -> str:
+    return mapping.get(index, f"LABEL_{index}")
 
 
 def _prepare_model_text(text: str, vectorizer) -> str:
@@ -80,12 +110,14 @@ def predict_text(text: str) -> Dict[str, Any]:
         probs = torch.softmax(logits, dim=1)
         confidence, pred_class = torch.max(probs, dim=1)
 
-    prediction = ID2LABEL[pred_class.item()]
+    id2label = _resolve_id2label(model)
+    prediction = _label_for_index(int(pred_class.item()), id2label)
     confidence_value = float(confidence.item())
 
-    probabilities = {
-        ID2LABEL[i]: float(probs[0][i].item()) for i in range(len(ID2LABEL))
-    }
+    probabilities = {}
+    for i in range(int(probs.shape[1])):
+        label = _label_for_index(i, id2label)
+        probabilities[label] = float(probs[0][i].item())
 
     logger.info(
         "Prediction completed | class=%s | confidence=%.3f",
@@ -103,4 +135,8 @@ def predict_text(text: str) -> Dict[str, Any]:
 def predict_batch(texts: list[str]) -> list[Dict[str, Any]]:
     """Run predictions on multiple texts."""
 
-    return [predict_text(text) for text in texts]
+    normalized = ensure_non_empty_text_list(texts)
+    for idx, text in enumerate(normalized):
+        ensure_non_empty_text(text, name=f"texts[{idx}]")
+
+    return [predict_text(text) for text in normalized]

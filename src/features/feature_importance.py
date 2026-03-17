@@ -89,7 +89,19 @@ def compute_feature_importance(
                 "Model does not support coefficient-based importance"
             )
 
-        importance = np.abs(model.coef_[0])
+        coef = np.asarray(model.coef_)
+        if coef.ndim == 1:
+            importance = np.abs(coef)
+        elif coef.ndim == 2:
+            # Support multiclass estimators by aggregating across classes.
+            importance = np.mean(np.abs(coef), axis=0)
+        else:
+            raise ValueError("Model coefficients must be 1D or 2D")
+
+        if len(feature_names) != len(importance):
+            raise ValueError(
+                "feature_names length does not match model coefficients"
+            )
 
         category_scores = {}
 
@@ -97,7 +109,7 @@ def compute_feature_importance(
 
             category = categorize_feature(feature)
 
-            score = importance[idx]
+            score = float(importance[idx])
 
             category_scores.setdefault(category, 0.0)
 
@@ -136,10 +148,24 @@ def get_top_features(
     Return top individual features by importance.
     """
 
+    if top_k <= 0:
+        return []
+
     if not hasattr(model, "coef_"):
         raise ValueError("Model does not support coefficient-based importance")
 
-    importance = np.abs(model.coef_[0])
+    coef = np.asarray(model.coef_)
+    if coef.ndim == 1:
+        importance = np.abs(coef)
+    elif coef.ndim == 2:
+        importance = np.mean(np.abs(coef), axis=0)
+    else:
+        raise ValueError("Model coefficients must be 1D or 2D")
+
+    if len(feature_names) != len(importance):
+        raise ValueError(
+            "feature_names length does not match model coefficients"
+        )
 
     indices = np.argsort(importance)[::-1][:top_k]
 

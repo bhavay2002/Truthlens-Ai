@@ -65,9 +65,11 @@ def _count_sentences(text: Optional[str]) -> int:
     if text is None or pd.isna(text):
         return 0
 
-    sentences = re.split(r"[.!?]+", str(text))
+    sentences = [
+        s.strip() for s in re.split(r"[.!?]+", str(text)) if s.strip()
+    ]
 
-    return max(0, len(sentences) - 1)
+    return len(sentences)
 
 
 def _count_exclamations(text: Optional[str]) -> int:

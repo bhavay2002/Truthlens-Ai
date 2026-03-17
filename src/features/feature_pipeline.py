@@ -78,6 +78,29 @@ def _safe_token(value: object) -> str:
     return "".join(ch for ch in token if ch.isalnum() or ch == "_")
 
 
+def _safe_int(value: object, default: int = 0) -> int:
+    try:
+        if value is None:
+            return default
+        if isinstance(value, (float, np.floating)) and not np.isfinite(value):
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(value: object, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        result = float(value)
+        if not np.isfinite(result):
+            return default
+        return result
+    except (TypeError, ValueError):
+        return default
+
+
 # ---------------------------------------------------------
 # Metadata Token Generator
 # ---------------------------------------------------------
@@ -88,14 +111,14 @@ def _metadata_token_block(row: pd.Series) -> str:
     Convert metadata features into token strings.
     """
 
-    word_count = int(row.get("word_count", 0))
-    sentence_count = int(row.get("sentence_count", 0))
-    exclamation_count = int(row.get("exclamation_count", 0))
-    question_count = int(row.get("question_count", 0))
-    uppercase_ratio = float(row.get("uppercase_ratio", 0.0))
-    source_credibility = int(row.get("source_credibility", 0))
-    is_high_credibility = int(row.get("is_high_credibility", 0))
-    is_low_credibility = int(row.get("is_low_credibility", 0))
+    word_count = _safe_int(row.get("word_count", 0))
+    sentence_count = _safe_int(row.get("sentence_count", 0))
+    exclamation_count = _safe_int(row.get("exclamation_count", 0))
+    question_count = _safe_int(row.get("question_count", 0))
+    uppercase_ratio = _safe_float(row.get("uppercase_ratio", 0.0))
+    source_credibility = _safe_int(row.get("source_credibility", 0))
+    is_high_credibility = _safe_int(row.get("is_high_credibility", 0))
+    is_low_credibility = _safe_int(row.get("is_low_credibility", 0))
 
     domain = row.get("domain", "unknown")
 
@@ -150,7 +173,8 @@ def _top_tfidf_terms_for_row(
 
 
 def _clip_bin(value: float, factor: float = 10.0, max_bin: int = 20) -> int:
-    return max(0, min(int(value * factor), max_bin))
+    numeric_value = _safe_float(value, default=0.0)
+    return max(0, min(int(numeric_value * factor), max_bin))
 
 
 def _bias_emotion_token_block(text: str) -> str:
@@ -291,6 +315,9 @@ def transform_feature_pipeline(
     ensure_dataframe(df, name="df", required_columns=[text_column])
 
     ensure_non_empty_text_column(df, text_column, name="df")
+    ensure_positive_int(
+        top_terms_per_doc, name="top_terms_per_doc", min_value=1
+    )
 
     logger.info("Applying trained feature pipeline")
 
