@@ -1,284 +1,310 @@
 """
-TruthLens AI
-Bias Lexicon Detection Module
+File Name: bias_lexicon.py
+Module: Feature Engineering - Bias Lexicon Management
 
-Detects subjective, propagandistic, and emotionally loaded language.
+Description:
+    Supports loading, normalization, validation, and querying of
+    bias-related lexicons across multiple formats.
 
-Capabilities:
-    • Weighted bias scoring
-    • Sentence-level bias heatmap
-    • Token-level bias attribution
-    • Media bias estimation
-    • Contextual bias hooks
-    • Transformer bias classifier support
+    Features:
+        • multi-format lexicon loading
+        • phrase lexicon support
+        • weighted lexicons
+        • fast token lookup
+        • batch token matching
+        • lexicon statistics and diagnostics
 
-Outputs:
-    bias_score
-    biased_tokens
-    sentence_heatmap
-    media_bias
+Dependencies:
+    logging
+    pathlib
+    typing
+    json
+    yaml
 """
 
-from __future__ import annotations
+import json
+import logging
+from pathlib import Path
+from typing import Dict, List, Set, Iterable, Tuple, Optional
 
-import re
-from dataclasses import dataclass
-from typing import Dict, List, Tuple
-
-# ---------------------------------------------------------
-# Bias Lexicons with Weights
-# ---------------------------------------------------------
-
-BIAS_LEXICON = {
-    # Emotional / loaded language
-    "shocking": 1.8,
-    "outrageous": 1.6,
-    "disastrous": 1.7,
-    "corrupt": 2.0,
-    "disgraceful": 1.7,
-    "evil": 2.2,
-    "scandalous": 1.8,
-    "unbelievable": 1.4,
-    "ridiculous": 1.5,
-    "horrifying": 1.9,
-    "catastrophic": 2.1,
-    "absurd": 1.5,
-    "disturbing": 1.6,
-    # Propaganda framing
-    "regime": 1.5,
-    "propaganda": 1.9,
-    "agenda": 1.6,
-    "brainwash": 2.0,
-    "manipulate": 1.8,
-    "elite": 1.3,
-    "deep": 1.4,
-    "state": 1.4,
-    "cover": 1.6,
-    "hoax": 1.9,
-    "conspiracy": 1.8,
-    "traitor": 2.2,
-    "enemy": 1.6,
-    "fake": 1.5,
-    # Opinion indicators
-    "clearly": 1.3,
-    "obviously": 1.4,
-    "undoubtedly": 1.5,
-    "certainly": 1.2,
-    "apparently": 1.1,
-    "arguably": 1.2,
-    "supposedly": 1.3,
-    "allegedly": 1.1,
-    "frankly": 1.2,
-    "honestly": 1.1,
-    "fortunately": 1.1,
-    "unfortunately": 1.2,
-}
+import yaml
 
 
-# ---------------------------------------------------------
-# Political Bias Indicators
-# ---------------------------------------------------------
-
-LEFT_LEXICON = {
-    "climate justice",
-    "systemic inequality",
-    "wealth tax",
-    "social justice",
-    "corporate greed",
-}
-
-RIGHT_LEXICON = {
-    "deep state",
-    "radical left",
-    "fake news",
-    "illegal immigrants",
-    "globalist agenda",
-}
+logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------
-# Data Classes
-# ---------------------------------------------------------
-
-
-@dataclass
-class BiasResult:
-    bias_score: float
-    biased_tokens: List[str]
-    token_weights: Dict[str, float]
-    sentence_heatmap: List[Dict]
-    media_bias: str
-
-
-# ---------------------------------------------------------
-# Tokenization
-# ---------------------------------------------------------
-
-
-def tokenize(text: str) -> List[str]:
+class BiasLexiconManager:
     """
-    Lowercase tokenization using regex.
-    """
-    text = text.lower()
-    return re.findall(r"\b[a-z]+\b", text)
+    Advanced lexicon manager for bias detection.
 
-
-def split_sentences(text: str) -> List[str]:
-    """
-    Sentence segmentation.
-    """
-    sentences = re.split(r"[.!?]+", text)
-    return [s.strip() for s in sentences if s.strip()]
-
-
-# ---------------------------------------------------------
-# Weighted Bias Scoring
-# ---------------------------------------------------------
-
-
-def compute_weighted_bias(tokens: List[str]) -> Tuple[float, Dict[str, float]]:
-    """
-    Compute weighted bias score.
-
-    Score = sum(weights of biased tokens) / total tokens
+    Supports:
+        • token lexicons
+        • phrase lexicons
+        • weighted lexicons
     """
 
-    token_weights = {}
+    SUPPORTED_EXTENSIONS = {".txt", ".json", ".yaml", ".yml"}
 
-    weighted_sum = 0.0
+    def __init__(self, lexicon_path: str) -> None:
 
-    for token in tokens:
-        if token in BIAS_LEXICON:
-            weight = BIAS_LEXICON[token]
-            token_weights[token] = weight
-            weighted_sum += weight
+        if not isinstance(lexicon_path, str) or not lexicon_path.strip():
+            raise ValueError("lexicon_path must be a non-empty string")
 
-    if len(tokens) == 0:
-        return 0.0, {}
+        self.lexicon_path: Path = Path(lexicon_path)
 
-    bias_score = weighted_sum / len(tokens)
+        if not self.lexicon_path.exists():
+            raise FileNotFoundError(f"Lexicon file not found: {lexicon_path}")
 
-    return round(bias_score, 4), token_weights
+        if self.lexicon_path.suffix.lower() not in self.SUPPORTED_EXTENSIONS:
+            raise ValueError(f"Unsupported format: {self.lexicon_path.suffix}")
 
+        # token lexicon
+        self.lexicon: Set[str] = set()
 
-# ---------------------------------------------------------
-# Sentence Heatmap
-# ---------------------------------------------------------
+        # phrase lexicon (multi-word)
+        self.phrase_lexicon: Set[str] = set()
 
+        # optional weights
+        self.weights: Dict[str, float] = {}
 
-def compute_sentence_heatmap(text: str) -> List[Dict]:
-    """
-    Compute sentence-level bias heatmap.
-    """
+        self._load_lexicon()
 
-    sentences = split_sentences(text)
+        logger.info(
+            "Bias lexicon loaded: %d tokens | %d phrases",
+            len(self.lexicon),
+            len(self.phrase_lexicon),
+        )
 
-    heatmap = []
+    # -----------------------------------------------------
 
-    for sentence in sentences:
+    def _load_lexicon(self) -> None:
 
-        tokens = tokenize(sentence)
+        suffix = self.lexicon_path.suffix.lower()
 
-        score, _ = compute_weighted_bias(tokens)
+        try:
 
-        heatmap.append({"sentence": sentence, "bias_score": score})
+            if suffix == ".txt":
+                terms = self._load_txt()
 
-    return heatmap
+            elif suffix == ".json":
+                terms = self._load_json()
 
+            elif suffix in {".yaml", ".yml"}:
+                terms = self._load_yaml()
 
-# ---------------------------------------------------------
-# Media Bias Classification
-# ---------------------------------------------------------
+            else:
+                raise ValueError("Unsupported lexicon format")
 
+            self._parse_terms(terms)
 
-def classify_media_bias(text: str) -> str:
-    """
-    Simple heuristic political bias classifier.
-    """
+        except Exception as exc:
+            logger.exception("Lexicon loading failed")
+            raise RuntimeError("Lexicon initialization failed") from exc
 
-    text_lower = text.lower()
+    # -----------------------------------------------------
 
-    left_hits = sum(1 for term in LEFT_LEXICON if term in text_lower)
-    right_hits = sum(1 for term in RIGHT_LEXICON if term in text_lower)
+    def _parse_terms(self, terms: Iterable) -> None:
+        """
+        Parse terms and detect:
+            • tokens
+            • phrases
+            • weighted entries
+        """
 
-    if left_hits > right_hits:
-        return "Left"
-    elif right_hits > left_hits:
-        return "Right"
-    else:
-        return "Neutral"
+        for item in terms:
 
+            if isinstance(item, str):
 
-# ---------------------------------------------------------
-# Main Bias Detection Pipeline
-# ---------------------------------------------------------
+                term = item.strip().lower()
 
+                if " " in term:
+                    self.phrase_lexicon.add(term)
+                else:
+                    self.lexicon.add(term)
 
-def compute_bias_features(text: str) -> BiasResult:
-    """
-    Main entry point used by TruthLens pipeline.
-    """
+            elif isinstance(item, dict):
 
-    tokens = tokenize(text)
+                term = item.get("term")
+                weight = item.get("weight", 1.0)
 
-    bias_score, token_weights = compute_weighted_bias(tokens)
+                if not isinstance(term, str):
+                    continue
 
-    biased_tokens = list(token_weights.keys())
+                term = term.strip().lower()
 
-    sentence_heatmap = compute_sentence_heatmap(text)
+                if " " in term:
+                    self.phrase_lexicon.add(term)
+                else:
+                    self.lexicon.add(term)
 
-    media_bias = classify_media_bias(text)
+                self.weights[term] = float(weight)
 
-    return BiasResult(
-        bias_score=bias_score,
-        biased_tokens=biased_tokens,
-        token_weights=token_weights,
-        sentence_heatmap=sentence_heatmap,
-        media_bias=media_bias,
-    )
+    # -----------------------------------------------------
 
+    def _load_txt(self) -> List[str]:
 
-# ---------------------------------------------------------
-# Optional: BERT Bias Classifier Hook
-# ---------------------------------------------------------
+        with self.lexicon_path.open("r", encoding="utf-8") as f:
+            return [line.strip() for line in f if line.strip()]
 
+    # -----------------------------------------------------
 
-def bert_bias_classifier(text: str, model=None, tokenizer=None) -> Dict:
-    """
-    Contextual bias detection using transformer models.
+    def _load_json(self) -> List:
 
-    Expected model:
-        fine-tuned BERT/RoBERTa bias classifier
-    """
+        with self.lexicon_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
 
-    if model is None or tokenizer is None:
-        return {"bias_probability": None}
+        if isinstance(data, list):
+            return data
 
-    inputs = tokenizer(text, return_tensors="pt", truncation=True)
+        if isinstance(data, dict):
 
-    outputs = model(**inputs)
+            terms: List = []
 
-    probs = outputs.logits.softmax(dim=1)
+            for value in data.values():
+                if isinstance(value, list):
+                    terms.extend(value)
 
-    bias_prob = probs[0][1].item()
+            return terms
 
-    return {"bias_probability": round(bias_prob, 4)}
+        raise ValueError("Invalid JSON lexicon structure")
 
+    # -----------------------------------------------------
 
-# ---------------------------------------------------------
-# Example Usage
-# ---------------------------------------------------------
+    def _load_yaml(self) -> List:
 
-if __name__ == "__main__":
+        with self.lexicon_path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
 
-    sample_text = """
-    This shocking scandal proves the corrupt regime is hiding the truth.
-    Obviously the elite are manipulating the public.
-    """
+        if isinstance(data, list):
+            return data
 
-    result = compute_bias_features(sample_text)
+        if isinstance(data, dict):
 
-    print("Bias Score:", result.bias_score)
-    print("Biased Tokens:", result.biased_tokens)
-    print("Media Bias:", result.media_bias)
-    print("Sentence Heatmap:", result.sentence_heatmap)
+            terms: List = []
+
+            for value in data.values():
+                if isinstance(value, list):
+                    terms.extend(value)
+
+            return terms
+
+        raise ValueError("Invalid YAML lexicon structure")
+
+    # -----------------------------------------------------
+
+    def contains(self, token: str) -> bool:
+
+        if not isinstance(token, str):
+            raise ValueError("token must be a string")
+
+        return token.lower().strip() in self.lexicon
+
+    # -----------------------------------------------------
+
+    def phrase_matches(self, text: str) -> List[str]:
+        """
+        Detect phrase lexicon matches.
+        """
+
+        text = text.lower()
+
+        matches = []
+
+        for phrase in self.phrase_lexicon:
+            if phrase in text:
+                matches.append(phrase)
+
+        return matches
+
+    # -----------------------------------------------------
+
+    def count_matches(self, tokens: Iterable[str]) -> int:
+
+        matches = 0
+
+        for token in tokens:
+
+            if isinstance(token, str) and token.lower().strip() in self.lexicon:
+                matches += 1
+
+        return matches
+
+    # -----------------------------------------------------
+
+    def weighted_score(self, tokens: Iterable[str]) -> float:
+        """
+        Compute weighted bias score using lexicon weights.
+        """
+
+        score = 0.0
+
+        for token in tokens:
+
+            token = token.lower().strip()
+
+            if token in self.weights:
+                score += self.weights[token]
+
+            elif token in self.lexicon:
+                score += 1.0
+
+        return score
+
+    # -----------------------------------------------------
+
+    def batch_match(self, documents: Iterable[List[str]]) -> List[int]:
+        """
+        Efficient lexicon match counts for multiple documents.
+        """
+
+        results: List[int] = []
+
+        for tokens in documents:
+            results.append(self.count_matches(tokens))
+
+        return results
+
+    # -----------------------------------------------------
+
+    def coverage(self, tokens: Iterable[str]) -> float:
+        """
+        Measure lexicon coverage over token list.
+        """
+
+        tokens = list(tokens)
+
+        if not tokens:
+            return 0.0
+
+        matches = self.count_matches(tokens)
+
+        return matches / len(tokens)
+
+    # -----------------------------------------------------
+
+    def get_statistics(self) -> Dict[str, int]:
+
+        return {
+            "token_terms": len(self.lexicon),
+            "phrase_terms": len(self.phrase_lexicon),
+            "weighted_terms": len(self.weights),
+        }
+
+    # -----------------------------------------------------
+
+    def get_all_terms(self) -> Set[str]:
+
+        return set(self.lexicon)
+
+    # -----------------------------------------------------
+
+    def export(self) -> Dict:
+        """
+        Export lexicon for reproducibility.
+        """
+
+        return {
+            "tokens": list(self.lexicon),
+            "phrases": list(self.phrase_lexicon),
+            "weights": self.weights,
+        }

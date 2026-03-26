@@ -1,186 +1,250 @@
 """
-TruthLens AI
-Emotion Detection Pipeline
+File Name: emotion_detector.py
+Module: Emotion Analysis
 
-Central orchestration module for emotion analysis.
+Description:
+     emotion detection module for TruthLens AI.
 
-Combines signals from:
-    • emotion_lexicon.py
-    • emotion_intensity.py
-    • manipulation_patterns.py
+    Provides:
+        • lexicon-based emotion inference
+        • emotion intensity estimation
+        • negation-aware emotion scoring
+        • batch processing
+        • transformer-compatible feature vectors
 
-Capabilities
-------------
-• Emotion distribution
-• Dominant emotion detection
-• Emotion intensity scoring
-• Emotional manipulation detection
-• Emotion entropy (diversity metric)
 """
 
-from __future__ import annotations
+import logging
+from collections import Counter
+from typing import Dict, List, Optional, Iterable
 
-from dataclasses import asdict, dataclass
-from typing import Dict
-import math
+import numpy as np
+import spacy
+from spacy.tokens import Doc
 
-from .emotion_lexicon import EmotionLexiconAnalyzer
-from .emotion_intensity import EmotionIntensityAnalyzer
-from .manipulation_patterns import detect_emotion_manipulation
-
-# ---------------------------------------------------------
-# Result Structure
-# ---------------------------------------------------------
-
-
-@dataclass
-class EmotionDetectionResult:
-    emotion_scores: Dict[str, float]
-    dominant_emotion: str
-    emotion_entropy: float
-    emotion_intensity: float
-    manipulation_score: float
-    manipulation_type: str
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------
-# Utility Functions
+# Feature schema for deterministic ML input
 # ---------------------------------------------------------
 
-
-def compute_emotion_entropy(emotion_scores: Dict[str, float]) -> float:
-    """
-    Compute entropy of emotion distribution.
-
-    High entropy -> diverse emotions
-    Low entropy -> single dominant emotion
-    """
-
-    entropy = 0.0
-
-    for value in emotion_scores.values():
-
-        if value > 0:
-            entropy -= value * math.log(value)
-
-    return round(entropy, 4)
-
-
-def get_dominant_emotion(emotion_scores: Dict[str, float]) -> str:
-
-    if not emotion_scores:
-        return "neutral"
-
-    dominant = max(emotion_scores, key=emotion_scores.get)
-
-    if emotion_scores[dominant] == 0:
-        return "neutral"
-
-    return dominant
+EMOTION_SCHEMA = [
+    "emotion_anger",
+    "emotion_fear",
+    "emotion_joy",
+    "emotion_sadness",
+    "emotion_surprise",
+    "emotion_disgust",
+    "emotion_trust",
+    "emotion_anticipation",
+    "emotion_intensity",
+]
 
 
 # ---------------------------------------------------------
-# Emotion Detection Pipeline
+# Linguistic helpers
+# ---------------------------------------------------------
+
+NEGATIONS = {"not", "never", "no", "none"}
+
+INTENSIFIERS = {
+    "very",
+    "extremely",
+    "highly",
+    "deeply",
+    "incredibly",
+    "strongly",
+}
+
+
+# ---------------------------------------------------------
+# Emotion Detector
 # ---------------------------------------------------------
 
 
 class EmotionDetector:
-    """
-    Main emotion analysis engine for TruthLens AI.
-    """
 
-    def __init__(self):
+    DEFAULT_EMOTIONS = [
+        "anger",
+        "fear",
+        "joy",
+        "sadness",
+        "surprise",
+        "disgust",
+        "trust",
+        "anticipation",
+    ]
 
-        self.lexicon_analyzer = EmotionLexiconAnalyzer()
-        self.intensity_analyzer = EmotionIntensityAnalyzer()
+    def __init__(
+        self,
+        emotion_lexicon: Optional[Dict[str, List[str]]] = None,
+        spacy_model: str = "en_core_web_sm",
+    ):
+
+        try:
+            self.nlp = spacy.load(spacy_model)
+        except Exception as exc:
+            logger.exception("spaCy load failed")
+            raise RuntimeError("spaCy initialization failed") from exc
+
+        self.emotion_lexicon = self._normalize_lexicon(emotion_lexicon)
+
+        logger.info("EmotionDetector initialized")
 
     # -----------------------------------------------------
 
-    def analyze(self, text: str) -> EmotionDetectionResult:
+    def _normalize_lexicon(
+        self,
+        emotion_lexicon: Optional[Dict[str, List[str]]],
+    ) -> Dict[str, set]:
 
-        # -------------------------------------------------
-        # 1. Base emotion detection
-        # -------------------------------------------------
+        normalized = {}
 
-        lexicon_result = self.lexicon_analyzer.analyze(text)
+        if emotion_lexicon is None:
+            for e in self.DEFAULT_EMOTIONS:
+                normalized[e] = set()
+            return normalized
 
-        emotion_scores = lexicon_result.emotion_scores
+        for emotion, words in emotion_lexicon.items():
 
-        # -------------------------------------------------
-        # 2. Emotion intensity
-        # -------------------------------------------------
+            normalized[emotion.lower()] = {
+                w.strip().lower()
+                for w in words
+                if isinstance(w, str) and w.strip()
+            }
 
-        intensity_result = self.intensity_analyzer.analyze(text)
+        return normalized
 
-        intensity_score = intensity_result.intensity_score
+    # -----------------------------------------------------
 
-        # -------------------------------------------------
-        # 3. Emotional manipulation
-        # -------------------------------------------------
+    def detect(self, text: str) -> Dict[str, float]:
 
-        manipulation_result = detect_emotion_manipulation(text)
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("text must be a non-empty string")
 
-        manipulation_score = manipulation_result["manipulation_score"]
-        manipulation_type = manipulation_result["manipulation_type"]
+        doc = self.nlp(text)
 
-        # -------------------------------------------------
-        # 4. Dominant emotion
-        # -------------------------------------------------
+        tokens = [t.text.lower() for t in doc if t.is_alpha]
 
-        dominant_emotion = get_dominant_emotion(emotion_scores)
+        emotion_counts = self._emotion_counts(tokens)
 
-        # -------------------------------------------------
-        # 5. Emotion amplification (intensity adjusted)
-        # -------------------------------------------------
+        distribution = self._normalize_distribution(emotion_counts)
 
-        weighted_emotions = {
-            emotion: round(score * (1 + intensity_score), 4)
-            for emotion, score in emotion_scores.items()
-        }
+        intensity = self._compute_intensity(tokens)
 
-        # -------------------------------------------------
-        # 6. Emotion entropy
-        # -------------------------------------------------
+        result = {}
 
-        entropy = compute_emotion_entropy(weighted_emotions)
+        for emotion in self.DEFAULT_EMOTIONS:
+            result[f"emotion_{emotion}"] = distribution.get(emotion, 0.0)
 
-        return EmotionDetectionResult(
-            emotion_scores=weighted_emotions,
-            dominant_emotion=dominant_emotion,
-            emotion_entropy=entropy,
-            emotion_intensity=intensity_score,
-            manipulation_score=manipulation_score,
-            manipulation_type=manipulation_type,
-        )
+        result["emotion_intensity"] = intensity
+
+        return result
+
+    # -----------------------------------------------------
+
+    def detect_batch(
+        self,
+        texts: Iterable[str],
+    ) -> List[Dict[str, float]]:
+
+        results = []
+
+        for doc in self.nlp.pipe(texts):
+
+            tokens = [t.text.lower() for t in doc if t.is_alpha]
+
+            emotion_counts = self._emotion_counts(tokens)
+
+            distribution = self._normalize_distribution(emotion_counts)
+
+            intensity = self._compute_intensity(tokens)
+
+            record = {}
+
+            for emotion in self.DEFAULT_EMOTIONS:
+                record[f"emotion_{emotion}"] = distribution.get(emotion, 0.0)
+
+            record["emotion_intensity"] = intensity
+
+            results.append(record)
+
+        return results
+
+    # -----------------------------------------------------
+
+    def _emotion_counts(self, tokens: List[str]) -> Counter:
+
+        counts = Counter()
+
+        for i, token in enumerate(tokens):
+
+            modifier = 1.0
+
+            if i > 0 and tokens[i - 1] in INTENSIFIERS:
+                modifier = 1.5
+
+            if i > 0 and tokens[i - 1] in NEGATIONS:
+                modifier = -1.0
+
+            for emotion, lexicon in self.emotion_lexicon.items():
+
+                if token in lexicon:
+                    counts[emotion] += modifier
+
+        return counts
+
+    # -----------------------------------------------------
+
+    def _normalize_distribution(
+        self,
+        emotion_counts: Counter,
+    ) -> Dict[str, float]:
+
+        total = sum(abs(v) for v in emotion_counts.values())
+
+        if total == 0:
+            return {e: 0.0 for e in self.DEFAULT_EMOTIONS}
+
+        distribution = {}
+
+        for emotion in self.DEFAULT_EMOTIONS:
+            distribution[emotion] = emotion_counts.get(emotion, 0) / total
+
+        return distribution
+
+    # -----------------------------------------------------
+
+    def _compute_intensity(self, tokens: List[str]) -> float:
+
+        if not tokens:
+            return 0.0
+
+        hits = 0
+
+        for token in tokens:
+            for lexicon in self.emotion_lexicon.values():
+
+                if token in lexicon:
+                    hits += 1
+                    break
+
+        return hits / len(tokens)
 
 
-def detect_emotion(text: str) -> Dict:
-    """
-    Backward-compatible helper for callers that expect dict output.
-    """
+# ---------------------------------------------------------
+# Vector Conversion
+# ---------------------------------------------------------
 
-    result = EmotionDetector().analyze(text)
-    result_dict = asdict(result)
-    result_dict["emotion_score"] = float(
-        max(result.emotion_scores.values()) if result.emotion_scores else 0.0
+
+def emotion_vector_to_numpy(
+    emotion_dict: Dict[str, float]
+) -> np.ndarray:
+
+    vector = np.array(
+        [emotion_dict.get(name, 0.0) for name in EMOTION_SCHEMA],
+        dtype=np.float32,
     )
-    return result_dict
 
-
-# ---------------------------------------------------------
-# Example Usage
-# ---------------------------------------------------------
-
-if __name__ == "__main__":
-
-    detector = EmotionDetector()
-
-    text = """
-    This shocking crisis has created massive fear and panic.
-    The government has failed completely!
-    Act now before it's too late!
-    """
-
-    result = detector.analyze(text)
-
-    print(result)
+    return vector

@@ -1,244 +1,226 @@
 """
-TruthLens AI
-Emotion Intensity Detection Module
+File Name: emotion_intensity.py
+Module: Emotion Analysis - Intensity Estimation
 
-Measures the strength of emotional expression in text.
+Description:
+    Emotional intensity estimator used in TruthLens AI.
+    Extracts interpretable signals indicating emotional strength and
+    rhetorical amplification within text.
 
-Signals Used
-------------
-• ALL CAPS emphasis
-• Exclamation punctuation
-• Intensifier adverbs
-• Repeated punctuation patterns
-
-Outputs
--------
-intensity_score
-signal_breakdown
-sentence_intensity
-highlighted_tokens
 """
 
-from __future__ import annotations
-
+import logging
 import re
-from dataclasses import dataclass
-from typing import Dict, List
+from collections import Counter
+from typing import Dict, List, Optional, Iterable
+
+import numpy as np
+import spacy
+from spacy.tokens import Doc
+
+
+logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------
-# Intensifier Lexicon
+# Feature schema (deterministic ordering)
 # ---------------------------------------------------------
 
-INTENSIFIER_ADVERBS = {
+INTENSITY_SCHEMA = [
+    "emotion_lexicon_intensity",
+    "intensifier_ratio",
+    "exclamation_intensity",
+    "question_intensity",
+    "ellipsis_intensity",
+    "capitalization_intensity",
+    "adjective_amplification",
+    "adverb_amplification",
+    "repetition_intensity",
+]
+
+
+NEGATIONS = {"not", "never", "no", "none"}
+
+INTENSIFIERS = {
     "very",
     "extremely",
-    "incredibly",
-    "highly",
-    "deeply",
-    "absolutely",
-    "totally",
-    "completely",
-    "remarkably",
-    "terribly",
     "really",
-    "so",
+    "highly",
+    "absolutely",
+    "deeply",
+    "incredibly",
+    "totally",
 }
 
 
-# ---------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------
+class EmotionIntensityEstimator:
 
-WEIGHTS = {
-    "caps": 0.35,
-    "exclamation": 0.30,
-    "intensifier": 0.20,
-    "repeated_punctuation": 0.15,
-}
+    def __init__(
+        self,
+        emotion_lexicon: Optional[Dict[str, List[str]]] = None,
+        spacy_model: str = "en_core_web_sm",
+    ):
 
+        try:
+            self.nlp = spacy.load(spacy_model)
+        except Exception as exc:
+            logger.exception("spaCy load failed")
+            raise RuntimeError("spaCy initialization failed") from exc
 
-# ---------------------------------------------------------
-# Data Structures
-# ---------------------------------------------------------
+        self.emotion_lexicon = self._normalize_lexicon(emotion_lexicon)
 
+    # -----------------------------------------------------
 
-@dataclass
-class EmotionIntensityResult:
-    intensity_score: float
-    signal_breakdown: Dict[str, float]
-    sentence_intensity: List[Dict]
-    highlighted_tokens: List[Dict]
+    def _normalize_lexicon(
+        self,
+        emotion_lexicon: Optional[Dict[str, List[str]]],
+    ) -> Dict[str, set]:
 
+        normalized = {}
 
-# ---------------------------------------------------------
-# Text Processing Utilities
-# ---------------------------------------------------------
+        if emotion_lexicon is None:
+            return normalized
 
+        for emotion, words in emotion_lexicon.items():
 
-def tokenize_words(text: str) -> List[str]:
+            normalized[emotion] = {
+                w.strip().lower()
+                for w in words
+                if isinstance(w, str)
+            }
 
-    return re.findall(r"\b\w+\b", text)
+        return normalized
 
+    # -----------------------------------------------------
 
-def tokenize_sentences(text: str) -> List[str]:
+    def estimate(self, text: str) -> Dict[str, float]:
 
-    sentences = re.split(r"[.!?]+", text)
+        doc = self.nlp(text)
 
-    return [s.strip() for s in sentences if s.strip()]
+        tokens = [t.text.lower() for t in doc if t.is_alpha]
 
+        features = {}
 
-# ---------------------------------------------------------
-# Signal Detection
-# ---------------------------------------------------------
+        features.update(self._lexicon_intensity(tokens))
+        features.update(self._intensifier_features(tokens))
+        features.update(self._punctuation_features(text))
+        features.update(self._capitalization_features(text))
+        features.update(self._syntactic_features(doc))
+        features.update(self._repetition_features(tokens))
 
+        return features
 
-def detect_caps_words(tokens: List[str]) -> int:
+    # -----------------------------------------------------
 
-    return sum(1 for token in tokens if token.isupper() and len(token) > 2)
+    def estimate_batch(
+        self,
+        texts: Iterable[str],
+    ) -> List[Dict[str, float]]:
 
+        results = []
 
-def detect_exclamations(text: str) -> int:
+        for doc in self.nlp.pipe(texts):
 
-    return text.count("!")
+            tokens = [t.text.lower() for t in doc if t.is_alpha]
 
+            features = {}
 
-def detect_intensifiers(tokens: List[str]) -> List[int]:
+            features.update(self._lexicon_intensity(tokens))
+            features.update(self._intensifier_features(tokens))
+            features.update(self._punctuation_features(doc.text))
+            features.update(self._capitalization_features(doc.text))
+            features.update(self._syntactic_features(doc))
+            features.update(self._repetition_features(tokens))
 
-    positions = []
+            results.append(features)
 
-    for idx, token in enumerate(tokens):
+        return results
 
-        if token.lower() in INTENSIFIER_ADVERBS:
-            positions.append(idx)
+    # -----------------------------------------------------
 
-    return positions
+    def _lexicon_intensity(self, tokens: List[str]) -> Dict[str, float]:
 
+        if not tokens or not self.emotion_lexicon:
+            return {"emotion_lexicon_intensity": 0.0}
 
-def detect_repeated_punctuation(text: str) -> int:
+        hits = 0
 
-    patterns = re.findall(r"[!?]{2,}", text)
+        for token in tokens:
+            for lexicon in self.emotion_lexicon.values():
 
-    return len(patterns)
+                if token in lexicon:
+                    hits += 1
+                    break
 
+        return {"emotion_lexicon_intensity": hits / len(tokens)}
 
-# ---------------------------------------------------------
-# Sentence-Level Intensity
-# ---------------------------------------------------------
+    # -----------------------------------------------------
 
+    def _intensifier_features(self, tokens: List[str]):
 
-def compute_sentence_intensity(sentence: str) -> float:
+        count = sum(token in INTENSIFIERS for token in tokens)
 
-    tokens = tokenize_words(sentence)
+        return {"intensifier_ratio": count / max(len(tokens), 1)}
 
-    if not tokens:
-        return 0.0
+    # -----------------------------------------------------
 
-    caps = detect_caps_words(tokens)
-    intensifiers = len(detect_intensifiers(tokens))
-    exclamations = sentence.count("!")
+    def _punctuation_features(self, text: str):
 
-    score = caps * 0.4 + intensifiers * 0.35 + exclamations * 0.25
+        exclam = len(re.findall(r"!", text))
+        quest = len(re.findall(r"\?", text))
+        ellip = len(re.findall(r"\.\.\.", text))
 
-    return round(score / len(tokens), 4)
+        length = max(len(text), 1)
 
-
-# ---------------------------------------------------------
-# Emotion Intensity Analyzer
-# ---------------------------------------------------------
-
-
-class EmotionIntensityAnalyzer:
-    """
-    Detects emotional amplification signals in text.
-    """
-
-    def analyze(self, text: str) -> EmotionIntensityResult:
-
-        tokens = tokenize_words(text)
-
-        if not tokens:
-
-            return EmotionIntensityResult(
-                intensity_score=0.0,
-                signal_breakdown={},
-                sentence_intensity=[],
-                highlighted_tokens=[],
-            )
-
-        total_words = len(tokens)
-
-        # Signal counts
-        caps_count = detect_caps_words(tokens)
-        exclamation_count = detect_exclamations(text)
-        repeated_punct = detect_repeated_punctuation(text)
-        intensifier_positions = detect_intensifiers(tokens)
-
-        intensifier_count = len(intensifier_positions)
-
-        # Ratios
-        caps_ratio = caps_count / total_words
-        exclamation_ratio = exclamation_count / total_words
-        intensifier_ratio = intensifier_count / total_words
-        repeated_ratio = repeated_punct / total_words
-
-        # Weighted intensity score
-        intensity_score = (
-            WEIGHTS["caps"] * caps_ratio
-            + WEIGHTS["exclamation"] * exclamation_ratio
-            + WEIGHTS["intensifier"] * intensifier_ratio
-            + WEIGHTS["repeated_punctuation"] * repeated_ratio
-        )
-
-        intensity_score = round(intensity_score, 4)
-
-        # Sentence-level analysis
-        sentences = tokenize_sentences(text)
-
-        sentence_scores = []
-
-        for sentence in sentences:
-
-            score = compute_sentence_intensity(sentence)
-
-            sentence_scores.append({"sentence": sentence, "intensity": score})
-
-        # Token highlights
-        highlights = []
-
-        for pos in intensifier_positions:
-
-            highlights.append(
-                {"token": tokens[pos], "type": "intensifier", "position": pos}
-            )
-
-        signal_breakdown = {
-            "caps_ratio": round(caps_ratio, 4),
-            "exclamation_ratio": round(exclamation_ratio, 4),
-            "intensifier_ratio": round(intensifier_ratio, 4),
-            "repeated_punctuation_ratio": round(repeated_ratio, 4),
+        return {
+            "exclamation_intensity": exclam / length,
+            "question_intensity": quest / length,
+            "ellipsis_intensity": ellip / length,
         }
 
-        return EmotionIntensityResult(
-            intensity_score=intensity_score,
-            signal_breakdown=signal_breakdown,
-            sentence_intensity=sentence_scores,
-            highlighted_tokens=highlights,
-        )
+    # -----------------------------------------------------
+
+    def _capitalization_features(self, text: str):
+
+        caps = re.findall(r"\b[A-Z]{2,}\b", text)
+
+        return {
+            "capitalization_intensity": len(caps) / max(len(text.split()), 1)
+        }
+
+    # -----------------------------------------------------
+
+    def _syntactic_features(self, doc: Doc):
+
+        adjectives = [t for t in doc if t.pos_ == "ADJ"]
+        adverbs = [t for t in doc if t.pos_ == "ADV"]
+
+        length = max(len(doc), 1)
+
+        return {
+            "adjective_amplification": len(adjectives) / length,
+            "adverb_amplification": len(adverbs) / length,
+        }
+
+    # -----------------------------------------------------
+
+    def _repetition_features(self, tokens: List[str]):
+
+        counts = Counter(tokens)
+
+        repeated = sum(1 for token, c in counts.items() if c > 1)
+
+        return {"repetition_intensity": repeated / max(len(tokens), 1)}
 
 
 # ---------------------------------------------------------
-# Example Usage
+# Vector Conversion
 # ---------------------------------------------------------
 
-if __name__ == "__main__":
 
-    analyzer = EmotionIntensityAnalyzer()
+def emotion_intensity_vector(features: Dict[str, float]) -> np.ndarray:
 
-    text = """
-    THIS is absolutely shocking!!!
-    The government has made an incredibly terrible decision!!!
-    """
-
-    result = analyzer.analyze(text)
-
-    print(result)
+    return np.array(
+        [features.get(name, 0.0) for name in INTENSITY_SCHEMA],
+        dtype=np.float32,
+    )
