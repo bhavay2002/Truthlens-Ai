@@ -28,7 +28,7 @@ SETTINGS = load_settings()
 configure_logging(log_file=SETTINGS.paths.training_log_path)
 
 models_dir = SETTINGS.paths.models_dir
-reports_dir = SETTINGS.paths.reports_dir
+reports_dir = SETTINGS.paths.reports_dir        
 logs_dir = SETTINGS.paths.logs_dir
 merged_dataset_path = SETTINGS.data.merged_dataset_path
 cleaned_dataset_path = SETTINGS.data.cleaned_dataset_path
@@ -49,7 +49,7 @@ def _split_clean_dataset(df):
         df,
         test_size=holdout_size,
         random_state=SETTINGS.training.seed,
-        stratify=df["label"],
+        stratify=df["label"],        
     )
 
     val_fraction_within_holdout = SETTINGS.training.validation_size / holdout_size

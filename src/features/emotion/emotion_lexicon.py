@@ -1,274 +1,226 @@
 """
-TruthLens AI
-Emotion Detection using NRC Emotion Lexicon
+File Name: emotion_intensity.py
+Module: Emotion Analysis - Intensity Estimation
 
-Detects emotional signals in text using the NRC Emotion Lexicon.
+Description:
+    Emotional intensity estimator used in TruthLens AI.
+    Extracts interpretable signals indicating emotional strength and
+    rhetorical amplification within text.
 
-Capabilities
-------------
-• Emotion intensity scoring
-• Token-level emotion attribution
-• Sentence-level emotion analysis
-• Dominant emotion detection
-• Support for full NRC lexicon loading
-
-Emotions detected
------------------
-fear
-anger
-joy
-sadness
-surprise
-disgust
 """
 
-from __future__ import annotations
-
+import logging
 import re
-from collections import Counter, defaultdict
-from dataclasses import dataclass
-from typing import Dict, List
+from collections import Counter
+from typing import Dict, List, Optional, Iterable
+
+import numpy as np
+import spacy
+from spacy.tokens import Doc
+
+
+logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------
-# Emotion Categories
+# Feature schema (deterministic ordering)
 # ---------------------------------------------------------
 
-EMOTIONS = ["fear", "anger", "joy", "sadness", "surprise", "disgust"]
+INTENSITY_SCHEMA = [
+    "emotion_lexicon_intensity",
+    "intensifier_ratio",
+    "exclamation_intensity",
+    "question_intensity",
+    "ellipsis_intensity",
+    "capitalization_intensity",
+    "adjective_amplification",
+    "adverb_amplification",
+    "repetition_intensity",
+]
 
 
-# ---------------------------------------------------------
-# Default Lightweight NRC Subset
-# ---------------------------------------------------------
+NEGATIONS = {"not", "never", "no", "none"}
 
-DEFAULT_NRC_LEXICON = {
-    "fear": {
-        "fear",
-        "threat",
-        "terror",
-        "danger",
-        "panic",
-        "risk",
-        "crisis",
-        "afraid",
-        "scared",
-        "fright",
-    },
-    "anger": {
-        "anger",
-        "rage",
-        "furious",
-        "outrage",
-        "hate",
-        "hostile",
-        "violent",
-        "attack",
-        "fight",
-    },
-    "joy": {
-        "joy",
-        "happy",
-        "celebrate",
-        "success",
-        "victory",
-        "delight",
-        "excited",
-        "pleased",
-    },
-    "sadness": {
-        "sad",
-        "grief",
-        "sorrow",
-        "loss",
-        "tragic",
-        "depressed",
-        "cry",
-        "mourning",
-    },
-    "surprise": {
-        "surprise",
-        "unexpected",
-        "suddenly",
-        "shocking",
-        "astonishing",
-    },
-    "disgust": {"disgust", "repulsive", "dirty", "corrupt", "filthy", "gross"},
+INTENSIFIERS = {
+    "very",
+    "extremely",
+    "really",
+    "highly",
+    "absolutely",
+    "deeply",
+    "incredibly",
+    "totally",
 }
 
 
-# ---------------------------------------------------------
-# Data Structures
-# ---------------------------------------------------------
+class EmotionIntensityEstimator:
 
+    def __init__(
+        self,
+        emotion_lexicon: Optional[Dict[str, List[str]]] = None,
+        spacy_model: str = "en_core_web_sm",
+    ):
 
-@dataclass
-class EmotionResult:
-    emotion_scores: Dict[str, float]
-    dominant_emotion: str
-    emotion_distribution: Dict[str, int]
-    sentence_emotions: List[Dict]
-    emotion_tokens: List[Dict]
+        try:
+            self.nlp = spacy.load(spacy_model)
+        except Exception as exc:
+            logger.exception("spaCy load failed")
+            raise RuntimeError("spaCy initialization failed") from exc
 
-
-# ---------------------------------------------------------
-# Utility Functions
-# ---------------------------------------------------------
-
-
-def tokenize_words(text: str) -> List[str]:
-    """
-    Tokenize words from text.
-    """
-    return re.findall(r"\b[a-z]+\b", text.lower())
-
-
-def tokenize_sentences(text: str) -> List[str]:
-    """
-    Lightweight sentence tokenizer.
-    """
-    sentences = re.split(r"[.!?]+", text)
-    return [s.strip() for s in sentences if s.strip()]
-
-
-# ---------------------------------------------------------
-# NRC Lexicon Loader
-# ---------------------------------------------------------
-
-
-def load_nrc_lexicon(path: str) -> Dict[str, set]:
-    """
-    Load NRC Emotion Lexicon from file.
-
-    Expected format:
-        word emotion association
-    """
-
-    lexicon = defaultdict(set)
-
-    with open(path, "r", encoding="utf-8") as f:
-
-        for line in f:
-
-            word, emotion, association = line.strip().split()
-
-            if emotion in EMOTIONS and association == "1":
-                lexicon[emotion].add(word)
-
-    return dict(lexicon)
-
-
-# ---------------------------------------------------------
-# Emotion Analyzer
-# ---------------------------------------------------------
-
-
-class EmotionLexiconAnalyzer:
-    """
-    Emotion detection engine using NRC lexicon.
-    """
-
-    def __init__(self, lexicon: Dict[str, set] | None = None):
-
-        self.lexicon = lexicon or DEFAULT_NRC_LEXICON
+        self.emotion_lexicon = self._normalize_lexicon(emotion_lexicon)
 
     # -----------------------------------------------------
 
-    def _detect_token_emotions(self, tokens: List[str]):
+    def _normalize_lexicon(
+        self,
+        emotion_lexicon: Optional[Dict[str, List[str]]],
+    ) -> Dict[str, set]:
 
-        emotion_counts = Counter()
+        normalized = {}
 
-        emotion_tokens = []
+        if emotion_lexicon is None:
+            return normalized
 
-        for idx, token in enumerate(tokens):
+        for emotion, words in emotion_lexicon.items():
 
-            for emotion, words in self.lexicon.items():
+            normalized[emotion] = {
+                w.strip().lower()
+                for w in words
+                if isinstance(w, str)
+            }
 
-                if token in words:
-
-                    emotion_counts[emotion] += 1
-
-                    emotion_tokens.append(
-                        {"token": token, "emotion": emotion, "position": idx}
-                    )
-
-        return emotion_counts, emotion_tokens
-
-    # -----------------------------------------------------
-
-    def _compute_scores(self, emotion_counts, total_tokens):
-
-        if total_tokens == 0:
-            return {emotion: 0.0 for emotion in EMOTIONS}
-
-        scores = {
-            emotion: round(emotion_counts.get(emotion, 0) / total_tokens, 4)
-            for emotion in EMOTIONS
-        }
-
-        return scores
+        return normalized
 
     # -----------------------------------------------------
 
-    def _sentence_level_analysis(self, text: str):
+    def estimate(self, text: str) -> Dict[str, float]:
 
-        sentences = tokenize_sentences(text)
+        doc = self.nlp(text)
+
+        tokens = [t.text.lower() for t in doc if t.is_alpha]
+
+        features = {}
+
+        features.update(self._lexicon_intensity(tokens))
+        features.update(self._intensifier_features(tokens))
+        features.update(self._punctuation_features(text))
+        features.update(self._capitalization_features(text))
+        features.update(self._syntactic_features(doc))
+        features.update(self._repetition_features(tokens))
+
+        return features
+
+    # -----------------------------------------------------
+
+    def estimate_batch(
+        self,
+        texts: Iterable[str],
+    ) -> List[Dict[str, float]]:
 
         results = []
 
-        for sentence in sentences:
+        for doc in self.nlp.pipe(texts):
 
-            tokens = tokenize_words(sentence)
+            tokens = [t.text.lower() for t in doc if t.is_alpha]
 
-            counts, _ = self._detect_token_emotions(tokens)
+            features = {}
 
-            score = sum(counts.values()) / max(len(tokens), 1)
+            features.update(self._lexicon_intensity(tokens))
+            features.update(self._intensifier_features(tokens))
+            features.update(self._punctuation_features(doc.text))
+            features.update(self._capitalization_features(doc.text))
+            features.update(self._syntactic_features(doc))
+            features.update(self._repetition_features(tokens))
 
-            results.append(
-                {"sentence": sentence, "emotion_intensity": round(score, 4)}
-            )
+            results.append(features)
 
         return results
 
     # -----------------------------------------------------
 
-    def analyze(self, text: str) -> EmotionResult:
-        """
-        Perform full emotion analysis.
-        """
+    def _lexicon_intensity(self, tokens: List[str]) -> Dict[str, float]:
 
-        tokens = tokenize_words(text)
+        if not tokens or not self.emotion_lexicon:
+            return {"emotion_lexicon_intensity": 0.0}
 
-        emotion_counts, emotion_tokens = self._detect_token_emotions(tokens)
+        hits = 0
 
-        scores = self._compute_scores(emotion_counts, len(tokens))
+        for token in tokens:
+            for lexicon in self.emotion_lexicon.values():
 
-        dominant_emotion = (
-            max(scores, key=scores.get) if any(scores.values()) else "neutral"
-        )
+                if token in lexicon:
+                    hits += 1
+                    break
 
-        sentence_analysis = self._sentence_level_analysis(text)
+        return {"emotion_lexicon_intensity": hits / len(tokens)}
 
-        return EmotionResult(
-            emotion_scores=scores,
-            dominant_emotion=dominant_emotion,
-            emotion_distribution=dict(emotion_counts),
-            sentence_emotions=sentence_analysis,
-            emotion_tokens=emotion_tokens,
-        )
+    # -----------------------------------------------------
+
+    def _intensifier_features(self, tokens: List[str]):
+
+        count = sum(token in INTENSIFIERS for token in tokens)
+
+        return {"intensifier_ratio": count / max(len(tokens), 1)}
+
+    # -----------------------------------------------------
+
+    def _punctuation_features(self, text: str):
+
+        exclam = len(re.findall(r"!", text))
+        quest = len(re.findall(r"\?", text))
+        ellip = len(re.findall(r"\.\.\.", text))
+
+        length = max(len(text), 1)
+
+        return {
+            "exclamation_intensity": exclam / length,
+            "question_intensity": quest / length,
+            "ellipsis_intensity": ellip / length,
+        }
+
+    # -----------------------------------------------------
+
+    def _capitalization_features(self, text: str):
+
+        caps = re.findall(r"\b[A-Z]{2,}\b", text)
+
+        return {
+            "capitalization_intensity": len(caps) / max(len(text.split()), 1)
+        }
+
+    # -----------------------------------------------------
+
+    def _syntactic_features(self, doc: Doc):
+
+        adjectives = [t for t in doc if t.pos_ == "ADJ"]
+        adverbs = [t for t in doc if t.pos_ == "ADV"]
+
+        length = max(len(doc), 1)
+
+        return {
+            "adjective_amplification": len(adjectives) / length,
+            "adverb_amplification": len(adverbs) / length,
+        }
+
+    # -----------------------------------------------------
+
+    def _repetition_features(self, tokens: List[str]):
+
+        counts = Counter(tokens)
+
+        repeated = sum(1 for token, c in counts.items() if c > 1)
+
+        return {"repetition_intensity": repeated / max(len(tokens), 1)}
 
 
 # ---------------------------------------------------------
-# Example Usage
+# Vector Conversion
 # ---------------------------------------------------------
 
-if __name__ == "__main__":
 
-    analyzer = EmotionLexiconAnalyzer()
+def emotion_intensity_vector(features: Dict[str, float]) -> np.ndarray:
 
-    text = """
-    The shocking crisis caused fear and panic among citizens.
-    Many people were angry and furious about the situation.
-    """
-
-    result = analyzer.analyze(text)
-
-    print(result)
+    return np.array(
+        [features.get(name, 0.0) for name in INTENSITY_SCHEMA],
+        dtype=np.float32,
+    )
