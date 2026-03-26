@@ -24,13 +24,47 @@ Dependencies:
 
 import json
 import logging
+import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Set, Iterable, Tuple, Optional
+from typing import Dict, Iterable, List, Optional, Set
 
 import yaml
 
 
 logger = logging.getLogger(__name__)
+
+
+DEFAULT_BIAS_LEXICON: Set[str] = {
+    "absurd",
+    "biased",
+    "catastrophic",
+    "corrupt",
+    "crooked",
+    "disgraceful",
+    "disgusting",
+    "elite",
+    "evil",
+    "fake",
+    "horrible",
+    "manipulate",
+    "radical",
+    "rigged",
+    "shocking",
+    "terrible",
+    "unbelievable",
+}
+
+_TOKEN_REGEX = re.compile(r"\b[a-z']+\b")
+_SENTENCE_SPLIT_REGEX = re.compile(r"[.!?]+")
+
+
+@dataclass(frozen=True)
+class BiasLexiconResult:
+    bias_score: float
+    media_bias: str
+    biased_tokens: List[str]
+    sentence_heatmap: List[Dict[str, object]]
 
 
 class BiasLexiconManager:
@@ -308,3 +342,113 @@ class BiasLexiconManager:
             "phrases": list(self.phrase_lexicon),
             "weights": self.weights,
         }
+
+
+def _normalize_lexicon(
+    lexicon: Optional[Iterable[str]],
+) -> Set[str]:
+
+    source = lexicon if lexicon is not None else DEFAULT_BIAS_LEXICON
+
+    return {
+        token.strip().lower()
+        for token in source
+        if isinstance(token, str) and token.strip()
+    }
+
+
+def _tokenize_words(text: str) -> List[str]:
+    return _TOKEN_REGEX.findall(text.lower())
+
+
+def _tokenize_sentences(text: str) -> List[str]:
+    sentences = _SENTENCE_SPLIT_REGEX.split(text)
+    return [sentence.strip() for sentence in sentences if sentence.strip()]
+
+
+def _ordered_unique(tokens: List[str]) -> List[str]:
+    ordered: List[str] = []
+    seen: Set[str] = set()
+
+    for token in tokens:
+        if token not in seen:
+            seen.add(token)
+            ordered.append(token)
+
+    return ordered
+
+
+def _media_bias_label(score: float) -> str:
+
+    if score >= 0.12:
+        return "High"
+
+    if score >= 0.05:
+        return "Moderate"
+
+    if score > 0:
+        return "Low"
+
+    return "Neutral"
+
+
+def compute_bias_features(
+    text: str,
+    lexicon: Optional[Iterable[str]] = None,
+) -> BiasLexiconResult:
+    """
+    Compute lightweight lexicon-based bias signals for a text.
+    """
+
+    if text is None:
+        text = ""
+
+    if not isinstance(text, str):
+        text = str(text)
+
+    normalized_lexicon = _normalize_lexicon(lexicon)
+
+    tokens = _tokenize_words(text)
+
+    if not tokens:
+        return BiasLexiconResult(
+            bias_score=0.0,
+            media_bias="Neutral",
+            biased_tokens=[],
+            sentence_heatmap=[],
+        )
+
+    matched_tokens = [
+        token for token in tokens if token in normalized_lexicon
+    ]
+
+    bias_score = round(len(matched_tokens) / len(tokens), 4)
+
+    sentence_heatmap: List[Dict[str, object]] = []
+
+    for sentence in _tokenize_sentences(text):
+        sentence_tokens = _tokenize_words(sentence)
+
+        if not sentence_tokens:
+            continue
+
+        sentence_matches = [
+            token for token in sentence_tokens if token in normalized_lexicon
+        ]
+
+        sentence_heatmap.append(
+            {
+                "sentence": sentence,
+                "bias_score": round(
+                    len(sentence_matches) / len(sentence_tokens), 4
+                ),
+                "biased_tokens": _ordered_unique(sentence_matches),
+            }
+        )
+
+    return BiasLexiconResult(
+        bias_score=bias_score,
+        media_bias=_media_bias_label(bias_score),
+        biased_tokens=_ordered_unique(matched_tokens),
+        sentence_heatmap=sentence_heatmap,
+    )

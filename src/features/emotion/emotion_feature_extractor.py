@@ -13,9 +13,9 @@ from typing import Dict, Optional, Iterable, List
 import numpy as np
 import torch
 
-from emotion_detector import EmotionDetector
-from emotion_intensity import EmotionIntensityEstimator
-from emotion_patterns import EmotionPatternDetector
+from src.features.emotion.emotion_detector import EmotionDetector
+from src.features.emotion.emotion_intensity import EmotionIntensityEstimator
+from src.features.emotion.emotion_patterns import EmotionPatternDetector
 
 
 logger = logging.getLogger(__name__)

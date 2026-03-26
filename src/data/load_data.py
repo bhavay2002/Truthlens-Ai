@@ -97,8 +97,8 @@ def _prepare_frame(
     if title_column not in prepared.columns:
         prepared[title_column] = ""
 
-    prepared[text_column] = prepared[text_column].astype(str).fillna("").str.strip()
-    prepared[title_column] = prepared[title_column].astype(str).fillna("").str.strip()
+    prepared[text_column] = prepared[text_column].fillna("").astype(str).str.strip()
+    prepared[title_column] = prepared[title_column].fillna("").astype(str).str.strip()
     prepared[label_column] = int(label_value)
 
     prepared = prepared[prepared[text_column].str.len() > 0]

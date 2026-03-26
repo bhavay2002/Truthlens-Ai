@@ -224,16 +224,28 @@ def visualize_evaluation(
         )
 
     if y_true is not None and y_proba is not None:
-        generated_files["roc_curve"] = plot_roc_curve(
-            y_true, y_proba, output_dir
-        )
-        generated_files["precision_recall_curve"] = (
-            plot_precision_recall_curve(
+        try:
+            generated_files["roc_curve"] = plot_roc_curve(
                 y_true,
                 y_proba,
                 output_dir,
             )
-        )
+        except ValueError as exc:
+            logger.warning("Skipping ROC curve generation: %s", exc)
+
+        try:
+            generated_files["precision_recall_curve"] = (
+                plot_precision_recall_curve(
+                    y_true,
+                    y_proba,
+                    output_dir,
+                )
+            )
+        except ValueError as exc:
+            logger.warning(
+                "Skipping precision-recall curve generation: %s",
+                exc,
+            )
 
     generated_files["metric_comparison"] = plot_metric_comparison(
         results, output_dir

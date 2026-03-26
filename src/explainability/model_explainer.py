@@ -49,18 +49,31 @@ def explain_prediction_full(
     use_shap: bool = True,
 ) -> Dict[str, Any]:
     """Generate a complete explanation package for one prediction."""
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("text must be a non-empty string.")
+    if not callable(predict_fn):
+        raise TypeError("predict_fn must be callable.")
+
     logger.info("Running unified model explanation")
 
     prediction = predict_fn(text)
 
-    bias_explanation = _run_component(
-        "Bias",
-        lambda: explain_bias(model, tokenizer, text),
-    )
-    emotion_explanation = _run_component(
-        "Emotion",
-        lambda: explain_emotion(text, model, tokenizer),
-    )
+    bias_explanation = None
+    emotion_explanation = None
+    if model is not None and tokenizer is not None:
+        bias_explanation = _run_component(
+            "Bias",
+            lambda: explain_bias(model, tokenizer, text),
+        )
+        emotion_explanation = _run_component(
+            "Emotion",
+            lambda: explain_emotion(text, model, tokenizer),
+        )
+    else:
+        logger.info(
+            "Skipping bias/emotion deep explanations because model/tokenizer "
+            "were not provided."
+        )
 
     shap_explanation = None
     if use_shap:
@@ -93,6 +106,11 @@ def explain_fast(
     predict_fn: PredictionFn,
 ) -> Dict[str, Any]:
     """Fast explanation path intended for low-latency endpoints."""
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("text must be a non-empty string.")
+    if not callable(predict_fn):
+        raise TypeError("predict_fn must be callable.")
+
     prediction = predict_fn(text)
     lime_explanation = explain_prediction(predict_fn, text)
 

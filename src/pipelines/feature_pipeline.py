@@ -1,110 +1,82 @@
 """
-File Name: preprocessing_pipeline.py
-Module: Data Processing - Text Preprocessing Pipeline
+File Name: feature_pipeline.py
+Module: TruthLens Pipeline - Feature Aggregation
 Description:
-    Implements the text preprocessing pipeline used in the TruthLens AI system.
-    The module performs normalization, cleaning, token preparation, sentence
-    segmentation, and optional stopword removal. It provides standardized text
-    outputs used by downstream NLP modules such as bias detection, emotion
-    analysis, narrative analysis, and transformer-based models.
-
-Dependencies:
-    logging
-    typing
-    re
-    spacy
-
-Inputs:
-    Raw text string
-
-Outputs:
-    Preprocessed text structure containing normalized text, tokens, and sentences
+    Runs bias, narrative, discourse, and graph feature extraction for a text
+    sample and returns a unified structured feature bundle.
 """
 
-import logging
-import re
-from typing import Dict, List
+from __future__ import annotations
 
-import spacy
+import logging
+from typing import Any, Dict
+
+import numpy as np
+
+from src.features.bias.bias_features import BiasFeatureExtractor
+from src.features.discourse.discourse_features import DiscourseFeatureExtractor
+from src.features.narrative.narrative_features import NarrativeFeatureExtractor
+from src.graph.entity_graph import EntityGraphBuilder
+from src.graph.graph_analysis import GraphAnalyzer
 
 
 logger = logging.getLogger(__name__)
 
 
-class PreprocessingPipeline:
-    """
-    Standardized preprocessing pipeline for textual inputs.
-    """
+class FeaturePipeline:
+    """Extract and aggregate non-emotion analytical feature groups."""
 
-    def __init__(self, spacy_model: str = "en_core_web_sm") -> None:
-        """Initialize NLP pipeline used for preprocessing."""
+    def __init__(self) -> None:
+        self.bias_extractor = BiasFeatureExtractor()
+        self.narrative_extractor = NarrativeFeatureExtractor()
+        self.discourse_extractor = DiscourseFeatureExtractor()
+        self.entity_graph_builder = EntityGraphBuilder()
+        self.graph_analyzer = GraphAnalyzer()
 
-        try:
-            self.nlp = spacy.load(spacy_model)
-        except Exception as exc:
-            logger.exception("spaCy model loading failed")
-            raise RuntimeError("Failed to load spaCy model") from exc
+        logger.info("FeaturePipeline initialized")
 
-        logger.info("PreprocessingPipeline initialized")
-
-    def preprocess(self, text: str) -> Dict[str, List[str]]:
-        """Run the preprocessing pipeline on input text."""
-
+    def extract_features(self, text: str) -> Dict[str, Dict[str, Any]]:
+        """Extract all supported feature groups for one text sample."""
         if not isinstance(text, str) or not text.strip():
             raise ValueError("text must be a non-empty string")
 
         try:
-            normalized_text = self._normalize_text(text)
+            bias_features = self.bias_extractor.extract_features(text)
+            narrative_features = self.narrative_extractor.extract(text)
+            discourse_features = self.discourse_extractor.extract(text)
 
-            doc = self.nlp(normalized_text)
-
+            entity_graph = self.entity_graph_builder.build_graph(text)
+            graph_features = self.entity_graph_builder.extract_graph_features(
+                entity_graph
+            )
+            graph_metrics = self.graph_analyzer.analyze(entity_graph)
         except Exception as exc:
-            logger.exception("Text preprocessing failed")
-            raise RuntimeError("Preprocessing pipeline failed") from exc
+            logger.exception("Feature extraction failed")
+            raise RuntimeError("Feature pipeline execution failed") from exc
 
-        tokens = self._extract_tokens(doc)
-
-        sentences = self._extract_sentences(doc)
-
-        lemmas = self._extract_lemmas(doc)
-
-        result = {
-            "normalized_text": normalized_text,
-            "tokens": tokens,
-            "lemmas": lemmas,
-            "sentences": sentences,
+        return {
+            "bias": bias_features,
+            "narrative": narrative_features,
+            "discourse": discourse_features,
+            "graph": {**graph_features, **graph_metrics},
         }
 
-        return result
+    def extract_vector(self, text: str) -> np.ndarray:
+        """Flatten numeric features across groups into a 1D vector."""
+        grouped = self.extract_features(text)
 
-    def _normalize_text(self, text: str) -> str:
-        """Normalize text by removing excessive whitespace and special characters."""
+        values: list[float] = []
+        for group_name in ("bias", "narrative", "discourse", "graph"):
+            section = grouped.get(group_name, {})
+            if not isinstance(section, dict):
+                continue
 
-        text = text.strip()
+            for key in sorted(section.keys()):
+                value = section[key]
+                if isinstance(value, (int, float)):
+                    values.append(float(value))
 
-        text = re.sub(r"\s+", " ", text)
+        if not values:
+            raise ValueError("No numeric features were extracted")
 
-        text = re.sub(r"[^\w\s\.\,\!\?\-']", "", text)
-
-        return text
-
-    def _extract_tokens(self, doc) -> List[str]:
-        """Extract token list from document."""
-
-        tokens = [token.text.lower() for token in doc if not token.is_space]
-
-        return tokens
-
-    def _extract_lemmas(self, doc) -> List[str]:
-        """Extract lemma list from document."""
-
-        lemmas = [token.lemma_.lower() for token in doc if not token.is_space]
-
-        return lemmas
-
-    def _extract_sentences(self, doc) -> List[str]:
-        """Extract sentence list from document."""
-
-        sentences = [sent.text.strip() for sent in doc.sents if sent.text.strip()]
-
-        return sentences
+        return np.asarray(values, dtype=np.float32)

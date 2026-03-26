@@ -24,8 +24,6 @@ Outputs:
 """
 
 import logging
-import re
-from collections import Counter
 from typing import Dict, List
 
 import numpy as np

@@ -1,101 +1,125 @@
 """
-File Name: emotion_feature_extractor.py
-Module: Emotion Analysis - Feature Extraction
+File Name: emotion_patterns.py
+Module: Emotion Analysis - Pattern Detection
+
 Description:
-    Combines multiple emotion analysis components to produce a unified emotion
-    feature representation for the TruthLens AI system. This module integrates
-    emotion classification outputs, emotion intensity estimation, and emotion
-    discourse pattern detection to generate a comprehensive feature vector
-    suitable for downstream machine learning models.
-
-Dependencies:
-    logging
-    typing
-    numpy
-    torch
-
-Inputs:
-    Raw text string
-
-Outputs:
-    Aggregated emotion feature dictionary and numerical feature vector
+    Extracts rhetorical and discourse-level emotion pattern signals.
 """
 
-import logging
-from typing import Dict, Optional
+from __future__ import annotations
+
+import re
+from collections import Counter
+from typing import Dict, List
 
 import numpy as np
-import torch
-
-from emotion_detector import EmotionDetector
-from emotion_intensity import EmotionIntensityEstimator
-from emotion_patterns import EmotionPatternDetector
 
 
-logger = logging.getLogger(__name__)
+PATTERN_SCHEMA = [
+    "emotion_contrast_ratio",
+    "emotion_escalation_ratio",
+    "emotion_negation_ratio",
+    "emotion_repetition_ratio",
+    "emotion_exclamation_ratio",
+    "emotion_question_ratio",
+    "emotion_ellipsis_ratio",
+    "emotion_sentence_variability",
+]
+
+CONTRAST_MARKERS = {
+    "but",
+    "however",
+    "yet",
+    "although",
+    "though",
+    "whereas",
+    "while",
+}
+
+ESCALATION_MARKERS = {
+    "increasingly",
+    "more",
+    "most",
+    "intensifying",
+    "escalating",
+    "worse",
+    "worst",
+    "growing",
+}
+
+NEGATION_MARKERS = {"not", "never", "no", "none", "without", "cannot"}
+
+_TOKEN_REGEX = re.compile(r"\b[a-z']+\b")
+_SENTENCE_SPLIT_REGEX = re.compile(r"[.!?]+")
+_ELLIPSIS_REGEX = re.compile(r"\.\.\.+")
 
 
-class EmotionFeatureExtractor:
+class EmotionPatternDetector:
     """
-    Aggregates multiple emotion analysis signals into a unified feature set.
+    Detect rhetorical emotion patterns that are useful for feature engineering.
     """
 
-    def __init__(
-        self,
-        emotion_detector: Optional[EmotionDetector] = None,
-        intensity_estimator: Optional[EmotionIntensityEstimator] = None,
-        pattern_detector: Optional[EmotionPatternDetector] = None,
-    ) -> None:
-        """Initialize emotion feature extractor components."""
+    def detect_patterns(self, text: str) -> Dict[str, float]:
+        if text is None:
+            text = ""
 
-        self.emotion_detector = emotion_detector or EmotionDetector()
-        self.intensity_estimator = intensity_estimator or EmotionIntensityEstimator()
-        self.pattern_detector = pattern_detector or EmotionPatternDetector()
+        if not isinstance(text, str):
+            text = str(text)
 
-        logger.info("EmotionFeatureExtractor initialized")
+        tokens = _TOKEN_REGEX.findall(text.lower())
+        if not tokens:
+            return self._empty_features()
 
-    def extract_features(self, text: str) -> Dict[str, float]:
-        """Extract unified emotion features from text."""
+        token_count = float(len(tokens))
+        text_length = float(max(len(text), 1))
 
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError("Input text must be a non-empty string")
+        contrast_count = sum(token in CONTRAST_MARKERS for token in tokens)
+        escalation_count = sum(token in ESCALATION_MARKERS for token in tokens)
+        negation_count = sum(token in NEGATION_MARKERS for token in tokens)
 
-        features: Dict[str, float] = {}
+        counts = Counter(tokens)
+        repeated_tokens = sum(count - 1 for count in counts.values() if count > 1)
 
-        try:
-            emotion_distribution = self.emotion_detector.detect(text)
-            intensity_features = self.intensity_estimator.estimate(text)
-            pattern_features = self.pattern_detector.detect_patterns(text)
-        except Exception as exc:
-            logger.exception("Emotion feature extraction failed")
-            raise RuntimeError("Failed to extract emotion features") from exc
+        exclamation_count = text.count("!")
+        question_count = text.count("?")
+        ellipsis_count = len(_ELLIPSIS_REGEX.findall(text))
 
-        features.update(emotion_distribution)
-        features.update(intensity_features)
-        features.update(pattern_features)
+        sentence_variability = self._sentence_variability(text)
 
-        return features
+        return {
+            "emotion_contrast_ratio": round(contrast_count / token_count, 4),
+            "emotion_escalation_ratio": round(escalation_count / token_count, 4),
+            "emotion_negation_ratio": round(negation_count / token_count, 4),
+            "emotion_repetition_ratio": round(repeated_tokens / token_count, 4),
+            "emotion_exclamation_ratio": round(exclamation_count / text_length, 4),
+            "emotion_question_ratio": round(question_count / text_length, 4),
+            "emotion_ellipsis_ratio": round(ellipsis_count / text_length, 4),
+            "emotion_sentence_variability": round(sentence_variability, 4),
+        }
 
-    def extract_vector(self, text: str) -> np.ndarray:
-        """Convert extracted emotion features into a numeric vector."""
+    def _sentence_variability(self, text: str) -> float:
+        sentences: List[str] = [
+            sentence.strip()
+            for sentence in _SENTENCE_SPLIT_REGEX.split(text)
+            if sentence.strip()
+        ]
 
-        features = self.extract_features(text)
+        if len(sentences) <= 1:
+            return 0.0
 
-        try:
-            vector = np.array(list(features.values()), dtype=np.float32)
-            return vector
-        except Exception as exc:
-            logger.exception("Emotion feature vector creation failed")
-            raise RuntimeError("Failed to convert emotion features to vector") from exc
+        lengths = [
+            len(_TOKEN_REGEX.findall(sentence.lower()))
+            for sentence in sentences
+        ]
 
-    def extract_tensor(self, text: str) -> torch.Tensor:
-        """Convert extracted emotion features into a PyTorch tensor."""
+        if not lengths:
+            return 0.0
 
-        vector = self.extract_vector(text)
+        avg_length = float(np.mean(lengths))
+        if avg_length == 0.0:
+            return 0.0
 
-        try:
-            tensor = torch.tensor(vector, dtype=torch.float32)
-            return tensor
-        except Exception as exc:
-            logger.exception("Emotion tensor conversion failed")
-            raise RuntimeError("Failed to convert emotion vector to tensor") from exc
+        return float(np.std(lengths) / avg_length)
+
+    def _empty_features(self) -> Dict[str, float]:
+        return {name: 0.0 for name in PATTERN_SCHEMA}

@@ -1,46 +1,30 @@
 """
-File Name: emotion_intensity.py
-Module: Emotion Analysis - Intensity Estimation
+File Name: emotion_lexicon.py
+Module: Emotion Analysis - Lexicon Scoring
 
 Description:
-    Emotional intensity estimator used in TruthLens AI.
-    Extracts interpretable signals indicating emotional strength and
-    rhetorical amplification within text.
-
+    Lightweight lexicon-based emotion analyzer used by feature and API layers.
 """
 
-import logging
+from __future__ import annotations
+
 import re
-from collections import Counter
-from typing import Dict, List, Optional, Iterable
-
-import numpy as np
-import spacy
-from spacy.tokens import Doc
+from dataclasses import dataclass
+from typing import Dict, Iterable, List, Optional, Set
 
 
-logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------
-# Feature schema (deterministic ordering)
-# ---------------------------------------------------------
-
-INTENSITY_SCHEMA = [
-    "emotion_lexicon_intensity",
-    "intensifier_ratio",
-    "exclamation_intensity",
-    "question_intensity",
-    "ellipsis_intensity",
-    "capitalization_intensity",
-    "adjective_amplification",
-    "adverb_amplification",
-    "repetition_intensity",
+EMOTION_ORDER = [
+    "anger",
+    "fear",
+    "joy",
+    "sadness",
+    "surprise",
+    "disgust",
+    "trust",
+    "anticipation",
 ]
 
-
-NEGATIONS = {"not", "never", "no", "none"}
-
+NEGATIONS = {"not", "never", "no", "none", "without"}
 INTENSIFIERS = {
     "very",
     "extremely",
@@ -52,175 +36,136 @@ INTENSIFIERS = {
     "totally",
 }
 
+DEFAULT_NRC_LEXICON: Dict[str, Set[str]] = {
+    "anger": {"angry", "rage", "outrage", "furious", "hostile"},
+    "fear": {"fear", "afraid", "panic", "threat", "terrified"},
+    "joy": {"joy", "happy", "delight", "celebrate", "pleased"},
+    "sadness": {"sad", "grief", "mourn", "tragic", "depressed"},
+    "surprise": {"surprised", "shocking", "unexpected", "sudden"},
+    "disgust": {"disgust", "revolting", "repulsive", "nauseating"},
+    "trust": {"trust", "reliable", "credible", "honest", "faith"},
+    "anticipation": {"expect", "await", "forecast", "upcoming", "anticipate"},
+}
 
-class EmotionIntensityEstimator:
+_TOKEN_REGEX = re.compile(r"\b[a-z']+\b")
+
+
+@dataclass(frozen=True)
+class EmotionLexiconResult:
+    dominant_emotion: str
+    emotion_scores: Dict[str, float]
+    emotion_distribution: Dict[str, float]
+
+
+class EmotionLexiconAnalyzer:
+    """
+    Lexicon-based emotion analyzer with simple negation/intensifier handling.
+    """
 
     def __init__(
         self,
-        emotion_lexicon: Optional[Dict[str, List[str]]] = None,
-        spacy_model: str = "en_core_web_sm",
-    ):
-
-        try:
-            self.nlp = spacy.load(spacy_model)
-        except Exception as exc:
-            logger.exception("spaCy load failed")
-            raise RuntimeError("spaCy initialization failed") from exc
-
+        emotion_lexicon: Optional[Dict[str, Iterable[str]]] = None,
+    ) -> None:
         self.emotion_lexicon = self._normalize_lexicon(emotion_lexicon)
-
-    # -----------------------------------------------------
 
     def _normalize_lexicon(
         self,
-        emotion_lexicon: Optional[Dict[str, List[str]]],
-    ) -> Dict[str, set]:
-
-        normalized = {}
-
+        emotion_lexicon: Optional[Dict[str, Iterable[str]]],
+    ) -> Dict[str, Set[str]]:
         if emotion_lexicon is None:
-            return normalized
+            return {
+                emotion: set(words)
+                for emotion, words in DEFAULT_NRC_LEXICON.items()
+            }
+
+        normalized: Dict[str, Set[str]] = {emotion: set() for emotion in EMOTION_ORDER}
 
         for emotion, words in emotion_lexicon.items():
+            if not isinstance(emotion, str):
+                continue
 
-            normalized[emotion] = {
-                w.strip().lower()
-                for w in words
-                if isinstance(w, str)
-            }
+            emotion_name = emotion.strip().lower()
+            if not emotion_name:
+                continue
+
+            if emotion_name not in normalized:
+                normalized[emotion_name] = set()
+
+            if not isinstance(words, Iterable):
+                continue
+
+            normalized[emotion_name].update(
+                token.strip().lower()
+                for token in words
+                if isinstance(token, str) and token.strip()
+            )
 
         return normalized
 
-    # -----------------------------------------------------
+    def analyze(self, text: str) -> EmotionLexiconResult:
+        if text is None:
+            text = ""
 
-    def estimate(self, text: str) -> Dict[str, float]:
+        if not isinstance(text, str):
+            text = str(text)
 
-        doc = self.nlp(text)
+        tokens = _TOKEN_REGEX.findall(text.lower())
 
-        tokens = [t.text.lower() for t in doc if t.is_alpha]
+        base_emotions = list(dict.fromkeys([*EMOTION_ORDER, *self.emotion_lexicon.keys()]))
 
-        features = {}
+        if not tokens:
+            empty = {emotion: 0.0 for emotion in base_emotions}
+            return EmotionLexiconResult(
+                dominant_emotion="neutral",
+                emotion_scores=empty,
+                emotion_distribution=empty.copy(),
+            )
 
-        features.update(self._lexicon_intensity(tokens))
-        features.update(self._intensifier_features(tokens))
-        features.update(self._punctuation_features(text))
-        features.update(self._capitalization_features(text))
-        features.update(self._syntactic_features(doc))
-        features.update(self._repetition_features(tokens))
+        raw_scores: Dict[str, float] = {emotion: 0.0 for emotion in base_emotions}
 
-        return features
+        for index, token in enumerate(tokens):
+            previous = tokens[index - 1] if index > 0 else ""
+            modifier = 1.0
 
-    # -----------------------------------------------------
+            if previous in INTENSIFIERS:
+                modifier = 1.5
 
-    def estimate_batch(
-        self,
-        texts: Iterable[str],
-    ) -> List[Dict[str, float]]:
+            if previous in NEGATIONS:
+                modifier *= -1.0
 
-        results = []
-
-        for doc in self.nlp.pipe(texts):
-
-            tokens = [t.text.lower() for t in doc if t.is_alpha]
-
-            features = {}
-
-            features.update(self._lexicon_intensity(tokens))
-            features.update(self._intensifier_features(tokens))
-            features.update(self._punctuation_features(doc.text))
-            features.update(self._capitalization_features(doc.text))
-            features.update(self._syntactic_features(doc))
-            features.update(self._repetition_features(tokens))
-
-            results.append(features)
-
-        return results
-
-    # -----------------------------------------------------
-
-    def _lexicon_intensity(self, tokens: List[str]) -> Dict[str, float]:
-
-        if not tokens or not self.emotion_lexicon:
-            return {"emotion_lexicon_intensity": 0.0}
-
-        hits = 0
-
-        for token in tokens:
-            for lexicon in self.emotion_lexicon.values():
-
+            for emotion in base_emotions:
+                lexicon = self.emotion_lexicon.get(emotion, set())
                 if token in lexicon:
-                    hits += 1
-                    break
+                    raw_scores[emotion] += modifier
 
-        return {"emotion_lexicon_intensity": hits / len(tokens)}
-
-    # -----------------------------------------------------
-
-    def _intensifier_features(self, tokens: List[str]):
-
-        count = sum(token in INTENSIFIERS for token in tokens)
-
-        return {"intensifier_ratio": count / max(len(tokens), 1)}
-
-    # -----------------------------------------------------
-
-    def _punctuation_features(self, text: str):
-
-        exclam = len(re.findall(r"!", text))
-        quest = len(re.findall(r"\?", text))
-        ellip = len(re.findall(r"\.\.\.", text))
-
-        length = max(len(text), 1)
-
-        return {
-            "exclamation_intensity": exclam / length,
-            "question_intensity": quest / length,
-            "ellipsis_intensity": ellip / length,
+        token_count = max(len(tokens), 1)
+        emotion_scores = {
+            emotion: round(score / token_count, 4)
+            for emotion, score in raw_scores.items()
         }
 
-    # -----------------------------------------------------
+        total_signal = sum(abs(score) for score in raw_scores.values())
 
-    def _capitalization_features(self, text: str):
+        if total_signal == 0:
+            emotion_distribution = {
+                emotion: 0.0 for emotion in base_emotions
+            }
+            dominant_emotion = "neutral"
+        else:
+            emotion_distribution = {
+                emotion: round(abs(raw_scores[emotion]) / total_signal, 4)
+                for emotion in base_emotions
+            }
+            dominant_emotion = max(
+                emotion_distribution,
+                key=emotion_distribution.get,
+            )
 
-        caps = re.findall(r"\b[A-Z]{2,}\b", text)
+        return EmotionLexiconResult(
+            dominant_emotion=dominant_emotion,
+            emotion_scores=emotion_scores,
+            emotion_distribution=emotion_distribution,
+        )
 
-        return {
-            "capitalization_intensity": len(caps) / max(len(text.split()), 1)
-        }
-
-    # -----------------------------------------------------
-
-    def _syntactic_features(self, doc: Doc):
-
-        adjectives = [t for t in doc if t.pos_ == "ADJ"]
-        adverbs = [t for t in doc if t.pos_ == "ADV"]
-
-        length = max(len(doc), 1)
-
-        return {
-            "adjective_amplification": len(adjectives) / length,
-            "adverb_amplification": len(adverbs) / length,
-        }
-
-    # -----------------------------------------------------
-
-    def _repetition_features(self, tokens: List[str]):
-
-        counts = Counter(tokens)
-
-        repeated = sum(1 for token, c in counts.items() if c > 1)
-
-        return {"repetition_intensity": repeated / max(len(tokens), 1)}
-
-
-# ---------------------------------------------------------
-# Vector Conversion
-# ---------------------------------------------------------
-
-
-def emotion_intensity_vector(features: Dict[str, float]) -> np.ndarray:
-
-    return np.array(
-        [features.get(name, 0.0) for name in INTENSITY_SCHEMA],
-        dtype=np.float32,
-    )
+    def analyze_batch(self, texts: Iterable[str]) -> List[EmotionLexiconResult]:
+        return [self.analyze(text) for text in texts]

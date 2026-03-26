@@ -97,6 +97,14 @@ def random_oversample(
     until all classes match the majority count.
     """
 
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("df must be a pandas DataFrame")
+
+    if label_column not in df.columns:
+        raise ValueError(
+            f"Column '{label_column}' not found in dataset"
+        )
+
     if len(df) == 0:
         raise ValueError("Dataset is empty")
 
@@ -152,6 +160,14 @@ def random_undersample(
     Majority classes are reduced to match
     the minority class size.
     """
+
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("df must be a pandas DataFrame")
+
+    if label_column not in df.columns:
+        raise ValueError(
+            f"Column '{label_column}' not found in dataset"
+        )
 
     if len(df) == 0:
         raise ValueError("Dataset is empty")

@@ -22,12 +22,12 @@ Outputs:
 """
 
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 import numpy as np
 import spacy
 
-from emotion_detector import EmotionDetector
+from src.features.emotion.emotion_detector import EmotionDetector
 
 
 logger = logging.getLogger(__name__)

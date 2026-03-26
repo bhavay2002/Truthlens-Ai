@@ -52,15 +52,26 @@ def plot_confusion_matrix(
 
         logger.info("Generating confusion matrix visualization")
 
+        cm = np.asarray(cm)
+        if cm.ndim != 2:
+            raise ValueError("cm must be a 2D array")
+        if cm.shape[0] != cm.shape[1]:
+            raise ValueError("cm must be a square matrix")
+
         if labels is None:
             labels = ["REAL", "FAKE"]
+        if len(labels) != cm.shape[0]:
+            raise ValueError(
+                "labels length must match confusion matrix dimensions "
+                f"({len(labels)} != {cm.shape[0]})"
+            )
 
         fig, ax = plt.subplots(figsize=(6, 5))
 
         sns.heatmap(
             cm,
             annot=True,
-            fmt="d",
+            fmt="g",
             cmap="Blues",
             cbar=False,
             xticklabels=labels,

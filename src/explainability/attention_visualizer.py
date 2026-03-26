@@ -48,6 +48,12 @@ class AttentionVisualizer:
 
         logger.info("AttentionVisualizer initialized")
 
+    def _resolve_model_device(self) -> torch.device | None:
+        try:
+            return next(self.model.parameters()).device
+        except (AttributeError, StopIteration, TypeError):
+            return None
+
     def extract_attention(
         self,
         input_ids: torch.Tensor,
@@ -57,22 +63,51 @@ class AttentionVisualizer:
 
         if input_ids is None or attention_mask is None:
             raise ValueError("input tensors cannot be None")
+        if not isinstance(input_ids, torch.Tensor) or not isinstance(
+            attention_mask, torch.Tensor
+        ):
+            raise TypeError("input_ids and attention_mask must be torch tensors")
+        if input_ids.ndim != 2 or attention_mask.ndim != 2:
+            raise ValueError("input_ids and attention_mask must be 2D tensors")
+        if input_ids.shape != attention_mask.shape:
+            raise ValueError(
+                "input_ids and attention_mask must have the same shape"
+            )
+
+        model_device = self._resolve_model_device()
+        if model_device is not None:
+            input_ids = input_ids.to(model_device)
+            attention_mask = attention_mask.to(model_device)
 
         try:
-            outputs = self.model.encoder.encoder(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                output_attentions=True,
-            )
+            with torch.no_grad():
+                try:
+                    outputs = self.model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        output_attentions=True,
+                        return_dict=True,
+                    )
+                except TypeError:
+                    outputs = self.model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        output_attentions=True,
+                    )
         except Exception as exc:
             logger.exception("Failed to extract attention weights")
             raise RuntimeError("Attention extraction failed") from exc
 
-        attentions = outputs.attentions
+        attentions = getattr(outputs, "attentions", None)
+        if attentions is None and isinstance(outputs, (tuple, list)) and outputs:
+            attentions = outputs[-1]
+        if attentions is None:
+            raise RuntimeError(
+                "Model output does not include attentions. "
+                "Ensure the model supports output_attentions=True."
+            )
 
-        return {
-            "attentions": attentions
-        }
+        return {"attentions": attentions}
 
     def aggregate_attention(
         self,
@@ -84,11 +119,27 @@ class AttentionVisualizer:
             raise ValueError("attentions list cannot be empty")
 
         try:
-            stacked = torch.stack(attentions)
+            tensor_attentions: list[torch.Tensor] = []
+            for tensor in attentions:
+                if not isinstance(tensor, torch.Tensor):
+                    raise TypeError("attentions must contain torch.Tensor values")
+                if tensor.ndim != 4:
+                    raise ValueError(
+                        "Each attention tensor must have shape "
+                        "(batch, heads, seq_len, seq_len)."
+                    )
+                tensor_attentions.append(tensor.detach())
 
+            stacked = torch.stack(tensor_attentions, dim=0)
+
+            # Average across layers and heads, then collapse batch.
             avg_attention = stacked.mean(dim=0).mean(dim=1)
+            if avg_attention.shape[0] == 1:
+                avg_attention = avg_attention[0]
+            else:
+                avg_attention = avg_attention.mean(dim=0)
 
-            return avg_attention.detach().cpu().numpy()
+            return avg_attention.cpu().numpy()
         except Exception as exc:
             logger.exception("Attention aggregation failed")
             raise RuntimeError("Failed to aggregate attention") from exc
@@ -103,23 +154,43 @@ class AttentionVisualizer:
 
         if attention_matrix is None or tokens is None:
             raise ValueError("attention_matrix and tokens must be provided")
+        if not isinstance(attention_matrix, np.ndarray):
+            attention_matrix = np.asarray(attention_matrix)
+        if attention_matrix.ndim != 2:
+            raise ValueError("attention_matrix must be 2D for plotting")
+        if not tokens:
+            raise ValueError("tokens cannot be empty")
 
         try:
-            plt.figure(figsize=(10, 8))
+            plot_size = min(
+                attention_matrix.shape[0],
+                attention_matrix.shape[1],
+                len(tokens),
+            )
+            if plot_size == 0:
+                raise ValueError("attention_matrix and tokens must be non-empty")
 
-            plt.imshow(attention_matrix, cmap="viridis")
+            matrix = attention_matrix[:plot_size, :plot_size]
+            token_labels = tokens[:plot_size]
 
-            plt.colorbar()
+            fig, ax = plt.subplots(figsize=(10, 8))
 
-            plt.xticks(range(len(tokens)), tokens, rotation=90)
+            image = ax.imshow(matrix, cmap="viridis")
 
-            plt.yticks(range(len(tokens)), tokens)
+            fig.colorbar(image, ax=ax)
 
-            plt.title(title)
+            ax.set_xticks(range(plot_size))
+            ax.set_xticklabels(token_labels, rotation=90)
 
-            plt.tight_layout()
+            ax.set_yticks(range(plot_size))
+            ax.set_yticklabels(token_labels)
+
+            ax.set_title(title)
+
+            fig.tight_layout()
 
             plt.show()
+            plt.close(fig)
 
         except Exception as exc:
             logger.exception("Attention visualization failed")

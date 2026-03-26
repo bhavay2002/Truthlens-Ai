@@ -1,4 +1,4 @@
- """
+"""
 File Name: truthlens_pipeline.py
 Module: TruthLens Pipeline - Unified Analysis Pipeline
 Description:
@@ -29,11 +29,11 @@ Outputs:
 import logging
 from typing import Dict, Any
 
-from preprocessing_pipeline import PreprocessingPipeline
-from feature_pipeline import FeaturePipeline
-from emotion_pipeline import EmotionPipeline
-from bias_profile_builder import BiasProfileBuilder
-from truthlens_score_calculator import TruthLensScoreCalculator
+from src.aggregation.truthlens_score_calculator import TruthLensScoreCalculator
+from src.analysis.bias_profile_builder import BiasProfileBuilder
+from src.pipelines.emotion_pipeline import EmotionPipeline
+from src.pipelines.feature_pipeline import FeaturePipeline
+from src.pipelines.preprocessing_pipeline import PreprocessingPipeline
 
 
 logger = logging.getLogger(__name__)
@@ -64,7 +64,11 @@ class TruthLensPipeline:
         try:
             preprocessing_output = self.preprocessor.preprocess(text)
 
-            normalized_text = preprocessing_output["normalized_text"]
+            normalized_text = preprocessing_output.get("normalized_text")
+            if not isinstance(normalized_text, str) or not normalized_text.strip():
+                raise RuntimeError(
+                    "Preprocessing output missing non-empty 'normalized_text'."
+                )
 
             feature_outputs = self.feature_pipeline.extract_features(normalized_text)
 
