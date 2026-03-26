@@ -21,7 +21,7 @@ Outputs:
 """
 
 import logging
-from collections import Counter
+from itertools import combinations
 from typing import Dict, List
 
 import numpy as np
@@ -45,11 +45,33 @@ class GraphAnalyzer:
         if not isinstance(graph, dict):
             raise ValueError("graph must be a dictionary")
 
-        node_count = len(graph)
+        adjacency: dict[str, set[str]] = {}
+        all_nodes: set[str] = set()
 
-        edge_count = sum(len(neighbors) for neighbors in graph.values())
+        for node, neighbors in graph.items():
+            if not isinstance(node, str):
+                raise ValueError("graph keys must be strings")
+            if not isinstance(neighbors, list):
+                raise ValueError("graph values must be lists")
 
-        degrees = [len(neighbors) for neighbors in graph.values()]
+            node_key = node.strip().lower()
+            neighbor_set = {
+                str(neighbor).strip().lower()
+                for neighbor in neighbors
+                if isinstance(neighbor, str)
+                and neighbor.strip()
+                and str(neighbor).strip().lower() != node_key
+            }
+            adjacency[node_key] = neighbor_set
+            all_nodes.add(node_key)
+            all_nodes.update(neighbor_set)
+
+        for node in all_nodes:
+            adjacency.setdefault(node, set())
+
+        node_count = len(all_nodes)
+        edge_count = sum(len(neighbors) for neighbors in adjacency.values())
+        degrees = [len(adjacency[node]) for node in sorted(all_nodes)]
 
         avg_degree = float(np.mean(degrees)) if degrees else 0.0
         max_degree = float(max(degrees)) if degrees else 0.0
@@ -61,7 +83,7 @@ class GraphAnalyzer:
 
         centralization = self._compute_centralization(degrees)
 
-        clustering = self._estimate_clustering(graph)
+        clustering = self._estimate_clustering(adjacency)
 
         features = {
             "graph_nodes": float(node_count),
@@ -104,33 +126,34 @@ class GraphAnalyzer:
 
         return float(diff_sum / normalization)
 
-    def _estimate_clustering(self, graph: Dict[str, List[str]]) -> float:
+    def _estimate_clustering(self, graph: Dict[str, set[str]]) -> float:
         """Estimate clustering coefficient using neighbor overlap."""
-
-        triangles = 0
-        triplets = 0
-
-        for node, neighbors in graph.items():
-
-            neighbor_set = set(neighbors)
-
-            for neighbor in neighbors:
-
-                if neighbor not in graph:
-                    continue
-
-                neighbor_neighbors = set(graph[neighbor])
-
-                common = neighbor_set.intersection(neighbor_neighbors)
-
-                triangles += len(common)
-
-                triplets += len(neighbors)
-
-        if triplets == 0:
+        if not graph:
             return 0.0
 
-        return float(triangles / triplets)
+        # Convert to undirected adjacency for clustering coefficient estimate.
+        undirected = {node: set(neighbors) for node, neighbors in graph.items()}
+        for node, neighbors in list(undirected.items()):
+            for neighbor in neighbors:
+                undirected.setdefault(neighbor, set()).add(node)
+
+        local_coefficients: list[float] = []
+        for neighbors in undirected.values():
+            degree = len(neighbors)
+            if degree < 2:
+                local_coefficients.append(0.0)
+                continue
+
+            neighbor_list = sorted(neighbors)
+            links_between_neighbors = 0
+            for left, right in combinations(neighbor_list, 2):
+                if right in undirected.get(left, set()):
+                    links_between_neighbors += 1
+
+            possible_links = degree * (degree - 1) / 2.0
+            local_coefficients.append(links_between_neighbors / possible_links)
+
+        return float(np.mean(local_coefficients)) if local_coefficients else 0.0
 
 
 def graph_feature_vector(features: Dict[str, float]) -> np.ndarray:

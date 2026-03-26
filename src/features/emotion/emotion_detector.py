@@ -20,7 +20,6 @@ from typing import Dict, List, Optional, Iterable
 
 import numpy as np
 import spacy
-from spacy.tokens import Doc
 
 logger = logging.getLogger(__name__)
 

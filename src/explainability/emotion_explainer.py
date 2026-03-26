@@ -17,12 +17,86 @@ Features
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
-from src.features.emotion.emotion_intensity import INTENSIFIER_ADVERBS
-from src.features.emotion.emotion_lexicon import DEFAULT_NRC_LEXICON
+import torch
+
+try:
+    from src.features.emotion.emotion_lexicon import (
+        DEFAULT_NRC_LEXICON as _IMPORTED_NRC_LEXICON,
+    )
+except ImportError:  # pragma: no cover - compatibility fallback
+    _IMPORTED_NRC_LEXICON = None
+
+try:
+    from src.features.emotion.emotion_intensity import (
+        INTENSIFIER_ADVERBS as _IMPORTED_INTENSIFIER_ADVERBS,
+    )
+except ImportError:  # pragma: no cover - compatibility fallback
+    try:
+        from src.features.emotion.emotion_intensity import (
+            INTENSIFIERS as _IMPORTED_INTENSIFIER_ADVERBS,
+        )
+    except ImportError:  # pragma: no cover - compatibility fallback
+        _IMPORTED_INTENSIFIER_ADVERBS = None
+
+logger = logging.getLogger(__name__)
+
+_FALLBACK_NRC_LEXICON: dict[str, set[str]] = {
+    "anger": {"angry", "furious", "rage", "outrage"},
+    "fear": {"fear", "afraid", "panic", "threat"},
+    "joy": {"joy", "happy", "delight", "celebrate"},
+    "sadness": {"sad", "grief", "mourn", "tragic"},
+    "surprise": {"surprised", "shocking", "unexpected", "sudden"},
+    "disgust": {"disgusting", "revolting", "repulsive"},
+    "trust": {"trust", "reliable", "credible", "honest"},
+    "anticipation": {"expect", "await", "forecast", "upcoming"},
+}
+
+_FALLBACK_INTENSIFIERS = {
+    "very",
+    "extremely",
+    "highly",
+    "incredibly",
+    "really",
+    "so",
+    "too",
+}
+
+
+def _normalize_lexicon(raw_lexicon: Any) -> dict[str, set[str]]:
+    if not isinstance(raw_lexicon, dict):
+        return {}
+
+    normalized: dict[str, set[str]] = {}
+    for emotion, words in raw_lexicon.items():
+        if not isinstance(words, (list, tuple, set)):
+            continue
+        token_set = {
+            str(word).strip().lower()
+            for word in words
+            if isinstance(word, str) and word.strip()
+        }
+        if token_set:
+            normalized[str(emotion).strip().lower()] = token_set
+    return normalized
+
+
+DEFAULT_NRC_LEXICON = (
+    _normalize_lexicon(_IMPORTED_NRC_LEXICON) or _FALLBACK_NRC_LEXICON
+)
+INTENSIFIER_ADVERBS = {
+    str(token).strip().lower()
+    for token in (
+        _IMPORTED_INTENSIFIER_ADVERBS
+        if _IMPORTED_INTENSIFIER_ADVERBS is not None
+        else _FALLBACK_INTENSIFIERS
+    )
+    if isinstance(token, str) and token.strip()
+}
 
 
 @dataclass

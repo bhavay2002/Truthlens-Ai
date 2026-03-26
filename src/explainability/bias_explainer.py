@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, List
@@ -14,7 +15,69 @@ try:
 except ImportError:  # pragma: no cover - environment-dependent
     shap = None  # type: ignore[assignment]
 
-from src.features.bias.bias_lexicon import compute_bias_features
+try:
+    from src.features.bias.bias_lexicon import (
+        compute_bias_features as _external_compute_bias_features,
+    )
+except ImportError:  # pragma: no cover - compatibility fallback
+    _external_compute_bias_features = None
+
+logger = logging.getLogger(__name__)
+
+# Backward-compatible lexical fallback when upstream bias lexicon helpers
+# are unavailable due API drift.
+_FALLBACK_BIAS_TERMS = {
+    "biased",
+    "corrupt",
+    "crooked",
+    "disgraceful",
+    "disgusting",
+    "elite",
+    "evil",
+    "fake",
+    "horrible",
+    "manipulate",
+    "radical",
+    "rigged",
+    "shocking",
+    "terrible",
+    "unbelievable",
+}
+
+
+@dataclass
+class _FallbackBiasFeatures:
+    bias_score: float
+    biased_tokens: List[str]
+
+
+def _compute_bias_features_compat(text: str) -> Any:
+    if _external_compute_bias_features is not None:
+        result = _external_compute_bias_features(text)
+        if not hasattr(result, "bias_score") or not hasattr(
+            result, "biased_tokens"
+        ):
+            raise RuntimeError(
+                "compute_bias_features must return an object with "
+                "'bias_score' and 'biased_tokens'."
+            )
+        return result
+
+    tokens = re.findall(r"\b[a-z]+\b", text.lower())
+    matched = [token for token in tokens if token in _FALLBACK_BIAS_TERMS]
+
+    ordered_unique: list[str] = []
+    seen: set[str] = set()
+    for token in matched:
+        if token not in seen:
+            seen.add(token)
+            ordered_unique.append(token)
+
+    score = len(matched) / max(len(tokens), 1)
+    return _FallbackBiasFeatures(
+        bias_score=round(float(score), 4),
+        biased_tokens=ordered_unique,
+    )
 
 
 @dataclass
@@ -40,7 +103,7 @@ def compute_sentence_bias(text: str) -> List[Dict[str, Any]]:
     results: list[dict[str, Any]] = []
 
     for sentence in sentences:
-        bias_result = compute_bias_features(sentence)
+        bias_result = _compute_bias_features_compat(sentence)
         results.append(
             {
                 "sentence": sentence,
@@ -228,8 +291,18 @@ def explain_bias(model, tokenizer, text: str) -> Dict[str, Any]:
         raise ValueError(
             "model and tokenizer are required for bias explanation."
         )
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("text must be a non-empty string.")
 
-    shap_importance = compute_shap_importance(model, tokenizer, text)
+    try:
+        shap_importance = compute_shap_importance(model, tokenizer, text)
+    except Exception as exc:
+        logger.warning(
+            "Falling back to gradient-based token importance because "
+            "SHAP attribution failed: %s",
+            exc,
+        )
+        shap_importance = compute_integrated_gradients(model, tokenizer, text)
     biased_tokens = extract_biased_tokens(shap_importance)
 
     ig_importance = compute_integrated_gradients(model, tokenizer, text)

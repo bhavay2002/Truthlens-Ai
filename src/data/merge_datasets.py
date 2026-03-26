@@ -21,11 +21,14 @@ def _ensure_schema(df: pd.DataFrame) -> pd.DataFrame:
     if "label" not in prepared.columns:
         raise ValueError("Dataset is missing required 'label' column")
 
-    prepared["title"] = prepared["title"].astype(str).fillna("").str.strip()
-    prepared["text"] = prepared["text"].astype(str).fillna("").str.strip()
-    prepared["label"] = prepared["label"].astype(int)
+    prepared["title"] = prepared["title"].fillna("").astype(str).str.strip()
+    prepared["text"] = prepared["text"].fillna("").astype(str).str.strip()
+    prepared["label"] = pd.to_numeric(prepared["label"], errors="coerce")
 
-    prepared = prepared[prepared["text"].str.len() > 0].reset_index(drop=True)
+    prepared = prepared[prepared["text"].str.len() > 0]
+    prepared = prepared.dropna(subset=["label"]).copy()
+    prepared["label"] = prepared["label"].astype(int)
+    prepared = prepared.reset_index(drop=True)
     return prepared[REQUIRED_COLUMNS]
 
 
@@ -89,7 +92,7 @@ def load_liar():
     df = df.rename(columns={"statement": "text"})
 
     df["title"] = ""
-    df["text"] = df["text"].astype(str).fillna("").str.strip()
+    df["text"] = df["text"].fillna("").astype(str).str.strip()
 
     return _ensure_schema(df)
 

@@ -70,7 +70,7 @@ def ensure_positive_int(
     Ensure integer parameter is valid.
     """
 
-    if not isinstance(value, int):
+    if isinstance(value, bool) or not isinstance(value, int):
 
         raise TypeError(f"{name} must be an integer")
 
@@ -156,9 +156,23 @@ def ensure_non_empty_text_list(
     Validate list of text inputs.
     """
 
+    if texts is None:
+
+        raise ValueError(f"{name} cannot be None")
+
+    if isinstance(texts, (str, bytes)):
+        iterable: Iterable[object] = [texts]
+    else:
+        try:
+            iterable = iter(texts)
+        except TypeError as exc:
+            raise TypeError(
+                f"{name} must be an iterable of text values"
+            ) from exc
+
     text_list: list[str] = []
 
-    for item in texts:
+    for item in iterable:
         if item is None:
             text_list.append("")
             continue

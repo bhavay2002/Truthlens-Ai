@@ -64,18 +64,24 @@ class EntityGraphBuilder:
         graph: Dict[str, List[str]] = defaultdict(list)
 
         for sentence in doc.sents:
+            entities = [
+                ent.text.lower().strip()
+                for ent in sentence.ents
+                if ent.text and ent.text.strip()
+            ]
+            entities = list(dict.fromkeys(entities))
 
-            entities = [ent.text.lower() for ent in sentence.ents]
-
+            if not entities:
+                continue
+            for entity in entities:
+                graph.setdefault(entity, [])
             if len(entities) < 2:
                 continue
 
             for i, entity_a in enumerate(entities):
-                for j, entity_b in enumerate(entities):
-                    if i == j:
-                        continue
-
+                for entity_b in entities[i + 1 :]:
                     graph[entity_a].append(entity_b)
+                    graph[entity_b].append(entity_a)
 
         return dict(graph)
 
@@ -85,14 +91,46 @@ class EntityGraphBuilder:
         if not isinstance(graph, dict):
             raise ValueError("graph must be a dictionary")
 
-        node_count = len(graph)
-
-        edge_count = sum(len(neighbors) for neighbors in graph.values())
-
-        degree_counts = Counter()
+        adjacency: dict[str, set[str]] = {}
+        all_nodes: set[str] = set()
 
         for entity, neighbors in graph.items():
-            degree_counts[entity] = len(neighbors)
+            if not isinstance(entity, str):
+                raise ValueError("graph keys must be strings")
+            if not isinstance(neighbors, list):
+                raise ValueError("graph values must be lists of neighbors")
+
+            entity_key = entity.strip().lower()
+            neighbor_set = {
+                str(neighbor).strip().lower()
+                for neighbor in neighbors
+                if isinstance(neighbor, str)
+                and neighbor.strip()
+                and str(neighbor).strip().lower() != entity_key
+            }
+            adjacency[entity_key] = neighbor_set
+            all_nodes.add(entity_key)
+            all_nodes.update(neighbor_set)
+
+        for node in all_nodes:
+            adjacency.setdefault(node, set())
+
+        edge_pairs = {
+            (source, target)
+            for source, neighbors in adjacency.items()
+            for target in neighbors
+            if source != target
+        }
+
+        node_count = len(all_nodes)
+        edge_count = len(edge_pairs)
+
+        degree_counts = Counter(
+            {
+                node: len(adjacency[node])
+                for node in all_nodes
+            }
+        )
 
         dominant_degree = degree_counts.most_common(1)[0][1] if degree_counts else 0
 
@@ -100,7 +138,11 @@ class EntityGraphBuilder:
 
         density = edge_count / max(node_count * (node_count - 1), 1)
 
-        connectivity_variance = float(np.var(list(degree_counts.values()))) if degree_counts else 0.0
+        connectivity_variance = (
+            float(np.var(list(degree_counts.values())))
+            if degree_counts
+            else 0.0
+        )
 
         features = {
             "entity_graph_nodes": float(node_count),

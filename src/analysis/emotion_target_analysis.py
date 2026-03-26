@@ -99,13 +99,14 @@ class EmotionTargetAnalyzer:
                     entity_emotion_map[head.lemma_.lower()] += 1
 
         total_entities = sum(entity_emotion_map.values())
+        expression_ratio = emotion_count / max(len(doc), 1)
 
         features: Dict[str, float] = {}
 
         if total_entities == 0:
             features["emotion_target_diversity"] = 0.0
             features["emotion_target_focus"] = 0.0
-            features["emotion_expression_ratio"] = 0.0
+            features["emotion_expression_ratio"] = float(expression_ratio)
             return features
 
         diversity = len(entity_emotion_map)
@@ -113,8 +114,6 @@ class EmotionTargetAnalyzer:
         dominant_target = max(entity_emotion_map.values())
 
         focus_score = dominant_target / max(total_entities, 1)
-
-        expression_ratio = emotion_count / max(len(doc), 1)
 
         features["emotion_target_diversity"] = float(diversity)
         features["emotion_target_focus"] = float(focus_score)

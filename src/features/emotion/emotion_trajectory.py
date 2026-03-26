@@ -22,12 +22,12 @@ Outputs:
 """
 
 import logging
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import spacy
 
-from emotion_detector import EmotionDetector
+from src.features.emotion.emotion_detector import EmotionDetector
 
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ class EmotionTrajectoryAnalyzer:
 
     def __init__(
         self,
-        emotion_detector: EmotionDetector = None,
+        emotion_detector: Optional[EmotionDetector] = None,
         spacy_model: str = "en_core_web_sm",
         segment_size: int = 2,
     ) -> None:
