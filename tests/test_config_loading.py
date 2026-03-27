@@ -8,3 +8,4 @@ def test_config_loading():
     assert "model" in config
     assert "training" in config
     assert "data" in config
+    assert "api" in config

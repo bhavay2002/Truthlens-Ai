@@ -75,6 +75,18 @@ class PathsSettings:
 
 
 # ---------------------------------------------------------
+# API Settings
+# ---------------------------------------------------------
+
+@dataclass(frozen=True)
+class ApiSettings:
+    title: str
+    description: str
+    version: str
+    text_preview_chars: int
+
+
+# ---------------------------------------------------------
 # Training Settings
 # ---------------------------------------------------------
 
@@ -113,6 +125,7 @@ class AppSettings:
     data: DataSettings
     paths: PathsSettings
     training: TrainingSettings
+    api: ApiSettings
 
 
 # ---------------------------------------------------------
@@ -458,10 +471,46 @@ def load_settings() -> AppSettings:
         optuna_validation_split=optuna_validation_split,
     )
 
+    api = ApiSettings(
+        title=str(
+            get_config_value(
+                config,
+                "api",
+                "title",
+                default="TruthLens AI - Fake News Detection API",
+            )
+        ),
+        description=str(
+            get_config_value(
+                config,
+                "api",
+                "description",
+                default="Detect fake news using RoBERTa-based NLP model",
+            )
+        ),
+        version=str(
+            get_config_value(
+                config,
+                "api",
+                "version",
+                default="1.0.0",
+            )
+        ),
+        text_preview_chars=int(
+            get_config_value(
+                config,
+                "api",
+                "text_preview_chars",
+                default=100,
+            )
+        ),
+    )
+
     return AppSettings(
         model=model,
         features=features,
         data=data,
         paths=paths,
         training=training,
+        api=api,
     )

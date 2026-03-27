@@ -49,5 +49,8 @@ def test_load_settings_supports_legacy_cv_and_tuning_sections(monkeypatch):
     assert settings.training.optuna_batch_sizes == (4, 8)
     assert settings.training.optuna_epoch_choices == (2, 4)
     assert settings.training.optuna_validation_split == 0.25
+    assert settings.api.title == "TruthLens AI - Fake News Detection API"
+    assert settings.api.version == "1.0.0"
+    assert settings.api.text_preview_chars == 100
 
     settings_module.load_settings.cache_clear()

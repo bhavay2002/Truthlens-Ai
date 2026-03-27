@@ -36,7 +36,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 import yaml
 
-from emotion_classifier import EmotionClassifier
+from src.features.emotion.emotion_classifier import EmotionClassifier
 
 
 logger = logging.getLogger(__name__)

@@ -77,6 +77,12 @@ paths:
   confusion_matrix_path: reports/confusion_matrix.png
   cleaning_report_path: reports/data_cleaning_report.json
 
+api:
+  title: TruthLens AI - Fake News Detection API
+  description: Detect fake news using RoBERTa-based NLP model
+  version: 1.1.0
+  text_preview_chars: 100
+
 inference:
   batch_size: 16
   device: auto

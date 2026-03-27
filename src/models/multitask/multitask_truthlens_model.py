@@ -33,7 +33,7 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
-from transformer_encoder import TransformerEncoder
+from src.models.encoder.transformer_encoder import TransformerEncoder
 
 
 logger = logging.getLogger(__name__)
