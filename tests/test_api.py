@@ -165,6 +165,7 @@ def test_health_reports_degraded_when_vectorizer_missing(
     monkeypatch.setattr(api_app, "MODEL_PATH", model_dir)
     monkeypatch.setattr(api_app, "TRAINING_TEXT_COLUMN", "engineered_text")
     monkeypatch.setattr(api_app, "VECTORIZER_PATH", tmp_path / "missing.joblib")
+    monkeypatch.setattr(api_app, "INFERENCE_ALLOW_RAW_TEXT_FALLBACK", False)
 
     response = client.get("/health")
 
@@ -173,3 +174,31 @@ def test_health_reports_degraded_when_vectorizer_missing(
     assert data["status"] == "degraded"
     assert data["vectorizer_required"] is True
     assert data["vectorizer_exists"] is False
+    assert data["vectorizer_fallback_enabled"] is False
+    assert data["vectorizer_effective_ready"] is False
+
+
+def test_health_reports_healthy_when_vectorizer_missing_with_fallback_enabled(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    for filename in ("config.json", "tokenizer.json", "model.safetensors"):
+        (model_dir / filename).write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(api_app, "MODEL_PATH", model_dir)
+    monkeypatch.setattr(api_app, "TRAINING_TEXT_COLUMN", "engineered_text")
+    monkeypatch.setattr(api_app, "VECTORIZER_PATH", tmp_path / "missing.joblib")
+    monkeypatch.setattr(api_app, "INFERENCE_ALLOW_RAW_TEXT_FALLBACK", True)
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "healthy"
+    assert data["vectorizer_required"] is True
+    assert data["vectorizer_exists"] is False
+    assert data["vectorizer_fallback_enabled"] is True
+    assert data["vectorizer_effective_ready"] is True
