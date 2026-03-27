@@ -1,5 +1,9 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, ConfigDict
+from pathlib import Path
+from typing import Any
+import logging
+
 from src.models.predict import predict, predict_batch
 from src.features.bias.bias_lexicon import compute_bias_features
 from src.features.emotion.emotion_lexicon import EmotionLexiconAnalyzer
@@ -7,8 +11,6 @@ from src.explainability.emotion_explainer import explain_emotion
 from src.explainability.lime_explainer import explain_prediction
 from src.utils.logging_utils import configure_logging
 from src.utils.settings import load_settings
-import logging
-from typing import Any
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -16,13 +18,26 @@ SETTINGS = load_settings()
 MODEL_PATH = SETTINGS.model.path
 VECTORIZER_PATH = SETTINGS.paths.tfidf_vectorizer_path
 TRAINING_TEXT_COLUMN = SETTINGS.training.text_column
+APP_TITLE = SETTINGS.api.title
+APP_DESCRIPTION = SETTINGS.api.description
+APP_VERSION = SETTINGS.api.version
+TEXT_PREVIEW_CHARS = max(int(SETTINGS.api.text_preview_chars), 1)
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+MODEL_SUBPACKAGES = (
+    "emotion",
+    "encoder",
+    "ideology",
+    "multitask",
+    "narrative",
+    "propaganda",
+)
 LIME_NUM_SAMPLES = 256
 EMOTION_ANALYZER = EmotionLexiconAnalyzer()
 
 app = FastAPI(
-    title="TruthLens AI - Fake News Detection API",
-    description="Detect fake news using RoBERTa-based NLP model",
-    version="1.0.0"
+    title=APP_TITLE,
+    description=APP_DESCRIPTION,
+    version=APP_VERSION,
 )
 
 
@@ -54,17 +69,68 @@ class AnalysisResponse(BaseModel):
     explainability: dict[str, Any]
 
 
+def _preview_text(text: str) -> str:
+    if len(text) <= TEXT_PREVIEW_CHARS:
+        return text
+    return text[:TEXT_PREVIEW_CHARS] + "..."
+
+
+def _build_project_view() -> dict[str, Any]:
+    src_dir = PROJECT_ROOT / "src"
+    model_dir = src_dir / "models"
+
+    model_subpackages = {}
+    for subpackage in MODEL_SUBPACKAGES:
+        package_dir = model_dir / subpackage
+        model_subpackages[subpackage] = {
+            "directory_exists": package_dir.exists(),
+            "package_init_exists": (package_dir / "__init__.py").exists(),
+        }
+
+    return {
+        "project_root": str(PROJECT_ROOT),
+        "api": {
+            "title": APP_TITLE,
+            "version": APP_VERSION,
+            "description": APP_DESCRIPTION,
+        },
+        "config": {
+            "model_name": SETTINGS.model.name,
+            "model_path": str(MODEL_PATH),
+            "training_text_column": TRAINING_TEXT_COLUMN,
+            "vectorizer_path": str(VECTORIZER_PATH),
+        },
+        "structure": {
+            "src_exists": src_dir.exists(),
+            "api_exists": (PROJECT_ROOT / "api").exists(),
+            "config_exists": (PROJECT_ROOT / "config").exists(),
+            "tests_exists": (PROJECT_ROOT / "tests").exists(),
+            "models_package_init_exists": (model_dir / "__init__.py").exists(),
+            "model_subpackages": model_subpackages,
+        },
+    }
+
+
 @app.get("/")
 def home():
     """Health check endpoint"""
     return {
-        "message": "TruthLens AI - Fake News Detection API",
+        "message": APP_TITLE,
         "status": "online",
         "endpoints": {
             "predict": "/predict",
+            "analyze": "/analyze",
+            "health": "/health",
+            "project_view": "/project-view",
             "docs": "/docs"
         }
     }
+
+
+@app.get("/project-view")
+def project_view():
+    """Project-level view of API metadata, configuration, and package layout."""
+    return _build_project_view()
 
 
 @app.post("/predict", response_model=NewsResponse)
@@ -95,7 +161,7 @@ def predict_news(request: NewsRequest):
             confidence = prob if prob > 0.5 else (1 - prob)
         
         response = NewsResponse(
-            text=request.text[:100] + "..." if len(request.text) > 100 else request.text,
+            text=_preview_text(request.text),
             fake_probability=round(prob, 4),
             prediction=prediction,
             confidence=round(confidence, 4)
@@ -203,7 +269,7 @@ def analyze_news(request: NewsRequest):
             }
 
         return AnalysisResponse(
-            text=request.text[:100] + "..." if len(request.text) > 100 else request.text,
+            text=_preview_text(request.text),
             prediction=prediction,
             fake_probability=round(fake_probability, 4),
             confidence=round(confidence, 4),
