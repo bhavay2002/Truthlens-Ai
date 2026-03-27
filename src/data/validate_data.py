@@ -43,37 +43,21 @@ logger = logging.getLogger(__name__)
 
 
 class DataValidator:
-    """
-    Validate dataset quality and structure before ML training.
-
-    Parameters
-    ----------
-    required_columns : List[str]
-        Columns that must exist in dataset.
-
-    max_null_ratio : float
-        Maximum allowed ratio of null values per column.
-
-    max_dup_ratio : float
-        Maximum allowed duplicate ratio.
-
-    min_class_ratio : float
-        Minimum ratio for each class to avoid severe imbalance.
-
-    min_text_length : int
-        Minimum allowed text length.
-    """
 
     def __init__(
         self,
         required_columns: List[str] | None = None,
+        label_columns: List[str] | None = None,
         max_null_ratio: float = 0.1,
         max_dup_ratio: float = 0.2,
-        min_class_ratio: float = 0.2,
+        min_class_ratio: float = 0.05,
         min_text_length: int = 10,
     ):
 
-        self.required_columns = required_columns or ["text", "label"]
+        self.required_columns = required_columns or ["text"]
+
+        self.label_columns = label_columns or []
+
         self.max_null_ratio = max_null_ratio
         self.max_dup_ratio = max_dup_ratio
         self.min_class_ratio = min_class_ratio
@@ -82,28 +66,21 @@ class DataValidator:
         self.validation_errors: List[str] = []
 
     # ------------------------------------------------
-    # Internal Helpers
-    # ------------------------------------------------
-
-    def _has_required_columns(self, df: pd.DataFrame) -> bool:
-        """Check whether required columns exist."""
-        return set(self.required_columns).issubset(df.columns)
-
-    # ------------------------------------------------
     # Schema Validation
     # ------------------------------------------------
 
     def validate_schema(self, df: pd.DataFrame) -> bool:
-        """
-        Verify required columns exist in dataset.
-        """
 
-        missing_cols = set(self.required_columns) - set(df.columns)
+        missing = set(self.required_columns) - set(df.columns)
 
-        if missing_cols:
-            error = f"Missing required columns: {missing_cols}"
-            logger.error(error)
-            self.validation_errors.append(error)
+        if missing:
+
+            err = f"Missing required columns: {missing}"
+
+            logger.error(err)
+
+            self.validation_errors.append(err)
+
             return False
 
         return True
@@ -112,33 +89,19 @@ class DataValidator:
     # Null Validation
     # ------------------------------------------------
 
-    def validate_nulls(
-        self,
-        df: pd.DataFrame,
-        max_null_ratio: float | None = None,
-    ) -> bool:
-        """
-        Detect excessive null values.
-        """
+    def validate_nulls(self, df: pd.DataFrame) -> bool:
 
-        if not self._has_required_columns(df):
+        ratios = df.isnull().mean()
 
-            error = "Cannot validate nulls: required columns missing"
-            logger.error(error)
-            self.validation_errors.append(error)
-            return False
-
-        threshold = self.max_null_ratio if max_null_ratio is None else max_null_ratio
-
-        null_ratios = df[self.required_columns].isnull().mean()
-
-        problematic = null_ratios[null_ratios > threshold]
+        problematic = ratios[ratios > self.max_null_ratio]
 
         if not problematic.empty:
 
-            error = f"Columns with excessive nulls: {problematic.to_dict()}"
-            logger.warning(error)
-            self.validation_errors.append(error)
+            err = f"High null ratios detected: {problematic.to_dict()}"
+
+            logger.warning(err)
+
+            self.validation_errors.append(err)
 
             return False
 
@@ -149,109 +112,87 @@ class DataValidator:
     # ------------------------------------------------
 
     def validate_duplicates(self, df: pd.DataFrame) -> bool:
-        """
-        Detect duplicate text samples.
-        """
 
         if "text" not in df.columns:
-
-            error = "Cannot validate duplicates: 'text' column missing"
-            logger.error(error)
-            self.validation_errors.append(error)
-
-            return False
-
-        if len(df) == 0:
-            warning = "Cannot validate duplicates: dataframe is empty"
-            logger.warning(warning)
-            self.validation_errors.append(warning)
-            return False
+            return True
 
         dup_count = df.duplicated(subset=["text"]).sum()
+
         dup_ratio = dup_count / len(df)
 
         if dup_ratio > self.max_dup_ratio:
 
-            warning = (
-                f"High duplicate ratio detected: "
-                f"{dup_ratio:.2%} ({dup_count} duplicates)"
-            )
+            err = f"High duplicate ratio: {dup_ratio:.2%}"
 
-            logger.warning(warning)
-            self.validation_errors.append(warning)
+            logger.warning(err)
+
+            self.validation_errors.append(err)
 
             return False
 
         return True
 
     # ------------------------------------------------
-    # Label Distribution Validation
+    # Multi-task Label Validation
     # ------------------------------------------------
 
     def validate_labels(self, df: pd.DataFrame) -> bool:
-        """
-        Check class balance.
-        """
 
-        if "label" not in df.columns:
-            return True
+        results = True
 
-        if df["label"].nunique() < 2:
-            warning = "Only one class present in label column"
-            logger.warning(warning)
-            self.validation_errors.append(warning)
-            return False
+        for label in self.label_columns:
 
-        label_distribution = df["label"].value_counts(normalize=True)
+            if label not in df.columns:
+                continue
 
-        min_ratio = label_distribution.min()
+            values = df[label].dropna()
 
-        if min_ratio < self.min_class_ratio:
+            if values.nunique() < 2:
 
-            warning = f"Class imbalance detected: {label_distribution.to_dict()}"
+                err = f"Label '{label}' has <2 classes"
 
-            logger.warning(warning)
-            self.validation_errors.append(warning)
+                logger.warning(err)
 
-            return False
+                self.validation_errors.append(err)
 
-        return True
+                results = False
+
+                continue
+
+            distribution = values.value_counts(normalize=True)
+
+            if distribution.min() < self.min_class_ratio:
+
+                err = f"Class imbalance in '{label}': {distribution.to_dict()}"
+
+                logger.warning(err)
+
+                self.validation_errors.append(err)
+
+                results = False
+
+        return results
 
     # ------------------------------------------------
     # Text Quality Validation
     # ------------------------------------------------
 
     def validate_text_quality(self, df: pd.DataFrame) -> bool:
-        """
-        Ensure text samples are sufficiently long.
-        """
 
         if "text" not in df.columns:
             return True
 
-        if len(df) == 0:
-            warning = "Cannot validate text quality: dataframe is empty"
-            logger.warning(warning)
-            self.validation_errors.append(warning)
-            return False
+        lengths = df["text"].astype(str).str.len()
 
-        text_series = df["text"].astype(str)
-
-        short_texts = (text_series.str.len() < self.min_text_length).sum()
-
-        short_ratio = short_texts / len(df)
+        short_ratio = (lengths < self.min_text_length).mean()
 
         if short_ratio > 0.1:
 
-            warning = (
-                f"Too many short texts detected: "
-                f"{short_ratio:.2%} ({short_texts} samples "
-                f"< {self.min_text_length} characters)"
-            )
+            err = f"Too many short texts: {short_ratio:.2%}"
 
-            logger.warning(warning)
+            logger.warning(err)
 
-            self.validation_errors.append(warning)
+            self.validation_errors.append(err)
 
             return False
 
@@ -262,9 +203,6 @@ class DataValidator:
     # ------------------------------------------------
 
     def validate_vocabulary(self, df: pd.DataFrame) -> bool:
-        """
-        Check vocabulary diversity.
-        """
 
         if "text" not in df.columns:
             return True
@@ -273,54 +211,68 @@ class DataValidator:
 
         vocab_size = len(set(words))
 
-        if vocab_size < 50:
+        if vocab_size < 100:
 
-            warning = f"Very small vocabulary detected: {vocab_size} unique words"
+            err = f"Vocabulary too small: {vocab_size}"
 
-            logger.warning(warning)
+            logger.warning(err)
 
-            self.validation_errors.append(warning)
+            self.validation_errors.append(err)
 
             return False
 
         return True
 
     # ------------------------------------------------
+    # Dataset Size Check
+    # ------------------------------------------------
+
+    def validate_dataset_size(self, df: pd.DataFrame):
+
+        if len(df) < 100:
+
+            logger.warning("Dataset extremely small (<100 samples)")
+
+    # ------------------------------------------------
     # Dataset Summary
     # ------------------------------------------------
 
     def dataset_summary(self, df: pd.DataFrame) -> Dict[str, Any]:
-        """
-        Generate dataset statistics summary.
-        """
 
-        has_text = "text" in df.columns and len(df) > 0
-        text_series = df["text"].astype(str) if "text" in df.columns else pd.Series(dtype=str)
+        text_series = df["text"].astype(str) if "text" in df.columns else pd.Series()
+
+        words = " ".join(text_series).split()
 
         summary = {
+
             "rows": len(df),
-            "columns": len(df.columns),
-            "avg_text_length": int(text_series.str.len().mean()) if has_text else 0,
-            "median_text_length": int(text_series.str.len().median()) if has_text else 0,
-            "vocab_size": len(set(" ".join(text_series).split())) if has_text else 0,
+            "columns": list(df.columns),
+
+            "avg_text_length": int(text_series.str.len().mean()) if not text_series.empty else 0,
+            "median_text_length": int(text_series.str.len().median()) if not text_series.empty else 0,
+
+            "vocab_size": len(set(words)),
         }
 
-        if "label" in df.columns:
+        label_stats = {}
 
-            summary["label_distribution"] = df["label"].value_counts().to_dict()
+        for label in self.label_columns:
+
+            if label in df.columns:
+
+                label_stats[label] = df[label].value_counts().to_dict()
+
+        summary["label_distribution"] = label_stats
 
         return summary
 
     # ------------------------------------------------
-    # Run Full Validation
+    # Full Validation
     # ------------------------------------------------
 
     def validate(self, df: pd.DataFrame) -> Dict[str, Any]:
-        """
-        Run complete dataset validation pipeline.
-        """
 
-        if len(df) == 0:
+        if df.empty:
             raise ValueError("Dataset is empty")
 
         logger.info("Running dataset validation")
@@ -328,64 +280,36 @@ class DataValidator:
         self.validation_errors = []
 
         results = {
+
             "schema_valid": self.validate_schema(df),
             "nulls_valid": self.validate_nulls(df),
             "duplicates_valid": self.validate_duplicates(df),
             "labels_valid": self.validate_labels(df),
             "text_quality_valid": self.validate_text_quality(df),
             "vocabulary_valid": self.validate_vocabulary(df),
+
         }
+
+        self.validate_dataset_size(df)
 
         results["dataset_summary"] = self.dataset_summary(df)
 
-        validation_flags = [
-            results["schema_valid"],
-            results["nulls_valid"],
-            results["duplicates_valid"],
-            results["labels_valid"],
-            results["text_quality_valid"],
-            results["vocabulary_valid"],
-        ]
-
-        all_passed = all(validation_flags)
-
-        results["all_passed"] = all_passed
         results["errors"] = self.validation_errors
 
-        if all_passed:
-            logger.info("Dataset validation passed")
-        else:
-            logger.warning("Dataset validation issues detected")
-
-            for err in self.validation_errors:
-                logger.warning(f"- {err}")
-
-        logger.info(f"Dataset summary: {results['dataset_summary']}")
+        results["all_passed"] = all(results.values())
 
         return results
 
 
-# ------------------------------------------------
-# Convenience Function
-# ------------------------------------------------
-
-def validate_dataset(csv_path: str) -> Dict[str, Any]:
-    """
-    Validate dataset directly from CSV file.
-
-    Parameters
-    ----------
-    csv_path : str
-        Path to dataset CSV.
-
-    Returns
-    -------
-    Dict[str, Any]
-        Validation results dictionary.
-    """
+def validate_dataset(
+    csv_path: str,
+    label_columns: List[str] | None = None,
+) -> Dict[str, Any]:
 
     df = pd.read_csv(csv_path)
 
-    validator = DataValidator()
+    validator = DataValidator(
+        label_columns=label_columns
+    )
 
     return validator.validate(df)

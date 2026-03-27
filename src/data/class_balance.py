@@ -3,25 +3,24 @@ File: src/data/class_balance.py
 
 Purpose
 -------
-Provide utilities for detecting and correcting dataset class imbalance.
+Research-grade dataset balancing utilities.
 
 Supports:
+- Single-task and multi-task datasets
 - Class distribution inspection
 - Random oversampling
 - Random undersampling
-- Automatic dataset balancing
+- Automatic balancing
+- Multi-label / multi-task balancing
+- Missing label handling
 
-Used in fake news detection pipelines where label imbalance
-can significantly degrade model performance.
+Designed for multi-task NLP systems such as:
 
-Inputs
-------
-df : pandas.DataFrame
-label_column : str
-
-Outputs
--------
-Balanced pandas.DataFrame
+Bias
+Ideology
+Propaganda
+Narrative
+Emotion
 
 Dependencies
 ------------
@@ -33,7 +32,7 @@ logging
 from __future__ import annotations
 
 import logging
-from typing import Dict
+from typing import Dict, List, Optional
 
 import pandas as pd
 from sklearn.utils import resample
@@ -42,43 +41,71 @@ logger = logging.getLogger(__name__)
 
 
 # -------------------------------------------------
+# Utility Validation
+# -------------------------------------------------
+
+def _validate_dataframe(df: pd.DataFrame):
+
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("df must be a pandas DataFrame")
+
+    if len(df) == 0:
+        raise ValueError("Dataset is empty")
+
+
+# -------------------------------------------------
 # Class Distribution Check
 # -------------------------------------------------
 
 def check_class_distribution(
     df: pd.DataFrame,
-    label_column: str = "label",
-) -> Dict[int, int]:
+    label_column: str,
+) -> Dict:
+
     """
-    Inspect class distribution.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-    label_column : str
-
-    Returns
-    -------
-    Dict[int, int]
-        Label counts.
+    Inspect class distribution for a single task.
     """
 
-    if not isinstance(df, pd.DataFrame):
-        raise TypeError("df must be a pandas DataFrame")
+    _validate_dataframe(df)
 
     if label_column not in df.columns:
-        raise ValueError(
-            f"Column '{label_column}' not found in dataset"
-        )
+        raise ValueError(f"Column '{label_column}' not found")
 
-    if len(df) == 0:
-        raise ValueError("Dataset is empty")
+    counts = df[label_column].value_counts(dropna=True).to_dict()
 
-    counts = df[label_column].value_counts().to_dict()
-
-    logger.info("Class distribution: %s", counts)
+    logger.info(
+        "Class distribution for '%s': %s",
+        label_column,
+        counts,
+    )
 
     return counts
+
+
+# -------------------------------------------------
+# Multi-Task Distribution Inspection
+# -------------------------------------------------
+
+def check_multitask_distribution(
+    df: pd.DataFrame,
+    label_columns: List[str],
+) -> Dict[str, Dict]:
+
+    """
+    Inspect class distribution for multiple tasks.
+    """
+
+    results = {}
+
+    for col in label_columns:
+
+        if col not in df.columns:
+            logger.warning("Column '%s' missing. Skipping.", col)
+            continue
+
+        results[col] = check_class_distribution(df, col)
+
+    return results
 
 
 # -------------------------------------------------
@@ -87,30 +114,28 @@ def check_class_distribution(
 
 def random_oversample(
     df: pd.DataFrame,
-    label_column: str = "label",
+    label_column: str,
     random_state: int = 42,
 ) -> pd.DataFrame:
+
     """
     Balance dataset using random oversampling.
-
-    Minority class samples are duplicated
-    until all classes match the majority count.
     """
 
-    if not isinstance(df, pd.DataFrame):
-        raise TypeError("df must be a pandas DataFrame")
+    _validate_dataframe(df)
 
     if label_column not in df.columns:
-        raise ValueError(
-            f"Column '{label_column}' not found in dataset"
-        )
+        raise ValueError(f"Column '{label_column}' not found")
 
-    if len(df) == 0:
-        raise ValueError("Dataset is empty")
+    df = df.dropna(subset=[label_column])
 
     counts = df[label_column].value_counts()
+
     if len(counts) < 2:
-        logger.warning("Only one class present; skipping oversampling")
+        logger.warning(
+            "Only one class present for '%s'. Skipping oversampling.",
+            label_column,
+        )
         return df.reset_index(drop=True)
 
     max_count = counts.max()
@@ -138,7 +163,8 @@ def random_oversample(
     ).reset_index(drop=True)
 
     logger.info(
-        "Dataset balanced via oversampling: %s",
+        "Oversampled '%s' distribution: %s",
+        label_column,
         balanced_df[label_column].value_counts().to_dict(),
     )
 
@@ -151,30 +177,28 @@ def random_oversample(
 
 def random_undersample(
     df: pd.DataFrame,
-    label_column: str = "label",
+    label_column: str,
     random_state: int = 42,
 ) -> pd.DataFrame:
+
     """
     Balance dataset using random undersampling.
-
-    Majority classes are reduced to match
-    the minority class size.
     """
 
-    if not isinstance(df, pd.DataFrame):
-        raise TypeError("df must be a pandas DataFrame")
+    _validate_dataframe(df)
 
     if label_column not in df.columns:
-        raise ValueError(
-            f"Column '{label_column}' not found in dataset"
-        )
+        raise ValueError(f"Column '{label_column}' not found")
 
-    if len(df) == 0:
-        raise ValueError("Dataset is empty")
+    df = df.dropna(subset=[label_column])
 
     counts = df[label_column].value_counts()
+
     if len(counts) < 2:
-        logger.warning("Only one class present; skipping undersampling")
+        logger.warning(
+            "Only one class present for '%s'. Skipping undersampling.",
+            label_column,
+        )
         return df.reset_index(drop=True)
 
     min_count = counts.min()
@@ -202,7 +226,8 @@ def random_undersample(
     ).reset_index(drop=True)
 
     logger.info(
-        "Dataset balanced via undersampling: %s",
+        "Undersampled '%s' distribution: %s",
+        label_column,
         balanced_df[label_column].value_counts().to_dict(),
     )
 
@@ -210,43 +235,112 @@ def random_undersample(
 
 
 # -------------------------------------------------
-# Automatic Balancing
+# Automatic Balancing (Single Task)
 # -------------------------------------------------
 
 def balance_dataset(
     df: pd.DataFrame,
-    label_column: str = "label",
+    label_column: str,
     method: str = "oversample",
     random_state: int = 42,
 ) -> pd.DataFrame:
+
     """
-    Automatically balance dataset.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-
-    label_column : str
-
-    method : str
-        "oversample" or "undersample"
-
-    Returns
-    -------
-    pandas.DataFrame
-        Balanced dataset
+    Automatically balance a single task dataset.
     """
 
     if method == "oversample":
 
-        return random_oversample(df, label_column, random_state=random_state)
+        return random_oversample(
+            df,
+            label_column,
+            random_state=random_state,
+        )
 
     elif method == "undersample":
 
-        return random_undersample(df, label_column, random_state=random_state)
+        return random_undersample(
+            df,
+            label_column,
+            random_state=random_state,
+        )
 
     else:
 
         raise ValueError(
             "method must be 'oversample' or 'undersample'"
         )
+
+
+# -------------------------------------------------
+# Multi-Task Dataset Balancing
+# -------------------------------------------------
+
+def balance_multitask_dataset(
+    df: pd.DataFrame,
+    label_columns: List[str],
+    method: str = "oversample",
+    random_state: int = 42,
+) -> pd.DataFrame:
+
+    """
+    Balance each task independently in a multi-task dataset.
+
+    Useful for systems with multiple heads such as:
+
+    bias
+    ideology
+    propaganda
+    narrative
+    emotion
+    """
+
+    _validate_dataframe(df)
+
+    balanced_frames: List[pd.DataFrame] = []
+
+    for label in label_columns:
+
+        if label not in df.columns:
+
+            logger.warning(
+                "Label column '%s' missing. Skipping.",
+                label,
+            )
+            continue
+
+        task_df = df.dropna(subset=[label])
+
+        if len(task_df) == 0:
+
+            logger.warning(
+                "No valid samples for '%s'. Skipping.",
+                label,
+            )
+            continue
+
+        logger.info(
+            "Balancing task '%s' with %d samples",
+            label,
+            len(task_df),
+        )
+
+        balanced = balance_dataset(
+            task_df,
+            label_column=label,
+            method=method,
+            random_state=random_state,
+        )
+
+        balanced_frames.append(balanced)
+
+    if not balanced_frames:
+        raise ValueError("No tasks were balanced")
+
+    combined = pd.concat(balanced_frames)
+
+    combined = combined.drop_duplicates().reset_index(drop=True)
+
+    logger.info("Final balanced dataset size: %d", len(combined))
+
+    return combined

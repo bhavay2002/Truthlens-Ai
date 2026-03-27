@@ -3,36 +3,19 @@ File: src/data/clean_data.py
 
 Purpose
 -------
-Provides text normalization and dataset cleaning utilities for NLP pipelines.
-Removes noise such as URLs, HTML tags, emojis, mentions, and repeated characters.
-Also supports optional NLP preprocessing like stopword removal and lemmatization.
+Research-grade dataset cleaning and text normalization utilities.
 
-Typical Usage
--------------
-Used during dataset preprocessing before model training (e.g., RoBERTa classifier).
+Designed for large NLP pipelines and multi-dataset systems such as
+multi-task transformer training.
 
-Inputs
-------
-text : str
-    Raw text data (news article, tweet, etc.)
-
-df : pandas.DataFrame
-    Dataset containing text column.
-
-Outputs
--------
-clean_text(text) -> str
-clean_dataframe(df) -> pandas.DataFrame
-advanced_text_preprocessing(text) -> str
-
-Dependencies
-------------
-pandas
-re
-logging
-unicodedata
-optional: contractions
-optional: nltk
+Features
+--------
+- Robust text normalization
+- Vectorized dataset cleaning
+- Configurable preprocessing pipeline
+- Dataset diagnostics
+- Parallel processing support
+- Multi-dataset schema compatibility
 """
 
 from __future__ import annotations
@@ -40,7 +23,7 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
-from typing import Optional
+from typing import Optional, List
 
 import pandas as pd
 
@@ -48,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 
 # -------------------------------------------------
-# Precompiled Regex Patterns (Performance optimized)
+# Regex Patterns (Precompiled for performance)
 # -------------------------------------------------
 
 URL_PATTERN = re.compile(r"http\S+|www\S+|https\S+")
@@ -64,7 +47,6 @@ EMOJI_PATTERN = re.compile(
     "\U0001F600-\U0001F64F"
     "\U0001F300-\U0001F5FF"
     "\U0001F680-\U0001F6FF"
-    "\U0001F700-\U0001F77F"
     "\U0001F900-\U0001F9FF"
     "\U0001FA00-\U0001FAFF"
     "]+",
@@ -73,23 +55,10 @@ EMOJI_PATTERN = re.compile(
 
 
 # -------------------------------------------------
-# Text Normalization Utilities
+# Basic Normalization Utilities
 # -------------------------------------------------
 
 def normalize_unicode(text: str) -> str:
-    """
-    Normalize unicode characters and quotation marks.
-
-    Parameters
-    ----------
-    text : str
-        Input raw text.
-
-    Returns
-    -------
-    str
-        Normalized text.
-    """
 
     text = unicodedata.normalize("NFKD", text)
 
@@ -106,96 +75,61 @@ def normalize_unicode(text: str) -> str:
     return text
 
 
-def expand_contractions(text: str) -> str:
-    """
-    Expand English contractions if library available.
-
-    Example:
-    don't -> do not
-    """
-
-    try:
-        import contractions
-
-        return contractions.fix(text)
-
-    except ImportError:
-        return text
-
-
-def normalize_numbers(text: str) -> str:
-    """
-    Replace numeric values with <NUM> token.
-    """
-
-    return NUMBER_PATTERN.sub("<NUM>", text)
-
-
 def remove_emojis(text: str) -> str:
-    """
-    Remove emojis from text.
-    """
 
     return EMOJI_PATTERN.sub("", text)
 
 
-def normalize_repeated_chars(text: str) -> str:
-    """
-    Normalize repeated characters.
+def normalize_numbers(text: str) -> str:
 
-    Example:
-    soooo -> soo
-    """
+    return NUMBER_PATTERN.sub("<NUM>", text)
+
+
+def normalize_repeated_chars(text: str) -> str:
 
     return REPEATED_CHARS.sub(r"\1\1", text)
 
 
+def expand_contractions(text: str) -> str:
+
+    try:
+        import contractions
+        return contractions.fix(text)
+    except ImportError:
+        return text
+
+
 # -------------------------------------------------
-# Core Cleaning Function
+# Core Text Cleaning
 # -------------------------------------------------
 
-def clean_text(text: str, normalize_nums: bool = True) -> str:
-    """
-    Clean and normalize input text.
+def clean_text(
+    text: str,
+    normalize_nums: bool = True,
+    remove_urls: bool = True,
+    remove_html: bool = True,
+) -> str:
 
-    Steps
-    -----
-    - Unicode normalization
-    - Remove emojis
-    - Lowercase conversion
-    - Expand contractions
-    - Remove URLs / emails / mentions / HTML
-    - Normalize repeated characters
-    - Replace numbers
-    - Remove noisy symbols
+    if text is None:
+        return ""
 
-    Parameters
-    ----------
-    text : str
-        Raw input text.
-
-    normalize_nums : bool
-        Whether to replace numbers with <NUM> token.
-
-    Returns
-    -------
-    str
-        Clean normalized text.
-    """
-
-    original_text = "" if text is None else text
     text = str(text)
 
     text = normalize_unicode(text)
     text = remove_emojis(text)
 
     text = text.lower()
+
     text = expand_contractions(text)
 
-    text = URL_PATTERN.sub("", text)
-    text = EMAIL_PATTERN.sub("", text)
+    if remove_urls:
+        text = URL_PATTERN.sub("", text)
+        text = EMAIL_PATTERN.sub("", text)
+
     text = MENTION_PATTERN.sub("", text)
-    text = HTML_PATTERN.sub("", text)
+
+    if remove_html:
+        text = HTML_PATTERN.sub("", text)
 
     text = normalize_repeated_chars(text)
 
@@ -209,11 +143,33 @@ def clean_text(text: str, normalize_nums: bool = True) -> str:
 
     text = WHITESPACE_PATTERN.sub(" ", text).strip()
 
-    # Fallback safeguard
-    if not text or len(text) < 3:
-        return str(original_text).lower().strip()
-
     return text
+
+
+# -------------------------------------------------
+# Dataset Diagnostics
+# -------------------------------------------------
+
+def dataset_text_statistics(
+    df: pd.DataFrame,
+    text_column: str,
+) -> dict:
+
+    if text_column not in df.columns:
+        raise ValueError(f"{text_column} not found")
+
+    lengths = df[text_column].astype(str).apply(len)
+
+    stats = {
+        "rows": len(df),
+        "avg_length": lengths.mean(),
+        "max_length": lengths.max(),
+        "min_length": lengths.min(),
+    }
+
+    logger.info("Dataset text statistics: %s", stats)
+
+    return stats
 
 
 # -------------------------------------------------
@@ -224,36 +180,11 @@ def clean_dataframe(
     df: pd.DataFrame,
     text_column: str = "text",
     title_column: Optional[str] = None,
-    min_len: int = 30,
+    min_words: int = 20,
 ) -> pd.DataFrame:
-    """
-    Clean dataset containing text data.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Input dataset.
-
-    text_column : str
-        Column containing main article text.
-
-    title_column : Optional[str]
-        Optional column containing article title.
-
-    min_len : int
-        Minimum word count threshold.
-
-    Returns
-    -------
-    pd.DataFrame
-        Cleaned dataset.
-    """
 
     if not isinstance(df, pd.DataFrame):
         raise TypeError("df must be a pandas DataFrame")
-
-    if min_len < 0:
-        raise ValueError("min_len must be >= 0")
 
     if text_column not in df.columns:
         raise ValueError(f"Column '{text_column}' not found")
@@ -261,13 +192,13 @@ def clean_dataframe(
     df = df.copy()
 
     initial_rows = len(df)
-    logger.info(f"Initial dataset size: {initial_rows}")
+
+    logger.info("Initial dataset size: %d", initial_rows)
 
     if initial_rows == 0:
-        logger.warning("Input dataframe is empty; returning empty dataframe")
         return df
 
-    # Merge title + text
+    # Merge title + body text
     if title_column and title_column in df.columns:
 
         df[text_column] = (
@@ -282,36 +213,66 @@ def clean_dataframe(
     # Remove missing values
     df = df.dropna(subset=[text_column])
 
-    df[text_column] = df[text_column].astype(str).str.strip()
+    # Convert to string
+    df[text_column] = df[text_column].astype(str)
 
-    # Remove empty rows
-    df = df[df[text_column].str.len() > 0]
+    # Apply cleaning
+    df[text_column] = df[text_column].map(clean_text)
 
-    # Apply text cleaning
-    df[text_column] = df[text_column].apply(clean_text)
+    # Word filtering
+    word_counts = df[text_column].apply(lambda x: len(x.split()))
 
-    # Remove short texts
-    df["word_count"] = df[text_column].apply(lambda x: len(str(x).split()))
-
-    df = df[df["word_count"] >= min_len]
-
-    df = df.drop(columns=["word_count"])
+    df = df[word_counts >= min_words]
 
     df = df.reset_index(drop=True)
 
     final_rows = len(df)
 
-    logger.info(f"Final dataset size: {final_rows}")
-    logger.info(f"Rows removed: {initial_rows - final_rows}")
-
-    retention = (final_rows / initial_rows) * 100 if initial_rows else 0
-    logger.info(f"Retention rate: {retention:.2f}%")
+    logger.info("Final dataset size: %d", final_rows)
+    logger.info("Rows removed: %d", initial_rows - final_rows)
 
     return df
 
 
 # -------------------------------------------------
-# Optional NLP Preprocessing
+# Parallel Cleaning (Large Datasets)
+# -------------------------------------------------
+
+def clean_dataframe_parallel(
+    df: pd.DataFrame,
+    text_column: str = "text",
+    workers: int = 4,
+) -> pd.DataFrame:
+
+    try:
+
+        from multiprocessing import Pool
+
+        texts = df[text_column].astype(str).tolist()
+
+        with Pool(workers) as p:
+
+            cleaned = p.map(clean_text, texts)
+
+        df = df.copy()
+        df[text_column] = cleaned
+
+        return df
+
+    except Exception as e:
+
+        logger.warning(
+            "Parallel cleaning failed, falling back to single process: %s",
+            e,
+        )
+
+        df[text_column] = df[text_column].map(clean_text)
+
+        return df
+
+
+# -------------------------------------------------
+# Optional NLP Processing
 # -------------------------------------------------
 
 def advanced_text_preprocessing(
@@ -319,33 +280,11 @@ def advanced_text_preprocessing(
     remove_stopwords: bool = False,
     lemmatize: bool = False,
 ) -> str:
-    """
-    Advanced NLP preprocessing.
-
-    Optional:
-    - Stopword removal
-    - Lemmatization
-
-    Parameters
-    ----------
-    text : str
-        Input text.
-
-    remove_stopwords : bool
-        Whether to remove stopwords.
-
-    lemmatize : bool
-        Whether to apply lemmatization.
-
-    Returns
-    -------
-    str
-        Preprocessed text.
-    """
 
     text = clean_text(text)
 
     try:
+
         import nltk
         from nltk.corpus import stopwords
         from nltk.stem import WordNetLemmatizer
@@ -356,18 +295,19 @@ def advanced_text_preprocessing(
         words = text.split()
 
         if remove_stopwords:
+
             stop_words = set(stopwords.words("english"))
             words = [w for w in words if w not in stop_words]
 
         if lemmatize:
+
             lemmatizer = WordNetLemmatizer()
             words = [lemmatizer.lemmatize(w) for w in words]
 
         text = " ".join(words)
 
     except ImportError:
-        logger.warning(
-            "NLTK not installed, skipping advanced preprocessing"
-        )
+
+        logger.warning("NLTK not installed. Skipping NLP preprocessing.")
 
     return text
