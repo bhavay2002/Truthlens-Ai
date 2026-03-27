@@ -87,6 +87,17 @@ class ApiSettings:
 
 
 # ---------------------------------------------------------
+# Inference Settings
+# ---------------------------------------------------------
+
+@dataclass(frozen=True)
+class InferenceSettings:
+    batch_size: int
+    device: str
+    allow_raw_text_fallback: bool
+
+
+# ---------------------------------------------------------
 # Training Settings
 # ---------------------------------------------------------
 
@@ -126,6 +137,7 @@ class AppSettings:
     paths: PathsSettings
     training: TrainingSettings
     api: ApiSettings
+    inference: InferenceSettings
 
 
 # ---------------------------------------------------------
@@ -506,6 +518,33 @@ def load_settings() -> AppSettings:
         ),
     )
 
+    inference = InferenceSettings(
+        batch_size=int(
+            get_config_value(
+                config,
+                "inference",
+                "batch_size",
+                default=16,
+            )
+        ),
+        device=str(
+            get_config_value(
+                config,
+                "inference",
+                "device",
+                default="auto",
+            )
+        ),
+        allow_raw_text_fallback=bool(
+            get_config_value(
+                config,
+                "inference",
+                "allow_raw_text_fallback",
+                default=True,
+            )
+        ),
+    )
+
     return AppSettings(
         model=model,
         features=features,
@@ -513,4 +552,5 @@ def load_settings() -> AppSettings:
         paths=paths,
         training=training,
         api=api,
+        inference=inference,
     )

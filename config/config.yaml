@@ -86,3 +86,4 @@ api:
 inference:
   batch_size: 16
   device: auto
+  allow_raw_text_fallback: true

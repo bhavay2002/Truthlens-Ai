@@ -22,6 +22,9 @@ APP_TITLE = SETTINGS.api.title
 APP_DESCRIPTION = SETTINGS.api.description
 APP_VERSION = SETTINGS.api.version
 TEXT_PREVIEW_CHARS = max(int(SETTINGS.api.text_preview_chars), 1)
+INFERENCE_ALLOW_RAW_TEXT_FALLBACK = bool(
+    SETTINGS.inference.allow_raw_text_fallback
+)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MODEL_SUBPACKAGES = (
     "emotion",
@@ -194,6 +197,12 @@ def health_check():
         model_exists = MODEL_PATH.exists()
         vectorizer_required = TRAINING_TEXT_COLUMN == "engineered_text"
         vectorizer_exists = (not vectorizer_required) or VECTORIZER_PATH.exists()
+        vectorizer_fallback_enabled = INFERENCE_ALLOW_RAW_TEXT_FALLBACK
+        vectorizer_effective_ready = (
+            vectorizer_exists
+            if not vectorizer_required
+            else (vectorizer_exists or vectorizer_fallback_enabled)
+        )
         
         # Check for required model files
         required_files = ["config.json", "tokenizer.json"]
@@ -208,7 +217,7 @@ def health_check():
         return {
             "status": (
                 "healthy"
-                if model_exists and model_files_exist and vectorizer_exists
+                if model_exists and model_files_exist and vectorizer_effective_ready
                 else "degraded"
             ),
             "model_path": str(MODEL_PATH),
@@ -217,6 +226,8 @@ def health_check():
             "training_text_column": TRAINING_TEXT_COLUMN,
             "vectorizer_required": vectorizer_required,
             "vectorizer_exists": vectorizer_exists,
+            "vectorizer_fallback_enabled": vectorizer_fallback_enabled,
+            "vectorizer_effective_ready": vectorizer_effective_ready,
             "vectorizer_path": str(VECTORIZER_PATH),
         }
     except Exception as e:

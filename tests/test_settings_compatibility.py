@@ -52,5 +52,8 @@ def test_load_settings_supports_legacy_cv_and_tuning_sections(monkeypatch):
     assert settings.api.title == "TruthLens AI - Fake News Detection API"
     assert settings.api.version == "1.0.0"
     assert settings.api.text_preview_chars == 100
+    assert settings.inference.batch_size == 16
+    assert settings.inference.device == "auto"
+    assert settings.inference.allow_raw_text_fallback is True
 
     settings_module.load_settings.cache_clear()
