@@ -43,7 +43,7 @@ import json
 import logging
 from collections import Counter
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 import pandas as pd
 
@@ -53,27 +53,19 @@ logger = logging.getLogger(__name__)
 class DataProfiler:
     """
     Dataset profiling tool for NLP datasets.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        Dataset containing text and optional label column.
-
-    report_dir : Path
-        Directory to save profiling reports.
     """
 
     def __init__(
         self,
         df: pd.DataFrame,
         text_column: str = "text",
-        label_column: str = "label",
+        label_columns: List[str] | None = None,
         report_dir: str | Path = "reports",
     ):
 
         self.df = df.copy()
         self.text_column = text_column
-        self.label_column = label_column
+        self.label_columns = label_columns or []
 
         self.report_dir = Path(report_dir)
         self.report_dir.mkdir(parents=True, exist_ok=True)
@@ -81,22 +73,22 @@ class DataProfiler:
         self.summary: Dict[str, Any] = {}
 
     # -------------------------------------------------
-    # Basic Dataset Statistics
+    # Dataset Overview
     # -------------------------------------------------
 
-    def dataset_overview(self) -> None:
+    def dataset_overview(self):
 
         self.summary["rows"] = len(self.df)
         self.summary["columns"] = len(self.df.columns)
         self.summary["column_names"] = list(self.df.columns)
 
-        logger.info("Dataset rows: %s", len(self.df))
+        logger.info("Dataset rows: %d", len(self.df))
 
     # -------------------------------------------------
     # Missing Values
     # -------------------------------------------------
 
-    def missing_values(self) -> None:
+    def missing_values(self):
 
         missing = self.df.isnull().sum().to_dict()
 
@@ -106,53 +98,81 @@ class DataProfiler:
     # Duplicate Detection
     # -------------------------------------------------
 
-    def duplicate_analysis(self) -> None:
+    def duplicate_analysis(self):
 
         dup_count = self.df.duplicated().sum()
-        dup_ratio = (dup_count / len(self.df)) if len(self.df) > 0 else 0.0
+
+        dup_ratio = dup_count / len(self.df) if len(self.df) else 0
 
         self.summary["duplicate_count"] = int(dup_count)
         self.summary["duplicate_ratio"] = float(dup_ratio)
 
     # -------------------------------------------------
-    # Label Distribution
+    # Multi-Task Label Distribution
     # -------------------------------------------------
 
-    def label_distribution(self) -> None:
+    def label_distribution(self):
 
-        if self.label_column in self.df.columns:
+        label_stats = {}
 
-            distribution = self.df[self.label_column].value_counts().to_dict()
+        for col in self.label_columns:
 
-            self.summary["label_distribution"] = distribution
+            if col in self.df.columns:
+
+                label_stats[col] = (
+                    self.df[col]
+                    .value_counts(dropna=True)
+                    .to_dict()
+                )
+
+        self.summary["label_distribution"] = label_stats
 
     # -------------------------------------------------
     # Text Length Statistics
     # -------------------------------------------------
 
-    def text_length_stats(self) -> None:
+    def text_length_stats(self):
 
         if self.text_column not in self.df.columns:
             return
 
-        text_lengths = self.df[self.text_column].astype(str).str.len()
-        if text_lengths.empty:
-            self.summary["avg_text_length"] = 0
-            self.summary["median_text_length"] = 0
-            self.summary["max_text_length"] = 0
-            self.summary["min_text_length"] = 0
+        lengths = self.df[self.text_column].astype(str).str.len()
+
+        if lengths.empty:
             return
 
-        self.summary["avg_text_length"] = int(text_lengths.mean())
-        self.summary["median_text_length"] = int(text_lengths.median())
-        self.summary["max_text_length"] = int(text_lengths.max())
-        self.summary["min_text_length"] = int(text_lengths.min())
+        self.summary["text_length_stats"] = {
+            "avg": int(lengths.mean()),
+            "median": int(lengths.median()),
+            "max": int(lengths.max()),
+            "min": int(lengths.min()),
+        }
+
+    # -------------------------------------------------
+    # Token Statistics
+    # -------------------------------------------------
+
+    def token_statistics(self):
+
+        if self.text_column not in self.df.columns:
+            return
+
+        token_lengths = self.df[self.text_column].astype(str).apply(
+            lambda x: len(x.split())
+        )
+
+        self.summary["token_stats"] = {
+            "avg_tokens": float(token_lengths.mean()),
+            "median_tokens": float(token_lengths.median()),
+            "max_tokens": int(token_lengths.max()),
+            "min_tokens": int(token_lengths.min()),
+        }
 
     # -------------------------------------------------
     # Vocabulary Analysis
     # -------------------------------------------------
 
-    def vocabulary_analysis(self) -> None:
+    def vocabulary_analysis(self):
 
         if self.text_column not in self.df.columns:
             return
@@ -165,19 +185,21 @@ class DataProfiler:
 
         vocab = set(words)
 
-        self.summary["vocab_size"] = len(vocab)
+        total_words = len(words)
 
-        if words:
-
-            diversity = len(vocab) / len(words)
-
-            self.summary["lexical_diversity"] = float(diversity)
+        self.summary["vocabulary"] = {
+            "vocab_size": len(vocab),
+            "total_tokens": total_words,
+            "lexical_diversity": (
+                len(vocab) / total_words if total_words else 0
+            ),
+        }
 
     # -------------------------------------------------
     # Most Common Words
     # -------------------------------------------------
 
-    def most_common_words(self, top_n: int = 20) -> None:
+    def most_common_words(self, top_n: int = 20):
 
         if self.text_column not in self.df.columns:
             return
@@ -193,49 +215,64 @@ class DataProfiler:
         self.summary["top_words"] = counts.most_common(top_n)
 
     # -------------------------------------------------
+    # Dataset Quality Metrics
+    # -------------------------------------------------
+
+    def dataset_quality_metrics(self):
+
+        if self.text_column not in self.df.columns:
+            return
+
+        lengths = self.df[self.text_column].astype(str).str.len()
+
+        short_ratio = (lengths < 20).mean()
+
+        self.summary["quality_metrics"] = {
+            "short_text_ratio": float(short_ratio),
+        }
+
+    # -------------------------------------------------
     # Save JSON Report
     # -------------------------------------------------
 
-    def save_json(self) -> None:
+    def save_json(self):
 
-        json_path = self.report_dir / "dataset_profile.json"
+        path = self.report_dir / "dataset_profile.json"
 
-        with json_path.open("w", encoding="utf-8") as f:
-
+        with path.open("w", encoding="utf-8") as f:
             json.dump(self.summary, f, indent=2)
 
-        logger.info("Dataset profile saved to %s", json_path)
+        logger.info("Dataset profile saved: %s", path)
 
     # -------------------------------------------------
     # Save Markdown Report
     # -------------------------------------------------
 
-    def save_markdown(self) -> None:
+    def save_markdown(self):
 
-        md_path = self.report_dir / "dataset_quality_report.md"
+        path = self.report_dir / "dataset_quality_report.md"
 
-        lines = []
-
-        lines.append("# Dataset Quality Report\n")
+        lines = ["# Dataset Quality Report\n"]
 
         for key, value in self.summary.items():
 
             lines.append(f"## {key}\n")
-            lines.append(f"```\n{value}\n```\n")
+            lines.append("```")
+            lines.append(str(value))
+            lines.append("```\n")
 
-        with md_path.open("w", encoding="utf-8") as f:
-
+        with path.open("w", encoding="utf-8") as f:
             f.write("\n".join(lines))
 
-        logger.info("Dataset report saved to %s", md_path)
+        logger.info("Dataset report saved: %s", path)
 
     # -------------------------------------------------
-    # Run Full Profiling
+    # Run Profiling
     # -------------------------------------------------
 
     def profile(self) -> Dict[str, Any]:
 
-        logger.info("Running dataset profiler")
+        logger.info("Running dataset profiling")
 
         self.dataset_overview()
         self.missing_values()
@@ -243,8 +280,12 @@ class DataProfiler:
         self.label_distribution()
 
         self.text_length_stats()
+        self.token_statistics()
+
         self.vocabulary_analysis()
         self.most_common_words()
+
+        self.dataset_quality_metrics()
 
         self.save_json()
         self.save_markdown()
@@ -258,13 +299,18 @@ class DataProfiler:
 # Convenience Function
 # -------------------------------------------------
 
-def profile_dataset(csv_path: str) -> Dict[str, Any]:
-    """
-    Run dataset profiling from CSV file.
-    """
+def profile_dataset(
+    csv_path: str,
+    text_column: str = "text",
+    label_columns: List[str] | None = None,
+) -> Dict[str, Any]:
 
     df = pd.read_csv(csv_path)
 
-    profiler = DataProfiler(df)
+    profiler = DataProfiler(
+        df,
+        text_column=text_column,
+        label_columns=label_columns,
+    )
 
     return profiler.profile()

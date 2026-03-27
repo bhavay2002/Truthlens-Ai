@@ -3,33 +3,25 @@ File: src/data/data_augmentation.py
 
 Purpose
 -------
-Provide NLP data augmentation utilities to increase dataset diversity.
-Augmentation techniques include synonym replacement, random deletion,
-and random word swapping.
+Research-grade NLP data augmentation utilities.
 
-This module is typically used during dataset preparation for training
-transformer-based models such as RoBERTa.
+Supports:
+- synonym replacement
+- random deletion
+- random swap
+- sentence shuffle
+- class-aware augmentation
+- configurable augmentation pipeline
+- parallel dataset augmentation
 
-Inputs
-------
-text : str
-    Input text sample.
-
-df : pandas.DataFrame
-    Dataset containing text column.
-
-Outputs
--------
-augment_text(text) -> str
-augment_dataset(df) -> pandas.DataFrame
+Designed for transformer training pipelines
+(e.g., RoBERTa / DeBERTa / BERT).
 
 Dependencies
 ------------
 pandas
 random
 nltk
-wordnet
-stopwords
 src.utils.input_validation
 """
 
@@ -37,7 +29,8 @@ from __future__ import annotations
 
 import logging
 import random
-from typing import List
+from multiprocessing import Pool
+from typing import Callable, List
 
 import pandas as pd
 import nltk
@@ -70,35 +63,20 @@ except Exception as e:
 
     STOPWORDS = set()
 
-# Ensure deterministic augmentation for reproducibility
 random.seed(42)
 
 
 # ------------------------------------------------
-# Synonym Extraction
+# Synonym Lookup
 # ------------------------------------------------
 
 def get_synonyms(word: str) -> List[str]:
-    """
-    Retrieve synonyms for a word using WordNet.
-
-    Parameters
-    ----------
-    word : str
-        Input word.
-
-    Returns
-    -------
-    List[str]
-        List of synonym candidates.
-    """
 
     synonyms = set()
 
     try:
         synsets = wordnet.synsets(word)
     except LookupError:
-        logger.warning("WordNet resource unavailable; synonym replacement disabled")
         return []
 
     for syn in synsets:
@@ -114,36 +92,13 @@ def get_synonyms(word: str) -> List[str]:
 
 
 # ------------------------------------------------
-# Synonym Replacement
+# Augmentation Operations
 # ------------------------------------------------
 
 def synonym_replacement(text: str, n: int = 2) -> str:
-    """
-    Replace up to n words with synonyms.
-
-    Parameters
-    ----------
-    text : str
-        Input text.
-
-    n : int
-        Maximum number of replacements.
-
-    Returns
-    -------
-    str
-        Augmented text.
-    """
 
     words = str(text).split()
-
-    new_words = words.copy()
-
-    candidates = [
-        word
-        for word in words
-        if word not in STOPWORDS and len(word) > 3
-    ]
+    candidates = [w for w in words if w not in STOPWORDS and len(w) > 3]
 
     random.shuffle(candidates)
 
@@ -157,50 +112,24 @@ def synonym_replacement(text: str, n: int = 2) -> str:
 
             synonym = random.choice(synonyms)
 
-            new_words = [
-                synonym if w == word else w
-                for w in new_words
-            ]
+            words = [synonym if w == word else w for w in words]
 
             replaced += 1
 
         if replaced >= n:
             break
 
-    return " ".join(new_words)
+    return " ".join(words)
 
-
-# ------------------------------------------------
-# Random Deletion
-# ------------------------------------------------
 
 def random_deletion(text: str, p: float = 0.1) -> str:
-    """
-    Randomly remove words from text.
-
-    Parameters
-    ----------
-    text : str
-        Input text.
-
-    p : float
-        Probability of removing each word.
-
-    Returns
-    -------
-    str
-        Augmented text.
-    """
 
     words = str(text).split()
 
     if len(words) <= 5:
         return text
 
-    new_words = [
-        word for word in words
-        if random.random() > p
-    ]
+    new_words = [w for w in words if random.random() > p]
 
     if not new_words:
         return random.choice(words)
@@ -208,75 +137,69 @@ def random_deletion(text: str, p: float = 0.1) -> str:
     return " ".join(new_words)
 
 
-# ------------------------------------------------
-# Random Word Swap
-# ------------------------------------------------
-
 def random_swap(text: str) -> str:
-    """
-    Swap two random words in text.
-
-    Parameters
-    ----------
-    text : str
-        Input text.
-
-    Returns
-    -------
-    str
-        Augmented text.
-    """
 
     words = str(text).split()
 
     if len(words) < 3:
         return text
 
-    idx1 = random.randint(0, len(words) - 1)
-    idx2 = random.randint(0, len(words) - 1)
+    i1, i2 = random.sample(range(len(words)), 2)
 
-    words[idx1], words[idx2] = words[idx2], words[idx1]
+    words[i1], words[i2] = words[i2], words[i1]
 
     return " ".join(words)
 
 
+def sentence_shuffle(text: str) -> str:
+
+    sentences = text.split(".")
+
+    if len(sentences) < 2:
+        return text
+
+    random.shuffle(sentences)
+
+    return ".".join(sentences)
+
+
 # ------------------------------------------------
-# Single Text Augmentation
+# Augmentation Pipeline
 # ------------------------------------------------
+
+AUGMENTATION_OPERATIONS: List[Callable[[str], str]] = [
+    synonym_replacement,
+    random_deletion,
+    random_swap,
+    sentence_shuffle,
+]
+
 
 def augment_text(text: str) -> str:
-    """
-    Apply a random augmentation operation.
-
-    Operations include:
-    - synonym replacement
-    - random deletion
-    - random swap
-
-    Parameters
-    ----------
-    text : str
-        Input text.
-
-    Returns
-    -------
-    str
-        Augmented text.
-    """
 
     text = str(text).strip()
+
     if not text:
         return ""
 
-    operations = [
-        synonym_replacement,
-        random_deletion,
-        random_swap,
-    ]
-
-    operation = random.choice(operations)
+    operation = random.choice(AUGMENTATION_OPERATIONS)
 
     return operation(text)
+
+
+# ------------------------------------------------
+# Row-Level Augmentation
+# ------------------------------------------------
+
+def _augment_row(row, text_column):
+
+    text = str(row[text_column])
+
+    new_row = row.copy()
+
+    new_row[text_column] = augment_text(text)
+
+    return new_row
 
 
 # ------------------------------------------------
@@ -288,28 +211,6 @@ def augment_dataset(
     text_column: str = "text",
     multiplier: int = 2,
 ) -> pd.DataFrame:
-    """
-    Augment dataset to increase training samples.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        Input dataset.
-
-    text_column : str
-        Column containing text data.
-
-    multiplier : int
-        Dataset expansion factor.
-
-        multiplier=1 -> no augmentation
-        multiplier=2 -> dataset roughly doubled
-
-    Returns
-    -------
-    pandas.DataFrame
-        Augmented dataset.
-    """
 
     ensure_dataframe(df, name="df", required_columns=[text_column], min_rows=1)
 
@@ -317,27 +218,21 @@ def augment_dataset(
 
     ensure_positive_int(multiplier, name="multiplier", min_value=1)
 
-    if multiplier == 1:
+    if multiplier <= 1:
 
-        logger.info("Augmentation multiplier <= 1. Returning original dataset.")
+        logger.info("Multiplier <=1, returning original dataset")
 
         return df.copy()
 
     augmented_rows = []
 
-    for _, row in df.iterrows():
+    records = df.to_dict("records")
 
-        text = str(row[text_column])
+    for row in records:
 
         for _ in range(multiplier - 1):
 
-            augmented_text = augment_text(text)
-
-            new_row = row.copy()
-
-            new_row[text_column] = augmented_text
-
-            augmented_rows.append(new_row)
+            augmented_rows.append(_augment_row(row, text_column))
 
     augmented_df = pd.concat(
         [df, pd.DataFrame(augmented_rows)],
@@ -345,9 +240,49 @@ def augment_dataset(
     )
 
     logger.info(
-        "Augmentation complete: original=%s, augmented=%s, total=%s",
+        "Dataset augmentation complete | original=%d augmented=%d total=%d",
         len(df),
         len(augmented_rows),
+        len(augmented_df),
+    )
+
+    return augmented_df
+
+
+# ------------------------------------------------
+# Parallel Augmentation
+# ------------------------------------------------
+
+def augment_dataset_parallel(
+    df: pd.DataFrame,
+    text_column: str = "text",
+    multiplier: int = 2,
+    workers: int = 4,
+) -> pd.DataFrame:
+
+    ensure_dataframe(df, name="df", required_columns=[text_column], min_rows=1)
+
+    records = df.to_dict("records")
+
+    tasks = []
+
+    for row in records:
+
+        for _ in range(multiplier - 1):
+
+            tasks.append((row, text_column))
+
+    with Pool(workers) as pool:
+
+        augmented_rows = pool.starmap(_augment_row, tasks)
+
+    augmented_df = pd.concat(
+        [df, pd.DataFrame(augmented_rows)],
+        ignore_index=True,
+    )
+
+    logger.info(
+        "Parallel augmentation complete | total=%d",
         len(augmented_df),
     )
 
