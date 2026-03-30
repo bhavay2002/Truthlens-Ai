@@ -1,0 +1,73 @@
+# Dataset Quality Report
+
+## rows
+
+```
+25987
+```
+
+## columns
+
+```
+5
+```
+
+## column_names
+
+```
+['text', 'frame', 'trigger', 'actor_role', 'target_role']
+```
+
+## missing_values
+
+```
+{'text': 0, 'frame': 0, 'trigger': 0, 'actor_role': 23777, 'target_role': 25572}
+```
+
+## duplicate_count
+
+```
+0
+```
+
+## duplicate_ratio
+
+```
+0.0
+```
+
+## label_distribution
+
+```
+{}
+```
+
+## text_length_stats
+
+```
+{'avg': 159, 'median': 147, 'max': 680, 'min': 7}
+```
+
+## token_stats
+
+```
+{'avg_tokens': 28.99961519221149, 'median_tokens': 27.0, 'max_tokens': 153, 'min_tokens': 1}
+```
+
+## vocabulary
+
+```
+{'vocab_size': 13935, 'total_tokens': 753613, 'lexical_diversity': 0.01849092305997906}
+```
+
+## top_words
+
+```
+[('the', 42319), (',', 37387), ('.', 25035), ('of', 21405), ('and', 20275), ('to', 18405), ('a', 14880), ('in', 14270), ('that', 7484), ('is', 5697), ('for', 5524), ('-', 5230), ("'s", 4993), ('on', 4643), ('(', 4610), (')', 4432), ('it', 4391), ('with', 4216), ('as', 3857), ('iran', 3619)]
+```
+
+## quality_metrics
+
+```
+{'short_text_ratio': 0.003155423865779043}
+```

@@ -1,0 +1,36 @@
+{
+  "data_files": {
+    "isot_fake": "data\\raw\\isot\\Fake.csv",
+    "isot_true": "data\\raw\\isot\\True.csv",
+    "liar_train": "data\\raw\\liar_dataset\\train.tsv",
+    "fakenewsnet_root": "data\\raw\\FakeNewsNet"
+  },
+  "rows": 48883,
+  "columns": [
+    "title",
+    "text",
+    "label",
+    "text_length",
+    "word_count",
+    "sentence_count",
+    "avg_word_length",
+    "uppercase_ratio"
+  ],
+  "label_distribution": {
+    "0": 26941,
+    "1": 21942
+  },
+  "text_length_stats": {
+    "mean": 1963.8105476341468,
+    "median": 1845.0,
+    "min": 5,
+    "max": 51793
+  },
+  "word_count_stats": {
+    "mean": 322.5378966102735,
+    "median": 307.0,
+    "min": 1,
+    "max": 8135
+  },
+  "figures_dir": "reports\\figures"
+}
