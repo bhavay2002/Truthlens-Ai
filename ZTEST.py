@@ -1,120 +1,170 @@
 from __future__ import annotations
 
-import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import List
+from typing import Dict
 import pandas as pd
 
 
-# -------------------------------------------------------
-# Paths
-# -------------------------------------------------------
+# =======================================================
+# PATH CONFIGURATION
+# =======================================================
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
-FRAMENET_ROOT = Path(
-    r"C:\Users\bhava\Downloads\Framenet\framenet_v17\framenet_v17"
-)
+SEMEVAL_DIR = Path(r"C:\Users\bhava\Downloads\SemEval")
 
-OUTPUT_FILE = PROJECT_ROOT / "data" / "interim" / ".csv"
+TRAIN_FILE = SEMEVAL_DIR / "SemEval-Train.csv"
+DEV_FILE = SEMEVAL_DIR / "SemEval-Validation.csv"
+TEST_FILE = SEMEVAL_DIR / "SemEval-Test.csv"
 
-
-# -------------------------------------------------------
-# Parse XML file
-# -------------------------------------------------------
-
-def parse_document(xml_file: Path):
-
-    rows: List[dict] = []
-
-    try:
-        tree = ET.parse(xml_file)
-        root = tree.getroot()
-    except Exception:
-        return rows
-
-    ns = {"fn": "http://framenet.icsi.berkeley.edu"}
-
-    for sentence in root.findall(".//fn:sentence", ns):
-
-        text_node = sentence.find("fn:text", ns)
-
-        if text_node is None:
-            continue
-
-        text = text_node.text
-
-        for ann in sentence.findall(".//fn:annotationSet", ns):
-
-            frame_name = ann.attrib.get("frameName")
-
-            if frame_name is None:
-                continue
-
-            actor = None
-            target = None
-            trigger = None
-
-            for layer in ann.findall("fn:layer", ns):
-
-                if layer.attrib.get("name") == "Target":
-
-                    for label in layer.findall("fn:label", ns):
-                        trigger = label.attrib.get("name")
-
-                if layer.attrib.get("name") == "FE":
-
-                    for label in layer.findall("fn:label", ns):
-
-                        role = label.attrib.get("name")
-
-                        if role in ["Agent", "Actor", "Attacker"]:
-                            actor = role
-
-                        if role in ["Patient", "Victim", "Target"]:
-                            target = role
-
-            rows.append(
-                {
-                    "text": text,
-                    "frame": frame_name,
-                    "trigger": trigger,
-                    "actor_role": actor,
-                    "target_role": target,
-                }
-            )
-
-    return rows
+OUTPUT_FILE = PROJECT_ROOT / "data" / "interim" / "semeval_emotions.csv"
 
 
-# -------------------------------------------------------
-# Build dataset
-# -------------------------------------------------------
+# =======================================================
+# SEMEVAL LABEL MAPPING
+# =======================================================
 
-def build_dataset():
+SEMEVAL_LABELS: Dict[int, str] = {
+    0: "anger",
+    1: "anticipation",
+    2: "disgust",
+    3: "fear",
+    4: "joy",
+    5: "love",
+    6: "optimism",
+    7: "pessimism",
+    8: "sadness",
+    9: "surprise",
+    10: "trust"
+}
 
-    rows: List[dict] = []
+LABEL_COLUMNS = list(SEMEVAL_LABELS.values())
 
-    xml_files = list(FRAMENET_ROOT.rglob("*.xml"))
 
-    print("Total XML files found:", len(xml_files))
+# =======================================================
+# LOAD SEMEVAL EXCEL
+# =======================================================
 
-    for xml_file in xml_files:
+def load_semeval(file_path):
 
-        rows.extend(parse_document(xml_file))
+    df = pd.read_csv(file_path)
 
-    df = pd.DataFrame(rows)
+    text_candidates = ["text", "Tweet", "tweet", "Sentence"]
 
-    df = df.drop_duplicates()
+    for col in text_candidates:
+        if col in df.columns:
+            df = df.rename(columns={col: "text"})
+            break
+
+    if "text" not in df.columns:
+        raise ValueError(
+            f"No text column found. Available columns: {list(df.columns)}"
+        )
+
+    # convert numeric label columns to int
+    for col in df.columns:
+        if str(col).isdigit():
+            df.rename(columns={col: int(col)}, inplace=True)
+
+    return df
+
+# =======================================================
+# CONVERT MULTI-COLUMN LABELS → ID STRING
+# =======================================================
+
+def convert_labels(df: pd.DataFrame):
+
+    def build_label_string(row):
+
+        labels = []
+    
+        for idx in SEMEVAL_LABELS.keys():
+    
+            if idx in row.index and row[idx] == 1:
+                labels.append(str(idx))
+    
+        return ",".join(labels)
+
+    df["labels"] = df.apply(build_label_string, axis=1)
+
+    return df
+
+
+# =======================================================
+# MERGE DATASETS
+# =======================================================
+
+def merge_semeval():
+
+    print("\nLoading SemEval datasets...")
+
+    train = load_semeval(TRAIN_FILE)
+    dev = load_semeval(DEV_FILE)
+    test = load_semeval(TEST_FILE)
+
+    print("Train size:", len(train))
+    print("Validation size:", len(dev))
+    print("Test size:", len(test))
+
+    merged = pd.concat([train, dev, test], ignore_index=True)
+
+    merged = merged.drop_duplicates(subset=["text"])
+
+    merged = convert_labels(merged)
 
     OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-    df.to_csv(OUTPUT_FILE, index=False)
+    merged[["text", "labels"]].to_csv(OUTPUT_FILE, index=False)
 
-    print("Total extracted rows:", len(df))
-    print("Saved to:", OUTPUT_FILE)
+    print("Merged dataset size:", len(merged))
+    print("Saved merged dataset:", OUTPUT_FILE)
+
+    return merged
+
+
+# =======================================================
+# ANALYZE EMOTION DISTRIBUTION
+# =======================================================
+
+def analyze_emotions(df: pd.DataFrame):
+
+    counts = {v: 0 for v in SEMEVAL_LABELS.values()}
+
+    for labels in df["labels"]:
+
+        if pd.isna(labels) or labels == "":
+            continue
+
+        label_ids = labels.split(",")
+
+        for lid in label_ids:
+
+            idx = int(lid)
+            emotion = SEMEVAL_LABELS[idx]
+
+            counts[emotion] += 1
+
+    result = (
+        pd.DataFrame(list(counts.items()), columns=["emotion", "count"])
+        .sort_values("count", ascending=False)
+    )
+
+    print("\nSemEval Emotion Distribution:\n")
+    print(result)
+
+    return result
+
+
+# =======================================================
+# MAIN PIPELINE
+# =======================================================
+
+def main():
+
+    merged_df = merge_semeval()
+
+    analyze_emotions(merged_df)
 
 
 if __name__ == "__main__":
-
-    build_dataset()
+    main()

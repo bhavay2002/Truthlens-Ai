@@ -7,8 +7,10 @@ Description:
     propaganda presence within text using contextual embeddings generated
     by a pretrained transformer encoder and a classification head.
 
-    The architecture supports multi-label classification for detecting
-    multiple propaganda techniques simultaneously.
+    Supports configurable task modes:
+    - binary (default; suitable for No/Yes)
+    - multi_class
+    - multi_label
 
 Dependencies:
     logging
@@ -46,6 +48,7 @@ class PropagandaDetector(nn.Module):
         self,
         encoder_model: str,
         num_labels: int,
+        task_type: str = "binary",
         dropout: float = 0.1,
         device: Optional[str] = None,
     ) -> None:
@@ -55,6 +58,11 @@ class PropagandaDetector(nn.Module):
 
         if not isinstance(num_labels, int) or num_labels <= 0:
             raise ValueError("num_labels must be a positive integer")
+
+        if task_type not in {"binary", "multi_class", "multi_label"}:
+            raise ValueError(
+                "task_type must be one of: 'binary', 'multi_class', 'multi_label'"
+            )
 
         self.encoder = TransformerEncoder(
             model_name=encoder_model,
@@ -68,7 +76,15 @@ class PropagandaDetector(nn.Module):
 
         self.classifier = nn.Linear(hidden_size, num_labels)
 
-        self.activation = nn.Sigmoid()
+        self.task_type = task_type
+        self.num_labels = num_labels
+
+        if self.task_type == "multi_label":
+            self.activation = nn.Sigmoid()
+        elif self.task_type == "binary" and self.num_labels == 1:
+            self.activation = nn.Sigmoid()
+        else:
+            self.activation = nn.Softmax(dim=-1)
 
         self.device = self.encoder.device
 
@@ -109,9 +125,19 @@ class PropagandaDetector(nn.Module):
 
             labels = labels.to(self.device)
 
-            loss_fn = nn.BCEWithLogitsLoss()
-
-            loss = loss_fn(logits, labels)
+            if self.task_type == "multi_label":
+                loss_fn = nn.BCEWithLogitsLoss()
+                loss = loss_fn(logits, labels.float())
+            elif self.task_type == "binary" and self.num_labels == 1:
+                loss_fn = nn.BCEWithLogitsLoss()
+                if labels.dim() == 1:
+                    labels = labels.unsqueeze(1)
+                loss = loss_fn(logits, labels.float())
+            else:
+                loss_fn = nn.CrossEntropyLoss()
+                if labels.dim() == 2 and labels.size(1) == self.num_labels:
+                    labels = labels.argmax(dim=1)
+                loss = loss_fn(logits, labels.long())
 
             outputs["loss"] = loss
 

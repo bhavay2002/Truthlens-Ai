@@ -4,12 +4,13 @@ import argparse
 from pathlib import Path
 import pandas as pd
 
-from src.data.class_balance import balance_dataset
 from src.data.clean_data import clean_dataframe
-from src.data.data_augmentation import augment_dataset
 from src.data.data_profiler import profile_dataset
 from src.data.eda import run_eda
 from src.data.validate_data import validate_dataset
+
+from src.data.class_balance import balance_dataset
+from src.data.data_augmentation import augment_dataset
 
 
 # --------------------------------------------------
@@ -18,136 +19,68 @@ from src.data.validate_data import validate_dataset
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
-DEFAULT_DATA_PATH = PROJECT_ROOT / "data" / "interim" / "framenet_all_frames_dataset2.csv"
+DEFAULT_DATA_PATH = PROJECT_ROOT / "data" / "splits" / "propaganda2"
 
-DEFAULT_OUTPUT_PATH = PROJECT_ROOT / "data" / "processed" / "framenet_all_frames_dataset_processed2.csv"
-
-
-# --------------------------------------------------
-# NARRATIVE FRAME LABELS
-# --------------------------------------------------
-
-FRAME_COLUMNS = ["RE", "HI", "CO", "MO", "EC"]
+DEFAULT_OUTPUT_PATH = (
+    PROJECT_ROOT / "data" / "processed" / "propaganda_processed.csv"
+)
 
 
 # --------------------------------------------------
-# FRAME → NARRATIVE MAPPING (FrameNet)
+# VALID LABELS
 # --------------------------------------------------
 
-FRAME_TO_NARRATIVE = {
-
-    # conflict
-    "Attack": "CO",
-    "Hostile_encounter": "CO",
-    "Killing": "CO",
-    "Protest": "CO",
-
-    # responsibility
-    "Blame": "RE",
-    "Responsibility": "RE",
-    "Judgment": "RE",
-
-    # morality
-    "Justice": "MO",
-    "Crime": "MO",
-    "Punishment": "MO",
-
-    # economy
-    "Commerce_buy": "EC",
-    "Commerce_sell": "EC",
-    "Economic_activity": "EC",
-
-}
+VALID_LABELS = {0, 1}
 
 
 # --------------------------------------------------
-# LABEL NORMALIZATION
+# LABEL VALIDATION
 # --------------------------------------------------
 
-def normalize_labels(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Normalize labels across datasets.
-    """
+def validate_labels(df: pd.DataFrame) -> pd.DataFrame:
 
-    # -----------------------------
-    # Bias labels
-    # -----------------------------
+    if "label" not in df.columns:
+        raise ValueError("Dataset must contain a 'label' column")
 
-    if "label" in df.columns:
-
-        df["label"] = df["label"].astype(str).str.lower().str.strip()
-
-        label_map = {
-            "biased": 1,
-            "non-biased": 0,
-            "neutral": 0,
-            "lexical": 1,
-            "informational": 1,
-            "0": 0,
-            "1": 1,
-            "-1": 0,
-            "left": 0,
-            "center": 1,
-            "right": 2,
-        }
-
-        df["label"] = df["label"].map(label_map).fillna(df["label"])
-        df = df.dropna(subset=["label"])
-        df["label"] = df["label"].astype(int)
-
-    # -----------------------------
-    # Propaganda labels
-    # -----------------------------
-
-    if "binary_label" in df.columns:
-        df["binary_label"] = df["binary_label"].astype(int)
-
-    if "technique_id" in df.columns:
-        df["technique_id"] = df["technique_id"].astype(int)
-
-    # -----------------------------
-    # Narrative frame labels
-    # -----------------------------
-
-    for col in FRAME_COLUMNS:
-
-        if col in df.columns:
-
-            df[col] = df[col].astype(str).str.lower()
-
-            frame_map = {
-                "true": 1,
-                "false": 0,
-                "yes": 1,
-                "no": 0,
-                "1": 1,
-                "0": 0,
-            }
-
-            df[col] = df[col].map(frame_map).fillna(0).astype(int)
+    df = df[df["label"].isin(VALID_LABELS)]
 
     return df
 
 
 # --------------------------------------------------
-# FRAME MAPPING (FrameNet)
+# LOAD SPLIT DATASETS
 # --------------------------------------------------
 
-def convert_framenet_frames(df: pd.DataFrame):
+def load_splits(data_dir: Path) -> pd.DataFrame:
 
-    if "frame" not in df.columns:
-        return df
+    train_file = data_dir / "Train_preprocessed.csv"
+    val_file = data_dir / "Valid_preprocessed.csv"
+    test_file = data_dir / "Test_preprocessed.csv"
 
-    for col in FRAME_COLUMNS:
-        if col not in df.columns:
-            df[col] = 0
+    if not train_file.exists():
+        raise FileNotFoundError(f"Missing file: {train_file}")
 
-    for frame, narrative_label in FRAME_TO_NARRATIVE.items():
+    if not val_file.exists():
+        raise FileNotFoundError(f"Missing file: {val_file}")
 
-        mask = df["frame"] == frame
-        df.loc[mask, narrative_label] = 1
+    if not test_file.exists():
+        raise FileNotFoundError(f"Missing file: {test_file}")
 
-    return df
+    print("Loading dataset splits...")
+
+    train = pd.read_csv(train_file)
+    val = pd.read_csv(val_file)
+    test = pd.read_csv(test_file)
+
+    print("Train size:", len(train))
+    print("Validation size:", len(val))
+    print("Test size:", len(test))
+
+    merged = pd.concat([train, val, test], ignore_index=True)
+
+    print("Merged dataset size:", len(merged))
+
+    return merged
 
 
 # --------------------------------------------------
@@ -161,28 +94,23 @@ def run(
 ) -> Path:
 
     if not data_path.exists():
-        raise FileNotFoundError(f"Dataset not found: {data_path}")
+        raise FileNotFoundError(f"Dataset folder not found: {data_path}")
 
-    print("Input dataset:", data_path)
+    print("Dataset folder:", data_path)
 
     # --------------------------------------------------
-    # Validation
+    # Load and merge datasets
     # --------------------------------------------------
 
-    validation_results = validate_dataset(
-        str(data_path),
-        label_columns=["label", "binary_label", "technique_id"],
-    )
-
-    print("Validation passed:", validation_results.get("all_passed"))
+    df = load_splits(data_path)
 
     # --------------------------------------------------
     # Profiling
     # --------------------------------------------------
 
     profile_results = profile_dataset(
-        str(data_path),
-        label_columns=["label", "binary_label", "technique_id"],
+        str(data_path / "Train_preprocessed.csv"),
+        label_columns=["label"],
     )
 
     print("Profile keys:", list(profile_results.keys()))
@@ -193,18 +121,10 @@ def run(
 
     if not skip_eda:
         print("Running EDA...")
-        run_eda(str(data_path))
+        run_eda(str(data_path / "Train_preprocessed.csv"))
 
     # --------------------------------------------------
-    # Load dataset
-    # --------------------------------------------------
-
-    df = pd.read_csv(data_path)
-
-    print("Rows loaded:", len(df))
-
-    # --------------------------------------------------
-    # Normalize column names
+    # Normalize text column
     # --------------------------------------------------
 
     if "sentence" in df.columns and "text" not in df.columns:
@@ -214,18 +134,12 @@ def run(
         raise ValueError("Dataset must contain a 'text' column")
 
     # --------------------------------------------------
-    # Convert FrameNet frames
+    # Label validation
     # --------------------------------------------------
 
-    df = convert_framenet_frames(df)
+    df = validate_labels(df)
 
-    # --------------------------------------------------
-    # Ensure narrative columns exist
-    # --------------------------------------------------
-
-    for col in FRAME_COLUMNS:
-        if col not in df.columns:
-            df[col] = 0
+    print("Rows after label validation:", len(df))
 
     # --------------------------------------------------
     # Basic cleaning
@@ -238,12 +152,6 @@ def run(
     df = df.drop_duplicates(subset=["text"])
 
     print("Rows after duplicate removal:", len(df))
-
-    # --------------------------------------------------
-    # Normalize labels
-    # --------------------------------------------------
-
-    df = normalize_labels(df)
 
     # --------------------------------------------------
     # Transformer safety
@@ -260,57 +168,44 @@ def run(
     print("Rows after cleaning:", len(df))
 
     # --------------------------------------------------
-    # Target column detection
+    # CLASS BALANCING
     # --------------------------------------------------
 
-    target_column = None
+    print("Balancing dataset...")
 
-    if "label" in df.columns:
-        target_column = "label"
-
-    elif "technique_id" in df.columns:
-        target_column = "technique_id"
-
-    elif "binary_label" in df.columns:
-        target_column = "binary_label"
-
-    # Narrative frames → multi-label
-    # Skip balancing
+    df = balance_dataset(
+        df,
+        label_column="label",
+        method="oversample",
+    )
 
     # --------------------------------------------------
-    # Class balancing
+    # AUGMENT PROPAGANDA CLASS
     # --------------------------------------------------
 
-    if target_column and df[target_column].nunique() >= 2:
+    print("Augmenting propaganda samples...")
 
-        df = balance_dataset(
-            df,
-            label_column=target_column,
-            method="oversample",
-        )
+    propaganda_df = df[df["label"] == 1]
 
-        print("Rows after balancing:", len(df))
+    propaganda_aug = augment_dataset(
+        propaganda_df,
+        text_column="text",
+        multiplier=2,
+    )
 
-    else:
+    non_prop_df = df[df["label"] == 0]
 
-        print("Skipping balancing (multi-label dataset)")
+    df = pd.concat(
+        [non_prop_df, propaganda_aug],
+        ignore_index=True,
+    )
 
-    # --------------------------------------------------
-    # Data augmentation
-    # --------------------------------------------------
+    df = df.sample(frac=1, random_state=42).reset_index(drop=True)
 
-    if len(df) > 0:
-
-        df = augment_dataset(
-            df,
-            text_column="text",
-            multiplier=2,
-        )
-
-        print("Rows after augmentation:", len(df))
+    print("Dataset size after augmentation:", len(df))
 
     # --------------------------------------------------
-    # Save dataset
+    # SAVE DATASET
     # --------------------------------------------------
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -330,7 +225,7 @@ def run(
 def _parse_args():
 
     parser = argparse.ArgumentParser(
-        description="Run TruthLens preprocessing pipeline"
+        description="Run Propaganda preprocessing pipeline"
     )
 
     parser.add_argument(

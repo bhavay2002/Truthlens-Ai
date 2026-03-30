@@ -164,8 +164,20 @@ def run_data_pipeline(config_path: str | Path = DEFAULT_DATA_CONFIG_PATH) -> dic
     # Validation
     # --------------------------------------------------
 
+    configured_label_columns = dataset_cfg.get("label_columns")
+    if isinstance(configured_label_columns, list) and configured_label_columns:
+        label_columns = configured_label_columns
+    else:
+        label_columns = [dataset_cfg["label_column"]]
+
+    label_specs = dataset_cfg.get("label_specs")
+    if not isinstance(label_specs, dict):
+        label_specs = None
+
     validator = DataValidator(
         required_columns=config["validation"]["required_columns"],
+        label_columns=label_columns,
+        label_specs=label_specs,
         max_null_ratio=config["validation"]["max_null_ratio"],
         max_dup_ratio=config["validation"]["max_duplicate_ratio"],
         min_class_ratio=config["validation"]["min_class_ratio"],

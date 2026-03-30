@@ -4,9 +4,9 @@ Module: Model Architecture - Multi-Task TruthLens Model
 Description:
     Defines the core multi-task neural architecture used in the TruthLens AI
     system. The model uses a shared transformer encoder and multiple task-
-    specific classification heads for tasks such as bias detection, emotion
-    classification, propaganda detection, stance detection, and misinformation
-    analysis.
+    specific classification heads for tasks such as bias detection, ideology
+    classification, propaganda detection, narrative role detection, and
+    emotion classification.
 
     The design follows modern multi-task NLP research practices where a shared
     language representation is learned by a common encoder while specialized
@@ -24,7 +24,7 @@ Inputs:
     Optional task labels
 
 Outputs:
-    Dictionary containing logits, probabilities, and optional losses for tasks
+    Dictionary containing logits, probabilities, and optional losses
 """
 
 import logging
@@ -74,16 +74,23 @@ class TaskHead(nn.Module):
 class MultiTaskTruthLensModel(nn.Module):
     """
     Multi-task architecture combining shared encoder with multiple heads.
+
+    Expected task schema:
+    - bias: single-label (0/1)
+    - ideology: single-label (0/1/2)
+    - propaganda: single-label (0/1)
+    - narrative: multi-label binary flags (hero/villain/victim)
+    - emotion: single-label (0-19)
     """
 
     def __init__(
         self,
         encoder_model: str,
-        num_bias_labels: int,
-        num_emotion_labels: int,
-        num_propaganda_labels: int,
-        num_stance_labels: int,
-        num_misinformation_labels: int,
+        num_bias_labels: int = 2,
+        num_ideology_labels: int = 3,
+        num_propaganda_labels: int = 2,
+        num_narrative_labels: int = 3,
+        num_emotion_labels: int = 20,
         dropout: float = 0.1,
         device: Optional[str] = None,
     ) -> None:
@@ -101,23 +108,63 @@ class MultiTaskTruthLensModel(nn.Module):
 
         self.bias_head = TaskHead(hidden_size, num_bias_labels, dropout)
 
-        self.emotion_head = TaskHead(hidden_size, num_emotion_labels, dropout)
+        self.ideology_head = TaskHead(hidden_size, num_ideology_labels, dropout)
 
         self.propaganda_head = TaskHead(hidden_size, num_propaganda_labels, dropout)
 
-        self.stance_head = TaskHead(hidden_size, num_stance_labels, dropout)
+        self.narrative_head = TaskHead(hidden_size, num_narrative_labels, dropout)
 
-        self.misinformation_head = TaskHead(
-            hidden_size,
-            num_misinformation_labels,
-            dropout,
-        )
+        self.emotion_head = TaskHead(hidden_size, num_emotion_labels, dropout)
+
+        self.num_bias_labels = num_bias_labels
+        self.num_ideology_labels = num_ideology_labels
+        self.num_propaganda_labels = num_propaganda_labels
+        self.num_narrative_labels = num_narrative_labels
+        self.num_emotion_labels = num_emotion_labels
 
         self.device = self.encoder.device
 
         self.to(self.device)
 
         logger.info("MultiTaskTruthLensModel initialized")
+
+    @staticmethod
+    def _prepare_single_label_targets(
+        labels: torch.Tensor,
+        *,
+        num_classes: int,
+        task_name: str,
+    ) -> torch.Tensor:
+        """
+        Accept either class indices [batch] or one-hot [batch, num_classes].
+        """
+
+        if labels.dim() == 1:
+            return labels.long()
+
+        if labels.dim() == 2 and labels.size(1) == num_classes:
+            return labels.argmax(dim=1).long()
+
+        raise ValueError(
+            f"{task_name} labels must be shape [batch] or [batch, {num_classes}]"
+        )
+
+    @staticmethod
+    def _prepare_multi_label_targets(
+        labels: torch.Tensor,
+        *,
+        num_classes: int,
+        task_name: str,
+    ) -> torch.Tensor:
+        if labels.dim() == 1 and num_classes == 1:
+            labels = labels.unsqueeze(1)
+
+        if labels.dim() != 2 or labels.size(1) != num_classes:
+            raise ValueError(
+                f"{task_name} labels must be shape [batch, {num_classes}]"
+            )
+
+        return labels.float()
 
     def forward(
         self,
@@ -138,61 +185,92 @@ class MultiTaskTruthLensModel(nn.Module):
         pooled = encoder_outputs["pooled_output"]
 
         bias_logits = self.bias_head(pooled)
-        emotion_logits = self.emotion_head(pooled)
+
+        ideology_logits = self.ideology_head(pooled)
+
         propaganda_logits = self.propaganda_head(pooled)
-        stance_logits = self.stance_head(pooled)
-        misinformation_logits = self.misinformation_head(pooled)
+
+        narrative_logits = self.narrative_head(pooled)
+
+        emotion_logits = self.emotion_head(pooled)
 
         outputs: Dict[str, torch.Tensor] = {
             "bias_logits": bias_logits,
-            "emotion_logits": emotion_logits,
+            "ideology_logits": ideology_logits,
             "propaganda_logits": propaganda_logits,
-            "stance_logits": stance_logits,
-            "misinformation_logits": misinformation_logits,
+            "narrative_logits": narrative_logits,
+            "emotion_logits": emotion_logits,
+            "bias_probabilities": torch.softmax(bias_logits, dim=1),
+            "ideology_probabilities": torch.softmax(ideology_logits, dim=1),
+            "propaganda_probabilities": torch.softmax(propaganda_logits, dim=1),
+            "narrative_probabilities": torch.sigmoid(narrative_logits),
+            "emotion_probabilities": torch.softmax(emotion_logits, dim=1),
         }
 
         if labels is not None:
 
-            loss_fn = nn.BCEWithLogitsLoss()
-
-            losses = []
+            ce_loss = nn.CrossEntropyLoss()
+            bce_loss = nn.BCEWithLogitsLoss()
+            task_losses: Dict[str, torch.Tensor] = {}
 
             if "bias" in labels:
-                losses.append(
-                    loss_fn(bias_logits, labels["bias"].to(self.device))
+                bias_targets = self._prepare_single_label_targets(
+                    labels["bias"].to(self.device),
+                    num_classes=self.num_bias_labels,
+                    task_name="bias",
+                )
+                task_losses["bias"] = ce_loss(
+                    bias_logits,
+                    bias_targets,
                 )
 
-            if "emotion" in labels:
-                losses.append(
-                    loss_fn(emotion_logits, labels["emotion"].to(self.device))
+            if "ideology" in labels:
+                ideology_targets = self._prepare_single_label_targets(
+                    labels["ideology"].to(self.device),
+                    num_classes=self.num_ideology_labels,
+                    task_name="ideology",
+                )
+                task_losses["ideology"] = ce_loss(
+                    ideology_logits,
+                    ideology_targets,
                 )
 
             if "propaganda" in labels:
-                losses.append(
-                    loss_fn(
-                        propaganda_logits,
-                        labels["propaganda"].to(self.device),
-                    )
+                propaganda_targets = self._prepare_single_label_targets(
+                    labels["propaganda"].to(self.device),
+                    num_classes=self.num_propaganda_labels,
+                    task_name="propaganda",
+                )
+                task_losses["propaganda"] = ce_loss(
+                    propaganda_logits,
+                    propaganda_targets,
                 )
 
-            if "stance" in labels:
-                losses.append(
-                    loss_fn(
-                        stance_logits,
-                        labels["stance"].to(self.device),
-                    )
+            if "narrative" in labels:
+                narrative_targets = self._prepare_multi_label_targets(
+                    labels["narrative"].to(self.device),
+                    num_classes=self.num_narrative_labels,
+                    task_name="narrative",
+                )
+                task_losses["narrative"] = bce_loss(
+                    narrative_logits,
+                    narrative_targets,
                 )
 
-            if "misinformation" in labels:
-                losses.append(
-                    loss_fn(
-                        misinformation_logits,
-                        labels["misinformation"].to(self.device),
-                    )
+            if "emotion" in labels:
+                emotion_targets = self._prepare_single_label_targets(
+                    labels["emotion"].to(self.device),
+                    num_classes=self.num_emotion_labels,
+                    task_name="emotion",
+                )
+                task_losses["emotion"] = ce_loss(
+                    emotion_logits,
+                    emotion_targets,
                 )
 
-            if losses:
-                total_loss = torch.stack(losses).mean()
+            if task_losses:
+                total_loss = torch.stack(list(task_losses.values())).mean()
                 outputs["loss"] = total_loss
+                outputs["task_losses"] = task_losses
 
         return outputs

@@ -1,0 +1,109 @@
+Emotion	ID removed
+desire	8
+fear	14
+remorse	24
+embarrassment	12
+nervousness	19
+relief	23
+pride	21
+grief	16
+
+
+
+GOEMOTIONS_LABELS: Dict[int, str] = {
+    0: "admiration",
+    1: "amusement",
+    2: "anger",
+    3: "annoyance",
+    4: "approval",
+    5: "caring",
+    6: "confusion",
+    7: "curiosity",
+    8: "desire",
+    9: "disappointment",
+    10: "disapproval",
+    11: "disgust",
+    12: "embarrassment",
+    13: "excitement",
+    14: "fear",
+    15: "gratitude",
+    16: "grief",
+    17: "joy",
+    18: "love",
+    19: "nervousness",
+    20: "optimism",
+    21: "pride",
+    22: "realization",
+    23: "relief",
+    24: "remorse",
+    25: "sadness",
+    26: "surprise",
+    27: "neutral"
+}
+
+
+
+Final Label Index Mapping (Recommended)
+
+After cleaning, remap labels 0–19.
+
+New ID	Emotion
+0	neutral
+1	admiration
+2	approval
+3	gratitude
+4	annoyance
+5	amusement
+6	curiosity
+7	disapproval
+8	love
+9	optimism
+10	anger
+11	joy
+12	confusion
+13	sadness
+14	disappointment
+15	realization
+16	caring
+17	surprise
+18	excitement
+19	disgust
+
+
+
+SemEval Emotion Distribution:
+
+         emotion  count
+4            joy   4266
+2        disgust   4017
+0          anger   3956
+6       optimism   3407
+8        sadness   3228
+3           fear   1844
+1   anticipation   1513
+5           love   1329
+7      pessimism   1268
+9       surprise    559
+10         trust    546
+PS C:\Users\bhava\OneDrive\Desktop\demo.cpp\Truthlens Ai> 
+
+
+emotion_map = {
+    "anger": 10,
+    "anticipation": 6,
+    "disgust": 19,
+    "fear": 12,
+    "joy": 11,
+    "love": 8,
+    "optimism": 9,
+    "pessimism": 14,
+    "sadness": 13,
+    "surprise": 17,
+    "trust": 2
+}
+
+
+
+| Task                     | 0             | 1          |
+| ------------------------ | ------------- | ---------- |
+| **Propaganda detection** | No propaganda | Propaganda |

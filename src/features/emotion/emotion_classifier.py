@@ -36,7 +36,7 @@ class EmotionClassifier(nn.Module):
         model_name: str,
         num_emotions: int,
         dropout: float = 0.1,
-        multi_label: bool = True,
+        multi_label: bool = False,
         freeze_encoder: bool = False,
         device: Optional[str] = None,
     ) -> None:

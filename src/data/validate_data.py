@@ -48,6 +48,7 @@ class DataValidator:
         self,
         required_columns: List[str] | None = None,
         label_columns: List[str] | None = None,
+        label_specs: Dict[str, Dict[str, Any]] | None = None,
         max_null_ratio: float = 0.1,
         max_dup_ratio: float = 0.2,
         min_class_ratio: float = 0.05,
@@ -57,6 +58,7 @@ class DataValidator:
         self.required_columns = required_columns or ["text"]
 
         self.label_columns = label_columns or []
+        self.label_specs = label_specs or {}
 
         self.max_null_ratio = max_null_ratio
         self.max_dup_ratio = max_dup_ratio
@@ -64,6 +66,67 @@ class DataValidator:
         self.min_text_length = min_text_length
 
         self.validation_errors: List[str] = []
+
+    def _validate_label_spec(
+        self,
+        *,
+        label: str,
+        values: pd.Series,
+    ) -> bool:
+        """
+        Validate values against an optional spec for a label column.
+
+        Supported keys:
+        - allowed_values: list
+        - min_value: number
+        - max_value: number
+        """
+
+        spec = self.label_specs.get(label)
+        if not spec:
+            return True
+
+        results = True
+        numeric = pd.to_numeric(values, errors="coerce")
+
+        if numeric.isna().any():
+            err = f"Non-numeric values detected in '{label}'"
+            logger.warning(err)
+            self.validation_errors.append(err)
+            results = False
+            return results
+
+        allowed_values = spec.get("allowed_values")
+        if isinstance(allowed_values, list) and allowed_values:
+            allowed_set = set(allowed_values)
+            invalid_mask = ~numeric.isin(allowed_set)
+            if bool(invalid_mask.any()):
+                invalid_values = sorted(set(numeric[invalid_mask].tolist()))
+                err = (
+                    f"Invalid values in '{label}': {invalid_values}. "
+                    f"Allowed: {sorted(allowed_set)}"
+                )
+                logger.warning(err)
+                self.validation_errors.append(err)
+                results = False
+
+        min_value = spec.get("min_value")
+        if min_value is not None:
+            if bool((numeric < float(min_value)).any()):
+                err = f"Values below min_value={min_value} in '{label}'"
+                logger.warning(err)
+                self.validation_errors.append(err)
+                results = False
+
+        max_value = spec.get("max_value")
+        if max_value is not None:
+            if bool((numeric > float(max_value)).any()):
+                err = f"Values above max_value={max_value} in '{label}'"
+                logger.warning(err)
+                self.validation_errors.append(err)
+                results = False
+
+        return results
 
     # ------------------------------------------------
     # Schema Validation
@@ -146,6 +209,16 @@ class DataValidator:
                 continue
 
             values = df[label].dropna()
+
+            if values.empty:
+                err = f"Label '{label}' has no non-null values"
+                logger.warning(err)
+                self.validation_errors.append(err)
+                results = False
+                continue
+
+            if not self._validate_label_spec(label=label, values=values):
+                results = False
 
             if values.nunique() < 2:
 
@@ -304,12 +377,14 @@ class DataValidator:
 def validate_dataset(
     csv_path: str,
     label_columns: List[str] | None = None,
+    label_specs: Dict[str, Dict[str, Any]] | None = None,
 ) -> Dict[str, Any]:
 
     df = pd.read_csv(csv_path)
 
     validator = DataValidator(
-        label_columns=label_columns
+        label_columns=label_columns,
+        label_specs=label_specs,
     )
 
     return validator.validate(df)

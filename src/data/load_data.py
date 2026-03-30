@@ -3,47 +3,13 @@ File: src/data/load_data.py
 
 Purpose
 -------
-Provide reliable dataset loading utilities for NLP pipelines.
-
-Functions included:
-- Load CSV datasets safely
-- Merge fake and real news datasets
-- Assign labels for binary classification
-
-Inputs
-------
-path : str | Path
-    Path to CSV dataset
-
-fake_path : str | Path
-real_path : str | Path
-
-Outputs
--------
-load_csv(path) -> pandas.DataFrame
-
-merge_datasets(fake_path, real_path) -> pandas.DataFrame
-
-Dependencies
-------------
-pandas
-pathlib
-logging
-"""
-"""
-File: src/data/load_data.py
-
-Purpose
--------
 Reliable dataset loading utilities for NLP pipelines.
 
 Supports:
 - safe CSV loading
-- dataset schema normalization
-- dataset merging
-- dataset metadata tracking
-
-Designed for multi-task NLP pipelines.
+- schema normalization
+- fake/real path-based merge for binary datasets
+- dataframe-list merge for multi-source datasets
 """
 
 from __future__ import annotations
@@ -145,12 +111,14 @@ def merge_fake_real(
     text_column: str = "text",
     title_column: str = "title",
     label_column: str = "label",
+    fake_label: int = 1,
+    real_label: int = 0,
 ) -> pd.DataFrame:
     """
     Merge fake and real news datasets.
 
-    Fake = 1
-    Real = 0
+    Fake = fake_label
+    Real = real_label
     """
 
     fake_df = load_csv(fake_path)
@@ -168,8 +136,8 @@ def merge_fake_real(
         title_column=title_column,
     )
 
-    fake_df[label_column] = 1
-    real_df[label_column] = 0
+    fake_df[label_column] = int(fake_label)
+    real_df[label_column] = int(real_label)
 
     merged = pd.concat([fake_df, real_df], ignore_index=True)
 
@@ -188,23 +156,56 @@ def merge_fake_real(
 # -------------------------------------------------
 
 def merge_datasets(
-    datasets: List[pd.DataFrame],
+    datasets_or_fake_path: List[pd.DataFrame] | str | Path,
+    real_path: Union[str, Path, None] = None,
+    *,
+    text_column: str = "text",
+    title_column: str = "title",
+    label_column: str = "label",
+    fake_label: int = 1,
+    real_label: int = 0,
     dataset_names: List[str] | None = None,
 ) -> pd.DataFrame:
     """
-    Merge multiple datasets into a unified dataframe.
+    Backward-compatible merge utility.
 
-    Adds dataset source column for traceability.
+    Supports two call styles:
+    1) merge_datasets(fake_path, real_path, ...)
+    2) merge_datasets([df1, df2, ...], dataset_names=[...])
+
+    For list input, adds optional dataset_source column for traceability.
     """
+
+    if isinstance(datasets_or_fake_path, (str, Path)):
+        if real_path is None:
+            raise ValueError(
+                "real_path is required when merge_datasets is called with fake_path"
+            )
+
+        return merge_fake_real(
+            fake_path=datasets_or_fake_path,
+            real_path=real_path,
+            text_column=text_column,
+            title_column=title_column,
+            label_column=label_column,
+            fake_label=fake_label,
+            real_label=real_label,
+        )
+
+    if not isinstance(datasets_or_fake_path, list):
+        raise TypeError(
+            "datasets_or_fake_path must be either a list of DataFrames "
+            "or a fake dataset path"
+        )
 
     frames = []
 
-    for i, df in enumerate(datasets):
+    for i, df in enumerate(datasets_or_fake_path):
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError(f"Expected DataFrame at index {i}, got {type(df).__name__}")
 
         frame = df.copy()
-
         if dataset_names:
-
             frame["dataset_source"] = dataset_names[i]
 
         frames.append(frame)

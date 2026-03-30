@@ -62,6 +62,7 @@ class EmotionModelLoader:
         self.model = EmotionClassifier(
             model_name=self.config["model"]["encoder_model"],
             num_emotions=self.config["model"]["num_labels"],
+            multi_label=bool(self.config["model"].get("multi_label", False)),
             dropout=self.config["model"].get("dropout", 0.1),
             device=str(self.device),
         )
