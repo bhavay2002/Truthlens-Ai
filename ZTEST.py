@@ -1,169 +1,185 @@
 from __future__ import annotations
 
+"""
+File Name: framenet_extractor_full.py
+Description:
+    Extracts all useful columns from FrameNet v1.7 XML files including:
+        - sentence text
+        - frame name
+        - lexical unit
+        - frame elements
+        - span start/end
+        - annotation metadata
+
+Output:
+    data/interim/framenet_full.csv
+"""
+
 from pathlib import Path
-from typing import Dict
 import pandas as pd
+import xml.etree.ElementTree as ET
 
 
-# =======================================================
+# ==========================================================
 # PATH CONFIGURATION
-# =======================================================
+# ==========================================================
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+FRAMENET_ROOT = Path(
+    r"C:\Users\bhava\Downloads\Framenet\framenet_v17\framenet_v17"
+)
 
-SEMEVAL_DIR = Path(r"C:\Users\bhava\Downloads\SemEval")
-
-TRAIN_FILE = SEMEVAL_DIR / "SemEval-Train.csv"
-DEV_FILE = SEMEVAL_DIR / "SemEval-Validation.csv"
-TEST_FILE = SEMEVAL_DIR / "SemEval-Test.csv"
-
-OUTPUT_FILE = PROJECT_ROOT / "data" / "interim" / "semeval_emotions.csv"
+OUTPUT_FILE = Path("data/interim/framenet_full.csv")
 
 
-# =======================================================
-# SEMEVAL LABEL MAPPING
-# =======================================================
-
-SEMEVAL_LABELS: Dict[int, str] = {
-    0: "anger",
-    1: "anticipation",
-    2: "disgust",
-    3: "fear",
-    4: "joy",
-    5: "love",
-    6: "optimism",
-    7: "pessimism",
-    8: "sadness",
-    9: "surprise",
-    10: "trust"
-}
-
-LABEL_COLUMNS = list(SEMEVAL_LABELS.values())
+TARGET_DIRS = [
+    FRAMENET_ROOT / "fulltext",
+    FRAMENET_ROOT / "lu",
+    FRAMENET_ROOT / "frame"
+]
 
 
-# =======================================================
-# LOAD SEMEVAL EXCEL
-# =======================================================
+# ==========================================================
+# EXTRACTION FUNCTION
+# ==========================================================
 
-def load_semeval(file_path):
+def parse_framenet():
 
-    df = pd.read_csv(file_path)
+    rows = []
 
-    text_candidates = ["text", "Tweet", "tweet", "Sentence"]
+    xml_files = []
 
-    for col in text_candidates:
-        if col in df.columns:
-            df = df.rename(columns={col: "text"})
-            break
+    for d in TARGET_DIRS:
+        xml_files.extend(list(d.rglob("*.xml")))
 
-    if "text" not in df.columns:
-        raise ValueError(
-            f"No text column found. Available columns: {list(df.columns)}"
-        )
+    print("Total XML files:", len(xml_files))
 
-    # convert numeric label columns to int
-    for col in df.columns:
-        if str(col).isdigit():
-            df.rename(columns={col: int(col)}, inplace=True)
+    for i, file in enumerate(xml_files):
 
-    return df
+        if i % 200 == 0:
+            print(f"Processing {i}/{len(xml_files)}")
 
-# =======================================================
-# CONVERT MULTI-COLUMN LABELS → ID STRING
-# =======================================================
+        try:
 
-def convert_labels(df: pd.DataFrame):
+            tree = ET.parse(file)
+            root = tree.getroot()
 
-    def build_label_string(row):
+            for sentence in root.iter():
 
-        labels = []
-    
-        for idx in SEMEVAL_LABELS.keys():
-    
-            if idx in row.index and row[idx] == 1:
-                labels.append(str(idx))
-    
-        return ",".join(labels)
+                if not sentence.tag.endswith("sentence"):
+                    continue
 
-    df["labels"] = df.apply(build_label_string, axis=1)
+                sentence_id = sentence.attrib.get("ID")
 
-    return df
+                sentence_text = None
+
+                for child in sentence:
+
+                    if child.tag.endswith("text"):
+                        sentence_text = child.text
+
+                if not sentence_text:
+                    continue
+
+                # ======================================
+                # annotation sets
+                # ======================================
+
+                for ann in sentence.iter():
+
+                    if not ann.tag.endswith("annotationSet"):
+                        continue
+
+                    frame_name = ann.attrib.get("frameName")
+                    lu_name = ann.attrib.get("luName")
+                    ann_id = ann.attrib.get("ID")
+
+                    if frame_name is None:
+                        continue
+
+                    # ======================================
+                    # layers
+                    # ======================================
+
+                    for layer in ann.iter():
+
+                        if not layer.tag.endswith("layer"):
+                            continue
+
+                        layer_name = layer.attrib.get("name")
+
+                        for label in layer.iter():
+
+                            if not label.tag.endswith("label"):
+                                continue
+
+                            fe_name = label.attrib.get("name")
+                            start = label.attrib.get("start")
+                            end = label.attrib.get("end")
+
+                            rows.append({
+
+                                "text": sentence_text.strip(),
+                                "sentence_id": sentence_id,
+
+                                "frame": frame_name,
+                                "lexical_unit": lu_name,
+
+                                "annotation_id": ann_id,
+                                "layer": layer_name,
+
+                                "frame_element": fe_name,
+
+                                "span_start": start,
+                                "span_end": end,
+
+                                "source_file": file.name
+
+                            })
+
+        except Exception:
+            continue
+
+    print("Extracted rows:", len(rows))
+
+    return rows
 
 
-# =======================================================
-# MERGE DATASETS
-# =======================================================
+# ==========================================================
+# SAVE DATASET
+# ==========================================================
 
-def merge_semeval():
+def save_dataset(rows):
 
-    print("\nLoading SemEval datasets...")
+    if not rows:
+        print("WARNING: No rows extracted.")
+        return
 
-    train = load_semeval(TRAIN_FILE)
-    dev = load_semeval(DEV_FILE)
-    test = load_semeval(TEST_FILE)
-
-    print("Train size:", len(train))
-    print("Validation size:", len(dev))
-    print("Test size:", len(test))
-
-    merged = pd.concat([train, dev, test], ignore_index=True)
-
-    merged = merged.drop_duplicates(subset=["text"])
-
-    merged = convert_labels(merged)
+    df = pd.DataFrame(rows)
 
     OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-    merged[["text", "labels"]].to_csv(OUTPUT_FILE, index=False)
+    df.to_csv(OUTPUT_FILE, index=False)
 
-    print("Merged dataset size:", len(merged))
-    print("Saved merged dataset:", OUTPUT_FILE)
+    print("\nDataset saved:", OUTPUT_FILE)
 
-    return merged
+    print("\nColumns extracted:\n")
 
+    for c in df.columns:
+        print("-", c)
 
-# =======================================================
-# ANALYZE EMOTION DISTRIBUTION
-# =======================================================
-
-def analyze_emotions(df: pd.DataFrame):
-
-    counts = {v: 0 for v in SEMEVAL_LABELS.values()}
-
-    for labels in df["labels"]:
-
-        if pd.isna(labels) or labels == "":
-            continue
-
-        label_ids = labels.split(",")
-
-        for lid in label_ids:
-
-            idx = int(lid)
-            emotion = SEMEVAL_LABELS[idx]
-
-            counts[emotion] += 1
-
-    result = (
-        pd.DataFrame(list(counts.items()), columns=["emotion", "count"])
-        .sort_values("count", ascending=False)
-    )
-
-    print("\nSemEval Emotion Distribution:\n")
-    print(result)
-
-    return result
+    print("\nPreview:\n")
+    print(df.head())
 
 
-# =======================================================
-# MAIN PIPELINE
-# =======================================================
+# ==========================================================
+# MAIN
+# ==========================================================
 
 def main():
 
-    merged_df = merge_semeval()
+    rows = parse_framenet()
 
-    analyze_emotions(merged_df)
+    save_dataset(rows)
 
 
 if __name__ == "__main__":

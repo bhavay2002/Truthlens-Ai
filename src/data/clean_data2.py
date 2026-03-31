@@ -5,7 +5,11 @@ Purpose
 -------
 Research-grade dataset cleaning and text normalization utilities.
 
-Optimized for emotion datasets such as GoEmotions.
+Compatible with:
+- FrameNet
+- GoEmotions
+- Propaganda datasets
+- Bias datasets
 """
 
 from __future__ import annotations
@@ -34,7 +38,7 @@ REPEATED_CHARS = re.compile(r"(.)\1{2,}")
 
 
 # -------------------------------------------------
-# Basic Normalization
+# Unicode Normalization
 # -------------------------------------------------
 
 def normalize_unicode(text: str) -> str:
@@ -54,15 +58,27 @@ def normalize_unicode(text: str) -> str:
     return text
 
 
+# -------------------------------------------------
+# Numeric Normalization
+# -------------------------------------------------
+
 def normalize_numbers(text: str) -> str:
 
     return NUMBER_PATTERN.sub("<NUM>", text)
 
 
+# -------------------------------------------------
+# Character Normalization
+# -------------------------------------------------
+
 def normalize_repeated_chars(text: str) -> str:
 
     return REPEATED_CHARS.sub(r"\1\1", text)
 
+
+# -------------------------------------------------
+# Contraction Expansion
+# -------------------------------------------------
 
 def expand_contractions(text: str) -> str:
 
@@ -95,12 +111,20 @@ def clean_text(
 
     text = expand_contractions(text)
 
+    # ---------------------------------------------
+    # Remove URLs
+    # ---------------------------------------------
+
     if remove_urls:
 
         text = URL_PATTERN.sub("", text)
         text = EMAIL_PATTERN.sub("", text)
 
     text = MENTION_PATTERN.sub("", text)
+
+    # ---------------------------------------------
+    # Remove HTML
+    # ---------------------------------------------
 
     if remove_html:
         text = HTML_PATTERN.sub("", text)
@@ -110,11 +134,19 @@ def clean_text(
     if normalize_nums:
         text = normalize_numbers(text)
 
+    # ---------------------------------------------
+    # Normalize punctuation
+    # ---------------------------------------------
+
     text = re.sub(r"[!?]{2,}", "!", text)
     text = re.sub(r"[.]{2,}", ".", text)
 
-    # Keep emojis + punctuation important for emotions
-    text = re.sub(r"[^a-zA-Z0-9\s.,!?<>:'\-]", "", text)
+    # ---------------------------------------------
+    # SAFE CHARACTER FILTER
+    # (important for FrameNet tokens like Dec-98)
+    # ---------------------------------------------
+
+    text = re.sub(r"[^a-zA-Z0-9\s.,!?<>:'\-/]", "", text)
 
     text = WHITESPACE_PATTERN.sub(" ", text).strip()
 
@@ -155,7 +187,7 @@ def clean_dataframe(
     df: pd.DataFrame,
     text_column: str = "text",
     title_column: Optional[str] = None,
-    min_words: int = 3,
+    min_words: int = 1,
     max_words: int = 200,
 ) -> pd.DataFrame:
 
@@ -174,7 +206,10 @@ def clean_dataframe(
     if initial_rows == 0:
         return df
 
-    # Merge title + body if present
+    # ---------------------------------------------
+    # Merge title + body
+    # ---------------------------------------------
+
     if title_column and title_column in df.columns:
 
         df[text_column] = (
@@ -183,18 +218,34 @@ def clean_dataframe(
             + df[text_column].fillna("")
         )
 
-    # Remove duplicates
-    df = df.drop_duplicates(subset=[text_column])
-
+    # ---------------------------------------------
     # Remove missing text
+    # ---------------------------------------------
+
     df = df.dropna(subset=[text_column])
 
     df[text_column] = df[text_column].astype(str)
 
+    # ---------------------------------------------
     # Clean text
+    # ---------------------------------------------
+
     df[text_column] = df[text_column].map(clean_text)
 
+    # ---------------------------------------------
+    # Remove duplicates
+    # IMPORTANT: keep text+frame combinations
+    # ---------------------------------------------
+
+    if "frame" in df.columns:
+        df = df.drop_duplicates(subset=[text_column, "frame"])
+    else:
+        df = df.drop_duplicates(subset=[text_column])
+
+    # ---------------------------------------------
     # Word filtering
+    # ---------------------------------------------
+
     word_counts = df[text_column].apply(lambda x: len(x.split()))
 
     df = df[(word_counts >= min_words) & (word_counts <= max_words)]

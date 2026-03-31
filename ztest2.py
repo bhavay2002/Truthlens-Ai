@@ -4,13 +4,9 @@ import argparse
 from pathlib import Path
 import pandas as pd
 
-from src.data.clean_data import clean_dataframe
+from src.data.clean_data2 import clean_dataframe
 from src.data.data_profiler import profile_dataset
 from src.data.eda import run_eda
-from src.data.validate_data import validate_dataset
-
-from src.data.class_balance import balance_dataset
-from src.data.data_augmentation import augment_dataset
 
 
 # --------------------------------------------------
@@ -19,68 +15,141 @@ from src.data.data_augmentation import augment_dataset
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
-DEFAULT_DATA_PATH = PROJECT_ROOT / "data" / "splits" / "propaganda2"
+DEFAULT_DATA_PATH = PROJECT_ROOT / "data" / "interim" / "framenet_full.csv"
 
 DEFAULT_OUTPUT_PATH = (
-    PROJECT_ROOT / "data" / "processed" / "propaganda_processed.csv"
+    PROJECT_ROOT / "data" / "processed" / "framenet_processed2.csv"
 )
 
 
 # --------------------------------------------------
-# VALID LABELS
+# LOAD DATASET
 # --------------------------------------------------
 
-VALID_LABELS = {0, 1}
+def load_dataset(path: Path) -> pd.DataFrame:
+
+    # Single CSV
+    if path.is_file():
+        print("Loading dataset file:", path)
+        df = pd.read_csv(path)
+        print("Rows loaded:", len(df))
+        return df
+
+    # Folder with CSV files
+    if path.is_dir():
+
+        csv_files = list(path.glob("*.csv"))
+
+        if not csv_files:
+            raise FileNotFoundError(
+                f"No CSV files found in directory: {path}"
+            )
+
+        dfs = []
+
+        for f in csv_files:
+            print("Loading:", f.name)
+            dfs.append(pd.read_csv(f))
+
+        df = pd.concat(dfs, ignore_index=True)
+
+        print("Rows loaded:", len(df))
+
+        return df
+
+    raise FileNotFoundError(f"Invalid dataset path: {path}")
 
 
 # --------------------------------------------------
-# LABEL VALIDATION
+# NORMALIZE FRAMENET DATA
 # --------------------------------------------------
 
-def validate_labels(df: pd.DataFrame) -> pd.DataFrame:
+def normalize_framenet(df: pd.DataFrame) -> pd.DataFrame:
 
-    if "label" not in df.columns:
-        raise ValueError("Dataset must contain a 'label' column")
+    required_cols = {"text", "frame"}
 
-    df = df[df["label"].isin(VALID_LABELS)]
+    if not required_cols.issubset(df.columns):
+        print("FrameNet columns not detected — skipping normalization")
+        return df
+
+    print("Converting FrameNet annotations → sentence-frame dataset")
+
+    df = df[["text", "frame", "frame_element"]].copy()
+
+    df["text"] = df["text"].astype(str).str.strip()
+    df["frame"] = df["frame"].astype(str).str.lower()
+
+    df = df[df["text"].str.len() > 3]
+    df = df[df["frame"].notna()]
+
+    df["frame_element"] = df["frame_element"].fillna("")
+
+    grouped = df.groupby(["text", "frame"])
+
+    rows = []
+
+    for (text, frame), g in grouped:
+
+        elements = list(set(g["frame_element"].dropna()))
+
+        rows.append({
+            "text": text,
+            "frame": frame,
+            "frame_elements": ",".join(elements)
+        })
+
+    df_new = pd.DataFrame(rows)
+
+    print("Normalized rows:", len(df_new))
+
+    return df_new
+
+
+# --------------------------------------------------
+# NARRATIVE ROLE GENERATION
+# --------------------------------------------------
+
+def add_narrative_roles(df: pd.DataFrame) -> pd.DataFrame:
+
+    villain_frames = {
+        "attack",
+        "cause_harm",
+        "destroying",
+        "killing",
+        "hostile_encounter",
+        "violence"
+    }
+
+    hero_frames = {
+        "helping",
+        "protecting",
+        "rescuing",
+        "supporting",
+        "assistance",
+        "defending"
+    }
+
+    victim_frames = {
+        "victimization",
+        "suffering",
+        "harm"
+    }
+
+    df["frame"] = df["frame"].fillna("").str.lower()
+
+    df["hero"] = df["frame"].apply(
+        lambda x: int(any(f in x for f in hero_frames))
+    )
+
+    df["villain"] = df["frame"].apply(
+        lambda x: int(any(f in x for f in villain_frames))
+    )
+
+    df["victim"] = df["frame"].apply(
+        lambda x: int(any(f in x for f in victim_frames))
+    )
 
     return df
-
-
-# --------------------------------------------------
-# LOAD SPLIT DATASETS
-# --------------------------------------------------
-
-def load_splits(data_dir: Path) -> pd.DataFrame:
-
-    train_file = data_dir / "Train_preprocessed.csv"
-    val_file = data_dir / "Valid_preprocessed.csv"
-    test_file = data_dir / "Test_preprocessed.csv"
-
-    if not train_file.exists():
-        raise FileNotFoundError(f"Missing file: {train_file}")
-
-    if not val_file.exists():
-        raise FileNotFoundError(f"Missing file: {val_file}")
-
-    if not test_file.exists():
-        raise FileNotFoundError(f"Missing file: {test_file}")
-
-    print("Loading dataset splits...")
-
-    train = pd.read_csv(train_file)
-    val = pd.read_csv(val_file)
-    test = pd.read_csv(test_file)
-
-    print("Train size:", len(train))
-    print("Validation size:", len(val))
-    print("Test size:", len(test))
-
-    merged = pd.concat([train, val, test], ignore_index=True)
-
-    print("Merged dataset size:", len(merged))
-
-    return merged
 
 
 # --------------------------------------------------
@@ -93,25 +162,15 @@ def run(
     skip_eda: bool = False,
 ) -> Path:
 
-    if not data_path.exists():
-        raise FileNotFoundError(f"Dataset folder not found: {data_path}")
+    print("Dataset path:", data_path)
 
-    print("Dataset folder:", data_path)
-
-    # --------------------------------------------------
-    # Load and merge datasets
-    # --------------------------------------------------
-
-    df = load_splits(data_path)
+    df = load_dataset(data_path)
 
     # --------------------------------------------------
-    # Profiling
+    # PROFILE
     # --------------------------------------------------
 
-    profile_results = profile_dataset(
-        str(data_path / "Train_preprocessed.csv"),
-        label_columns=["label"],
-    )
+    profile_results = profile_dataset(str(data_path))
 
     print("Profile keys:", list(profile_results.keys()))
 
@@ -121,46 +180,24 @@ def run(
 
     if not skip_eda:
         print("Running EDA...")
-        run_eda(str(data_path / "Train_preprocessed.csv"))
+        run_eda(str(data_path))
 
     # --------------------------------------------------
-    # Normalize text column
+    # NORMALIZE FRAMENET
     # --------------------------------------------------
 
-    if "sentence" in df.columns and "text" not in df.columns:
-        df = df.rename(columns={"sentence": "text"})
-
-    if "text" not in df.columns:
-        raise ValueError("Dataset must contain a 'text' column")
+    df = normalize_framenet(df)
 
     # --------------------------------------------------
-    # Label validation
+    # REMOVE DUPLICATES
     # --------------------------------------------------
 
-    df = validate_labels(df)
-
-    print("Rows after label validation:", len(df))
-
-    # --------------------------------------------------
-    # Basic cleaning
-    # --------------------------------------------------
-
-    df["text"] = df["text"].astype(str).str.strip()
-
-    df = df[df["text"].str.len() > 10]
-
-    df = df.drop_duplicates(subset=["text"])
+    df = df.drop_duplicates(subset=["text", "frame"])
 
     print("Rows after duplicate removal:", len(df))
 
     # --------------------------------------------------
-    # Transformer safety
-    # --------------------------------------------------
-
-    df["text"] = df["text"].str.slice(0, 2000)
-
-    # --------------------------------------------------
-    # Text cleaning
+    # TEXT CLEANING
     # --------------------------------------------------
 
     df = clean_dataframe(df, text_column="text")
@@ -168,44 +205,19 @@ def run(
     print("Rows after cleaning:", len(df))
 
     # --------------------------------------------------
-    # CLASS BALANCING
+    # GENERATE NARRATIVE LABELS
     # --------------------------------------------------
 
-    print("Balancing dataset...")
-
-    df = balance_dataset(
-        df,
-        label_column="label",
-        method="oversample",
-    )
+    df = add_narrative_roles(df)
 
     # --------------------------------------------------
-    # AUGMENT PROPAGANDA CLASS
+    # SHUFFLE DATA
     # --------------------------------------------------
-
-    print("Augmenting propaganda samples...")
-
-    propaganda_df = df[df["label"] == 1]
-
-    propaganda_aug = augment_dataset(
-        propaganda_df,
-        text_column="text",
-        multiplier=2,
-    )
-
-    non_prop_df = df[df["label"] == 0]
-
-    df = pd.concat(
-        [non_prop_df, propaganda_aug],
-        ignore_index=True,
-    )
 
     df = df.sample(frac=1, random_state=42).reset_index(drop=True)
 
-    print("Dataset size after augmentation:", len(df))
-
     # --------------------------------------------------
-    # SAVE DATASET
+    # SAVE
     # --------------------------------------------------
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -225,7 +237,7 @@ def run(
 def _parse_args():
 
     parser = argparse.ArgumentParser(
-        description="Run Propaganda preprocessing pipeline"
+        description="FrameNet Narrative Processing Pipeline"
     )
 
     parser.add_argument(
