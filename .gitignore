@@ -88,3 +88,13 @@ htmlcov/
 .mypy_cache/
 .dmypy.json
 dmypy.json
+
+
+data/
+*.csv
+*.json
+*.parquet
+*.npy
+*.pkl
+*.pt
+*.pth
