@@ -98,3 +98,13 @@ data/
 *.pkl
 *.pt
 *.pth
+
+data/
+datasets/
+*.csv
+*.json
+*.parquet
+*.npy
+*.pkl
+*.pt
+*.pth
