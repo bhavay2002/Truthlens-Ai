@@ -11,6 +11,7 @@ Description:
 Dependencies:
     logging
     typing
+    dataclasses
     collections
     numpy
     spacy
@@ -22,41 +23,99 @@ Outputs:
     Entity interaction graph and graph feature dictionary
 """
 
+from __future__ import annotations
+
 import logging
-from collections import defaultdict, Counter
-from typing import Dict, List
+from collections import Counter, defaultdict
+from dataclasses import dataclass
+from typing import Dict, List, Set
 
 import numpy as np
 import spacy
+from spacy.language import Language
+from spacy.tokens import Doc
 
 
 logger = logging.getLogger(__name__)
 
 
+@dataclass(slots=True)
+class EntityGraphFeatures:
+    """
+    Structured container for entity graph features.
+    """
+
+    entity_graph_nodes: float
+    entity_graph_edges: float
+    entity_graph_avg_degree: float
+    entity_graph_density: float
+    entity_graph_dominant_degree: float
+    entity_graph_degree_variance: float
+
+    def to_dict(self) -> Dict[str, float]:
+        """Convert dataclass to dictionary."""
+        return {
+            "entity_graph_nodes": self.entity_graph_nodes,
+            "entity_graph_edges": self.entity_graph_edges,
+            "entity_graph_avg_degree": self.entity_graph_avg_degree,
+            "entity_graph_density": self.entity_graph_density,
+            "entity_graph_dominant_degree": self.entity_graph_dominant_degree,
+            "entity_graph_degree_variance": self.entity_graph_degree_variance,
+        }
+
+
 class EntityGraphBuilder:
     """
-    Constructs and analyzes entity co-occurrence graphs.
+    Constructs and analyzes entity co-occurrence graphs from text.
     """
 
     def __init__(self, spacy_model: str = "en_core_web_sm") -> None:
-        """Initialize NLP pipeline for entity extraction."""
+        """
+        Initialize spaCy NLP pipeline for entity extraction.
+
+        Parameters
+        ----------
+        spacy_model : str
+            spaCy model name.
+        """
+
+        if not isinstance(spacy_model, str) or not spacy_model:
+            raise ValueError("spacy_model must be a valid model name")
 
         try:
-            self.nlp = spacy.load(spacy_model)
-        except Exception as exc:
+            self.nlp: Language = spacy.load(spacy_model)
+        except Exception as exc:  # pragma: no cover
             logger.exception("spaCy model loading failed")
             raise RuntimeError("Failed to load spaCy model") from exc
 
-        logger.info("EntityGraphBuilder initialized")
+        logger.info("EntityGraphBuilder initialized with model: %s", spacy_model)
+
+    def _validate_text(self, text: str) -> None:
+        """Validate input text."""
+        if not isinstance(text, str):
+            raise TypeError("text must be a string")
+        if not text.strip():
+            raise ValueError("text must not be empty")
 
     def build_graph(self, text: str) -> Dict[str, List[str]]:
-        """Construct an entity co-occurrence graph from text."""
+        """
+        Construct an entity co-occurrence graph from text.
 
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError("Input text must be a non-empty string")
+        Parameters
+        ----------
+        text : str
+            Input document.
+
+        Returns
+        -------
+        Dict[str, List[str]]
+            Entity adjacency list graph.
+        """
+
+        self._validate_text(text)
 
         try:
-            doc = self.nlp(text)
+            doc: Doc = self.nlp(text)
         except Exception as exc:
             logger.exception("spaCy processing failed")
             raise RuntimeError("Text processing failed") from exc
@@ -69,12 +128,16 @@ class EntityGraphBuilder:
                 for ent in sentence.ents
                 if ent.text and ent.text.strip()
             ]
+
+            # remove duplicates while preserving order
             entities = list(dict.fromkeys(entities))
 
             if not entities:
                 continue
+
             for entity in entities:
                 graph.setdefault(entity, [])
+
             if len(entities) < 2:
                 continue
 
@@ -83,24 +146,41 @@ class EntityGraphBuilder:
                     graph[entity_a].append(entity_b)
                     graph[entity_b].append(entity_a)
 
+        logger.debug("Entity graph built with %d nodes", len(graph))
+
         return dict(graph)
 
-    def extract_graph_features(self, graph: Dict[str, List[str]]) -> Dict[str, float]:
-        """Compute structural metrics from the entity graph."""
+    def extract_graph_features(
+        self, graph: Dict[str, List[str]]
+    ) -> EntityGraphFeatures:
+        """
+        Compute structural graph metrics.
+
+        Parameters
+        ----------
+        graph : Dict[str, List[str]]
+            Entity adjacency graph.
+
+        Returns
+        -------
+        EntityGraphFeatures
+            Structured feature object.
+        """
 
         if not isinstance(graph, dict):
-            raise ValueError("graph must be a dictionary")
+            raise TypeError("graph must be a dictionary")
 
-        adjacency: dict[str, set[str]] = {}
-        all_nodes: set[str] = set()
+        adjacency: Dict[str, Set[str]] = {}
+        all_nodes: Set[str] = set()
 
         for entity, neighbors in graph.items():
             if not isinstance(entity, str):
                 raise ValueError("graph keys must be strings")
             if not isinstance(neighbors, list):
-                raise ValueError("graph values must be lists of neighbors")
+                raise ValueError("graph values must be lists")
 
             entity_key = entity.strip().lower()
+
             neighbor_set = {
                 str(neighbor).strip().lower()
                 for neighbor in neighbors
@@ -108,6 +188,7 @@ class EntityGraphBuilder:
                 and neighbor.strip()
                 and str(neighbor).strip().lower() != entity_key
             }
+
             adjacency[entity_key] = neighbor_set
             all_nodes.add(entity_key)
             all_nodes.update(neighbor_set)
@@ -144,20 +225,33 @@ class EntityGraphBuilder:
             else 0.0
         )
 
-        features = {
-            "entity_graph_nodes": float(node_count),
-            "entity_graph_edges": float(edge_count),
-            "entity_graph_avg_degree": float(avg_degree),
-            "entity_graph_density": float(density),
-            "entity_graph_dominant_degree": float(dominant_degree),
-            "entity_graph_degree_variance": float(connectivity_variance),
-        }
+        features = EntityGraphFeatures(
+            entity_graph_nodes=float(node_count),
+            entity_graph_edges=float(edge_count),
+            entity_graph_avg_degree=float(avg_degree),
+            entity_graph_density=float(density),
+            entity_graph_dominant_degree=float(dominant_degree),
+            entity_graph_degree_variance=float(connectivity_variance),
+        )
+
+        logger.debug("Graph features extracted: %s", features)
 
         return features
 
 
 def entity_graph_vector(features: Dict[str, float]) -> np.ndarray:
-    """Convert entity graph features into a numerical vector."""
+    """
+    Convert entity graph features into a numerical vector.
+
+    Parameters
+    ----------
+    features : Dict[str, float]
+
+    Returns
+    -------
+    np.ndarray
+        Feature vector.
+    """
 
     if not isinstance(features, dict) or not features:
         raise ValueError("features must be a non-empty dictionary")
@@ -165,6 +259,8 @@ def entity_graph_vector(features: Dict[str, float]) -> np.ndarray:
     try:
         vector = np.array(list(features.values()), dtype=np.float32)
         return vector
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover
         logger.exception("Entity graph vector conversion failed")
-        raise RuntimeError("Failed to convert entity graph features") from exc
+        raise RuntimeError(
+            "Failed to convert entity graph features"
+        ) from exc

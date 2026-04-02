@@ -1,0 +1,157 @@
+"""
+File Name: graph_pipeline.py
+Module: Graph Analysis - End-to-End Graph Pipeline
+Description:
+    Implements the end-to-end graph processing pipeline for the TruthLens AI
+    system. The pipeline orchestrates entity graph construction, narrative
+    graph construction, graph metric analysis, and unified graph feature
+    extraction. It serves as the primary entry point for graph-based feature
+    generation used by higher-level pipelines such as feature extraction and
+    prediction pipelines.
+
+Dependencies:
+    logging
+    typing
+    dataclasses
+    numpy
+    src.graph.entity_graph
+    src.graph.narrative_graph_builder
+    src.graph.graph_analysis
+    src.graph.graph_features
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Dict, Any
+
+import numpy as np
+
+from src.graph.entity_graph import EntityGraphBuilder
+from src.graph.narrative_graph_builder import NarrativeGraphBuilder
+from src.graph.graph_analysis import GraphAnalyzer
+from src.graph.graph_features import GraphFeatureExtractor
+
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class GraphPipelineConfig:
+    """
+    Configuration for the graph processing pipeline.
+    """
+
+    enable_entity_graph: bool = True
+    enable_narrative_graph: bool = True
+    return_vector: bool = True
+
+
+class GraphPipeline:
+    """
+    End-to-end graph feature pipeline.
+
+    Processing Flow
+    ---------------
+    text
+        ↓
+    entity_graph_builder
+        ↓
+    narrative_graph_builder
+        ↓
+    graph_analyzer
+        ↓
+    graph_features
+        ↓
+    feature_vector
+    """
+
+    def __init__(self, config: GraphPipelineConfig | None = None) -> None:
+        if config is None:
+            config = GraphPipelineConfig()
+
+        self.config = config
+
+        self.entity_graph_builder = (
+            EntityGraphBuilder() if config.enable_entity_graph else None
+        )
+
+        self.narrative_graph_builder = (
+            NarrativeGraphBuilder() if config.enable_narrative_graph else None
+        )
+
+        self.graph_analyzer = GraphAnalyzer()
+        self.graph_feature_extractor = GraphFeatureExtractor()
+
+        logger.info("GraphPipeline initialized")
+
+    def _validate_text(self, text: str) -> None:
+        """Validate input text."""
+        if not isinstance(text, str):
+            raise TypeError("text must be a string")
+        if not text.strip():
+            raise ValueError("text must be non-empty")
+
+    def run(self, text: str) -> Dict[str, Any]:
+        """
+        Execute the graph processing pipeline.
+
+        Parameters
+        ----------
+        text : str
+
+        Returns
+        -------
+        Dict[str, Any]
+            Contains graphs, features, and optionally feature vector.
+        """
+
+        self._validate_text(text)
+
+        results: Dict[str, Any] = {}
+
+        # -------------------------------------------
+        # Entity Graph
+        # -------------------------------------------
+        if self.entity_graph_builder:
+            entity_graph = self.entity_graph_builder.build_graph(text)
+            results["entity_graph"] = entity_graph
+
+            entity_metrics = self.graph_analyzer.analyze(entity_graph)
+            results["entity_graph_metrics"] = entity_metrics.to_dict()
+
+        # -------------------------------------------
+        # Narrative Graph
+        # -------------------------------------------
+        if self.narrative_graph_builder:
+            narrative_graph = self.narrative_graph_builder.build_graph(text)
+            results["narrative_graph"] = narrative_graph
+
+            narrative_metrics = self.graph_analyzer.analyze(narrative_graph)
+            results["narrative_graph_metrics"] = narrative_metrics.to_dict()
+
+        # -------------------------------------------
+        # Unified Graph Features
+        # -------------------------------------------
+        features = self.graph_feature_extractor.extract_features(text)
+
+        results["graph_features"] = features
+
+        # -------------------------------------------
+        # Feature Vector
+        # -------------------------------------------
+        if self.config.return_vector:
+            try:
+                vector = np.array(list(features.values()), dtype=np.float32)
+                results["graph_feature_vector"] = vector
+            except Exception as exc:
+                logger.exception("Failed to build graph feature vector")
+                raise RuntimeError("Graph feature vector creation failed") from exc
+
+        logger.debug(
+            "GraphPipeline completed: %d features extracted",
+            len(features),
+        )
+
+        return results

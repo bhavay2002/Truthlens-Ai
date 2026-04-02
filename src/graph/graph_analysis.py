@@ -10,7 +10,8 @@ Description:
 Dependencies:
     logging
     typing
-    collections
+    dataclasses
+    itertools
     numpy
 
 Inputs:
@@ -20,14 +21,48 @@ Outputs:
     Graph metric dictionary and numerical feature vector
 """
 
+from __future__ import annotations
+
 import logging
+from dataclasses import dataclass
 from itertools import combinations
-from typing import Dict, List
+from typing import Dict, List, Set
 
 import numpy as np
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class GraphMetrics:
+    """
+    Dataclass container for graph metrics.
+    """
+
+    graph_nodes: float
+    graph_edges: float
+    graph_avg_degree: float
+    graph_max_degree: float
+    graph_min_degree: float
+    graph_degree_variance: float
+    graph_density: float
+    graph_centralization: float
+    graph_clustering_estimate: float
+
+    def to_dict(self) -> Dict[str, float]:
+        """Convert metrics dataclass to dictionary."""
+        return {
+            "graph_nodes": self.graph_nodes,
+            "graph_edges": self.graph_edges,
+            "graph_avg_degree": self.graph_avg_degree,
+            "graph_max_degree": self.graph_max_degree,
+            "graph_min_degree": self.graph_min_degree,
+            "graph_degree_variance": self.graph_degree_variance,
+            "graph_density": self.graph_density,
+            "graph_centralization": self.graph_centralization,
+            "graph_clustering_estimate": self.graph_clustering_estimate,
+        }
 
 
 class GraphAnalyzer:
@@ -39,22 +74,38 @@ class GraphAnalyzer:
         """Initialize graph analyzer."""
         logger.info("GraphAnalyzer initialized")
 
-    def analyze(self, graph: Dict[str, List[str]]) -> Dict[str, float]:
-        """Compute structural statistics from a graph."""
-
+    def _validate_graph(self, graph: Dict[str, List[str]]) -> None:
+        """Validate graph structure."""
         if not isinstance(graph, dict):
-            raise ValueError("graph must be a dictionary")
-
-        adjacency: dict[str, set[str]] = {}
-        all_nodes: set[str] = set()
+            raise TypeError("graph must be a dictionary")
 
         for node, neighbors in graph.items():
             if not isinstance(node, str):
                 raise ValueError("graph keys must be strings")
             if not isinstance(neighbors, list):
-                raise ValueError("graph values must be lists")
+                raise ValueError("graph values must be lists of neighbors")
 
+    def analyze(self, graph: Dict[str, List[str]]) -> GraphMetrics:
+        """
+        Compute structural statistics from a graph.
+
+        Parameters
+        ----------
+        graph : Dict[str, List[str]]
+
+        Returns
+        -------
+        GraphMetrics
+        """
+
+        self._validate_graph(graph)
+
+        adjacency: Dict[str, Set[str]] = {}
+        all_nodes: Set[str] = set()
+
+        for node, neighbors in graph.items():
             node_key = node.strip().lower()
+
             neighbor_set = {
                 str(neighbor).strip().lower()
                 for neighbor in neighbors
@@ -62,6 +113,7 @@ class GraphAnalyzer:
                 and neighbor.strip()
                 and str(neighbor).strip().lower() != node_key
             }
+
             adjacency[node_key] = neighbor_set
             all_nodes.add(node_key)
             all_nodes.update(neighbor_set)
@@ -71,80 +123,81 @@ class GraphAnalyzer:
 
         node_count = len(all_nodes)
         edge_count = sum(len(neighbors) for neighbors in adjacency.values())
+
         degrees = [len(adjacency[node]) for node in sorted(all_nodes)]
 
         avg_degree = float(np.mean(degrees)) if degrees else 0.0
         max_degree = float(max(degrees)) if degrees else 0.0
         min_degree = float(min(degrees)) if degrees else 0.0
-
         degree_variance = float(np.var(degrees)) if degrees else 0.0
 
         density = self._compute_density(node_count, edge_count)
-
         centralization = self._compute_centralization(degrees)
-
         clustering = self._estimate_clustering(adjacency)
 
-        features = {
-            "graph_nodes": float(node_count),
-            "graph_edges": float(edge_count),
-            "graph_avg_degree": avg_degree,
-            "graph_max_degree": max_degree,
-            "graph_min_degree": min_degree,
-            "graph_degree_variance": degree_variance,
-            "graph_density": density,
-            "graph_centralization": centralization,
-            "graph_clustering_estimate": clustering,
-        }
+        metrics = GraphMetrics(
+            graph_nodes=float(node_count),
+            graph_edges=float(edge_count),
+            graph_avg_degree=avg_degree,
+            graph_max_degree=max_degree,
+            graph_min_degree=min_degree,
+            graph_degree_variance=degree_variance,
+            graph_density=density,
+            graph_centralization=centralization,
+            graph_clustering_estimate=clustering,
+        )
 
-        return features
+        logger.debug("Graph metrics computed: %s", metrics)
+
+        return metrics
 
     def _compute_density(self, nodes: int, edges: int) -> float:
         """Compute graph density."""
-
         if nodes <= 1:
             return 0.0
 
         possible_edges = nodes * (nodes - 1)
-
         return float(edges / possible_edges)
 
     def _compute_centralization(self, degrees: List[int]) -> float:
         """Estimate network centralization."""
-
         if not degrees:
             return 0.0
 
         max_degree = max(degrees)
-
         diff_sum = sum(max_degree - d for d in degrees)
 
         normalization = len(degrees) * (len(degrees) - 1)
-
         if normalization == 0:
             return 0.0
 
         return float(diff_sum / normalization)
 
-    def _estimate_clustering(self, graph: Dict[str, set[str]]) -> float:
-        """Estimate clustering coefficient using neighbor overlap."""
+    def _estimate_clustering(self, graph: Dict[str, Set[str]]) -> float:
+        """
+        Estimate clustering coefficient using neighbor overlap.
+        """
+
         if not graph:
             return 0.0
 
-        # Convert to undirected adjacency for clustering coefficient estimate.
         undirected = {node: set(neighbors) for node, neighbors in graph.items()}
+
         for node, neighbors in list(undirected.items()):
             for neighbor in neighbors:
                 undirected.setdefault(neighbor, set()).add(node)
 
-        local_coefficients: list[float] = []
+        local_coefficients: List[float] = []
+
         for neighbors in undirected.values():
             degree = len(neighbors)
+
             if degree < 2:
                 local_coefficients.append(0.0)
                 continue
 
             neighbor_list = sorted(neighbors)
+
             links_between_neighbors = 0
             for left, right in combinations(neighbor_list, 2):
                 if right in undirected.get(left, set()):
@@ -157,7 +210,9 @@ class GraphAnalyzer:
 
 
 def graph_feature_vector(features: Dict[str, float]) -> np.ndarray:
-    """Convert graph metric dictionary into numerical vector."""
+    """
+    Convert graph metric dictionary into numerical vector.
+    """
 
     if not isinstance(features, dict) or not features:
         raise ValueError("features must be a non-empty dictionary")
@@ -165,6 +220,6 @@ def graph_feature_vector(features: Dict[str, float]) -> np.ndarray:
     try:
         vector = np.array(list(features.values()), dtype=np.float32)
         return vector
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover
         logger.exception("Graph feature vector conversion failed")
         raise RuntimeError("Failed to convert graph metrics") from exc
