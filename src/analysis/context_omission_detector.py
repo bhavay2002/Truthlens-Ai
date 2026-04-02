@@ -24,16 +24,31 @@ Outputs:
     Dictionary of context omission features and optional numerical vector
 """
 
+from __future__ import annotations
+
 import logging
 import re
 from collections import Counter
-from typing import Dict, List
+from dataclasses import dataclass
+from typing import Dict, List, Any
 
 import numpy as np
 import spacy
+from spacy.language import Language
+from spacy.tokens import Doc
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class ContextOmissionConfig:
+    """
+    Configuration for ContextOmissionDetector.
+    """
+
+    spacy_model: str = "en_core_web_sm"
+    normalize_ratios: bool = True
 
 
 class ContextOmissionDetector:
@@ -73,96 +88,168 @@ class ContextOmissionDetector:
         "statistics",
     }
 
-    def __init__(self, spacy_model: str = "en_core_web_sm") -> None:
-        """Initialize NLP pipeline for context omission detection."""
+    QUOTE_PATTERN = re.compile(r'"')
+
+    def __init__(self, config: ContextOmissionConfig | None = None) -> None:
+        """
+        Initialize NLP pipeline for context omission detection.
+
+        Args:
+            config: Optional configuration for detector.
+        """
+
+        self.config = config or ContextOmissionConfig()
 
         try:
-            self.nlp = spacy.load(spacy_model)
+            self.nlp: Language = spacy.load(self.config.spacy_model)
         except Exception as exc:
             logger.exception("spaCy model loading failed")
-            raise RuntimeError("Failed to load spaCy model") from exc
+            raise RuntimeError(
+                f"Failed to load spaCy model: {self.config.spacy_model}"
+            ) from exc
 
-        logger.info("ContextOmissionDetector initialized")
+        logger.info(
+            "ContextOmissionDetector initialized with model=%s",
+            self.config.spacy_model,
+        )
 
     def analyze(self, text: str) -> Dict[str, float]:
-        """Analyze text for signals of missing contextual information."""
+        """
+        Analyze text for signals of missing contextual information.
 
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError("Input text must be a non-empty string")
+        Args:
+            text: Input text.
+
+        Returns:
+            Dictionary containing context omission features.
+        """
+
+        if not isinstance(text, str):
+            raise ValueError("Input text must be a string")
+
+        cleaned_text = text.strip()
+
+        if not cleaned_text:
+            raise ValueError("Input text must be non-empty")
 
         try:
-            doc = self.nlp(text)
+            doc: Doc = self.nlp(cleaned_text)
         except Exception as exc:
             logger.exception("spaCy processing failed")
             raise RuntimeError("Text processing failed") from exc
 
-        tokens = [token.text.lower() for token in doc if token.is_alpha]
+        tokens: List[str] = [
+            token.text.lower() for token in doc if token.is_alpha
+        ]
 
         features: Dict[str, float] = {}
 
         features.update(self._vague_reference_features(tokens))
         features.update(self._attribution_features(tokens))
         features.update(self._evidence_features(tokens))
-        features.update(self._quote_features(text))
+        features.update(self._quote_features(cleaned_text))
         features.update(self._entity_context_features(doc))
+
+        logger.debug("Context omission features computed")
 
         return features
 
     def _vague_reference_features(self, tokens: List[str]) -> Dict[str, float]:
-        """Measure frequency of vague references."""
+        """
+        Measure frequency of vague references.
+
+        Args:
+            tokens: Tokenized words.
+
+        Returns:
+            Feature dictionary.
+        """
 
         if not tokens:
             return {"context_vague_reference_ratio": 0.0}
 
         count = sum(1 for token in tokens if token in self.VAGUE_REFERENCES)
 
-        ratio = count / max(len(tokens), 1)
+        ratio = count / len(tokens)
 
         return {"context_vague_reference_ratio": float(ratio)}
 
     def _attribution_features(self, tokens: List[str]) -> Dict[str, float]:
-        """Detect attribution signals referencing external sources."""
+        """
+        Detect attribution signals referencing external sources.
+
+        Args:
+            tokens: Tokenized words.
+
+        Returns:
+            Feature dictionary.
+        """
 
         if not tokens:
             return {"context_attribution_ratio": 0.0}
 
         count = sum(1 for token in tokens if token in self.ATTRIBUTION_MARKERS)
 
-        ratio = count / max(len(tokens), 1)
+        ratio = count / len(tokens)
 
         return {"context_attribution_ratio": float(ratio)}
 
     def _evidence_features(self, tokens: List[str]) -> Dict[str, float]:
-        """Measure presence of evidence or research references."""
+        """
+        Measure presence of evidence or research references.
+
+        Args:
+            tokens: Tokenized words.
+
+        Returns:
+            Feature dictionary.
+        """
 
         if not tokens:
             return {"context_evidence_ratio": 0.0}
 
         count = sum(1 for token in tokens if token in self.EVIDENCE_MARKERS)
 
-        ratio = count / max(len(tokens), 1)
+        ratio = count / len(tokens)
 
         return {"context_evidence_ratio": float(ratio)}
 
     def _quote_features(self, text: str) -> Dict[str, float]:
-        """Detect quotation usage indicating cited statements."""
+        """
+        Detect quotation usage indicating cited statements.
 
-        quotes = len(re.findall(r'"', text))
+        Args:
+            text: Input text.
 
+        Returns:
+            Feature dictionary.
+        """
+
+        quote_count = len(self.QUOTE_PATTERN.findall(text))
         length = max(len(text), 1)
 
-        return {"context_quote_ratio": float(quotes / length)}
+        ratio = quote_count / length
 
-    def _entity_context_features(self, doc) -> Dict[str, float]:
-        """Measure named entity presence as contextual grounding."""
+        return {"context_quote_ratio": float(ratio)}
 
-        entities = [ent.text for ent in doc.ents]
+    def _entity_context_features(self, doc: Doc) -> Dict[str, float]:
+        """
+        Measure named entity presence as contextual grounding.
+
+        Args:
+            doc: spaCy document.
+
+        Returns:
+            Feature dictionary.
+        """
+
+        entities = list(doc.ents)
 
         total_tokens = max(len(doc), 1)
 
         entity_ratio = len(entities) / total_tokens
 
-        entity_types = Counter(ent.label_ for ent in doc.ents)
+        entity_types = Counter(ent.label_ for ent in entities)
 
         diversity = len(entity_types)
 
@@ -173,13 +260,35 @@ class ContextOmissionDetector:
 
 
 def context_feature_vector(features: Dict[str, float]) -> np.ndarray:
-    """Convert context omission features into a numerical vector."""
+    """
+    Convert context omission features into a numerical vector.
 
-    if not isinstance(features, dict) or not features:
-        raise ValueError("features must be a non-empty dictionary")
+    Args:
+        features: Dictionary of context features.
+
+    Returns:
+        NumPy feature vector.
+    """
+
+    if not isinstance(features, dict):
+        raise ValueError("features must be a dictionary")
+
+    if not features:
+        raise ValueError("features dictionary cannot be empty")
+
+    numeric_values: List[float] = []
+
+    for key, value in features.items():
+        if isinstance(value, (int, float, np.number)):
+            numeric_values.append(float(value))
+        else:
+            logger.warning("Non-numeric feature skipped: %s", key)
+
+    if not numeric_values:
+        raise ValueError("No numeric values found in features")
 
     try:
-        vector = np.array(list(features.values()), dtype=np.float32)
+        vector = np.array(numeric_values, dtype=np.float32)
         return vector
     except Exception as exc:
         logger.exception("Context feature vector conversion failed")
