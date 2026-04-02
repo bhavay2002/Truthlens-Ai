@@ -34,13 +34,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.data.load_data import merge_datasets
+from src.data.load_data import merge_datasets, load_csv, normalize_schema
 from src.data.validate_data import DataValidator
 from src.data.data_profiler import DataProfiler
 from src.data.clean_data import clean_dataframe
@@ -73,13 +74,22 @@ def _validate_config(config: dict[str, Any]) -> None:
         "dataset",
         (
             "raw_data_dir",
-            "fake_news_file",
-            "real_news_file",
             "text_column",
             "title_column",
             "label_column",
         ),
     )
+    dataset_cfg = config["dataset"]
+    has_pair_files = (
+        "fake_news_file" in dataset_cfg
+        and "real_news_file" in dataset_cfg
+    )
+    has_unified_file = "unified_dataset_file" in dataset_cfg
+    if not has_pair_files and not has_unified_file:
+        raise KeyError(
+            "dataset config must include either "
+            "('fake_news_file' and 'real_news_file') or 'unified_dataset_file'"
+        )
     _require_keys(
         config,
         "validation",
@@ -135,27 +145,44 @@ def run_data_pipeline(config_path: str | Path = DEFAULT_DATA_CONFIG_PATH) -> dic
     config = load_config(config_path)
 
     dataset_cfg = config["dataset"]
-    labels_cfg = dataset_cfg.get("labels", {})
-    fake_label = int(labels_cfg.get("fake", 1))
-    real_label = int(labels_cfg.get("real", 0))
-
     raw_data_dir = _resolve_project_path(dataset_cfg["raw_data_dir"])
-    fake_path = raw_data_dir / dataset_cfg["fake_news_file"]
-    real_path = raw_data_dir / dataset_cfg["real_news_file"]
 
     # --------------------------------------------------
     # Load Dataset
     # --------------------------------------------------
 
-    df = merge_datasets(
-        fake_path,
-        real_path,
-        text_column=dataset_cfg["text_column"],
-        title_column=dataset_cfg["title_column"],
-        label_column=dataset_cfg["label_column"],
-        fake_label=fake_label,
-        real_label=real_label,
-    )
+    if "unified_dataset_file" in dataset_cfg:
+        unified_path = raw_data_dir / dataset_cfg["unified_dataset_file"]
+        df = load_csv(unified_path)
+        label_columns = dataset_cfg.get("label_columns")
+        if not isinstance(label_columns, list) or not label_columns:
+            label_columns = [dataset_cfg["label_column"]]
+
+        df = normalize_schema(
+            df,
+            text_column=dataset_cfg["text_column"],
+            title_column=dataset_cfg["title_column"],
+            label_columns=label_columns,
+        )
+        if dataset_cfg["label_column"] not in df.columns:
+            df[dataset_cfg["label_column"]] = pd.NA
+    else:
+        labels_cfg = dataset_cfg.get("labels", {})
+        fake_label = int(labels_cfg.get("fake", 1))
+        real_label = int(labels_cfg.get("real", 0))
+
+        fake_path = raw_data_dir / dataset_cfg["fake_news_file"]
+        real_path = raw_data_dir / dataset_cfg["real_news_file"]
+
+        df = merge_datasets(
+            fake_path,
+            real_path,
+            text_column=dataset_cfg["text_column"],
+            title_column=dataset_cfg["title_column"],
+            label_column=dataset_cfg["label_column"],
+            fake_label=fake_label,
+            real_label=real_label,
+        )
 
     if df.empty:
         raise ValueError("Merged dataset is empty; cannot continue pipeline")

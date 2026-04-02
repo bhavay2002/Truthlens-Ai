@@ -36,6 +36,52 @@ from src.utils.settings import load_settings
 logger = logging.getLogger(__name__)
 SETTINGS = load_settings()
 
+_UNIFIED_LABEL_CANDIDATES = (
+    "bias_label",
+    "ideology_label",
+    "propaganda_label",
+    "frame",
+)
+
+
+def _resolve_label_column(
+    df: pd.DataFrame,
+    label_column: str,
+) -> str:
+    if label_column in df.columns:
+        return label_column
+
+    if label_column != "label":
+        raise ValueError(
+            f"label column '{label_column}' not found in dataframe columns."
+        )
+
+    for candidate in _UNIFIED_LABEL_CANDIDATES:
+        if candidate in df.columns:
+            logger.info(
+                "Column 'label' not found. Using '%s' as label column.",
+                candidate,
+            )
+            return candidate
+
+    raise ValueError(
+        "No usable label column found. Expected 'label' or one of "
+        f"{list(_UNIFIED_LABEL_CANDIDATES)}."
+    )
+
+
+def _prepare_training_frame(
+    df: pd.DataFrame,
+    *,
+    label_column: str,
+) -> pd.DataFrame:
+    if label_column == "label":
+        return df
+
+    prepared = df.copy()
+    prepared["label"] = prepared[label_column]
+    return prepared
+
 
 def _resolve_metric(
     metrics: dict[str, Any],
@@ -71,22 +117,38 @@ def cross_validate_model(
     n_splits: int | None = None,
     *,
     text_column: str = "text",
+    label_column: str = "label",
     params: dict[str, Any] | None = None,
     metric_name: str | None = None,
     random_state: int | None = None,
 ) -> dict[str, Any]:
     """Run stratified cross-validation and return summary metrics."""
 
+    resolved_label_column = _resolve_label_column(df, label_column)
+
     ensure_dataframe(
         df,
         name="df",
-        required_columns=[text_column, "label"],
+        required_columns=[text_column, resolved_label_column],
+        min_rows=3,
+    )
+
+    working_df = df[df[resolved_label_column].notna()].reset_index(drop=True)
+    if working_df.empty:
+        raise ValueError(
+            f"No non-null labels found in column '{resolved_label_column}'."
+        )
+
+    ensure_dataframe(
+        working_df,
+        name="working_df",
+        required_columns=[text_column, resolved_label_column],
         min_rows=3,
     )
     ensure_non_empty_text_column(
-        df,
+        working_df,
         text_column,
-        name="df",
+        name="working_df",
     )
 
     effective_splits = (
@@ -100,12 +162,12 @@ def cross_validate_model(
         min_value=2,
     )
 
-    if df["label"].nunique() < 2:
+    if working_df[resolved_label_column].nunique() < 2:
         raise ValueError("Cross-validation requires at least 2 classes")
-    if len(df) < effective_splits:
+    if len(working_df) < effective_splits:
         raise ValueError("n_splits cannot exceed number of rows")
 
-    minimum_class_size = int(df["label"].value_counts().min())
+    minimum_class_size = int(working_df[resolved_label_column].value_counts().min())
     if minimum_class_size < effective_splits:
         raise ValueError(
             "Each class must contain at least n_splits samples for stratified "
@@ -132,12 +194,21 @@ def cross_validate_model(
 
     fold_scores: list[float] = []
 
-    X = df[text_column]
-    y = df["label"]
+    X = working_df[text_column]
+    y = working_df[resolved_label_column]
 
     for fold, (train_idx, val_idx) in enumerate(skf.split(X, y), start=1):
-        fold_train_df = df.iloc[train_idx].reset_index(drop=True)
-        fold_val_df = df.iloc[val_idx].reset_index(drop=True)
+        fold_train_df = working_df.iloc[train_idx].reset_index(drop=True)
+        fold_val_df = working_df.iloc[val_idx].reset_index(drop=True)
+
+        fold_train_df = _prepare_training_frame(
+            fold_train_df,
+            label_column=resolved_label_column,
+        )
+        fold_val_df = _prepare_training_frame(
+            fold_val_df,
+            label_column=resolved_label_column,
+        )
 
         train_kwargs: dict[str, Any] = {}
         if supports_params:
@@ -177,4 +248,5 @@ def cross_validate_model(
         "mean_score": mean_score,
         "std_score": std_score,
         "n_splits": effective_splits,
+        "label_column": resolved_label_column,
     }

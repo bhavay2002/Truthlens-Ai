@@ -1,74 +1,72 @@
-﻿# TruthLens AI - Project Review (Current)
+# TruthLens AI - Project Review (Current)
 
-Date: March 10, 2026
-Status: Active and updated
+Date: 2026-04-02
+Status: Active
 
 ## Executive Summary
 
-The project has moved from a baseline RoBERTa training script to a structured training platform with:
+The app now supports both legacy binary workflows and unified multi-task dataset workflows.
+Recent engineering passes focused on schema correctness, training/evaluation compatibility, and cross-module stability.
 
-- integrated feature engineering
-- centralized settings/config management
-- centralized logging
-- dataframe-based cross-validation and hyperparameter tuning utilities
-- stronger input validation
-- expanded automated tests
+## What Was Updated Recently
 
-## Implemented Improvements
+### 1. Unified dataset schema hardening
 
-### Core pipeline
+- Canonical 7-task structure implemented in:
+  - `src/data/unified_label_schema.py`
+- Unified split builder standardized to canonical columns:
+  - `ztest3 copy.py`
+- Unified dataset CSV outputs regenerated:
+  - `data/unified_dataset_train.csv`
+  - `data/unified_dataset_validation.csv`
+  - `data/unified_dataset_test.csv`
 
-- `main.py` now orchestrates an end-to-end flow with optional CV/tuning toggles from config.
-- Training uses `engineered_text` by default (configurable).
+### 2. Training utility compatibility improvements
 
-### Feature engineering
+- CV and hyperparameter tuning now accept configurable label columns and can resolve unified label columns when `label` is absent:
+  - `src/training/cross_validation.py`
+  - `src/training/hyperparameter_tuning.py`
 
-- Added integrated feature pipeline in `src/features/feature_pipeline.py`.
-- Uses source, metadata, and TF-IDF features; appends tokens to model text input.
+### 3. Model and pipeline compatibility improvements
 
-### Configuration management
+- `src/models/train_roberta.py` now supports configurable label columns and dynamic class mappings.
+- `src/pipelines/data_pipeline.py` now supports direct unified dataset file mode (`unified_dataset_file`) in addition to fake/real pair mode.
+- `src/models/multitask/multitask_truthlens_model.py` expanded for:
+  - frame head
+  - narrative-frame multi-label head (`CO/EC/HI/MO/RE`)
+  - emotion multi-label handling (while preserving single-label compatibility)
 
-- `config/config.yaml` is the single source of runtime settings.
-- `src/utils/settings.py` exposes typed settings used across modules.
+### 4. Evaluation and inference robustness
 
-### Logging
+- `src/evaluation/evaluate_model.py` is multiclass-safe (while preserving binary outputs/ROC where applicable).
+- Confusion matrix plotting now supports dynamic class counts and labels.
+- `src/models/predict.py` and `src/models/inference.py` now decode labels from model config more safely for non-binary mappings.
 
-- `src/utils/logging_utils.py` defines common logging setup.
-- Module-level `basicConfig` duplication removed.
+### 5. Import/runtime bug fixes
 
-### Training utilities
+- `src/inference/analyze_article.py` import paths were corrected to package-safe `src.*` imports.
 
-- `src/training/cross_validation.py` supports current `train_model` signature and returns fold summary stats.
-- `src/training/hyperparameter_tuning.py` accepts dataframe inputs; runs Optuna if installed, otherwise fallback random search.
+## Quality Status
 
-### Validation and reliability
-
-- `src/utils/input_validation.py` adds reusable dataframe/parameter validators.
-- Training, feature, augmentation, CV, and tuning paths now validate inputs explicitly.
-
-### Tests
-
-Test coverage expanded with:
-
-- `tests/test_training_utils.py`
-- `tests/test_feature_pipeline_and_validation.py`
-- `tests/test_settings_and_utils.py`
+- Latest full test run: `78 passed`.
+- Syntax checks across active `src` modules completed without syntax errors.
 
 ## Current Strengths
 
-- clear module separation by concern
-- configurable training behaviors without code edits
-- deterministic defaults via central seed settings
-- practical fallback behavior in environments missing optional tuning dependencies
+- Clear modular separation across data/features/models/pipelines.
+- Stronger schema and label compatibility across training/evaluation stack.
+- Backward compatibility retained for binary API and legacy training flows.
 
 ## Remaining Opportunities
 
-- add stronger integration/e2e test with a small synthetic training run
-- add model-card style artifact metadata after training
-- add CI job for optional dependency matrix (with and without Optuna)
+1. Promote root-level transitional scripts (`ztest*.py`) into formal package CLIs under `src/`.
+2. Add dedicated integration tests for full unified-task training loops beyond helper-level coverage.
+3. Unify API response semantics for multi-task inference use cases (current production schema remains binary-oriented).
+4. Add explicit model cards / artifact metadata for each trained task head.
 
-## Reference Docs
+## Related Docs
 
-- Overview and usage: `README.md`
-- Fast commands: `QUICKSTART.md`
-- Deep architecture + file map: `KNOWLEDGE.md`
+- `README.md`
+- `architecture.md`
+- `KNOWLEDGE.md`
+- `structure.md`

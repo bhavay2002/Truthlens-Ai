@@ -1,30 +1,47 @@
 """
-File: split_emotion_dataset.py
+File Name: split_allsides_dataset.py
+Module: Ideology Detection - Dataset Preparation
 
-Purpose
--------
-Convert comma-separated emotion labels to multi-hot format
-and split dataset into Train / Validation / Test.
+Description
+-----------
+Creates train / validation / test splits for the AllSides Media Bias dataset
+used in the ideology detection head of the TruthLens AI system.
+
+This script assumes the dataset has already been cleaned and preprocessed.
+It performs dataset validation, stratified splitting, and saves the splits
+for downstream model training.
 
 Dataset
 -------
-GoEmotions subset (0–19 emotions)
+AllSides Media Bias Dataset (~65k samples)
 
-Output
-------
-emotion_train.csv
-emotion_validation.csv
-emotion_test.csv
+Expected Input Columns
+----------------------
+title
+text
+label
+
+Output Files
+------------
+allsides_train.csv
+allsides_validation.csv
+allsides_test.csv
+
+Author: TruthLens AI
+Date: 2026
+Dependencies:
+    pandas
+    scikit-learn
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Tuple
 
 import pandas as pd
 from sklearn.model_selection import train_test_split
-
 
 # -------------------------------------------------------
 # PROJECT PATHS
@@ -32,17 +49,14 @@ from sklearn.model_selection import train_test_split
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
-INPUT_PATH = PROJECT_ROOT / "data" / "processed" / "emotion" / "semeval_emotions_processed2.csv"
+INPUT_PATH = PROJECT_ROOT / "data" / "processed" / "ideology" / "allsides_processed2.csv"
 
 OUTPUT_DIR = PROJECT_ROOT / "data" / "splits"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-
 # -------------------------------------------------------
-# CONFIG
+# CONFIGURATION
 # -------------------------------------------------------
-
-NUM_EMOTIONS = 20
 
 TRAIN_RATIO = 0.70
 VAL_RATIO = 0.15
@@ -50,6 +64,7 @@ TEST_RATIO = 0.15
 
 RANDOM_SEED = 42
 
+REQUIRED_COLUMNS = ["title", "text", "label"]
 
 # -------------------------------------------------------
 # LOGGER
@@ -62,131 +77,140 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-
 # -------------------------------------------------------
-# MULTI-LABEL CONVERSION
+# DATASET VALIDATION
 # -------------------------------------------------------
 
-def convert_to_multilabel(df: pd.DataFrame) -> pd.DataFrame:
+def validate_dataset(df: pd.DataFrame) -> None:
     """
-    Convert comma-separated emotion labels into binary columns.
+    Ensure dataset contains required schema.
     """
 
-    logger.info("Converting labels to multi-hot format...")
+    logger.info("Validating dataset schema...")
 
-    # Create columns
-    for i in range(NUM_EMOTIONS):
-        df[f"emotion_{i}"] = 0
+    missing_cols = [col for col in REQUIRED_COLUMNS if col not in df.columns]
 
-    # Fill labels
-    for idx, labels in df["labels"].items():
+    if missing_cols:
+        raise ValueError(
+            f"Dataset missing required columns: {missing_cols}"
+        )
 
-        if pd.isna(labels):
-            continue
-
-        labels = str(labels).split(",")
-
-        for lab in labels:
-            lab = lab.strip()
-
-            if lab.isdigit():
-                lab = int(lab)
-
-                if 0 <= lab < NUM_EMOTIONS:
-                    df.at[idx, f"emotion_{lab}"] = 1
-
-    df = df.drop(columns=["labels"])
-
-    return df
-
+    logger.info("Dataset schema validation passed.")
 
 # -------------------------------------------------------
 # DATASET SPLIT
 # -------------------------------------------------------
 
-def split_dataset(df: pd.DataFrame):
+def split_dataset(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Perform stratified dataset split (70 / 15 / 15).
+    """
 
-    logger.info("Splitting dataset (70 / 15 / 15)...")
+    logger.info("Shuffling dataset...")
+
+    df = df.sample(frac=1, random_state=RANDOM_SEED).reset_index(drop=True)
+
+    logger.info("Performing stratified split (70 / 15 / 15)...")
 
     train_df, temp_df = train_test_split(
         df,
         test_size=(1 - TRAIN_RATIO),
+        stratify=df["label"],
         random_state=RANDOM_SEED,
-        shuffle=True,
     )
 
     val_df, test_df = train_test_split(
         temp_df,
         test_size=TEST_RATIO / (TEST_RATIO + VAL_RATIO),
+        stratify=temp_df["label"],
         random_state=RANDOM_SEED,
-        shuffle=True,
+    )
+
+    logger.info(
+        "Split sizes | Train: %d | Validation: %d | Test: %d",
+        len(train_df),
+        len(val_df),
+        len(test_df),
     )
 
     return train_df, val_df, test_df
-
 
 # -------------------------------------------------------
 # LABEL DISTRIBUTION REPORT
 # -------------------------------------------------------
 
-def print_distribution(df: pd.DataFrame, name: str):
+def report_distribution(df: pd.DataFrame, name: str) -> None:
+    """
+    Log label distribution for a dataset split.
+    """
 
-    logger.info(f"\n{name} emotion distribution:")
+    logger.info("Label distribution (%s):", name)
 
-    emotion_cols = [f"emotion_{i}" for i in range(NUM_EMOTIONS)]
+    distribution = df["label"].value_counts(normalize=True)
 
-    counts = df[emotion_cols].sum()
-
-    total = len(df)
-
-    for i, count in counts.items():
-        pct = count / total
-        logger.info(f"{i}: {pct:.4f}")
-
+    for label, pct in distribution.items():
+        logger.info("  %s: %.4f", label, pct)
 
 # -------------------------------------------------------
-# MAIN PIPELINE
+# SAVE DATASETS
 # -------------------------------------------------------
 
-def main():
+def save_splits(
+    train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+) -> None:
+    """
+    Save dataset splits to disk.
+    """
 
-    logger.info("Loading dataset...")
-    logger.info(INPUT_PATH)
-
-    df = pd.read_csv(INPUT_PATH)
-
-    logger.info(f"Total samples: {len(df)}")
-
-    # Remove duplicates
-    if "text" in df.columns:
-        df = df.drop_duplicates(subset="text")
-
-    # Convert labels
-    df = convert_to_multilabel(df)
-
-    # Split
-    train_df, val_df, test_df = split_dataset(df)
-
-    logger.info("Dataset split completed.")
-
-    print_distribution(train_df, "TRAIN")
-    print_distribution(val_df, "VALIDATION")
-    print_distribution(test_df, "TEST")
-
-    # Save files
-    train_path = OUTPUT_DIR / "semeval_emotions_train.csv"
-    val_path = OUTPUT_DIR / "semeval_emotions_validation.csv"
-    test_path = OUTPUT_DIR / "semeval_emotions_test.csv"
+    train_path = OUTPUT_DIR / "allsides_train.csv"
+    val_path = OUTPUT_DIR / "allsides_validation.csv"
+    test_path = OUTPUT_DIR / "allsides_test.csv"
 
     train_df.to_csv(train_path, index=False)
     val_df.to_csv(val_path, index=False)
     test_df.to_csv(test_path, index=False)
 
-    logger.info("\nFiles saved:")
-    logger.info(train_path)
-    logger.info(val_path)
-    logger.info(test_path)
+    logger.info("Saved dataset splits:")
+    logger.info("  %s", train_path)
+    logger.info("  %s", val_path)
+    logger.info("  %s", test_path)
 
+# -------------------------------------------------------
+# MAIN PIPELINE
+# -------------------------------------------------------
+
+def main() -> None:
+    """
+    Execute dataset splitting pipeline.
+    """
+
+    logger.info("Loading dataset...")
+    logger.info("Input path: %s", INPUT_PATH)
+
+    if not INPUT_PATH.exists():
+        raise FileNotFoundError(f"Dataset not found: {INPUT_PATH}")
+
+    df = pd.read_csv(INPUT_PATH)
+
+    logger.info("Total samples loaded: %d", len(df))
+
+    # Validate schema
+    validate_dataset(df)
+
+    # Perform split
+    train_df, val_df, test_df = split_dataset(df)
+
+    # Distribution reports
+    report_distribution(train_df, "TRAIN")
+    report_distribution(val_df, "VALIDATION")
+    report_distribution(test_df, "TEST")
+
+    # Save datasets
+    save_splits(train_df, val_df, test_df)
+
+    logger.info("Dataset split pipeline completed successfully.")
 
 # -------------------------------------------------------
 # ENTRY POINT

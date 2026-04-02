@@ -79,8 +79,10 @@ class MultiTaskTruthLensModel(nn.Module):
     - bias: single-label (0/1)
     - ideology: single-label (0/1/2)
     - propaganda: single-label (0/1)
+    - frame: single-label (task-specific classes)
+    - narrative_frame: multi-label flags (CO/EC/HI/MO/RE)
     - narrative: multi-label binary flags (hero/villain/victim)
-    - emotion: single-label (0-19)
+    - emotion: supports single-label indices or multi-label 20-dim flags
     """
 
     def __init__(
@@ -89,6 +91,8 @@ class MultiTaskTruthLensModel(nn.Module):
         num_bias_labels: int = 2,
         num_ideology_labels: int = 3,
         num_propaganda_labels: int = 2,
+        num_frame_labels: int = 2,
+        num_narrative_frame_labels: int = 5,
         num_narrative_labels: int = 3,
         num_emotion_labels: int = 20,
         dropout: float = 0.1,
@@ -112,6 +116,14 @@ class MultiTaskTruthLensModel(nn.Module):
 
         self.propaganda_head = TaskHead(hidden_size, num_propaganda_labels, dropout)
 
+        self.frame_head = TaskHead(hidden_size, num_frame_labels, dropout)
+
+        self.narrative_frame_head = TaskHead(
+            hidden_size,
+            num_narrative_frame_labels,
+            dropout,
+        )
+
         self.narrative_head = TaskHead(hidden_size, num_narrative_labels, dropout)
 
         self.emotion_head = TaskHead(hidden_size, num_emotion_labels, dropout)
@@ -119,6 +131,8 @@ class MultiTaskTruthLensModel(nn.Module):
         self.num_bias_labels = num_bias_labels
         self.num_ideology_labels = num_ideology_labels
         self.num_propaganda_labels = num_propaganda_labels
+        self.num_frame_labels = num_frame_labels
+        self.num_narrative_frame_labels = num_narrative_frame_labels
         self.num_narrative_labels = num_narrative_labels
         self.num_emotion_labels = num_emotion_labels
 
@@ -190,6 +204,10 @@ class MultiTaskTruthLensModel(nn.Module):
 
         propaganda_logits = self.propaganda_head(pooled)
 
+        frame_logits = self.frame_head(pooled)
+
+        narrative_frame_logits = self.narrative_frame_head(pooled)
+
         narrative_logits = self.narrative_head(pooled)
 
         emotion_logits = self.emotion_head(pooled)
@@ -198,13 +216,18 @@ class MultiTaskTruthLensModel(nn.Module):
             "bias_logits": bias_logits,
             "ideology_logits": ideology_logits,
             "propaganda_logits": propaganda_logits,
+            "frame_logits": frame_logits,
+            "narrative_frame_logits": narrative_frame_logits,
             "narrative_logits": narrative_logits,
             "emotion_logits": emotion_logits,
             "bias_probabilities": torch.softmax(bias_logits, dim=1),
             "ideology_probabilities": torch.softmax(ideology_logits, dim=1),
             "propaganda_probabilities": torch.softmax(propaganda_logits, dim=1),
+            "frame_probabilities": torch.softmax(frame_logits, dim=1),
+            "narrative_frame_probabilities": torch.sigmoid(narrative_frame_logits),
             "narrative_probabilities": torch.sigmoid(narrative_logits),
             "emotion_probabilities": torch.softmax(emotion_logits, dim=1),
+            "emotion_multilabel_probabilities": torch.sigmoid(emotion_logits),
         }
 
         if labels is not None:
@@ -246,6 +269,33 @@ class MultiTaskTruthLensModel(nn.Module):
                     propaganda_targets,
                 )
 
+            if "frame" in labels:
+                frame_targets = self._prepare_single_label_targets(
+                    labels["frame"].to(self.device),
+                    num_classes=self.num_frame_labels,
+                    task_name="frame",
+                )
+                task_losses["frame"] = ce_loss(
+                    frame_logits,
+                    frame_targets,
+                )
+
+            narrative_frame_key = (
+                "narrative_frame"
+                if "narrative_frame" in labels
+                else "narrative_frames"
+            )
+            if narrative_frame_key in labels:
+                narrative_frame_targets = self._prepare_multi_label_targets(
+                    labels[narrative_frame_key].to(self.device),
+                    num_classes=self.num_narrative_frame_labels,
+                    task_name="narrative_frame",
+                )
+                task_losses["narrative_frame"] = bce_loss(
+                    narrative_frame_logits,
+                    narrative_frame_targets,
+                )
+
             if "narrative" in labels:
                 narrative_targets = self._prepare_multi_label_targets(
                     labels["narrative"].to(self.device),
@@ -258,15 +308,30 @@ class MultiTaskTruthLensModel(nn.Module):
                 )
 
             if "emotion" in labels:
-                emotion_targets = self._prepare_single_label_targets(
-                    labels["emotion"].to(self.device),
-                    num_classes=self.num_emotion_labels,
-                    task_name="emotion",
-                )
-                task_losses["emotion"] = ce_loss(
-                    emotion_logits,
-                    emotion_targets,
-                )
+                emotion_tensor = labels["emotion"].to(self.device)
+                if (
+                    emotion_tensor.dim() == 2
+                    and emotion_tensor.size(1) == self.num_emotion_labels
+                ):
+                    emotion_targets_multilabel = self._prepare_multi_label_targets(
+                        emotion_tensor,
+                        num_classes=self.num_emotion_labels,
+                        task_name="emotion",
+                    )
+                    task_losses["emotion"] = bce_loss(
+                        emotion_logits,
+                        emotion_targets_multilabel,
+                    )
+                else:
+                    emotion_targets_single = self._prepare_single_label_targets(
+                        emotion_tensor,
+                        num_classes=self.num_emotion_labels,
+                        task_name="emotion",
+                    )
+                    task_losses["emotion"] = ce_loss(
+                        emotion_logits,
+                        emotion_targets_single,
+                    )
 
             if task_losses:
                 total_loss = torch.stack(list(task_losses.values())).mean()

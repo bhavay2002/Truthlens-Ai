@@ -37,6 +37,51 @@ logger = logging.getLogger(__name__)
 SETTINGS = load_settings()
 
 _VALID_OPTIMIZATION_DIRECTIONS = {"minimize", "maximize"}
+_UNIFIED_LABEL_CANDIDATES = (
+    "bias_label",
+    "ideology_label",
+    "propaganda_label",
+    "frame",
+)
+
+
+def _resolve_label_column(
+    df: pd.DataFrame,
+    label_column: str,
+) -> str:
+    if label_column in df.columns:
+        return label_column
+
+    if label_column != "label":
+        raise ValueError(
+            f"label column '{label_column}' not found in dataframe columns."
+        )
+
+    for candidate in _UNIFIED_LABEL_CANDIDATES:
+        if candidate in df.columns:
+            logger.info(
+                "Column 'label' not found. Using '%s' as label column.",
+                candidate,
+            )
+            return candidate
+
+    raise ValueError(
+        "No usable label column found. Expected 'label' or one of "
+        f"{list(_UNIFIED_LABEL_CANDIDATES)}."
+    )
+
+
+def _prepare_training_frame(
+    df: pd.DataFrame,
+    *,
+    label_column: str,
+) -> pd.DataFrame:
+    if label_column == "label":
+        return df
+
+    prepared = df.copy()
+    prepared["label"] = prepared[label_column]
+    return prepared
 
 
 def _resolve_metric(
@@ -96,16 +141,26 @@ def _evaluate_params(
     train_df: pd.DataFrame,
     val_df: pd.DataFrame,
     text_column: str,
+    label_column: str,
     metric_name: str,
 ) -> float:
+    prepared_train_df = _prepare_training_frame(
+        train_df,
+        label_column=label_column,
+    )
+    prepared_val_df = _prepare_training_frame(
+        val_df,
+        label_column=label_column,
+    )
+
     train_kwargs = _build_train_kwargs(
         train_function,
         params=params,
         text_column=text_column,
-        validation_df=val_df,
+        validation_df=prepared_val_df,
     )
 
-    train_result = train_function(train_df, **train_kwargs)
+    train_result = train_function(prepared_train_df, **train_kwargs)
     if not isinstance(train_result, tuple) or len(train_result) != 2:
         raise TypeError("train_function must return (trainer, eval_dataset).")
 
@@ -138,6 +193,7 @@ def _run_fallback_tuner(
     train_df: pd.DataFrame,
     val_df: pd.DataFrame,
     text_column: str,
+    label_column: str,
     n_trials: int,
     metric_name: str,
     direction: str,
@@ -157,6 +213,7 @@ def _run_fallback_tuner(
             train_df=train_df,
             val_df=val_df,
             text_column=text_column,
+            label_column=label_column,
             metric_name=metric_name,
         )
 
@@ -191,6 +248,7 @@ def _run_fallback_tuner(
         "direction": direction,
         "trials": n_trials,
         "backend": "fallback",
+        "label_column": label_column,
     }
 
 
@@ -200,6 +258,7 @@ def run_optuna(
     train_function: Callable[..., tuple[Any, Any]] = train_model,
     validation_df: pd.DataFrame | None = None,
     text_column: str = "text",
+    label_column: str = "label",
     n_trials: int | None = None,
     metric_name: str | None = None,
     direction: str | None = None,
@@ -207,16 +266,34 @@ def run_optuna(
 ) -> dict[str, Any]:
     """Run Optuna-based hyperparameter optimization (with fallback)."""
 
+    resolved_label_column = _resolve_label_column(df, label_column)
+
     ensure_dataframe(
         df,
         name="df",
-        required_columns=[text_column, "label"],
+        required_columns=[text_column, resolved_label_column],
         min_rows=10,
     )
     ensure_non_empty_text_column(
         df,
         text_column,
         name="df",
+    )
+    working_df = df[df[resolved_label_column].notna()].reset_index(drop=True)
+    if working_df.empty:
+        raise ValueError(
+            f"No non-null labels found in column '{resolved_label_column}'."
+        )
+    ensure_dataframe(
+        working_df,
+        name="working_df",
+        required_columns=[text_column, resolved_label_column],
+        min_rows=10,
+    )
+    ensure_non_empty_text_column(
+        working_df,
+        text_column,
+        name="working_df",
     )
 
     effective_trials = (
@@ -242,16 +319,20 @@ def run_optuna(
 
     if validation_df is None:
         train_df, val_df = train_test_split(
-            df,
+            working_df,
             test_size=SETTINGS.training.optuna_validation_split,
             random_state=effective_seed,
-            stratify=df["label"],
+            stratify=working_df[resolved_label_column],
         )
     else:
+        resolved_validation_label_column = _resolve_label_column(
+            validation_df,
+            resolved_label_column,
+        )
         ensure_dataframe(
             validation_df,
             name="validation_df",
-            required_columns=[text_column, "label"],
+            required_columns=[text_column, resolved_validation_label_column],
             min_rows=2,
         )
         ensure_non_empty_text_column(
@@ -259,8 +340,17 @@ def run_optuna(
             text_column,
             name="validation_df",
         )
-        train_df = df
-        val_df = validation_df
+        filtered_validation_df = validation_df[
+            validation_df[resolved_validation_label_column].notna()
+        ].reset_index(drop=True)
+        if filtered_validation_df.empty:
+            raise ValueError(
+                "validation_df has no non-null labels in column "
+                f"'{resolved_validation_label_column}'."
+            )
+
+        train_df = working_df
+        val_df = filtered_validation_df
 
     train_df = train_df.reset_index(drop=True)
     val_df = val_df.reset_index(drop=True)
@@ -274,6 +364,7 @@ def run_optuna(
             train_df=train_df,
             val_df=val_df,
             text_column=text_column,
+            label_column=resolved_label_column,
             n_trials=effective_trials,
             metric_name=effective_metric,
             direction=effective_direction,
@@ -311,6 +402,7 @@ def run_optuna(
             train_df=train_df,
             val_df=val_df,
             text_column=text_column,
+            label_column=resolved_label_column,
             metric_name=effective_metric,
         )
 
@@ -342,4 +434,5 @@ def run_optuna(
         "direction": effective_direction,
         "trials": effective_trials,
         "backend": "optuna",
+        "label_column": resolved_label_column,
     }

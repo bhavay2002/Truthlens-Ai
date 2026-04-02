@@ -30,14 +30,14 @@ Outputs:
 import logging
 from typing import Dict, Any
 
-from bias_features import BiasFeatureExtractor
-from emotion_feature_extractor import EmotionFeatureExtractor
-from narrative_features import NarrativeFeatureExtractor
-from discourse_features import DiscourseFeatureExtractor
-from entity_graph import EntityGraphBuilder
-from graph_analysis import GraphAnalyzer
-from bias_profile_builder import BiasProfileBuilder
-from truthlens_score_calculator import TruthLensScoreCalculator
+from src.features.bias.bias_features import BiasFeatureExtractor
+from src.features.emotion.emotion_feature_extractor import EmotionFeatureExtractor
+from src.features.narrative.narrative_features import NarrativeFeatureExtractor
+from src.features.discourse.discourse_features import DiscourseFeatureExtractor
+from src.graph.entity_graph import EntityGraphBuilder
+from src.graph.graph_analysis import GraphAnalyzer
+from src.analysis.bias_profile_builder import BiasProfileBuilder
+from src.aggregation.truthlens_score_calculator import TruthLensScoreCalculator
 
 
 logger = logging.getLogger(__name__)

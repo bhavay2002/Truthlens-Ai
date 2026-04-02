@@ -83,33 +83,40 @@ TRAINING_TEXT_COLUMN = SETTINGS.training.text_column
 TOP_TERMS_PER_DOC = SETTINGS.features.tfidf_top_terms_per_doc
 
 
-def _resolve_label_indices(model) -> tuple[int, int]:
-    """Resolve (real_idx, fake_idx) from model config; fallback to (0, 1)."""
+def _resolve_label_maps(model) -> tuple[dict[int, str], dict[str, int]]:
+    """Resolve id2label and normalized label2id mappings from model config."""
 
-    num_labels = int(getattr(model.config, "num_labels", 2) or 2)
+    id2label_raw = getattr(model.config, "id2label", None) or {}
+    label2id_raw = getattr(model.config, "label2id", None) or {}
 
-    label2id = getattr(model.config, "label2id", None) or {}
-    normalized = {}
-
-    for key, value in label2id.items():
+    id2label: dict[int, str] = {}
+    for key, value in id2label_raw.items():
         try:
-            normalized[str(key).strip().lower()] = int(value)
+            id2label[int(key)] = str(value)
         except (TypeError, ValueError):
             continue
 
-    fallback_fake = 1 if num_labels > 1 else 0
-    real_idx = normalized.get("real", 0)
-    fake_idx = normalized.get("fake", fallback_fake)
+    label2id: dict[str, int] = {}
+    for key, value in label2id_raw.items():
+        try:
+            label2id[str(key).strip().lower()] = int(value)
+        except (TypeError, ValueError):
+            continue
 
-    if real_idx < 0 or real_idx >= num_labels:
-        real_idx = 0
-    if fake_idx < 0 or fake_idx >= num_labels:
-        fake_idx = fallback_fake
+    if not id2label and label2id:
+        id2label = {idx: name for name, idx in label2id.items()}
 
-    if real_idx == fake_idx:
-        return (0, fallback_fake)
+    return id2label, label2id
 
-    return real_idx, fake_idx
+
+def _render_label(raw_label: str) -> str:
+    normalized = str(raw_label).strip()
+    upper = normalized.upper()
+    if upper == "REAL":
+        return "Real"
+    if upper == "FAKE":
+        return "Fake"
+    return normalized
 
 
 def _load_vectorizer():
@@ -251,14 +258,18 @@ def predict(text: str) -> Dict[str, Union[str, float]]:
         outputs = model(**inputs)
 
     probs = torch.softmax(outputs.logits, dim=1)
+    pred_idx = int(torch.argmax(probs, dim=1)[0].item())
+    confidence = float(probs[0][pred_idx].item())
 
-    real_idx, fake_idx = _resolve_label_indices(model)
+    id2label, label2id = _resolve_label_maps(model)
+    raw_label = id2label.get(pred_idx, f"LABEL_{pred_idx}")
+    label = _render_label(raw_label)
 
-    fake_prob = probs[0][fake_idx].item()
-    real_prob = probs[0][real_idx].item()
-
-    label = "Fake" if fake_prob > real_prob else "Real"
-    confidence = max(fake_prob, real_prob)
+    fake_idx = label2id.get("fake")
+    if fake_idx is None or fake_idx >= int(probs.shape[1]):
+        fake_prob = confidence
+    else:
+        fake_prob = float(probs[0][fake_idx].item())
 
     return {
         "label": label,
@@ -297,17 +308,22 @@ def predict_batch(texts: List[str]) -> List[Dict[str, Union[str, float]]]:
         outputs = model(**inputs)
 
     probs = torch.softmax(outputs.logits, dim=1)
-
-    real_idx, fake_idx = _resolve_label_indices(model)
+    id2label, label2id = _resolve_label_maps(model)
+    fake_idx = label2id.get("fake")
 
     results = []
 
     for prob in probs:
-        fake_prob = prob[fake_idx].item()
-        real_prob = prob[real_idx].item()
+        pred_idx = int(torch.argmax(prob).item())
+        confidence = float(prob[pred_idx].item())
 
-        label = "Fake" if fake_prob > real_prob else "Real"
-        confidence = max(fake_prob, real_prob)
+        raw_label = id2label.get(pred_idx, f"LABEL_{pred_idx}")
+        label = _render_label(raw_label)
+
+        if fake_idx is None or fake_idx >= int(prob.shape[0]):
+            fake_prob = confidence
+        else:
+            fake_prob = float(prob[fake_idx].item())
 
         results.append(
             {

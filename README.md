@@ -1,145 +1,116 @@
-﻿# TruthLens AI
+# TruthLens AI
 
-TruthLens AI is a fake-news detection project built around a RoBERTa classifier, with data cleaning, optional augmentation, engineered feature tokens, evaluation reporting, and a FastAPI inference service.
+TruthLens AI is a modular NLP platform for misinformation analysis. The current app supports:
 
-## What The Project Does
+- binary fake-news classification (RoBERTa-based)
+- unified multi-task dataset workflows for 7 NLP tasks
+- feature engineering, evaluation, explainability, graph analysis, and API serving
 
-- Trains a binary classifier (`REAL` vs `FAKE`) using merged datasets.
-- Applies NLP cleaning and optional data augmentation.
-- Adds feature-engineered signal (metadata, source credibility, TF-IDF keyword tokens) into the model input text.
-- Evaluates with classification metrics and confusion matrix output.
-- Serves predictions through a REST API.
-- Supports optional cross-validation and hyperparameter tuning from config.
+## Current Capabilities
 
-## Current Capability Snapshot
+- End-to-end training and evaluation for transformer classifiers.
+- Data validation and schema normalization for unified datasets.
+- Multi-task model components for:
+  - `bias_label`
+  - `ideology_label`
+  - `propaganda_label`
+  - `frame`
+  - `CO`, `EC`, `HI`, `MO`, `RE`
+  - `hero`, `villain`, `victim`
+  - `emotion_0` ... `emotion_19`
+- FastAPI inference endpoint for deployed binary model usage.
+- Cross-validation and hyperparameter tuning utilities that now support configurable label columns.
 
-- Training pipeline: `main.py`
-- Model training/inference: `src/models/train_roberta.py`, `src/models/predict.py`
-- Feature pipeline integration: `src/features/feature_pipeline.py`
-- Optional CV: `src/training/cross_validation.py`
-- Optional tuning: `src/training/hyperparameter_tuning.py` (Optuna backend if installed, fallback random search otherwise)
-- API: `api/app.py`
-- Evaluation: `evaluate.py` and `src/evaluation/evaluate_model.py`
-- Typed settings/config management: `src/utils/settings.py`
+## Canonical Unified Dataset Column Groups
 
-## Architecture Overview
+Text input:
+- `title`
+- `text`
 
-1. Data Ingestion Layer
-- `src/data/merge_datasets.py` merges ISOT + LIAR + FakeNewsNet sources.
+Media bias task:
+- `bias_label`
 
-2. Data Quality Layer
-- `src/data/clean_data.py` normalizes and filters text.
-- `src/data/validate_data.py` validates schema, nulls, duplicates, and label distribution.
+Ideology classification:
+- `ideology_label`
 
-3. Feature Layer
-- `src/features/feature_pipeline.py` combines:
-  - source features (`src/features/source_features.py`)
-  - metadata features (`src/features/metadata_features.py`)
-  - TF-IDF signals (`src/features/text_features.py`)
-- Produces `engineered_text` and persists TF-IDF vectorizer.
+Propaganda detection:
+- `propaganda_label`
 
-4. Training Layer
-- `src/models/train_roberta.py` handles split/tokenize/train/save flow.
-- `src/training/cross_validation.py` runs stratified CV against `train_model` compatible signatures.
-- `src/training/hyperparameter_tuning.py` searches training params from dataframe inputs.
+Narrative framing:
+- single-label: `frame`
+- multi-label: `CO`, `EC`, `HI`, `MO`, `RE`
 
-5. Evaluation Layer
-- `src/evaluation/evaluate_model.py` computes metrics and saves report JSON.
-- `src/visualization/visualize.py` plots confusion matrix.
+Narrative role extraction:
+- `hero`
+- `villain`
+- `victim`
+- `hero_entities`
+- `villain_entities`
+- `victim_entities`
 
-6. Serving Layer
-- `api/app.py` provides `/`, `/health`, and `/predict` endpoints.
-- `src/models/predict.py` lazily loads model/tokenizer and predicts.
+Emotion classification:
+- `emotion_0` ... `emotion_19`
+
+Metadata:
+- `dataset`
+
+## Key Modules
+
+- Data schema/normalization: `src/data/unified_label_schema.py`
+- Data pipeline orchestration: `src/pipelines/data_pipeline.py`
+- Feature pipeline: `src/features/feature_pipeline.py`
+- Binary model training: `src/models/train_roberta.py`
+- Multi-task model: `src/models/multitask/multitask_truthlens_model.py`
+- Inference helpers: `src/models/predict.py`, `src/models/inference.py`
+- Evaluation and plotting: `src/evaluation/evaluate_model.py`, `src/evaluation/visualize_metrics.py`
+- API service: `api/app.py`
 
 ## Repository Layout
 
 ```text
 Truthlens Ai/
-  api/                  # FastAPI service
-  config/               # YAML configuration
-  data/                 # Raw/interim/processed datasets
-  reports/              # Evaluation and EDA artifacts
-  src/                  # Core application modules
-  tests/                # Unit/integration tests
-  main.py               # End-to-end training pipeline
-  evaluate.py           # Standalone evaluation script
-  run_eda.py            # EDA runner
-  setup.py              # Environment setup helper
+  api/
+  config/
+  data/
+  models/
+  reports/
+  src/
+  tests/
+  README.md
+  architecture.md
+  KNOWLEDGE.md
+  PROJECT_REVIEW.md
+  structure.md
 ```
 
-## Configuration
+## Typical Workflows
 
-Primary config file: `config/config.yaml`
+1. Train/evaluate binary classifier:
+- `python main.py`
+- `python evaluate.py`
 
-Important knobs:
+2. Build unified dataset splits:
+- `python "ztest3 copy.py" --split train`
+- `python "ztest3 copy.py" --split validation`
+- `python "ztest3 copy.py" --split test`
 
-- `model.*`: model name/path/max sequence length
-- `training.*`: seed, epochs, batch size, learning rate
-- `training.run_cross_validation`: enable/disable CV
-- `training.run_hyperparameter_tuning`: enable/disable tuning
-- `features.*`: TF-IDF settings for feature pipeline
-- `data.*`: augmentation multiplier and dataset paths
-- `paths.*`: output/log/report/model artifact paths
+3. Run API:
+- `uvicorn api.app:app --reload`
 
-## Quick Start
+4. Run tests:
+- `pytest -q`
 
-### 1. Install
+## Quality Snapshot
 
-```bash
-python -m venv venv
-venv\Scripts\activate  # Windows PowerShell/CMD
-pip install -r requirements.txt
-```
+- Latest local test run: `78 passed`.
+- Core training/evaluation paths are compatible with configurable label columns and unified schema columns.
 
-### 2. Train
+## Documentation
 
-```bash
-python main.py
-```
-
-### 3. Evaluate
-
-```bash
-python evaluate.py
-```
-
-### 4. Start API
-
-```bash
-uvicorn api.app:app --reload
-```
-
-### 5. Run Tests
-
-```bash
-python -B -m pytest -q
-```
-
-## API Example
-
-```bash
-curl -X POST "http://localhost:8000/predict" \
-  -H "Content-Type: application/json" \
-  -d '{"text":"Breaking news: Scientists discover new species in Amazon rainforest."}'
-```
-
-## Outputs
-
-Main generated artifacts:
-
-- Model: `models/roberta_model/`
-- TF-IDF vectorizer: `models/tfidf_vectorizer.joblib`
-- Training log: `logs/training.log`
-- Evaluation JSON: `reports/evaluation_results.json`
-- Confusion matrix: `reports/confusion_matrix.png`
-- Cleaning report: `reports/data_cleaning_report.json`
-
-## Documentation Map
-
-- Quick usage: `QUICKSTART.md`
-- Deep project knowledge and full file catalog: `KNOWLEDGE.md`
-- Contribution process: `CONTRIBUTING.md`
-- Current review/status notes: `PROJECT_REVIEW.md`
+- Architecture details: `architecture.md`
+- Structure snapshot: `structure.md`
+- Deep knowledge map: `KNOWLEDGE.md`
+- Current status and gaps: `PROJECT_REVIEW.md`
 
 ## License
 

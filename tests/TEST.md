@@ -29,7 +29,7 @@ This document describes each file under `tests/`, what it validates, and why it 
 | `test_data_leakage.py` | Checks train/test text overlap after splitting. | No duplicate texts leak across split boundaries. |
 | `test_data_processing.py` | Tests cleaning utilities. | URL/lowercasing cleanup and DataFrame text-column sanitation flow. |
 | `test_data_validation.py` | Tests schema validator. | Required columns are accepted by `DataValidator`. |
-| `test_dataset_schema.py` | Minimal schema contract check. | Dataset contains required `text` and `label` columns. |
+| `test_dataset_schema.py` | Unified schema contract check. | Dataset contains the canonical 7-task unified columns (`title`, `text`, task labels, narrative frame flags, `emotion_0`-`emotion_19`, `dataset`). |
 | `test_dataset_split_integrity.py` | Split integrity test on synthetic data. | Train/test split has no overlapping text rows. |
 
 ## Evaluation & Explainability Tests

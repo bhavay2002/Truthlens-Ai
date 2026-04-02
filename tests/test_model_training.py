@@ -40,3 +40,57 @@ def test_validate_split_df_rejects_empty_text_column() -> None:
 
     with pytest.raises(ValueError):
         train_roberta._validate_split_df(empty_text_df, "df", "text")
+
+
+def test_validate_split_df_supports_custom_label_column() -> None:
+    df = pd.DataFrame({"text": ["alpha", "beta"], "bias_label": [0, 1]})
+
+    train_roberta._validate_split_df(
+        df,
+        "df",
+        "text",
+        label_column="bias_label",
+    )
+
+
+def test_split_train_val_test_supports_custom_label_column() -> None:
+    df = pd.DataFrame(
+        {
+            "id": list(range(120)),
+            "text": [f"sample training text {i}" for i in range(120)],
+            "bias_label": [i % 2 for i in range(120)],
+        }
+    )
+
+    train_df, val_df, test_df = train_roberta._split_train_val_test(
+        df,
+        label_column="bias_label",
+    )
+
+    assert len(train_df) + len(val_df) + len(test_df) == len(df)
+    assert set(train_df.columns) >= {"text", "bias_label"}
+
+
+def test_compute_checkpoint_save_steps_uses_ten_percent_progress() -> None:
+    # 100 examples, batch size 8, grad accumulation 2, epochs 3
+    # forward steps/epoch=13, optimizer steps/epoch=7, total=21
+    # 10% cadence => ceil(2.1)=3
+    save_steps = train_roberta._compute_checkpoint_save_steps(
+        train_examples=100,
+        batch_size=8,
+        gradient_accumulation_steps=2,
+        epochs=3,
+    )
+
+    assert save_steps == 3
+
+
+def test_compute_checkpoint_save_steps_has_minimum_of_one() -> None:
+    save_steps = train_roberta._compute_checkpoint_save_steps(
+        train_examples=4,
+        batch_size=8,
+        gradient_accumulation_steps=2,
+        epochs=1,
+    )
+
+    assert save_steps == 1

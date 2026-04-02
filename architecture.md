@@ -1,236 +1,136 @@
 # TruthLens AI Architecture
 
-## 1. Purpose
+Last updated: 2026-04-02
 
-TruthLens AI is an end-to-end fake news detection system that:
-- trains a RoBERTa classifier (`REAL` vs `FAKE`),
-- enriches input text with engineered feature tokens,
-- evaluates model quality and saves reports,
-- serves online inference through FastAPI.
+## 1. System Purpose
 
-Primary entry points:
-- Training pipeline: `main.py`
-- Evaluation runner: `evaluate.py`
-- EDA runner: `run_eda.py`
-- Inference API: `api/app.py`
+TruthLens AI is a modular NLP system for misinformation analysis that supports two primary operating modes:
 
-## 2. System Context
+1. Binary classifier workflow (`REAL` vs `FAKE`) for production prediction endpoints.
+2. Unified multi-task dataset workflow for structured NLP task training and experimentation.
 
-### Inputs
-- Raw datasets from:
-  - `data/raw/isot/`
-  - `data/raw/liar_dataset/`
-  - `data/raw/FakeNewsNet/`
-- Runtime configuration from `config/config.yaml`
+## 2. Canonical Unified Dataset Contract
 
-### Outputs
-- Trained model + tokenizer in `models/roberta_model/`
-- TF-IDF vectorizer in `models/tfidf_vectorizer.joblib`
-- Processed/temporary datasets under `data/interim/` and `data/processed/`
-- Reports and visual artifacts under `reports/`
-- API predictions (`label`, `fake_probability`, `confidence`)
+The unified dataset contract used by schema utilities and dataset builders is:
+
+- Text: `title`, `text`
+- Classification tasks: `bias_label`, `ideology_label`, `propaganda_label`, `frame`
+- Narrative frame multi-label: `CO`, `EC`, `HI`, `MO`, `RE`
+- Narrative role extraction: `hero`, `villain`, `victim`
+- Narrative entities: `hero_entities`, `villain_entities`, `victim_entities`
+- Emotion multi-label: `emotion_0` ... `emotion_19`
+- Metadata: `dataset`
 
 ## 3. High-Level Architecture
 
 ```text
-Raw Data Sources (ISOT + LIAR + FakeNewsNet)
-                |
-                v
-        Merge Datasets (src/data/merge_datasets.py)
-                |
-                v
-        Clean + Validate (src/data/clean_data.py, src/data/validate_data.py)
-                |
-                +--------------------------+
-                |                          |
-                v                          v
-      Training/Eval Path            EDA Path (run_eda.py)
-                |                    -> src/data/eda.py
-                v
-    Leakage-Safe Split (train/val/test)
-                |
-                v
-      Train-only Augmentation
-                |
-                v
- Feature Pipeline (fit train, transform val/test)
-  - source_features
-  - metadata_features
-  - text_features (TF-IDF)
-                |
-                v
-      RoBERTa Training (HF Trainer)
-                |
-                v
-     Metrics + Reports + Confusion Matrix
-                |
-                v
-         Saved Artifacts (model/vectorizer/reports)
-                |
-                v
-   Serving: FastAPI -> src/models/predict.py -> model output
+Data Sources / Split CSVs
+        |
+        +--> Unified schema normalization
+        |     (src/data/unified_label_schema.py)
+        |
+        +--> Data pipeline orchestration
+        |     (src/pipelines/data_pipeline.py)
+        |
+        +--> Feature engineering
+        |     (src/features/feature_pipeline.py)
+        |
+        +--> Training paths
+        |     - Binary training: src/models/train_roberta.py
+        |     - Multi-task model: src/models/multitask/multitask_truthlens_model.py
+        |
+        +--> Evaluation
+        |     (src/evaluation/evaluate_model.py,
+        |      src/evaluation/visualize_metrics.py)
+        |
+        +--> Serving
+              (api/app.py -> src/models/predict.py)
 ```
 
-## 4. Component View
+## 4. Core Components
 
-### 4.1 Orchestration Layer
-- `main.py`
-  - Coordinates the full training lifecycle.
-  - Creates required directories.
-  - Runs merge, cleaning, split, augmentation, feature engineering, optional CV/tuning, final training, and evaluation.
+### 4.1 Data Layer
 
-### 4.2 Data Layer
-- `src/data/merge_datasets.py`
-  - Merges records from ISOT, LIAR, and FakeNewsNet into a common schema.
-- `src/data/clean_data.py`
-  - Normalizes text and removes unusable rows.
-- `src/data/validate_data.py`
-  - Validates structure/quality constraints.
-- `src/data/data_augmentation.py`
-  - Expands only the train split when enabled.
-- `src/data/eda.py`
-  - Generates analysis summaries and figures.
+- `src/data/load_data.py`: CSV loading and schema normalization helpers.
+- `src/data/validate_data.py`: dataset quality validation (schema/nulls/duplicates/class balance).
+- `src/data/unified_label_schema.py`: canonical unified label normalization and validation.
+- `src/data/clean_data.py`: text cleaning primitives used in pipelines.
 
-### 4.3 Feature Engineering Layer
-- `src/features/feature_pipeline.py`
-  - Builds `engineered_text` by composing multiple feature families.
-  - Persists TF-IDF vectorizer for inference-time consistency.
-- `src/features/source_features.py`
-  - Adds source/domain credibility signals.
-- `src/features/metadata_features.py`
-  - Adds structural metadata features.
-- `src/features/text_features.py`
-  - TF-IDF extraction and top-term token generation.
+### 4.2 Feature Layer
 
-### 4.4 Model Layer
-- `src/models/train_roberta.py`
-  - Tokenization, Trainer setup, training, and model serialization.
-- `src/models/predict.py`
-  - Lazy-loads model/tokenizer and optional TF-IDF vectorizer.
-  - Applies the same text preparation strategy used during training.
+- `src/features/feature_pipeline.py`: source/metadata/TF-IDF + semantic token enrichment.
+- `src/features/bias/*`, `src/features/emotion/*`, `src/features/narrative/*`, `src/features/discourse/*`: domain-specific feature extraction.
 
-### 4.5 Training Utilities Layer
-- `src/training/cross_validation.py`
-  - Optional stratified CV over dataframe-based flow.
-- `src/training/hyperparameter_tuning.py`
-  - Optional parameter search (Optuna or fallback logic).
+### 4.3 Model Layer
 
-### 4.6 Evaluation + Visualization Layer
-- `src/evaluation/evaluate_model.py`
-  - Computes classification metrics and serializes results.
-- `src/visualization/visualize.py`
-  - Confusion matrix plotting.
-- `evaluate.py`
-  - Standalone evaluation against saved model + test set.
+- `src/models/train_roberta.py`: HuggingFace training pipeline with configurable `label_column` compatibility.
+- `src/models/predict.py`: single/batch prediction helpers with model-config-aware label decoding.
+- `src/models/inference.py`: enriched inference path with explainability and auxiliary feature signals.
+- `src/models/multitask/multitask_truthlens_model.py`: shared encoder + task heads including `frame`, narrative-frame multi-label, roles, and emotion outputs.
 
-### 4.7 Serving Layer
-- `api/app.py`
-  - REST API endpoints:
-    - `GET /`
-    - `GET /health`
-    - `POST /predict`
-  - Input validation via Pydantic request/response models.
-  - Calls `src/models/predict.py` for inference.
+### 4.4 Pipeline Layer
 
-### 4.8 Configuration + Utilities Layer
-- `config/config.yaml`
-  - Canonical runtime knobs for model, training, features, data, and paths.
-- `src/utils/settings.py`
-  - Typed dataclass mapping + cached settings loader.
-- `src/utils/logging_utils.py`
-  - Centralized logging setup.
-- `src/utils/input_validation.py`
-  - Shared guards for dataframe and input correctness.
+- `src/pipelines/data_pipeline.py`: supports both fake/real paired files and direct unified dataset file mode.
+- `src/pipelines/feature_pipeline.py`, `src/pipelines/emotion_pipeline.py`, `src/pipelines/truthlens_pipeline.py`: orchestration utilities.
+
+### 4.5 Training Utilities
+
+- `src/training/cross_validation.py`: stratified CV with configurable label column support.
+- `src/training/hyperparameter_tuning.py`: Optuna/fallback tuning with configurable label column support.
+
+### 4.6 Evaluation and Visualization
+
+- `src/evaluation/evaluate_model.py`: binary and multiclass-safe metric computation.
+- `src/evaluation/visualize_metrics.py` and `src/visualization/visualize.py`: confusion matrix and metric plots with dynamic class label support.
+
+### 4.7 API Serving
+
+- `api/app.py`: health and prediction endpoints for deployed model usage.
 
 ## 5. Runtime Flows
 
-### 5.1 Training Flow (`python main.py`)
-1. Load typed settings from YAML.
-2. Merge raw datasets.
-3. Clean and validate data.
-4. Save cleaned dataset and cleaning report.
-5. Split into train/validation/test (leakage-safe).
-6. Apply augmentation only on train split (optional).
-7. Fit feature pipeline on train, transform val/test.
-8. Save TF-IDF vectorizer.
-9. Run optional cross-validation on train split.
-10. Run optional hyperparameter tuning on train+val.
-11. Train final RoBERTa model.
-12. Evaluate on test split and save metrics/plots.
+### 5.1 Binary Training Flow
 
-### 5.2 Inference Flow (`POST /predict`)
-1. API validates request payload (`text`, min length constraints).
-2. Prediction module lazy-loads tokenizer/model.
-3. If configured for engineered text, load vectorizer and transform text.
-4. Run model forward pass and softmax.
-5. Return normalized response (`prediction`, `fake_probability`, `confidence`).
+1. Load config/settings.
+2. Merge/load data.
+3. Validate + clean.
+4. Feature engineering (optional engineered text path).
+5. Train model with `train_roberta`.
+6. Evaluate and persist artifacts.
 
-### 5.3 Offline Evaluation Flow (`python evaluate.py`)
-1. Load persisted model and tokenizer.
-2. Load persisted test set.
-3. Infer predictions row-by-row.
-4. Compute and save metrics + confusion matrix artifact.
+### 5.2 Unified Dataset Build Flow
 
-### 5.4 EDA Flow (`python run_eda.py`)
-1. Merge raw datasets.
-2. Run EDA analysis class.
-3. Save plots and JSON summary report.
+1. Read split files per task.
+2. Standardize to canonical columns.
+3. Merge into unified split CSV.
+4. Validate with unified schema utilities.
 
-## 6. Data and Artifact Contracts
+Current builder entry point in repo:
+- `ztest3 copy.py`
 
-### Datasets
-- Merged dataset: `data/interim/merged_dataset.csv`
-- Cleaned dataset: `data/processed/cleaned_dataset.csv`
-- Test set: `data/processed/test_set.csv`
+### 5.3 Inference/API Flow
 
-### Model Artifacts
+1. Validate request text.
+2. Lazy-load model/tokenizer (and vectorizer when needed).
+3. Predict + optional explainability hooks.
+4. Return normalized response payload.
+
+## 6. Artifacts
+
+Common outputs:
+
 - Model directory: `models/roberta_model/`
 - Vectorizer: `models/tfidf_vectorizer.joblib`
-
-### Reporting Artifacts
-- Cleaning report: `reports/data_cleaning_report.json`
 - Evaluation report: `reports/evaluation_results.json`
 - Confusion matrix: `reports/confusion_matrix.png`
-- EDA report: `reports/eda_report.json`
-- EDA figures: `reports/figures/`
+- Unified dataset files:
+  - `data/unified_dataset_train.csv`
+  - `data/unified_dataset_validation.csv`
+  - `data/unified_dataset_test.csv`
 
-## 7. Key Architecture Decisions
+## 7. Design Notes
 
-1. Leakage-safe preprocessing order:
-- Split occurs before augmentation and feature fitting.
-- Feature pipeline is fit on train only, then reused for val/test.
-
-2. Typed centralized settings:
-- All runtime behavior is controlled via YAML + dataclass mapping.
-
-3. Training-serving feature parity:
-- Inference reuses saved TF-IDF vectorizer and feature pipeline logic.
-
-4. Lazy model loading for API:
-- Improves startup behavior and avoids repeated load overhead.
-
-5. Optional advanced workflows:
-- Cross-validation and hyperparameter tuning can be toggled without changing code paths.
-
-## 8. Operational Interfaces
-
-### CLI Commands
-- Train: `python main.py`
-- Evaluate: `python evaluate.py`
-- Run EDA: `python run_eda.py`
-- Serve API: `uvicorn api.app:app --reload`
-
-### API Endpoints
-- `GET /` basic service status
-- `GET /health` model readiness and file completeness check
-- `POST /predict` prediction endpoint
-
-## 9. Testing Surface
-
-Tests are organized under `tests/` and currently include:
-- Feature pipeline + validation checks
-- Settings and utilities checks
-- Training utility checks (CV/tuning)
-- Smoke/API tests
-
-This gives baseline coverage for the critical training and serving integration points.
+- Backward compatibility remains for legacy binary workflows.
+- New compatibility layers resolve non-`label` training columns for unified datasets.
+- Evaluation stack is now multiclass-safe while preserving binary metrics and ROC behavior where applicable.
+- Some root-level `ztest*.py` scripts are transitional utilities and not the long-term package API.

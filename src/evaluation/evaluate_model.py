@@ -89,6 +89,19 @@ def _prepare_probability_vector(
     return proba.astype(float)
 
 
+def _is_binary_zero_one(labels: np.ndarray) -> bool:
+    """Return True only for exactly two labels {0, 1}."""
+    if labels.size != 2:
+        return False
+
+    try:
+        casted = sorted(int(label) for label in labels.tolist())
+    except Exception:
+        return False
+
+    return casted == [0, 1]
+
+
 def evaluate(
     y_true,
     y_pred,
@@ -125,54 +138,91 @@ def evaluate(
             f"({y_true.shape[0]} != {y_pred.shape[0]})."
         )
 
+    label_values = np.unique(np.concatenate([y_true, y_pred]))
+    is_binary_01 = _is_binary_zero_one(label_values)
+    metric_average = "binary" if is_binary_01 else "macro"
+
     results: Dict[str, Any] = {}
 
     results["accuracy"] = accuracy_score(y_true, y_pred)
     results["balanced_accuracy"] = balanced_accuracy_score(y_true, y_pred)
     results["precision"] = precision_score(
-        y_true, y_pred, average="binary", zero_division=0
+        y_true,
+        y_pred,
+        average=metric_average,
+        zero_division=0,
     )
     results["recall"] = recall_score(
-        y_true, y_pred, average="binary", zero_division=0
+        y_true,
+        y_pred,
+        average=metric_average,
+        zero_division=0,
     )
-    results["f1"] = f1_score(y_true, y_pred, average="binary", zero_division=0)
+    results["f1"] = f1_score(
+        y_true,
+        y_pred,
+        average=metric_average,
+        zero_division=0,
+    )
     results["mcc"] = matthews_corrcoef(y_true, y_pred)
 
-    cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+    results["label_order"] = [str(label) for label in label_values.tolist()]
+    results["metric_average"] = metric_average
+
+    cm = confusion_matrix(y_true, y_pred, labels=label_values)
     results["confusion_matrix"] = cm.tolist()
 
     if y_proba is not None:
-        proba_vector = _prepare_probability_vector(
-            y_proba, n_samples=len(y_true)
-        )
+        if is_binary_01:
+            proba_vector = _prepare_probability_vector(
+                y_proba,
+                n_samples=len(y_true),
+            )
 
-        if np.unique(y_true).size > 1:
-            results["roc_auc"] = roc_auc_score(y_true, proba_vector)
-            fpr, tpr, thresholds = roc_curve(y_true, proba_vector)
-            results["roc_curve"] = {
-                "fpr": fpr.tolist(),
-                "tpr": tpr.tolist(),
-                "thresholds": thresholds.tolist(),
-            }
+            if np.unique(y_true).size > 1:
+                results["roc_auc"] = roc_auc_score(y_true, proba_vector)
+                fpr, tpr, thresholds = roc_curve(y_true, proba_vector)
+                results["roc_curve"] = {
+                    "fpr": fpr.tolist(),
+                    "tpr": tpr.tolist(),
+                    "thresholds": thresholds.tolist(),
+                }
+            else:
+                logger.warning(
+                    "Skipping ROC metrics because y_true contains only one class."
+                )
         else:
             logger.warning(
-                "Skipping ROC metrics because y_true contains only one class."
+                "Skipping ROC metrics because labels are not binary {0, 1}."
             )
+
+    target_names = (
+        ["Real", "Fake"]
+        if is_binary_01
+        else [str(label) for label in label_values.tolist()]
+    )
 
     results["classification_report"] = classification_report(
         y_true,
         y_pred,
-        labels=[0, 1],
-        target_names=["Real", "Fake"],
+        labels=label_values.tolist(),
+        target_names=target_names,
         output_dict=True,
         zero_division=0,
     )
 
+    class_counts = {
+        str(label): int(np.sum(y_true == label))
+        for label in label_values.tolist()
+    }
     results["dataset_stats"] = {
         "total_samples": int(len(y_true)),
-        "real_samples": int(np.sum(y_true == 0)),
-        "fake_samples": int(np.sum(y_true == 1)),
+        "num_classes": int(len(label_values)),
+        "class_counts": class_counts,
     }
+    if is_binary_01:
+        results["dataset_stats"]["real_samples"] = int(np.sum(y_true == 0))
+        results["dataset_stats"]["fake_samples"] = int(np.sum(y_true == 1))
 
     logger.info("================================================")
     logger.info("Model Evaluation Results")

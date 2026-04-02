@@ -57,7 +57,7 @@ def _to_1d_array(values: Iterable[float], *, name: str) -> np.ndarray:
 
 def plot_confusion_matrix(
     cm,
-    labels=("Real", "Fake"),
+    labels: Iterable[str] | None = None,
     output_dir="reports/figures",
 ) -> Path:
     """Plot and save confusion matrix heatmap."""
@@ -65,15 +65,27 @@ def plot_confusion_matrix(
     cm_array = np.asarray(cm)
     if cm_array.ndim != 2:
         raise ValueError("confusion matrix must be a 2D array.")
+    if cm_array.shape[0] != cm_array.shape[1]:
+        raise ValueError("confusion matrix must be square.")
+
+    if labels is None:
+        effective_labels = [str(idx) for idx in range(cm_array.shape[0])]
+    else:
+        effective_labels = [str(label) for label in labels]
+        if len(effective_labels) != cm_array.shape[0]:
+            raise ValueError(
+                "labels length must match confusion matrix dimensions "
+                f"({len(effective_labels)} != {cm_array.shape[0]})."
+            )
 
     fig, ax = plt.subplots(figsize=(6, 5))
     sns.heatmap(
         cm_array,
         annot=True,
-        fmt="d",
+        fmt="g",
         cmap="Blues",
-        xticklabels=labels,
-        yticklabels=labels,
+        xticklabels=effective_labels,
+        yticklabels=effective_labels,
         ax=ax,
     )
     ax.set_xlabel("Predicted Label")
@@ -218,8 +230,10 @@ def visualize_evaluation(
     logger.info("Generating evaluation visualizations")
 
     if "confusion_matrix" in results:
+        confusion_labels = results.get("label_order")
         generated_files["confusion_matrix"] = plot_confusion_matrix(
             results["confusion_matrix"],
+            labels=confusion_labels,
             output_dir=output_dir,
         )
 

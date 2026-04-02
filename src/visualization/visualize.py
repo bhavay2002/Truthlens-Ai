@@ -59,7 +59,7 @@ def plot_confusion_matrix(
             raise ValueError("cm must be a square matrix")
 
         if labels is None:
-            labels = ["REAL", "FAKE"]
+            labels = [str(idx) for idx in range(cm.shape[0])]
         if len(labels) != cm.shape[0]:
             raise ValueError(
                 "labels length must match confusion matrix dimensions "

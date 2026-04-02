@@ -60,6 +60,20 @@ def _sample_df(rows: int = 20) -> pd.DataFrame:
     })
 
 
+def _sample_unified_df(rows: int = 20) -> pd.DataFrame:
+    texts = [f"sample text {i}" for i in range(rows)]
+    bias_labels = [i % 2 for i in range(rows)]
+
+    return pd.DataFrame(
+        {
+            "title": ["" for _ in range(rows)],
+            "text": texts,
+            "bias_label": bias_labels,
+            "dataset": ["unit_test" for _ in range(rows)],
+        }
+    )
+
+
 # ---------------------------------------------------------
 # Cross Validation Tests
 # ---------------------------------------------------------
@@ -103,4 +117,37 @@ def test_run_optuna_accepts_dataframe():
     assert "best_params" in results
     assert "best_value" in results
     assert isinstance(results["best_params"], dict)
+    assert isinstance(results["best_value"], float)
+
+
+def test_cross_validate_model_supports_unified_label_column():
+    df = _sample_unified_df(24)
+
+    results = cross_validate_model(
+        df,
+        _dummy_train_function,
+        n_splits=3,
+        text_column="text",
+        label_column="bias_label",
+        metric_name="eval_loss",
+    )
+
+    assert results["label_column"] == "bias_label"
+    assert len(results["fold_scores"]) == 3
+
+
+def test_run_optuna_supports_unified_label_column():
+    df = _sample_unified_df(30)
+
+    results = run_optuna(
+        df,
+        train_function=_dummy_train_function,
+        text_column="text",
+        label_column="bias_label",
+        n_trials=2,
+        metric_name="eval_loss",
+        direction="minimize",
+    )
+
+    assert results["label_column"] == "bias_label"
     assert isinstance(results["best_value"], float)
