@@ -1,31 +1,56 @@
-﻿"""Bias explainability utilities for classification outputs."""
+﻿"""
+File Name: bias_explainer.py
+Module: Explainability - Bias Analysis
+Description:
+    Provides interpretability utilities for bias detection outputs within
+    the TruthLens AI system. The module analyzes text using lexical bias
+    signals, SHAP token importance, integrated gradients, and transformer
+    attention scores to generate human-readable bias explanations.
+
+Dependencies:
+    logging
+    re
+    dataclasses
+    typing
+    numpy
+    torch
+    shap (optional)
+
+Inputs:
+    model : transformer model
+    tokenizer : tokenizer compatible with the model
+    text : input text
+
+Outputs:
+    Structured explanation dictionary with token importance, sentence bias
+    scores, attention weights, and visualization-ready heatmaps.
+"""
 
 from __future__ import annotations
 
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
 
 try:
     import shap
-except ImportError:  # pragma: no cover - environment-dependent
-    shap = None  # type: ignore[assignment]
+except ImportError:  # pragma: no cover
+    shap = None  # type: ignore
 
 try:
     from src.features.bias.bias_lexicon import (
         compute_bias_features as _external_compute_bias_features,
     )
-except ImportError:  # pragma: no cover - compatibility fallback
+except ImportError:  # pragma: no cover
     _external_compute_bias_features = None
 
 logger = logging.getLogger(__name__)
 
-# Backward-compatible lexical fallback when upstream bias lexicon helpers
-# are unavailable due API drift.
+
 _FALLBACK_BIAS_TERMS = {
     "biased",
     "corrupt",
@@ -51,39 +76,8 @@ class _FallbackBiasFeatures:
     biased_tokens: List[str]
 
 
-def _compute_bias_features_compat(text: str) -> Any:
-    if _external_compute_bias_features is not None:
-        result = _external_compute_bias_features(text)
-        if not hasattr(result, "bias_score") or not hasattr(
-            result, "biased_tokens"
-        ):
-            raise RuntimeError(
-                "compute_bias_features must return an object with "
-                "'bias_score' and 'biased_tokens'."
-            )
-        return result
-
-    tokens = re.findall(r"\b[a-z]+\b", text.lower())
-    matched = [token for token in tokens if token in _FALLBACK_BIAS_TERMS]
-
-    ordered_unique: list[str] = []
-    seen: set[str] = set()
-    for token in matched:
-        if token not in seen:
-            seen.add(token)
-            ordered_unique.append(token)
-
-    score = len(matched) / max(len(tokens), 1)
-    return _FallbackBiasFeatures(
-        bias_score=round(float(score), 4),
-        biased_tokens=ordered_unique,
-    )
-
-
 @dataclass
 class BiasExplanation:
-    """Structured explanation object."""
-
     token_importance: List[Dict[str, Any]]
     biased_token_highlights: List[str]
     sentence_bias_scores: List[Dict[str, Any]]
@@ -91,19 +85,51 @@ class BiasExplanation:
     bias_heatmap: List[Dict[str, Any]]
 
 
+def _compute_bias_features_compat(text: str) -> Any:
+    if _external_compute_bias_features is not None:
+        result = _external_compute_bias_features(text)
+
+        if not hasattr(result, "bias_score") or not hasattr(
+            result, "biased_tokens"
+        ):
+            raise RuntimeError(
+                "compute_bias_features must return object with "
+                "'bias_score' and 'biased_tokens'."
+            )
+
+        return result
+
+    tokens = re.findall(r"\b[a-z]+\b", text.lower())
+    matched = [token for token in tokens if token in _FALLBACK_BIAS_TERMS]
+
+    unique_tokens: List[str] = []
+    seen: set[str] = set()
+
+    for token in matched:
+        if token not in seen:
+            seen.add(token)
+            unique_tokens.append(token)
+
+    score = len(matched) / max(len(tokens), 1)
+
+    return _FallbackBiasFeatures(
+        bias_score=round(float(score), 4),
+        biased_tokens=unique_tokens,
+    )
+
+
 def tokenize_sentences(text: str) -> List[str]:
-    """Split text into sentences."""
     sentences = re.split(r"[.!?]+", text)
-    return [sentence.strip() for sentence in sentences if sentence.strip()]
+    return [s.strip() for s in sentences if s.strip()]
 
 
 def compute_sentence_bias(text: str) -> List[Dict[str, Any]]:
-    """Compute bias score for each sentence."""
     sentences = tokenize_sentences(text)
-    results: list[dict[str, Any]] = []
+    results: List[Dict[str, Any]] = []
 
     for sentence in sentences:
         bias_result = _compute_bias_features_compat(sentence)
+
         results.append(
             {
                 "sentence": sentence,
@@ -115,27 +141,30 @@ def compute_sentence_bias(text: str) -> List[Dict[str, Any]]:
     return results
 
 
-def _resolve_device(model) -> torch.device | None:
+def _resolve_device(model) -> Optional[torch.device]:
     try:
         return next(model.parameters()).device
     except (AttributeError, StopIteration, TypeError):
         return None
 
 
-def _normalize_token_scores(raw_values: Any) -> np.ndarray:
-    values = np.asarray(raw_values)
+def _normalize_token_scores(values: Any) -> np.ndarray:
+    values = np.asarray(values)
+
     if values.ndim == 0:
         return np.asarray([float(values)])
+
     if values.ndim == 1:
         return values.astype(float)
-    # For multi-class outputs, average importance across class dimension.
+
     return values.mean(axis=-1).astype(float)
 
 
 def compute_shap_importance(
-    model, tokenizer, text: str
+    model,
+    tokenizer,
+    text: str,
 ) -> List[Dict[str, Any]]:
-    """Compute SHAP token importance."""
     if shap is None:
         raise ImportError("SHAP is not installed.")
 
@@ -150,9 +179,7 @@ def compute_shap_importance(
         )
 
         if device is not None:
-            encodings = {
-                key: value.to(device) for key, value in encodings.items()
-            }
+            encodings = {k: v.to(device) for k, v in encodings.items()}
 
         with torch.no_grad():
             outputs = model(**encodings)
@@ -167,28 +194,22 @@ def compute_shap_importance(
     values = _normalize_token_scores(shap_values.values[0])
 
     return [
-        {
-            "token": token,
-            "importance": float(value),
-        }
+        {"token": token, "importance": float(value)}
         for token, value in zip(tokens, values)
     ]
 
 
 def compute_integrated_gradients(
-    model, tokenizer, text: str
+    model,
+    tokenizer,
+    text: str,
 ) -> List[Dict[str, Any]]:
-    """Compute token attribution using gradient magnitudes."""
     device = _resolve_device(model)
 
-    inputs = tokenizer(
-        text,
-        return_tensors="pt",
-        truncation=True,
-    )
+    inputs = tokenizer(text, return_tensors="pt", truncation=True)
 
     if device is not None:
-        inputs = {key: value.to(device) for key, value in inputs.items()}
+        inputs = {k: v.to(device) for k, v in inputs.items()}
 
     if hasattr(model, "zero_grad"):
         model.zero_grad(set_to_none=True)
@@ -202,60 +223,58 @@ def compute_integrated_gradients(
         "inputs_embeds": input_embeddings,
         "attention_mask": inputs.get("attention_mask"),
     }
+
     if "token_type_ids" in inputs:
         model_kwargs["token_type_ids"] = inputs["token_type_ids"]
 
     outputs = model(**model_kwargs)
+
     target = outputs.logits.max()
+
     target.backward()
 
     gradients = input_embeddings.grad
+
     if gradients is None:
-        raise RuntimeError(
-            "Failed to compute gradients for integrated gradients."
-        )
+        raise RuntimeError("Gradient computation failed.")
 
     importance = gradients.abs().sum(dim=-1).detach().cpu().numpy()[0]
+
     tokens = tokenizer.convert_ids_to_tokens(input_ids[0].detach().cpu())
 
     return [
-        {
-            "token": token,
-            "importance": float(score),
-        }
+        {"token": token, "importance": float(score)}
         for token, score in zip(tokens, importance)
     ]
 
 
 def compute_attention_scores(
-    model, tokenizer, text: str
+    model,
+    tokenizer,
+    text: str,
 ) -> List[Dict[str, Any]]:
-    """Extract attention-based token importance."""
     device = _resolve_device(model)
 
-    inputs = tokenizer(
-        text,
-        return_tensors="pt",
-        truncation=True,
-    )
+    inputs = tokenizer(text, return_tensors="pt", truncation=True)
+
     if device is not None:
-        inputs = {key: value.to(device) for key, value in inputs.items()}
+        inputs = {k: v.to(device) for k, v in inputs.items()}
 
     with torch.no_grad():
         outputs = model(**inputs, output_attentions=True)
 
     attentions = outputs.attentions[-1]
+
     attention_matrix = attentions.mean(dim=1)[0].detach().cpu().numpy()
+
     tokens = tokenizer.convert_ids_to_tokens(
         inputs["input_ids"][0].detach().cpu()
     )
+
     token_scores = attention_matrix.mean(axis=0)
 
     return [
-        {
-            "token": token,
-            "attention": float(score),
-        }
+        {"token": token, "attention": float(score)}
         for token, score in zip(tokens, token_scores)
     ]
 
@@ -264,7 +283,6 @@ def extract_biased_tokens(
     token_importance: List[Dict[str, Any]],
     threshold: float = 0.05,
 ) -> List[str]:
-    """Extract tokens above the given absolute-importance threshold."""
     return [
         str(item["token"])
         for item in token_importance
@@ -275,7 +293,6 @@ def extract_biased_tokens(
 def generate_bias_heatmap(
     token_importance: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Generate heatmap-ready token importance scores."""
     return [
         {
             "token": item["token"],
@@ -285,12 +302,14 @@ def generate_bias_heatmap(
     ]
 
 
-def explain_bias(model, tokenizer, text: str) -> Dict[str, Any]:
-    """Run complete bias explanation pipeline."""
+def explain_bias(
+    model,
+    tokenizer,
+    text: str,
+) -> Dict[str, Any]:
     if model is None or tokenizer is None:
-        raise ValueError(
-            "model and tokenizer are required for bias explanation."
-        )
+        raise ValueError("model and tokenizer are required.")
+
     if not isinstance(text, str) or not text.strip():
         raise ValueError("text must be a non-empty string.")
 
@@ -298,23 +317,31 @@ def explain_bias(model, tokenizer, text: str) -> Dict[str, Any]:
         shap_importance = compute_shap_importance(model, tokenizer, text)
     except Exception as exc:
         logger.warning(
-            "Falling back to gradient-based token importance because "
-            "SHAP attribution failed: %s",
+            "SHAP attribution failed, using gradient fallback: %s",
             exc,
         )
-        shap_importance = compute_integrated_gradients(model, tokenizer, text)
+        shap_importance = compute_integrated_gradients(
+            model,
+            tokenizer,
+            text,
+        )
+
     biased_tokens = extract_biased_tokens(shap_importance)
 
     ig_importance = compute_integrated_gradients(model, tokenizer, text)
+
     attention_scores = compute_attention_scores(model, tokenizer, text)
+
     sentence_scores = compute_sentence_bias(text)
+
     heatmap = generate_bias_heatmap(shap_importance)
 
-    return {
-        "token_importance": shap_importance,
-        "integrated_gradients": ig_importance,
-        "biased_token_highlights": biased_tokens,
-        "sentence_bias_scores": sentence_scores,
-        "attention_scores": attention_scores,
-        "bias_heatmap": heatmap,
-    }
+    explanation = BiasExplanation(
+        token_importance=shap_importance,
+        biased_token_highlights=biased_tokens,
+        sentence_bias_scores=sentence_scores,
+        attention_scores=attention_scores,
+        bias_heatmap=heatmap,
+    )
+
+    return explanation.__dict__

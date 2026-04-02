@@ -1,31 +1,43 @@
 ﻿"""
-File: src/explainability/lime_explainer.py
+File Name: lime_explainer.py
+Module: Explainability - LIME
+Description:
+    Provides Local Interpretable Model-Agnostic Explanations (LIME) for
+    text classification predictions within the TruthLens AI system.
 
-Purpose
--------
-Provide LIME explanations for model predictions.
+    This module supports generating token-level importance explanations
+    by perturbing text inputs and observing changes in model predictions.
+    It produces both structured explanation data and interactive HTML
+    visualizations suitable for dashboards and reports.
 
-LIME explains model decisions by perturbing text inputs
-and identifying important tokens influencing predictions.
+Dependencies:
+    logging
+    pathlib
+    typing
+    numpy
+    lime
 
-Outputs
--------
-important_features
-interactive HTML visualization
+Inputs:
+    predict_fn : callable prediction function
+    text : str input text
+
+Outputs:
+    explanation dictionary
+    optional HTML visualization
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Callable, Dict, Sequence
+from typing import Any, Callable, Dict, List, Sequence
 
 import numpy as np
 
 try:
     from lime.lime_text import LimeTextExplainer
-except ImportError:  # pragma: no cover - environment-dependent
-    LimeTextExplainer = None  # type: ignore[assignment]
+except ImportError:  # pragma: no cover
+    LimeTextExplainer = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -33,29 +45,36 @@ _explainer: LimeTextExplainer | None = None
 
 
 def _extract_fake_probability(result: Any) -> float:
+    """
+    Extract fake probability from prediction result.
+    """
     if not isinstance(result, dict) or "fake_probability" not in result:
         raise KeyError(
-            "predict_fn(text) must return a dict with "
-            "'fake_probability'."
+            "predict_fn(text) must return a dict containing 'fake_probability'."
         )
 
-    fake_prob = float(result["fake_probability"])
-    if fake_prob < 0.0 or fake_prob > 1.0:
+    prob = float(result["fake_probability"])
+
+    if prob < 0.0 or prob > 1.0:
         raise ValueError("fake_probability must be between 0 and 1.")
-    return fake_prob
+
+    return prob
 
 
 def get_explainer() -> LimeTextExplainer:
-    """Lazily initialize and cache a LIME text explainer."""
+    """
+    Lazily initialize and cache a LimeTextExplainer instance.
+    """
     if LimeTextExplainer is None:
         raise ImportError(
-            "LIME is not installed. Install dependency 'lime' to use "
-            "explainability functions in src.explainability.lime_explainer."
+            "LIME is not installed. Install 'lime' to enable "
+            "src.explainability.lime_explainer."
         )
 
     global _explainer
+
     if _explainer is None:
-        logger.info("Initializing LIME explainer")
+        logger.info("Initializing LIME text explainer")
         _explainer = LimeTextExplainer(class_names=["Real", "Fake"])
 
     return _explainer
@@ -64,8 +83,10 @@ def get_explainer() -> LimeTextExplainer:
 def _extract_fake_probabilities_from_batch(
     batch_result: Any,
     expected_size: int,
-) -> list[float] | None:
-    """Extract fake probabilities from batch-style predictor output."""
+) -> List[float] | None:
+    """
+    Extract probabilities from batch prediction output.
+    """
     if (
         not isinstance(batch_result, Sequence)
         or isinstance(batch_result, (str, bytes))
@@ -73,13 +94,15 @@ def _extract_fake_probabilities_from_batch(
     ):
         return None
 
-    probs: list[float] = []
+    probabilities: List[float] = []
+
     for item in batch_result:
         try:
-            probs.append(_extract_fake_probability(item))
+            probabilities.append(_extract_fake_probability(item))
         except Exception:
             return None
-    return probs
+
+    return probabilities
 
 
 def lime_predict_wrapper(
@@ -87,36 +110,35 @@ def lime_predict_wrapper(
     predict_fn: Callable[[Any], Any],
 ) -> np.ndarray:
     """
-    Convert predictor output to a LIME-compatible probability matrix.
-
-    Supports both:
-    - single-text predictors: predict_fn(text) -> {"fake_probability": ...}
-    - batch predictors: predict_fn(list[str]) -> list[{"fake_probability": ...}]
+    Convert prediction outputs to LIME-compatible probability matrix.
     """
     text_list = [str(text) for text in texts]
 
-    # Fast path: try batch prediction first.
-    batch_fake_probs: list[float] | None = None
+    batch_probs: List[float] | None = None
+
     try:
         batch_result = predict_fn(text_list)
-        batch_fake_probs = _extract_fake_probabilities_from_batch(
+
+        batch_probs = _extract_fake_probabilities_from_batch(
             batch_result,
             expected_size=len(text_list),
         )
-    except Exception:
-        batch_fake_probs = None
 
-    probs: list[list[float]] = []
-    if batch_fake_probs is not None:
-        for fake_prob in batch_fake_probs:
-            probs.append([1.0 - fake_prob, fake_prob])
+    except Exception:
+        batch_probs = None
+
+    probabilities: List[List[float]] = []
+
+    if batch_probs is not None:
+        for fake_prob in batch_probs:
+            probabilities.append([1.0 - fake_prob, fake_prob])
     else:
         for text in text_list:
             result = predict_fn(text)
             fake_prob = _extract_fake_probability(result)
-            probs.append([1.0 - fake_prob, fake_prob])
+            probabilities.append([1.0 - fake_prob, fake_prob])
 
-    return np.asarray(probs, dtype=float)
+    return np.asarray(probabilities, dtype=float)
 
 
 def explain_prediction(
@@ -125,9 +147,13 @@ def explain_prediction(
     num_features: int = 10,
     num_samples: int = 256,
 ) -> Dict[str, Any]:
-    """Generate a LIME explanation for one text sample."""
-    if not text.strip():
+    """
+    Generate a LIME explanation for a single text input.
+    """
+
+    if not isinstance(text, str) or not text.strip():
         raise ValueError("text cannot be empty.")
+
     if num_samples <= 0:
         raise ValueError("num_samples must be greater than 0.")
 
@@ -146,6 +172,7 @@ def explain_prediction(
     }
 
     logger.info("LIME explanation generated")
+
     return explanation
 
 
@@ -156,9 +183,13 @@ def save_explanation_html(
     num_features: int = 10,
     num_samples: int = 256,
 ) -> Path:
-    """Save an interactive LIME explanation to HTML and return file path."""
-    if not text.strip():
+    """
+    Save interactive LIME explanation visualization to HTML.
+    """
+
+    if not isinstance(text, str) or not text.strip():
         raise ValueError("text cannot be empty.")
+
     if num_samples <= 0:
         raise ValueError("num_samples must be greater than 0.")
 
@@ -176,5 +207,6 @@ def save_explanation_html(
 
     exp.save_to_file(str(output_path))
 
-    logger.info("Saved LIME explanation: %s", output_path)
+    logger.info("Saved LIME explanation to %s", output_path)
+
     return output_path

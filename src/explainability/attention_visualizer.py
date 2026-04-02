@@ -7,6 +7,7 @@ Description:
     extraction from HuggingFace transformer models and generates interpretable
     visualizations for analysis, debugging, and research purposes.
 
+
 Dependencies:
     logging
     typing
@@ -23,7 +24,7 @@ Outputs:
 """
 
 import logging
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import torch
@@ -38,17 +39,33 @@ class AttentionVisualizer:
     Extracts and visualizes attention maps from transformer models.
     """
 
-    def __init__(self, model) -> None:
-        """Initialize visualizer with transformer model."""
+    def __init__(self, model: torch.nn.Module) -> None:
+        """
+        Initialize visualizer with transformer model.
+
+        Parameters
+        ----------
+        model : torch.nn.Module
+            HuggingFace-compatible transformer model.
+        """
 
         if model is None:
             raise ValueError("model cannot be None")
 
-        self.model = model
+        self.model: torch.nn.Module = model
 
         logger.info("AttentionVisualizer initialized")
 
-    def _resolve_model_device(self) -> torch.device | None:
+    def _resolve_model_device(self) -> Optional[torch.device]:
+        """
+        Resolve the device where the model parameters reside.
+
+        Returns
+        -------
+        Optional[torch.device]
+            Device of the model parameters or None if not available.
+        """
+
         try:
             return next(self.model.parameters()).device
         except (AttributeError, StopIteration, TypeError):
@@ -58,23 +75,39 @@ class AttentionVisualizer:
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
-    ) -> Dict[str, torch.Tensor]:
-        """Extract attention weights from the transformer model."""
+    ) -> Dict[str, List[torch.Tensor]]:
+        """
+        Extract attention weights from the transformer model.
+
+        Parameters
+        ----------
+        input_ids : torch.Tensor
+            Tokenized input ids.
+        attention_mask : torch.Tensor
+            Attention mask tensor.
+
+        Returns
+        -------
+        Dict[str, List[torch.Tensor]]
+            Dictionary containing attention tensors.
+        """
 
         if input_ids is None or attention_mask is None:
             raise ValueError("input tensors cannot be None")
+
         if not isinstance(input_ids, torch.Tensor) or not isinstance(
             attention_mask, torch.Tensor
         ):
             raise TypeError("input_ids and attention_mask must be torch tensors")
+
         if input_ids.ndim != 2 or attention_mask.ndim != 2:
             raise ValueError("input_ids and attention_mask must be 2D tensors")
+
         if input_ids.shape != attention_mask.shape:
-            raise ValueError(
-                "input_ids and attention_mask must have the same shape"
-            )
+            raise ValueError("input_ids and attention_mask must have the same shape")
 
         model_device = self._resolve_model_device()
+
         if model_device is not None:
             input_ids = input_ids.to(model_device)
             attention_mask = attention_mask.to(model_device)
@@ -99,47 +132,70 @@ class AttentionVisualizer:
             raise RuntimeError("Attention extraction failed") from exc
 
         attentions = getattr(outputs, "attentions", None)
+
         if attentions is None and isinstance(outputs, (tuple, list)) and outputs:
             attentions = outputs[-1]
+
         if attentions is None:
             raise RuntimeError(
                 "Model output does not include attentions. "
                 "Ensure the model supports output_attentions=True."
             )
 
-        return {"attentions": attentions}
+        if not isinstance(attentions, (list, tuple)):
+            raise TypeError("Attentions returned by model must be a list or tuple")
+
+        return {"attentions": list(attentions)}
 
     def aggregate_attention(
         self,
         attentions: List[torch.Tensor],
     ) -> np.ndarray:
-        """Aggregate attention across heads and layers."""
+        """
+        Aggregate attention across layers and heads.
+
+        Parameters
+        ----------
+        attentions : List[torch.Tensor]
+            Attention tensors from transformer layers.
+
+        Returns
+        -------
+        np.ndarray
+            Aggregated attention matrix.
+        """
 
         if not attentions:
             raise ValueError("attentions list cannot be empty")
 
         try:
-            tensor_attentions: list[torch.Tensor] = []
+            validated_tensors: List[torch.Tensor] = []
+
             for tensor in attentions:
                 if not isinstance(tensor, torch.Tensor):
                     raise TypeError("attentions must contain torch.Tensor values")
+
                 if tensor.ndim != 4:
                     raise ValueError(
                         "Each attention tensor must have shape "
-                        "(batch, heads, seq_len, seq_len)."
+                        "(batch, heads, seq_len, seq_len)"
                     )
-                tensor_attentions.append(tensor.detach())
 
-            stacked = torch.stack(tensor_attentions, dim=0)
+                validated_tensors.append(tensor.detach())
 
-            # Average across layers and heads, then collapse batch.
+            stacked = torch.stack(validated_tensors, dim=0)
+
+            # Shape: (layers, batch, heads, seq, seq)
             avg_attention = stacked.mean(dim=0).mean(dim=1)
+
+            # Collapse batch dimension
             if avg_attention.shape[0] == 1:
                 avg_attention = avg_attention[0]
             else:
                 avg_attention = avg_attention.mean(dim=0)
 
             return avg_attention.cpu().numpy()
+
         except Exception as exc:
             logger.exception("Attention aggregation failed")
             raise RuntimeError("Failed to aggregate attention") from exc
@@ -150,14 +206,31 @@ class AttentionVisualizer:
         tokens: List[str],
         title: str = "Attention Map",
     ) -> None:
-        """Visualize attention matrix using heatmap."""
+        """
+        Visualize attention matrix using heatmap.
 
-        if attention_matrix is None or tokens is None:
-            raise ValueError("attention_matrix and tokens must be provided")
+        Parameters
+        ----------
+        attention_matrix : np.ndarray
+            Aggregated attention matrix.
+        tokens : List[str]
+            Tokens corresponding to the attention matrix.
+        title : str
+            Plot title.
+        """
+
+        if attention_matrix is None:
+            raise ValueError("attention_matrix must be provided")
+
+        if tokens is None:
+            raise ValueError("tokens must be provided")
+
         if not isinstance(attention_matrix, np.ndarray):
             attention_matrix = np.asarray(attention_matrix)
+
         if attention_matrix.ndim != 2:
-            raise ValueError("attention_matrix must be 2D for plotting")
+            raise ValueError("attention_matrix must be a 2D matrix")
+
         if not tokens:
             raise ValueError("tokens cannot be empty")
 
@@ -167,6 +240,7 @@ class AttentionVisualizer:
                 attention_matrix.shape[1],
                 len(tokens),
             )
+
             if plot_size == 0:
                 raise ValueError("attention_matrix and tokens must be non-empty")
 
