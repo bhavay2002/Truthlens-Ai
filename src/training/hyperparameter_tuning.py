@@ -1,25 +1,42 @@
 ﻿"""
-File: src/training/hyperparameter_tuning.py
+File Name: hyperparameter_tuning.py
+Module: TruthLens AI - Training Hyperparameter Optimization
+Description:
+    Automated hyperparameter tuning utilities for TruthLens AI models.
 
-Purpose
--------
-Automated hyperparameter tuning for TruthLens AI models.
+    Supports:
+    • Optuna-based Bayesian optimization
+    • Random-search fallback tuner
+    • Flexible training function interfaces compatible with HuggingFace Trainer
 
-Supports:
-• Optuna-based Bayesian optimization
-• Random-search fallback tuner
-• Flexible training function interfaces
+Dependencies:
+    inspect
+    logging
+    typing
+    numpy
+    pandas
+    sklearn.model_selection
+    src.models.train_roberta
+    src.utils.input_validation
+    src.utils.settings
 
-Outputs
--------
-Best hyperparameters and evaluation metric score.
+Inputs:
+    df: pandas DataFrame containing training data
+    validation_df: optional validation dataframe
+    train_function: callable returning (trainer, eval_dataset)
+    n_trials: number of optimization trials
+    metric_name: evaluation metric name
+    direction: optimization direction ("minimize" or "maximize")
+
+Outputs:
+    dictionary containing best hyperparameters and evaluation score
 """
 
 from __future__ import annotations
 
 import inspect
 import logging
-from typing import Any, Callable
+from typing import Any, Callable, Dict
 
 import numpy as np
 import pandas as pd
@@ -33,10 +50,12 @@ from src.utils.input_validation import (
 )
 from src.utils.settings import load_settings
 
+
 logger = logging.getLogger(__name__)
 SETTINGS = load_settings()
 
 _VALID_OPTIMIZATION_DIRECTIONS = {"minimize", "maximize"}
+
 _UNIFIED_LABEL_CANDIDATES = (
     "bias_label",
     "ideology_label",
@@ -49,6 +68,7 @@ def _resolve_label_column(
     df: pd.DataFrame,
     label_column: str,
 ) -> str:
+
     if label_column in df.columns:
         return label_column
 
@@ -76,6 +96,7 @@ def _prepare_training_frame(
     *,
     label_column: str,
 ) -> pd.DataFrame:
+
     if label_column == "label":
         return df
 
@@ -85,13 +106,13 @@ def _prepare_training_frame(
 
 
 def _resolve_metric(
-    metrics: dict[str, Any],
+    metrics: Dict[str, Any],
     metric_name: str,
 ) -> float:
+
     if not isinstance(metrics, dict):
         raise TypeError(
-            "trainer.evaluate(...) must return a dictionary, "
-            f"received: {type(metrics).__name__}."
+            "trainer.evaluate(...) must return a dictionary."
         )
 
     candidates = [
@@ -114,20 +135,24 @@ def _resolve_metric(
 def _build_train_kwargs(
     train_function: Callable[..., tuple[Any, Any]],
     *,
-    params: dict[str, Any],
+    params: Dict[str, Any],
     text_column: str,
     validation_df: pd.DataFrame,
-) -> dict[str, Any]:
+) -> Dict[str, Any]:
+
     train_sig = inspect.signature(train_function)
 
-    kwargs: dict[str, Any] = {}
+    kwargs: Dict[str, Any] = {}
 
     if "params" in train_sig.parameters:
         kwargs["params"] = params
+
     if "text_column" in train_sig.parameters:
         kwargs["text_column"] = text_column
+
     if "validation_df" in train_sig.parameters:
         kwargs["validation_df"] = validation_df
+
     if "test_df" in train_sig.parameters:
         kwargs["test_df"] = validation_df
 
@@ -135,7 +160,7 @@ def _build_train_kwargs(
 
 
 def _evaluate_params(
-    params: dict[str, Any],
+    params: Dict[str, Any],
     *,
     train_function: Callable[..., tuple[Any, Any]],
     train_df: pd.DataFrame,
@@ -144,10 +169,12 @@ def _evaluate_params(
     label_column: str,
     metric_name: str,
 ) -> float:
+
     prepared_train_df = _prepare_training_frame(
         train_df,
         label_column=label_column,
     )
+
     prepared_val_df = _prepare_training_frame(
         val_df,
         label_column=label_column,
@@ -161,10 +188,14 @@ def _evaluate_params(
     )
 
     train_result = train_function(prepared_train_df, **train_kwargs)
+
     if not isinstance(train_result, tuple) or len(train_result) != 2:
-        raise TypeError("train_function must return (trainer, eval_dataset).")
+        raise TypeError(
+            "train_function must return (trainer, eval_dataset)."
+        )
 
     trainer, eval_dataset = train_result
+
     metrics = trainer.evaluate(eval_dataset)
 
     return _resolve_metric(metrics, metric_name)
@@ -172,7 +203,8 @@ def _evaluate_params(
 
 def _sample_params_fallback(
     rng: np.random.Generator,
-) -> dict[str, Any]:
+) -> Dict[str, Any]:
+
     lr_min = np.log10(SETTINGS.training.optuna_learning_rate_min)
     lr_max = np.log10(SETTINGS.training.optuna_learning_rate_max)
 
@@ -198,13 +230,15 @@ def _run_fallback_tuner(
     metric_name: str,
     direction: str,
     seed: int,
-) -> dict[str, Any]:
+) -> Dict[str, Any]:
+
     rng = np.random.default_rng(seed)
 
-    best_params: dict[str, Any] | None = None
+    best_params: Dict[str, Any] | None = None
     best_value: float | None = None
 
     for trial_idx in range(1, n_trials + 1):
+
         params = _sample_params_fallback(rng)
 
         value = _evaluate_params(
@@ -238,7 +272,7 @@ def _run_fallback_tuner(
 
     if best_value is None or best_params is None:
         raise RuntimeError(
-            "Fallback tuner failed to produce any trial results."
+            "Fallback tuner failed to produce results."
         )
 
     return {
@@ -263,8 +297,7 @@ def run_optuna(
     metric_name: str | None = None,
     direction: str | None = None,
     random_state: int | None = None,
-) -> dict[str, Any]:
-    """Run Optuna-based hyperparameter optimization (with fallback)."""
+) -> Dict[str, Any]:
 
     resolved_label_column = _resolve_label_column(df, label_column)
 
@@ -274,22 +307,23 @@ def run_optuna(
         required_columns=[text_column, resolved_label_column],
         min_rows=10,
     )
-    ensure_non_empty_text_column(
-        df,
-        text_column,
-        name="df",
-    )
+
+    ensure_non_empty_text_column(df, text_column, name="df")
+
     working_df = df[df[resolved_label_column].notna()].reset_index(drop=True)
+
     if working_df.empty:
         raise ValueError(
             f"No non-null labels found in column '{resolved_label_column}'."
         )
+
     ensure_dataframe(
         working_df,
         name="working_df",
         required_columns=[text_column, resolved_label_column],
         min_rows=10,
     )
+
     ensure_non_empty_text_column(
         working_df,
         text_column,
@@ -299,6 +333,7 @@ def run_optuna(
     effective_trials = (
         n_trials if n_trials is not None else SETTINGS.training.optuna_trials
     )
+
     ensure_positive_int(
         effective_trials,
         name="n_trials",
@@ -307,10 +342,10 @@ def run_optuna(
 
     effective_metric = metric_name or SETTINGS.training.optuna_metric
     effective_direction = direction or SETTINGS.training.optuna_direction
+
     if effective_direction not in _VALID_OPTIMIZATION_DIRECTIONS:
         raise ValueError(
-            "direction must be either 'minimize' or 'maximize', "
-            f"received: {effective_direction!r}."
+            "direction must be either 'minimize' or 'maximize'."
         )
 
     effective_seed = (
@@ -318,35 +353,41 @@ def run_optuna(
     )
 
     if validation_df is None:
+
         train_df, val_df = train_test_split(
             working_df,
             test_size=SETTINGS.training.optuna_validation_split,
             random_state=effective_seed,
             stratify=working_df[resolved_label_column],
         )
+
     else:
+
         resolved_validation_label_column = _resolve_label_column(
             validation_df,
             resolved_label_column,
         )
+
         ensure_dataframe(
             validation_df,
             name="validation_df",
             required_columns=[text_column, resolved_validation_label_column],
             min_rows=2,
         )
+
         ensure_non_empty_text_column(
             validation_df,
             text_column,
             name="validation_df",
         )
+
         filtered_validation_df = validation_df[
             validation_df[resolved_validation_label_column].notna()
         ].reset_index(drop=True)
+
         if filtered_validation_df.empty:
             raise ValueError(
-                "validation_df has no non-null labels in column "
-                f"'{resolved_validation_label_column}'."
+                "validation_df has no valid labels."
             )
 
         train_df = working_df
@@ -359,6 +400,7 @@ def run_optuna(
         import optuna
     except ImportError:
         logger.warning("Optuna not installed, using fallback tuner")
+
         return _run_fallback_tuner(
             train_function=train_function,
             train_df=train_df,
@@ -379,6 +421,7 @@ def run_optuna(
     )
 
     def objective(trial) -> float:
+
         params = {
             "learning_rate": trial.suggest_float(
                 "learning_rate",

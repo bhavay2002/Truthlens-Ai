@@ -1,67 +1,221 @@
-# TruthLens AI - Data Pipeline Configuration
+# ==========================================================
+# TruthLens AI - Unified Data Pipeline Configuration
+# ==========================================================
+
+project:
+  name: TruthLens AI
+  version: 2.0
+  description: Multi-task NLP pipeline for bias, ideology, propaganda,
+               emotion, narrative roles, and frame detection.
+
+# ==========================================================
+# DATA SOURCES
+# ==========================================================
 
 dataset:
-  raw_data_dir: data/raw/isot
-  fake_news_file: Fake.csv
-  real_news_file: True.csv
-  text_column: text
-  title_column: title
-  label_column: label
-  labels:
-    fake: 1
-    real: 0
+
+  unified_schema:
+
+    text_fields:
+      - title
+      - text
+
+    label_fields:
+
+      # classification heads
+      bias_label: bias_label
+      ideology_label: ideology_label
+      propaganda_label: propaganda_label
+
+      # narrative frame
+      frame: frame
+
+      # narrative roles
+      hero: hero
+      villain: villain
+      victim: victim
+
+      # narrative entities
+      hero_entities: hero_entities
+      villain_entities: villain_entities
+      victim_entities: victim_entities
+
+      # frame categories
+      RE: resolution
+      HI: human_interest
+      CO: conflict
+      MO: moral
+      EC: economic
+
+      # emotion labels (multi-label)
+      emotion_prefix: emotion_
+
+  datasets:
+
+    bias:
+      path: data/raw/bias
+      text_column: text
+      label_column: bias_label
+
+    ideology:
+      path: data/raw/ideology
+      text_column: text
+      label_column: ideology_label
+
+    propaganda:
+      path: data/raw/propaganda
+      text_column: text
+      label_column: propaganda_label
+
+    narrative:
+      path: data/raw/narrative
+      text_column: text
+      hero_entities: hero_entities
+      villain_entities: villain_entities
+      victim_entities: victim_entities
+
+    emotion:
+      path: data/raw/emotion
+      text_column: text
+      emotion_columns_prefix: emotion_
+
+# ==========================================================
+# DATA VALIDATION
+# ==========================================================
 
 validation:
+
   required_columns:
     - text
-    - label
-  max_null_ratio: 0.10
-  max_duplicate_ratio: 0.20
-  min_class_ratio: 0.20
-  min_text_length: 10
 
-cleaning:
-  normalize_numbers: true
-  remove_emojis: true
-  normalize_unicode: true
-  expand_contractions: true
+  max_null_ratio: 0.10
+  max_duplicate_ratio: 0.15
+  min_text_length: 20
   min_word_count: 30
 
+  label_checks:
+    min_class_ratio: 0.10
+    allow_missing_labels: true
+
+# ==========================================================
+# TEXT CLEANING
+# ==========================================================
+
+cleaning:
+
+  normalize_unicode: true
+  normalize_numbers: true
+  remove_emojis: true
+  remove_urls: true
+  remove_html: true
+  expand_contractions: true
+
+  lowercase: true
+  strip_whitespace: true
+
+  min_word_count: 30
+
+# ==========================================================
+# CLASS BALANCING
+# ==========================================================
+
 balancing:
+
   enabled: true
   method: oversample
+
+  supported_methods:
+    - oversample
+    - undersample
+    - smote
+
   random_state: 42
 
+# ==========================================================
+# DATA AUGMENTATION
+# ==========================================================
+
 augmentation:
+
   enabled: true
   multiplier: 2
-  synonym_replacement: true
-  random_deletion: true
-  random_swap: true
+
+  techniques:
+    synonym_replacement: true
+    random_swap: true
+    random_deletion: true
+    back_translation: false
+
+# ==========================================================
+# TRAIN / VALIDATION / TEST SPLIT
+# ==========================================================
 
 split:
+
   train_ratio: 0.70
   validation_ratio: 0.15
   test_ratio: 0.15
+
   stratified: true
   random_state: 42
 
+# ==========================================================
+# DATA PROFILING
+# ==========================================================
+
 profiling:
+
   enabled: true
   report_dir: reports
+
   save_json: true
   save_markdown: true
+  save_html: true
+
+# ==========================================================
+# EXPLORATORY DATA ANALYSIS
+# ==========================================================
 
 eda:
+
   enabled: true
   figures_dir: reports/figures
-  top_words: 20
-  max_tfidf_features: 5000
+
+  top_words: 30
+  max_tfidf_features: 10000
+
   ngrams:
+    - 1
     - 2
     - 3
 
+  plots:
+    label_distribution: true
+    text_length_distribution: true
+    tfidf_top_terms: true
+    emotion_distribution: true
+
+# ==========================================================
+# OUTPUT
+# ==========================================================
+
 output:
+
+  unified_dataset: data/processed/unified_dataset.csv
+
   processed_data_dir: data/processed
   splits_dir: data/splits
   logs_dir: logs
+
+  save_formats:
+    - csv
+    - parquet
+
+# ==========================================================
+# REPRODUCIBILITY
+# ==========================================================
+
+reproducibility:
+
+  random_seed: 42
+  deterministic: true
