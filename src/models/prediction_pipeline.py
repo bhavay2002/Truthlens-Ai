@@ -8,7 +8,7 @@ from typing import Any, Dict
 import pandas as pd
 import torch
 
-from src.features.feature_pipeline import transform_feature_pipeline
+from features.pipelines.feature_pipeline import transform_feature_pipeline
 from src.models.model_registry import ModelRegistry
 from src.utils.input_validation import (
     ensure_non_empty_text,

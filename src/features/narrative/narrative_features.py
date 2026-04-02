@@ -1,183 +1,156 @@
 """
 File Name: narrative_features.py
-Module: Narrative Analysis - Feature Extraction
+Module: Feature Engineering - Narrative Features
 Description:
-    Extracts narrative-level linguistic and structural features used by the
-    TruthLens AI system. The module identifies narrative framing signals,
-    actor-action structures, temporal progression, conflict indicators,
-    and storytelling patterns that frequently appear in political narratives,
-    propaganda, and ideological messaging.
+    Extracts narrative structure indicators from text. The module detects
+    narrative roles, conflict framing, temporal storytelling markers,
+    and narrative progression signals commonly found in news reporting
+    and political narratives.
+
+    These features help characterize storytelling structure used to
+    influence interpretation, such as hero/villain framing, crisis
+    escalation, and resolution narratives.
+
+    The implementation is lightweight and lexicon-based with simple
+    structural heuristics, allowing deterministic feature extraction
+    without requiring heavy NLP models.
 
 Dependencies:
+    dataclasses
+    typing
     logging
     re
-    typing
     collections
-    numpy
-    spacy
 
 Inputs:
-    Raw text string
+    FeatureContext containing input text and optional tokens
 
 Outputs:
-    Dictionary of narrative-level features and numerical feature vector
+    Dict[str, float] representing narrative structure indicators
 """
 
+from __future__ import annotations
+
 import logging
-from typing import Dict, List
+import re
+from collections import Counter
+from dataclasses import dataclass
+from typing import Dict, List, Set
 
-import numpy as np
-import spacy
-
+from src.features.base.base_feature import BaseFeature, FeatureContext
+from src.features.base.feature_registry import register_feature
 
 logger = logging.getLogger(__name__)
 
 
-class NarrativeFeatureExtractor:
+def _tokenize(text: str) -> List[str]:
+    """Simple tokenizer fallback."""
+    return re.findall(r"\b\w+\b", text.lower())
+
+
+# ---------------------------------------------------------------------
+# Narrative Lexicons
+# ---------------------------------------------------------------------
+
+HERO_TERMS: Set[str] = {
+    "hero", "leader", "defender", "champion",
+    "protect", "save", "rescue"
+}
+
+VILLAIN_TERMS: Set[str] = {
+    "villain", "enemy", "corrupt", "attacker",
+    "threat", "destroy", "betray"
+}
+
+VICTIM_TERMS: Set[str] = {
+    "victim", "suffer", "harm", "damage",
+    "loss", "injured", "affected"
+}
+
+CONFLICT_TERMS: Set[str] = {
+    "conflict", "battle", "fight", "clash",
+    "dispute", "attack", "war"
+}
+
+RESOLUTION_TERMS: Set[str] = {
+    "resolve", "agreement", "peace", "solution",
+    "settlement", "deal"
+}
+
+CRISIS_TERMS: Set[str] = {
+    "crisis", "emergency", "disaster",
+    "collapse", "panic"
+}
+
+
+@dataclass
+@register_feature
+class NarrativeFeatures(BaseFeature):
     """
-    Extracts narrative framing and storytelling features from text.
+    Extract narrative structure indicators.
+
+    Output Features
+    ---------------
+    narrative_hero_ratio
+    narrative_villain_ratio
+    narrative_victim_ratio
+    narrative_conflict_ratio
+    narrative_resolution_ratio
+    narrative_crisis_ratio
+    narrative_role_diversity
+    narrative_conflict_intensity
     """
 
-    TEMPORAL_MARKERS = {
-        "then",
-        "later",
-        "after",
-        "before",
-        "finally",
-        "eventually",
-        "suddenly",
-        "meanwhile",
-        "during",
-        "when",
-    }
+    name: str = "narrative_features"
+    description: str = "Narrative structure and role framing indicators"
 
-    CONFLICT_MARKERS = {
-        "fight",
-        "battle",
-        "attack",
-        "oppose",
-        "threat",
-        "crisis",
-        "conflict",
-        "war",
-        "struggle",
-    }
+    def extract(self, context: FeatureContext) -> Dict[str, float]:
+        """Extract narrative-related features."""
 
-    CAUSAL_MARKERS = {
-        "because",
-        "therefore",
-        "thus",
-        "hence",
-        "since",
-        "as",
-    }
+        if not context.text:
+            raise ValueError("FeatureContext.text cannot be empty")
 
-    def __init__(self, spacy_model: str = "en_core_web_sm") -> None:
-        """Initialize narrative feature extractor."""
+        tokens = context.tokens or _tokenize(context.text)
 
-        try:
-            self.nlp = spacy.load(spacy_model)
-        except Exception as exc:
-            logger.exception("spaCy model loading failed")
-            raise RuntimeError("Failed to load spaCy model") from exc
+        if not tokens:
+            logger.warning("No tokens available for narrative feature extraction")
+            return {}
 
-        logger.info("NarrativeFeatureExtractor initialized")
+        counter = Counter(tokens)
+        total_tokens = len(tokens)
 
-    def extract(self, text: str) -> Dict[str, float]:
-        """Extract narrative-related linguistic features."""
+        def ratio(lexicon: Set[str]) -> float:
+            count = sum(counter.get(w, 0) for w in lexicon)
+            return count / total_tokens
 
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError("Input text must be a non-empty string")
+        hero_ratio = ratio(HERO_TERMS)
+        villain_ratio = ratio(VILLAIN_TERMS)
+        victim_ratio = ratio(VICTIM_TERMS)
+        conflict_ratio = ratio(CONFLICT_TERMS)
+        resolution_ratio = ratio(RESOLUTION_TERMS)
+        crisis_ratio = ratio(CRISIS_TERMS)
 
-        try:
-            doc = self.nlp(text)
-        except Exception as exc:
-            logger.exception("spaCy text processing failed")
-            raise RuntimeError("Text processing failed") from exc
+        role_values = [hero_ratio, villain_ratio, victim_ratio]
 
-        tokens = [token.text.lower() for token in doc if token.is_alpha]
+        role_diversity = sum(1 for v in role_values if v > 0) / len(role_values)
 
-        features: Dict[str, float] = {}
+        conflict_intensity = (conflict_ratio + crisis_ratio) / 2.0
 
-        features.update(self._actor_features(doc))
-        features.update(self._temporal_features(tokens))
-        features.update(self._conflict_features(tokens))
-        features.update(self._causal_features(tokens))
-        features.update(self._event_structure(doc))
+        features: Dict[str, float] = {
+            "narrative_hero_ratio": float(hero_ratio),
+            "narrative_villain_ratio": float(villain_ratio),
+            "narrative_victim_ratio": float(victim_ratio),
+            "narrative_conflict_ratio": float(conflict_ratio),
+            "narrative_resolution_ratio": float(resolution_ratio),
+            "narrative_crisis_ratio": float(crisis_ratio),
+            "narrative_role_diversity": float(role_diversity),
+            "narrative_conflict_intensity": float(conflict_intensity),
+        }
+
+        logger.debug(
+            "Narrative features extracted | conflict=%.4f roles=%.4f",
+            conflict_intensity,
+            role_diversity,
+        )
 
         return features
-
-    def _actor_features(self, doc) -> Dict[str, float]:
-        """Detect narrative actors through named entities and subjects."""
-
-        entities = [ent.text for ent in doc.ents if ent.label_ in {"PERSON", "ORG", "GPE"}]
-
-        subjects = [token for token in doc if token.dep_ == "nsubj"]
-
-        total_tokens = max(len(doc), 1)
-
-        return {
-            "narrative_entity_ratio": float(len(entities) / total_tokens),
-            "narrative_subject_ratio": float(len(subjects) / total_tokens),
-        }
-
-    def _temporal_features(self, tokens: List[str]) -> Dict[str, float]:
-        """Measure temporal progression indicators."""
-
-        if not tokens:
-            return {"narrative_temporal_ratio": 0.0}
-
-        count = sum(1 for token in tokens if token in self.TEMPORAL_MARKERS)
-
-        ratio = count / max(len(tokens), 1)
-
-        return {"narrative_temporal_ratio": float(ratio)}
-
-    def _conflict_features(self, tokens: List[str]) -> Dict[str, float]:
-        """Detect narrative conflict signals."""
-
-        if not tokens:
-            return {"narrative_conflict_ratio": 0.0}
-
-        count = sum(1 for token in tokens if token in self.CONFLICT_MARKERS)
-
-        ratio = count / max(len(tokens), 1)
-
-        return {"narrative_conflict_ratio": float(ratio)}
-
-    def _causal_features(self, tokens: List[str]) -> Dict[str, float]:
-        """Detect causal reasoning structures in narratives."""
-
-        if not tokens:
-            return {"narrative_causal_ratio": 0.0}
-
-        count = sum(1 for token in tokens if token in self.CAUSAL_MARKERS)
-
-        ratio = count / max(len(tokens), 1)
-
-        return {"narrative_causal_ratio": float(ratio)}
-
-    def _event_structure(self, doc) -> Dict[str, float]:
-        """Estimate narrative event density using verbs."""
-
-        verbs = [token for token in doc if token.pos_ == "VERB"]
-
-        total_tokens = max(len(doc), 1)
-
-        return {
-            "narrative_event_density": float(len(verbs) / total_tokens)
-        }
-
-
-def narrative_feature_vector(features: Dict[str, float]) -> np.ndarray:
-    """Convert narrative feature dictionary into numeric vector."""
-
-    if not isinstance(features, dict) or not features:
-        raise ValueError("features must be a non-empty dictionary")
-
-    try:
-        vector = np.array(list(features.values()), dtype=np.float32)
-        return vector
-    except Exception as exc:
-        logger.exception("Narrative vector conversion failed")
-        raise RuntimeError("Failed to convert narrative features") from exc

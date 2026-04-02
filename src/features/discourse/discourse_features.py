@@ -1,205 +1,170 @@
 """
 File Name: discourse_features.py
-Module: Discourse Analysis - Feature Extraction
+Module: Feature Engineering - Discourse Features
 Description:
-    Extracts discourse-level linguistic features used for narrative and bias
-    analysis in the TruthLens AI system. The module identifies structural
-    discourse signals such as sentence complexity, discourse markers,
-    argumentative structures, cohesion indicators, and rhetorical patterns.
-    These features complement transformer models by capturing document-level
-    language organization and discourse dynamics.
+    Extracts discourse-level linguistic signals from text such as discourse
+    markers, argumentation structure cues, rhetorical connectors, and
+    logical transition indicators. These features help characterize how
+    ideas are connected and structured within the text.
+
+    Discourse features are useful for identifying persuasive language,
+    argumentative structures, narrative flow, and coherence patterns.
+
+    The implementation relies on curated discourse marker lexicons and
+    lightweight heuristics to compute normalized feature ratios.
 
 Dependencies:
+    dataclasses
+    typing
     logging
     re
-    typing
     collections
-    numpy
-    spacy
 
 Inputs:
-    Raw text string
+    FeatureContext containing input text and optional tokens
 
 Outputs:
-    Dictionary of discourse-level features and numerical feature vector
+    Dict[str, float] representing discourse structure indicators
 """
+
+from __future__ import annotations
 
 import logging
 import re
 from collections import Counter
-from typing import Dict, List
+from dataclasses import dataclass
+from typing import Dict, List, Set
 
-import numpy as np
-import spacy
-
+from src.features.base.base_feature import BaseFeature, FeatureContext
+from src.features.base.feature_registry import register_feature
 
 logger = logging.getLogger(__name__)
 
 
-class DiscourseFeatureExtractor:
+def _tokenize(text: str) -> List[str]:
+    """Basic tokenizer fallback."""
+    return re.findall(r"\b\w+\b", text.lower())
+
+
+# ---------------------------------------------------------------------
+# Discourse Marker Lexicons
+# ---------------------------------------------------------------------
+
+CAUSAL_MARKERS: Set[str] = {
+    "because",
+    "since",
+    "therefore",
+    "thus",
+    "hence",
+    "consequently",
+}
+
+CONTRAST_MARKERS: Set[str] = {
+    "however",
+    "but",
+    "although",
+    "though",
+    "nevertheless",
+    "yet",
+}
+
+ADDITIVE_MARKERS: Set[str] = {
+    "also",
+    "furthermore",
+    "moreover",
+    "additionally",
+    "besides",
+}
+
+SEQUENTIAL_MARKERS: Set[str] = {
+    "first",
+    "second",
+    "then",
+    "next",
+    "finally",
+}
+
+EVIDENTIAL_MARKERS: Set[str] = {
+    "according",
+    "reported",
+    "evidence",
+    "study",
+    "data",
+    "research",
+}
+
+
+@dataclass
+@register_feature
+class DiscourseFeatures(BaseFeature):
     """
-    Extracts discourse structure and cohesion features from text.
+    Extracts discourse structure indicators.
+
+    Output Features
+    ---------------
+    discourse_causal_ratio
+    discourse_contrast_ratio
+    discourse_additive_ratio
+    discourse_sequential_ratio
+    discourse_evidential_ratio
+    discourse_marker_density
+    discourse_diversity
     """
 
-    DISCOURSE_MARKERS = {
-        "however",
-        "therefore",
-        "thus",
-        "moreover",
-        "furthermore",
-        "nevertheless",
-        "meanwhile",
-        "consequently",
-        "instead",
-        "otherwise",
-        "although",
-        "because",
-        "since",
-        "while",
-    }
+    name: str = "discourse_features"
+    description: str = "Discourse structure and rhetorical connector features"
 
-    CONTRAST_MARKERS = {
-        "but",
-        "however",
-        "although",
-        "though",
-        "yet",
-        "nevertheless",
-    }
+    def extract(self, context: FeatureContext) -> Dict[str, float]:
+        """Extract discourse-related features."""
+        if not context.text:
+            raise ValueError("FeatureContext.text cannot be empty")
 
-    CAUSAL_MARKERS = {
-        "because",
-        "since",
-        "therefore",
-        "thus",
-        "consequently",
-        "hence",
-    }
+        tokens = context.tokens or _tokenize(context.text)
 
-    def __init__(self, spacy_model: str = "en_core_web_sm") -> None:
-        """Initialize discourse feature extractor."""
+        if not tokens:
+            logger.warning("No tokens available for discourse feature extraction")
+            return {}
 
-        try:
-            self.nlp = spacy.load(spacy_model)
-        except Exception as exc:
-            logger.exception("spaCy model loading failed")
-            raise RuntimeError("Failed to load spaCy model") from exc
+        counter = Counter(tokens)
+        total_tokens = len(tokens)
 
-        logger.info("DiscourseFeatureExtractor initialized")
+        def ratio(lexicon: Set[str]) -> float:
+            count = sum(counter.get(w, 0) for w in lexicon)
+            return count / total_tokens
 
-    def extract(self, text: str) -> Dict[str, float]:
-        """Extract discourse-related linguistic features."""
+        causal_ratio = ratio(CAUSAL_MARKERS)
+        contrast_ratio = ratio(CONTRAST_MARKERS)
+        additive_ratio = ratio(ADDITIVE_MARKERS)
+        sequential_ratio = ratio(SEQUENTIAL_MARKERS)
+        evidential_ratio = ratio(EVIDENTIAL_MARKERS)
 
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError("Input text must be a non-empty string")
+        marker_counts = [
+            sum(counter.get(w, 0) for w in CAUSAL_MARKERS),
+            sum(counter.get(w, 0) for w in CONTRAST_MARKERS),
+            sum(counter.get(w, 0) for w in ADDITIVE_MARKERS),
+            sum(counter.get(w, 0) for w in SEQUENTIAL_MARKERS),
+            sum(counter.get(w, 0) for w in EVIDENTIAL_MARKERS),
+        ]
 
-        try:
-            doc = self.nlp(text)
-        except Exception as exc:
-            logger.exception("spaCy text processing failed")
-            raise RuntimeError("Text processing failed") from exc
+        total_markers = sum(marker_counts)
+        marker_density = total_markers / total_tokens
 
-        tokens = [token.text.lower() for token in doc if token.is_alpha]
+        diversity = sum(1 for c in marker_counts if c > 0) / len(marker_counts)
 
-        features: Dict[str, float] = {}
+        features: Dict[str, float] = {
+            "discourse_causal_ratio": float(causal_ratio),
+            "discourse_contrast_ratio": float(contrast_ratio),
+            "discourse_additive_ratio": float(additive_ratio),
+            "discourse_sequential_ratio": float(sequential_ratio),
+            "discourse_evidential_ratio": float(evidential_ratio),
+            "discourse_marker_density": float(marker_density),
+            "discourse_diversity": float(diversity),
+        }
 
-        features.update(self._sentence_structure(doc))
-        features.update(self._discourse_marker_features(tokens))
-        features.update(self._cohesion_features(tokens))
-        features.update(self._syntactic_complexity(doc))
-        features.update(self._punctuation_structure(text))
+        logger.debug(
+            "Discourse features extracted | density=%.4f diversity=%.4f",
+            marker_density,
+            diversity,
+        )
 
         return features
-
-    def _sentence_structure(self, doc) -> Dict[str, float]:
-        """Measure sentence-level structural properties."""
-
-        sentences = list(doc.sents)
-
-        if not sentences:
-            return {
-                "discourse_sentence_count": 0.0,
-                "discourse_avg_sentence_length": 0.0,
-            }
-
-        lengths = [len(sentence) for sentence in sentences]
-
-        return {
-            "discourse_sentence_count": float(len(sentences)),
-            "discourse_avg_sentence_length": float(np.mean(lengths)),
-        }
-
-    def _discourse_marker_features(self, tokens: List[str]) -> Dict[str, float]:
-        """Detect discourse marker usage in text."""
-
-        if not tokens:
-            return {"discourse_marker_ratio": 0.0}
-
-        count = sum(1 for token in tokens if token in self.DISCOURSE_MARKERS)
-
-        ratio = count / max(len(tokens), 1)
-
-        contrast_count = sum(1 for token in tokens if token in self.CONTRAST_MARKERS)
-        causal_count = sum(1 for token in tokens if token in self.CAUSAL_MARKERS)
-
-        return {
-            "discourse_marker_ratio": float(ratio),
-            "discourse_contrast_ratio": float(contrast_count / max(len(tokens), 1)),
-            "discourse_causal_ratio": float(causal_count / max(len(tokens), 1)),
-        }
-
-    def _cohesion_features(self, tokens: List[str]) -> Dict[str, float]:
-        """Measure lexical cohesion through word repetition."""
-
-        if not tokens:
-            return {"discourse_lexical_cohesion": 0.0}
-
-        counts = Counter(tokens)
-
-        repeated = sum(1 for _, count in counts.items() if count > 1)
-
-        ratio = repeated / max(len(tokens), 1)
-
-        return {"discourse_lexical_cohesion": float(ratio)}
-
-    def _syntactic_complexity(self, doc) -> Dict[str, float]:
-        """Estimate syntactic complexity using dependency structure."""
-
-        dep_counts = Counter(token.dep_ for token in doc)
-
-        total = max(len(doc), 1)
-
-        return {
-            "discourse_clause_ratio": float(dep_counts.get("ccomp", 0) / total),
-            "discourse_modifier_ratio": float(dep_counts.get("amod", 0) / total),
-            "discourse_adverbial_ratio": float(dep_counts.get("advmod", 0) / total),
-        }
-
-    def _punctuation_structure(self, text: str) -> Dict[str, float]:
-        """Capture structural punctuation patterns."""
-
-        commas = len(re.findall(r",", text))
-        semicolons = len(re.findall(r";", text))
-        colons = len(re.findall(r":", text))
-
-        length = max(len(text), 1)
-
-        return {
-            "discourse_comma_ratio": float(commas / length),
-            "discourse_semicolon_ratio": float(semicolons / length),
-            "discourse_colon_ratio": float(colons / length),
-        }
-
-
-def discourse_feature_vector(features: Dict[str, float]) -> np.ndarray:
-    """Convert discourse feature dictionary into numeric vector."""
-
-    if not isinstance(features, dict) or not features:
-        raise ValueError("features must be a non-empty dictionary")
-
-    try:
-        vector = np.array(list(features.values()), dtype=np.float32)
-        return vector
-    except Exception as exc:
-        logger.exception("Discourse vector conversion failed")
-        raise RuntimeError("Failed to convert discourse features") from exc

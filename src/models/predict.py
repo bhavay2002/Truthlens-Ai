@@ -60,7 +60,7 @@ import pandas as pd
 import joblib
 from transformers import RobertaTokenizer, RobertaForSequenceClassification
 
-from src.features.feature_pipeline import transform_feature_pipeline
+from features.pipelines.feature_pipeline import transform_feature_pipeline
 from src.utils.settings import load_settings
 
 logger = logging.getLogger(__name__)

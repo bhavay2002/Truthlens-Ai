@@ -10,7 +10,7 @@ from src.data.clean_data import clean_dataframe
 from src.data.data_augmentation import augment_dataset
 from src.data.merge_datasets import merge_datasets
 from src.evaluation.evaluate_model import evaluate, save_evaluation_results
-from src.features.feature_pipeline import (
+from features.pipelines.feature_pipeline import (
     fit_feature_pipeline,
     save_vectorizer,
     transform_feature_pipeline,
