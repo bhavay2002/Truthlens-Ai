@@ -1,12 +1,26 @@
 """
-File: json_utils.py
+File Name: json_utils.py
+Module: src.utils
+Description:
+    JSON utilities for TruthLens AI.
 
-Purpose
--------
-JSON utilities for TruthLens AI.
+    Provides robust helper functions to read, write, and append JSON files
+    used for experiment tracking, evaluation reports, configuration exports,
+    and analytical artifacts. The utilities enforce safe filesystem handling,
+    structured logging, and validation of JSON structures.
 
-Provides helper functions to read and write JSON files used
-for experiment tracking, evaluation reports, and data analysis.
+Author: TruthLens Engineering
+Date: 2026-04-03
+Dependencies:
+    - Python 3.10+
+
+Inputs:
+    - Python dictionaries
+    - JSON file paths
+
+Outputs:
+    - Serialized JSON files
+    - Parsed JSON dictionaries
 """
 
 from __future__ import annotations
@@ -28,6 +42,7 @@ logger = logging.getLogger(__name__)
 # Save JSON
 # ---------------------------------------------------------
 
+
 def save_json(
     data: dict[str, Any],
     path: str | Path,
@@ -38,11 +53,11 @@ def save_json(
 
     Parameters
     ----------
-    data : dict
+    data : dict[str, Any]
         Data to serialize.
 
     path : str | Path
-        Destination file.
+        Destination JSON file.
 
     indent : int
         JSON indentation level.
@@ -50,33 +65,33 @@ def save_json(
     Returns
     -------
     Path
-        Saved file path.
+        Path to the saved file.
     """
 
     try:
+        path_obj = Path(path)
 
-        path = Path(path)
+        if not isinstance(data, dict):
+            raise TypeError("data must be a dictionary")
 
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path_obj.parent.mkdir(parents=True, exist_ok=True)
 
-        with path.open("w", encoding="utf-8") as f:
+        with path_obj.open("w", encoding="utf-8") as file:
+            json.dump(data, file, indent=indent, ensure_ascii=False)
 
-            json.dump(data, f, indent=indent)
+        logger.info("Saved JSON file: %s", path_obj)
 
-        logger.info("Saved JSON file: %s", path)
+        return path_obj
 
-        return path
-
-    except Exception:
-
-        logger.exception("Failed to save JSON")
-
-        raise
+    except Exception as exc:
+        logger.exception("Failed to save JSON file")
+        raise RuntimeError(f"Unable to save JSON to {path}") from exc
 
 
 # ---------------------------------------------------------
 # Load JSON
 # ---------------------------------------------------------
+
 
 def load_json(path: str | Path) -> dict[str, Any]:
     """
@@ -85,38 +100,39 @@ def load_json(path: str | Path) -> dict[str, Any]:
     Parameters
     ----------
     path : str | Path
+        Path to JSON file.
 
     Returns
     -------
-    dict
+    dict[str, Any]
+        Parsed JSON content.
     """
 
     try:
+        path_obj = Path(path)
 
-        path = Path(path)
+        if not path_obj.exists():
+            raise FileNotFoundError(f"JSON file not found: {path_obj}")
 
-        if not path.exists():
+        with path_obj.open("r", encoding="utf-8") as file:
+            data = json.load(file)
 
-            raise FileNotFoundError(f"JSON file not found: {path}")
+        if not isinstance(data, dict):
+            raise ValueError("Loaded JSON content must be a dictionary")
 
-        with path.open("r", encoding="utf-8") as f:
-
-            data = json.load(f)
-
-        logger.info("Loaded JSON file: %s", path)
+        logger.info("Loaded JSON file: %s", path_obj)
 
         return data
 
-    except Exception:
-
-        logger.exception("Failed to load JSON")
-
-        raise
+    except Exception as exc:
+        logger.exception("Failed to load JSON file")
+        raise RuntimeError(f"Unable to load JSON from {path}") from exc
 
 
 # ---------------------------------------------------------
 # Append JSON Entry
 # ---------------------------------------------------------
+
 
 def append_json(
     entry: dict[str, Any],
@@ -125,55 +141,50 @@ def append_json(
     """
     Append dictionary entry to JSON list file.
 
-    If file does not exist, it is created.
+    If file does not exist, it will be created.
 
     Parameters
     ----------
-    entry : dict
+    entry : dict[str, Any]
         Entry to append.
 
     path : str | Path
+        JSON file containing a list.
 
     Returns
     -------
     Path
+        Path to updated JSON file.
     """
 
     try:
+        path_obj = Path(path)
 
-        path = Path(path)
+        if not isinstance(entry, dict):
+            raise TypeError("entry must be a dictionary")
 
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path_obj.parent.mkdir(parents=True, exist_ok=True)
 
-        if path.exists():
-
-            with path.open("r", encoding="utf-8") as f:
-
-                data = json.load(f)
+        if path_obj.exists():
+            with path_obj.open("r", encoding="utf-8") as file:
+                data = json.load(file)
 
             if not isinstance(data, list):
-
                 raise ValueError(
-                    "JSON file must contain a list "
-                    "to append entries"
+                    "JSON file must contain a list in order to append entries"
                 )
-
         else:
-
             data = []
 
         data.append(entry)
 
-        with path.open("w", encoding="utf-8") as f:
+        with path_obj.open("w", encoding="utf-8") as file:
+            json.dump(data, file, indent=2, ensure_ascii=False)
 
-            json.dump(data, f, indent=2)
+        logger.info("Appended entry to JSON file: %s", path_obj)
 
-        logger.info("Appended entry to JSON file: %s", path)
+        return path_obj
 
-        return path
-
-    except Exception:
-
+    except Exception as exc:
         logger.exception("Failed to append JSON entry")
-
-        raise
+        raise RuntimeError(f"Unable to append JSON entry to {path}") from exc

@@ -1,3 +1,43 @@
+Column Names:
+title
+text
+bias_label
+ideology_label
+propaganda_label
+frame
+CO
+EC
+HI
+MO
+RE
+hero
+villain
+victim
+hero_entities
+villain_entities
+victim_entities
+emotion_0
+emotion_1
+emotion_2
+emotion_3
+emotion_4
+emotion_5
+emotion_6
+emotion_7
+emotion_8
+emotion_9
+emotion_10
+emotion_11
+emotion_12
+emotion_13
+emotion_14
+emotion_15
+emotion_16
+emotion_17
+emotion_18
+emotion_19
+dataset
+
 Emotion	ID removed
 desire	8
 fear	14

@@ -170,7 +170,7 @@ class EmotionTargetAnalyzer:
         """
 
         head = token.head
-
+ 
         if head.ent_type_:
             return head.ent_type_
 
