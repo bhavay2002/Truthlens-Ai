@@ -1,4 +1,4 @@
-# TruthLens AI Repository Structure
+# Project Structure
 
 Snapshot date: 2026-04-03
 Root: `Truthlens Ai`

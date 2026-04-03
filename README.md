@@ -1,117 +1,340 @@
+
 # TruthLens AI
 
-TruthLens AI is a modular NLP platform for misinformation analysis. The current app supports:
+![Python](https://img.shields.io/badge/Python-3.10+-blue)
+![PyTorch](https://img.shields.io/badge/PyTorch-Deep%20Learning-red)
+![Transformers](https://img.shields.io/badge/HuggingFace-Transformers-yellow)
+![FastAPI](https://img.shields.io/badge/API-FastAPI-green)
+![License](https://img.shields.io/badge/License-MIT-lightgrey)
 
-- binary fake-news classification (RoBERTa-based)
-- unified multi-task dataset workflows for 7 NLP tasks
-- feature engineering, evaluation, explainability, graph analysis, and API serving
+**TruthLens AI** is a  **multi-layer AI system for misinformation detection and credibility analysis** .
 
-## Current Capabilities
+The platform combines:
 
-- End-to-end training and evaluation for transformer classifiers.
-- Data validation and schema normalization for unified datasets.
-- Multi-task model components for:
-  - `bias_label`
-  - `ideology_label`
-  - `propaganda_label`
-  - `frame`
-  - `CO`, `EC`, `HI`, `MO`, `RE`
-  - `hero`, `villain`, `victim`
-  - `emotion_0` ... `emotion_19`
-- FastAPI inference endpoint for deployed binary model usage.
-- Cross-validation and hyperparameter tuning utilities that now support configurable label columns.
+* Transformer-based NLP models
+* Linguistic feature engineering
+* Narrative and discourse analysis
+* Propaganda detection
+* Bias and ideological language detection
+* Graph-based reasoning
+* Explainable AI techniques
 
-## Canonical Unified Dataset Column Groups
+TruthLens evaluates news articles using **dozens of analytical signals** and produces a  **structured credibility score with explanations** .
 
-Text input:
-- `title`
-- `text`
+---
 
-Media bias task:
-- `bias_label`
+# Key Capabilities
 
-Ideology classification:
-- `ideology_label`
+### Fake News Detection
 
-Propaganda detection:
-- `propaganda_label`
+Binary classification of news articles:
 
-Narrative framing:
-- single-label: `frame`
-- multi-label: `CO`, `EC`, `HI`, `MO`, `RE`
-
-Narrative role extraction:
-- `hero`
-- `villain`
-- `victim`
-- `hero_entities`
-- `villain_entities`
-- `victim_entities`
-
-Emotion classification:
-- `emotion_0` ... `emotion_19`
-
-Metadata:
-- `dataset`
-
-## Key Modules
-
-- Data schema/normalization: `src/data/unified_label_schema.py`
-- Data pipeline orchestration: `src/pipelines/data_pipeline.py`
-- Feature pipeline: `src/features/feature_pipeline.py`
-- Binary model training: `src/models/train_roberta.py`
-- Multi-task model: `src/models/multitask/multitask_truthlens_model.py`
-- Inference helpers: `src/models/predict.py`, `src/models/inference.py`
-- Evaluation and plotting: `src/evaluation/evaluate_model.py`, `src/evaluation/visualize_metrics.py`
-- API service: `api/app.py`
-
-## Repository Layout
-
-```text
-Truthlens Ai/
-  api/
-  config/
-  data/
-  models/
-  reports/
-  src/
-  tests/
-  README.md
-  architecture.md
-  KNOWLEDGE.md
-  PROJECT_REVIEW.md
-  structure.md
+```
+REAL vs FAKE
 ```
 
-## Typical Workflows
+Using transformer models and engineered features.
 
-1. Train/evaluate binary classifier:
-- `python main.py`
-- `python evaluate.py`
+---
 
-2. Build unified dataset splits:
-- `python "ztest3 copy.py" --split train`
-- `python "ztest3 copy.py" --split validation`
-- `python "ztest3 copy.py" --split test`
+### Linguistic & Narrative Analysis
 
-3. Run API:
-- `uvicorn api.app:app --reload`
+TruthLens performs deep linguistic analysis including:
 
-4. Run tests:
-- `pytest -q`
+* Bias profiling
+* Emotion targeting
+* Narrative structure extraction
+* Rhetorical device detection
+* Context omission detection
+* Information density analysis
 
-## Quality Snapshot
+---
 
-- Latest local test run: `78 passed`.
-- Core training/evaluation paths are compatible with configurable label columns and unified schema columns.
+### Propaganda & Ideology Detection
 
-## Documentation
+The system identifies propaganda techniques and ideological framing:
 
-- Architecture details: `architecture.md`
-- Structure snapshot: `structure.md`
-- Deep knowledge map: `KNOWLEDGE.md`
-- Current status and gaps: `PROJECT_REVIEW.md`
+* Manipulation patterns
+* Ideologically loaded language
+* Framing strategies
+* Persuasion techniques
 
-## License
+---
 
-MIT (see `LICENSE`).
+### Graph-Based Analysis
+
+TruthLens constructs graphs representing relationships between:
+
+* Entities
+* Claims
+* Narratives
+* Sources
+
+Graph reasoning enables  **propagation and narrative conflict detection** .
+
+---
+
+### Explainable AI
+
+Predictions are accompanied by explanations using:
+
+* SHAP
+* LIME
+* Attention rollout
+* Feature importance
+* Explanation consistency checks
+
+---
+
+### Credibility Score Aggregation
+
+Outputs a final **TruthLens credibility score** using weighted signals from multiple modules.
+
+Example output:
+
+```
+Fake News Probability: 0.82
+Bias Score: 0.61
+Propaganda Score: 0.72
+Narrative Manipulation Score: 0.58
+
+TruthLens Credibility Score: 0.24
+Risk Level: HIGH
+```
+
+---
+
+# System Architecture
+
+TruthLens follows a  **multi-stage ML pipeline** .
+
+```
+Article Input
+      ↓
+Preprocessing
+      ↓
+Feature Engineering
+      ↓
+Transformer Model
+      ↓
+Analysis Modules
+      ↓
+Graph Analysis
+      ↓
+Explainability Layer
+      ↓
+Aggregation Engine
+      ↓
+TruthLens Credibility Score
+```
+
+---
+
+# Repository Structure
+
+Simplified project structure:
+
+```
+TruthLens-AI/
+
+api/                     FastAPI inference service
+config/                  YAML configuration files
+data/                    Raw / processed datasets
+experiments/             Experimental results
+logs/                    Training & inference logs
+models/                  Saved model artifacts
+notebooks/               Research notebooks
+reports/                 Evaluation reports and EDA
+
+src/
+
+  aggregation/           Credibility scoring system
+  analysis/              Linguistic & narrative analysis modules
+  data/                  Data ingestion & preprocessing
+  evaluation/            Evaluation metrics and dashboards
+  explainability/        SHAP, LIME, and explanation tools
+  features/              Feature engineering pipelines
+  graph/                 Graph construction & analysis
+  inference/             Production inference engine
+  models/                Transformer and multitask models
+  pipelines/             End-to-end ML pipelines
+  training/              Training utilities
+  utils/                 Config, logging, helper utilities
+  visualization/         Plotting and evaluation visualization
+
+tests/                   Unit and integration tests
+
+main.py                  Training pipeline
+evaluate.py              Evaluation script
+run_eda.py               Exploratory data analysis
+```
+
+This architecture enables  **modular experimentation and scalable inference pipelines** .
+
+---
+
+# Installation
+
+Create virtual environment
+
+```bash
+python -m venv venv
+```
+
+Activate environment
+
+Windows
+
+```
+venv\Scripts\activate
+```
+
+Linux / macOS
+
+```
+source venv/bin/activate
+```
+
+Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+---
+
+# Training
+
+Run the training pipeline:
+
+```bash
+python main.py
+```
+
+The pipeline performs:
+
+1. Dataset merging
+2. Data cleaning
+3. Feature engineering
+4. Model training
+5. Evaluation report generation
+
+---
+
+# Evaluation
+
+Evaluate trained models:
+
+```bash
+python evaluate.py
+```
+
+Evaluation outputs include:
+
+* Precision
+* Recall
+* F1 Score
+* Calibration analysis
+* Confusion matrices
+* Task correlation analysis
+
+Reports are stored in:
+
+```
+reports/
+```
+
+---
+
+# Inference API
+
+Start the FastAPI server:
+
+```bash
+uvicorn api.app:app --reload
+```
+
+Default address:
+
+```
+http://localhost:8000
+```
+
+---
+
+# API Example
+
+```
+POST /predict
+```
+
+Example request:
+
+```bash
+curl -X POST http://localhost:8000/predict \
+-H "Content-Type: application/json" \
+-d '{"text":"Breaking news: Scientists discover new species in the Amazon rainforest."}'
+```
+
+Example response:
+
+```json
+{
+ "prediction": "REAL",
+ "confidence": 0.91,
+ "truthlens_score": 0.72
+}
+```
+
+---
+
+# Datasets
+
+TruthLens integrates multiple datasets including:
+
+| Task       | Dataset                 |
+| ---------- | ----------------------- |
+| Fake News  | ISOT, LIAR, FakeNewsNet |
+| Bias       | BABE, BASIL, MBIC       |
+| Emotion    | GoEmotions, SemEval     |
+| Narrative  | FrameNet                |
+| Propaganda | PTC Propaganda          |
+| Ideology   | AllSides                |
+
+Datasets are unified using a  **shared label schema** .
+
+---
+
+# Testing
+
+Run the full test suite:
+
+```bash
+pytest
+```
+
+Tests cover:
+
+* data pipelines
+* model training
+* inference pipelines
+* explainability modules
+* configuration integrity
+
+---
+
+# Future Work
+
+Planned extensions:
+
+* Multilingual misinformation detection
+* Real-time news monitoring
+* Knowledge graph integration
+* Cross-source narrative tracking
+* Browser credibility extension
+
+---
+
+# License
+
+MIT License

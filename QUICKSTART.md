@@ -1,116 +1,355 @@
-﻿# TruthLens AI - QuickStart
+﻿
+# TruthLens AI — Quick Start
 
-This guide is for running the project quickly with the current architecture.
+This guide explains how to  **run TruthLens AI quickly using the current multi-model architecture** .
 
-## 1. Environment Setup
+TruthLens is an AI system designed to analyze news articles and detect:
+
+* Fake news signals
+* Political and media bias
+* Propaganda techniques
+* Narrative framing
+* Ideological positioning
+* Emotional manipulation
+
+The system combines **multiple models and feature pipelines** to produce a **comprehensive credibility and narrative analysis** of an article.
+
+---
+
+# 1. Environment Setup
+
+Create a virtual environment.
 
 ```bash
 python -m venv venv
+```
+
+Activate the environment.
+
+### Windows
+
+```bash
 venv\Scripts\activate
+```
+
+### Linux / Mac
+
+```bash
+source venv/bin/activate
+```
+
+Install dependencies.
+
+```bash
 pip install -r requirements.txt
 ```
 
-Optional setup helper:
+Optional environment setup helper:
 
 ```bash
 python setup.py
 ```
 
-## 2. Data Expectations
+This script may:
 
-The training pipeline uses merged datasets from:
+* verify environment configuration
+* create required directories
+* validate dataset paths
+* prepare cache directories
 
-- `data/raw/isot/`
-- `data/raw/liar_dataset/`
-- `data/raw/FakeNewsNet/`
+---
 
-If files are missing, add them under those folders before training.
+# 2. Dataset Requirements
 
-## 3. Configuration (Before Training)
+TruthLens supports  **multi-task learning** , so datasets may contain labels for multiple signals.
 
-Edit `config/config.yaml`.
+Datasets should be placed in:
 
-Common settings:
+```
+data/raw/isot/
+data/raw/liar_dataset/
+data/raw/FakeNewsNet/
+```
 
-- `data.augmentation_multiplier`
-- `training.epochs`
-- `training.batch_size`
-- `training.learning_rate`
-- `training.text_column` (default: `engineered_text`)
-- `training.run_cross_validation` (true/false)
-- `training.run_hyperparameter_tuning` (true/false)
-- `training.optuna_trials`
+These datasets are merged during training.
 
-## 4. Train
+### Dataset Roles
+
+| Dataset        | Purpose                          |
+| -------------- | -------------------------------- |
+| ISOT Fake News | Fake vs real news classification |
+| LIAR Dataset   | political truthfulness labels    |
+| FakeNewsNet    | misinformation + social signals  |
+
+Optional additional datasets may support:
+
+* propaganda detection
+* ideology labeling
+* narrative framing
+* emotion detection
+
+---
+
+# 3. Configuration
+
+Edit the configuration file:
+
+```
+config/config.yaml
+```
+
+Important settings:
+
+### Data Configuration
+
+| Parameter                        | Description                |
+| -------------------------------- | -------------------------- |
+| `data.augmentation_multiplier` | Dataset augmentation level |
+| `data.merge_strategy`          | Dataset merging strategy   |
+
+### Training Configuration
+
+| Parameter                  | Description                |
+| -------------------------- | -------------------------- |
+| `training.epochs`        | Number of training epochs  |
+| `training.batch_size`    | Training batch size        |
+| `training.learning_rate` | Optimizer learning rate    |
+| `training.text_column`   | Text column used by models |
+
+### Multi-Model Configuration
+
+TruthLens supports multiple model heads.
+
+| Parameter                    | Description                  |
+| ---------------------------- | ---------------------------- |
+| `models.enable_fake_news`  | Enable fake news classifier  |
+| `models.enable_bias`       | Enable bias detection model  |
+| `models.enable_propaganda` | Enable propaganda classifier |
+| `models.enable_narrative`  | Enable narrative analysis    |
+| `models.enable_ideology`   | Enable ideology classifier   |
+| `models.enable_emotion`    | Enable emotion analysis      |
+
+### Training Options
+
+| Parameter                              | Description                  |
+| -------------------------------------- | ---------------------------- |
+| `training.run_cross_validation`      | Enable cross-validation      |
+| `training.run_hyperparameter_tuning` | Enable hyperparameter search |
+| `training.optuna_trials`             | Number of tuning trials      |
+
+---
+
+# 4. Train the Models
+
+Run the full training pipeline.
 
 ```bash
 python main.py
 ```
 
-Pipeline steps:
+Training pipeline steps:
 
-1. Merge datasets
-2. Clean dataset
-3. Optional augmentation
-4. Feature engineering (source + metadata + TF-IDF tokens)
-5. Optional CV
-6. Optional tuning
-7. Final training
-8. Evaluation + reports
+1. Dataset loading and merging
+2. Data cleaning and normalization
+3. Optional dataset augmentation
+4. Feature engineering
+   * source credibility features
+   * metadata signals
+   * linguistic features
+   * TF-IDF tokens
+5. Feature pipeline transformation
+6. Multi-task model training
+7. Optional cross-validation
+8. Optional hyperparameter tuning
+9. Final training of all model heads
+10. Evaluation and report generation
 
-## 5. Evaluate Saved Model
+---
+
+# 5. Multi-Model Architecture
+
+TruthLens uses  **multiple specialized models** .
+
+| Model            | Purpose                         |
+| ---------------- | ------------------------------- |
+| Fake News Model  | Detect misinformation           |
+| Bias Model       | Detect political/media bias     |
+| Propaganda Model | Identify propaganda techniques  |
+| Narrative Model  | Detect narrative framing        |
+| Ideology Model   | Predict ideological orientation |
+| Emotion Model    | Detect emotional manipulation   |
+
+Outputs from these models are combined to generate a  **comprehensive article analysis report** .
+
+---
+
+# 6. Evaluate Trained Models
+
+Run evaluation.
 
 ```bash
 python evaluate.py
 ```
 
-## 6. Run API
+Evaluation includes:
+
+* classification metrics
+* confusion matrices
+* model-specific performance
+* multi-task evaluation reports
+
+Metrics may include:
+
+* Accuracy
+* Precision
+* Recall
+* F1 Score
+* ROC-AUC
+
+---
+
+# 7. Run the API Server
+
+TruthLens exposes a REST API for inference.
+
+Start the API server.
 
 ```bash
 uvicorn api.app:app --reload
 ```
 
-Endpoints:
+Default address:
 
-- `GET /`
-- `GET /health`
-- `POST /predict`
+```
+http://127.0.0.1:8000
+```
 
-## 7. Test Suite
+---
+
+# 8. API Endpoints
+
+| Endpoint     | Method | Description     |
+| ------------ | ------ | --------------- |
+| `/`        | GET    | API info        |
+| `/health`  | GET    | health check    |
+| `/predict` | POST   | analyze article |
+
+Example request:
+
+```json
+{
+  "text": "Example news article content..."
+}
+```
+
+Example response:
+
+```json
+{
+  "fake_news_probability": 0.78,
+  "bias_score": 0.42,
+  "propaganda_score": 0.36,
+  "narrative_type": "political conflict",
+  "ideology": "left-leaning",
+  "emotion_profile": {
+    "anger": 0.32,
+    "fear": 0.18,
+    "joy": 0.05
+  }
+}
+```
+
+---
+
+# 9. Run the Test Suite
+
+Execute all tests.
 
 ```bash
 python -B -m pytest -q
 ```
 
-## 8. Useful Commands
+Tests verify:
+
+* feature pipelines
+* data validation
+* training utilities
+* inference pipeline
+* API endpoints
+
+---
+
+# 10. Useful Testing Commands
+
+### Training utility tests
 
 ```bash
-# Run only training utility tests
 python -B -m pytest tests/test_training_utils.py -q
+```
 
-# Run only feature/validation tests
+### Feature pipeline tests
+
+```bash
 python -B -m pytest tests/test_feature_pipeline_and_validation.py -q
+```
 
-# Run API tests
+### API tests
+
+```bash
 python -B -m pytest tests/test_smoke.py::TestAPI -q
 ```
 
-## 9. Main Artifacts
+---
 
-- `models/roberta_model/`
-- `models/tfidf_vectorizer.joblib`
-- `logs/training.log`
-- `reports/evaluation_results.json`
-- `reports/confusion_matrix.png`
-- `reports/data_cleaning_report.json`
+# 11. Generated Artifacts
 
-## 10. Troubleshooting
+After training, the following artifacts are generated.
 
-- Model not found in API:
-  - Run `python main.py` first.
-- Slow training:
-  - Lower `training.epochs`, use smaller batch size, or use GPU.
-- Tuning fails due missing Optuna:
-  - Install Optuna or rely on built-in fallback search.
+| Artifact                              | Description                |
+| ------------------------------------- | -------------------------- |
+| `models/fake_news_model/`           | fake news classifier       |
+| `models/bias_model/`                | bias detection model       |
+| `models/propaganda_model/`          | propaganda classifier      |
+| `models/narrative_model/`           | narrative analysis model   |
+| `models/ideology_model/`            | ideology classifier        |
+| `models/emotion_model/`             | emotion classifier         |
+| `models/tfidf_vectorizer.joblib`    | TF-IDF vectorizer          |
+| `logs/training.log`                 | training logs              |
+| `reports/evaluation_results.json`   | evaluation metrics         |
+| `reports/confusion_matrix.png`      | confusion matrix           |
+| `reports/data_cleaning_report.json` | dataset processing summary |
 
-For full architecture + file-by-file details, read `KNOWLEDGE.md`.
+---
+
+# 12. Troubleshooting
+
+### Model not found in API
+
+Run training first.
+
+```bash
+python main.py
+```
+
+---
+
+### Training is slow
+
+Possible solutions:
+
+* reduce `training.epochs`
+* reduce `training.batch_size`
+* disable hyperparameter tuning
+* run training on GPU
+
+---
+
+### Hyperparameter tuning fails
+
+Install Optuna.
+
+```bash
+pip install optuna
+```
+
+If Optuna is unavailable, TruthLens will fall back to  **basic parameter search** .
