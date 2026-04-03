@@ -116,7 +116,7 @@ class FeatureSchemaValidator:
             try:
                 validated.append(self.validate(fv))
 
-            except Exception as exc:  # noqa: BLE001
+            except Exception:  # noqa: BLE001
                 logger.error("Feature validation failed at index %d", idx)
 
                 if self.strict:

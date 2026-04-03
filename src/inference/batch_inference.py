@@ -47,8 +47,14 @@ import pandas as pd
 from tqdm import tqdm
 
 from src.inference.model_loader import ModelLoader
-from src.inference.feature_preparer import FeaturePreparer
-from src.inference.prediction_pipeline import PredictionPipeline
+from src.inference.feature_preparer import (
+    FeaturePreparer,
+    FeaturePreparationConfig,
+)
+from src.inference.prediction_pipeline import (
+    PredictionPipeline,
+    PredictionPipelineConfig,
+)
 from src.inference.report_generator import ReportGenerator
 from src.inference.result_formatter import ResultFormatter
 
@@ -83,10 +89,30 @@ class BatchInferenceEngine:
         self.model_loader = ModelLoader(config.models_dir)
         self.artifacts = self.model_loader.load_all()
 
-        self.feature_preparer = feature_preparer
+        if feature_preparer is not None:
+            self.feature_preparer = feature_preparer
+        else:
+            schema = self.artifacts.feature_schema
+            if isinstance(schema, dict):
+                feature_schema = [str(k) for k in schema.keys()]
+            elif isinstance(schema, list):
+                feature_schema = [str(k) for k in schema]
+            else:
+                feature_schema = ["text_length"]
+
+            prep_config = FeaturePreparationConfig(
+                feature_schema=feature_schema,
+                return_tensor=True,
+            )
+            self.feature_preparer = FeaturePreparer(
+                prep_config,
+                scaler=self.artifacts.feature_scaler,
+                selector=self.artifacts.feature_selector,
+                device=str(self.model_loader.device),
+            )
 
         self.prediction_pipeline = PredictionPipeline(
-            config=None,
+            config=PredictionPipelineConfig(device=str(self.model_loader.device)),
             bias_model=self.artifacts.bias_model,
             ideology_model=self.artifacts.ideology_model,
             propaganda_model=None,

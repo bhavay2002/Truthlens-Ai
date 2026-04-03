@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from typing import Dict, Iterable, List, Set, Tuple
+from typing import Dict, List, Set, Tuple
 
 
 logger = logging.getLogger(__name__)

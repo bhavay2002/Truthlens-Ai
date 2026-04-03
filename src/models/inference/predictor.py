@@ -25,7 +25,7 @@ Outputs:
 from __future__ import annotations
 
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 import torch
 import torch.nn as nn

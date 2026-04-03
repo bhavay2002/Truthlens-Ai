@@ -34,6 +34,9 @@ import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
+
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import FeatureRegistry
 from src.features.fusion.feature_fusion import FeatureFusion
@@ -206,3 +209,73 @@ class FeaturePipeline:
         )
 
         return features
+
+
+def apply_feature_engineering(
+    df: pd.DataFrame,
+    *,
+    text_column: str = "text",
+    tfidf_max_features: int = 5000,
+    top_terms_per_doc: int = 5,
+    vectorizer: TfidfVectorizer | None = None,
+) -> tuple[pd.DataFrame, TfidfVectorizer]:
+    """
+    Build engineered text from top TF-IDF terms per document.
+    """
+
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("df must be a pandas DataFrame")
+
+    if text_column not in df.columns:
+        raise ValueError(f"Missing text column: {text_column}")
+
+    if top_terms_per_doc < 1:
+        raise ValueError("top_terms_per_doc must be >= 1")
+
+    texts = df[text_column].fillna("").astype(str).tolist()
+
+    if vectorizer is None:
+        vectorizer = TfidfVectorizer(max_features=tfidf_max_features)
+        matrix = vectorizer.fit_transform(texts)
+    else:
+        matrix = vectorizer.transform(texts)
+
+    feature_names = vectorizer.get_feature_names_out()
+
+    engineered: list[str] = []
+
+    for i in range(matrix.shape[0]):
+        row = matrix.getrow(i)
+        if row.nnz == 0:
+            engineered.append("")
+            continue
+
+        order = row.data.argsort()[::-1][:top_terms_per_doc]
+        top_indices = row.indices[order]
+        terms = [str(feature_names[idx]) for idx in top_indices]
+        engineered.append(" ".join(terms))
+
+    output_df = df.copy()
+    output_df["engineered_text"] = engineered
+
+    return output_df, vectorizer
+
+
+def transform_feature_pipeline(
+    df: pd.DataFrame,
+    *,
+    vectorizer: TfidfVectorizer,
+    text_column: str = "text",
+    top_terms_per_doc: int = 5,
+) -> pd.DataFrame:
+    """
+    Transform text data using an existing TF-IDF vectorizer.
+    """
+
+    transformed_df, _ = apply_feature_engineering(
+        df,
+        text_column=text_column,
+        top_terms_per_doc=top_terms_per_doc,
+        vectorizer=vectorizer,
+    )
+    return transformed_df

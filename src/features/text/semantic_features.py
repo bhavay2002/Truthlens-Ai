@@ -33,7 +33,7 @@ from __future__ import annotations
 import logging
 import hashlib
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict
 
 import numpy as np
 

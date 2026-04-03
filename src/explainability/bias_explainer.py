@@ -79,6 +79,7 @@ class _FallbackBiasFeatures:
 @dataclass
 class BiasExplanation:
     token_importance: List[Dict[str, Any]]
+    integrated_gradients: List[Dict[str, Any]]
     biased_token_highlights: List[str]
     sentence_bias_scores: List[Dict[str, Any]]
     attention_scores: List[Dict[str, Any]]
@@ -338,6 +339,7 @@ def explain_bias(
 
     explanation = BiasExplanation(
         token_importance=shap_importance,
+        integrated_gradients=ig_importance,
         biased_token_highlights=biased_tokens,
         sentence_bias_scores=sentence_scores,
         attention_scores=attention_scores,

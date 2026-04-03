@@ -182,10 +182,10 @@ class CheckpointManager:
         Remove old checkpoints beyond max_checkpoints limit.
         """
 
-        try:
+        if max_checkpoints < 1:
+            raise ValueError("max_checkpoints must be >= 1")
 
-            if max_checkpoints < 1:
-                raise ValueError("max_checkpoints must be >= 1")
+        try:
 
             checkpoints = self.list_checkpoints()
 

@@ -26,9 +26,19 @@ from pathlib import Path
 from typing import Dict, Any
 
 import pandas as pd
-import streamlit as st
+try:
+    import streamlit as st
+except ImportError:  # pragma: no cover - optional dependency
+    st = None
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_streamlit() -> None:
+    if st is None:
+        raise RuntimeError(
+            "Streamlit is not installed. Install 'streamlit' to launch dashboard."
+        )
 
 
 def _load_report(report_path: str | Path) -> Dict[str, Any]:
@@ -58,6 +68,8 @@ def _render_task_metrics(tasks: Dict[str, Dict[str, Any]]) -> None:
     Render metrics for each task.
     """
 
+    _ensure_streamlit()
+
     st.header("Task Metrics")
 
     for task, metrics in tasks.items():
@@ -81,6 +93,8 @@ def _render_summary(summary: Dict[str, Any]) -> None:
     Render overall evaluation summary.
     """
 
+    _ensure_streamlit()
+
     st.header("Overall Performance")
 
     try:
@@ -99,6 +113,8 @@ def launch_dashboard(report_path: str | Path) -> None:
     """
     Launch Streamlit evaluation dashboard.
     """
+
+    _ensure_streamlit()
 
     logger.info("Launching TruthLens evaluation dashboard")
 

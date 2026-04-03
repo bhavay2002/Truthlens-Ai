@@ -2,20 +2,21 @@
 File Name: feature_pipeline.py
 Module: TruthLens Pipeline - Feature Aggregation
 Description:
-    Runs bias, narrative, discourse, and graph feature extraction for a text
-    sample and returns a unified structured feature bundle.
+    Pipeline wrapper that builds structured feature bundles from the
+    registered TruthLens feature extraction system.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
+import re
+from dataclasses import dataclass
+from typing import Any, Dict, List
 
 import numpy as np
 
-from src.features.bias.bias_features import BiasFeatureExtractor
-from src.features.discourse.discourse_features import DiscourseFeatureExtractor
-from src.features.narrative.narrative_features import NarrativeFeatureExtractor
+from src.features.base.base_feature import FeatureContext
+from src.features.pipelines.feature_pipeline import FeaturePipeline as CoreFeaturePipeline
 from src.graph.entity_graph import EntityGraphBuilder
 from src.graph.graph_analysis import GraphAnalyzer
 
@@ -23,56 +24,122 @@ from src.graph.graph_analysis import GraphAnalyzer
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class FeatureBundle:
+    """
+    Structured feature bundle returned by the pipeline.
+    """
+
+    tokens: List[str]
+    embedding: np.ndarray
+    bias: Dict[str, Any]
+    narrative: Dict[str, Any]
+    discourse: Dict[str, Any]
+    linguistic: Dict[str, Any]
+    graph: Dict[str, Any]
+
+
 class FeaturePipeline:
-    """Extract and aggregate non-emotion analytical feature groups."""
+    """
+    Unified feature extraction pipeline for TruthLens.
+    """
 
     def __init__(self) -> None:
-        self.bias_extractor = BiasFeatureExtractor()
-        self.narrative_extractor = NarrativeFeatureExtractor()
-        self.discourse_extractor = DiscourseFeatureExtractor()
+        self._core = CoreFeaturePipeline()
+        self._core.initialize()
+
         self.entity_graph_builder = EntityGraphBuilder()
         self.graph_analyzer = GraphAnalyzer()
 
-        logger.info("FeaturePipeline initialized")
+        logger.info("FeaturePipeline initialized successfully")
 
-    def extract_features(self, text: str) -> Dict[str, Dict[str, Any]]:
-        """Extract all supported feature groups for one text sample."""
+    @staticmethod
+    def _tokenize(text: str) -> List[str]:
+        return re.findall(r"\b\w+\b", text.lower())
+
+    @staticmethod
+    def _split_feature_groups(flat_features: Dict[str, float]) -> Dict[str, Dict[str, float]]:
+        groups: Dict[str, Dict[str, float]] = {
+            "bias": {},
+            "narrative": {},
+            "discourse": {},
+            "linguistic": {},
+        }
+
+        for key, value in flat_features.items():
+            if key.startswith("bias_"):
+                groups["bias"][key] = value
+            elif key.startswith("narrative_"):
+                groups["narrative"][key] = value
+            elif key.startswith("discourse_"):
+                groups["discourse"][key] = value
+            else:
+                groups["linguistic"][key] = value
+
+        return groups
+
+    def extract_features(self, text: str) -> FeatureBundle:
+        """
+        Extract all supported feature groups for a single text input.
+        """
+
         if not isinstance(text, str) or not text.strip():
             raise ValueError("text must be a non-empty string")
 
+        context = FeatureContext(text=text)
+
         try:
-            bias_features = self.bias_extractor.extract_features(text)
-            narrative_features = self.narrative_extractor.extract(text)
-            discourse_features = self.discourse_extractor.extract(text)
+            flat_features = self._core.extract(context)
+            groups = self._split_feature_groups(flat_features)
 
             entity_graph = self.entity_graph_builder.build_graph(text)
-            graph_features = self.entity_graph_builder.extract_graph_features(
-                entity_graph
-            )
+            graph_features = self.entity_graph_builder.extract_graph_features(entity_graph)
             graph_metrics = self.graph_analyzer.analyze(entity_graph)
+            graph_bundle = {**graph_features, **graph_metrics}
         except Exception as exc:
             logger.exception("Feature extraction failed")
             raise RuntimeError("Feature pipeline execution failed") from exc
 
+        return FeatureBundle(
+            tokens=context.tokens or self._tokenize(text),
+            embedding=np.asarray([], dtype=np.float32),
+            bias=groups["bias"],
+            narrative=groups["narrative"],
+            discourse=groups["discourse"],
+            linguistic=groups["linguistic"],
+            graph=graph_bundle,
+        )
+
+    def extract_feature_dict(self, text: str) -> Dict[str, Any]:
+        bundle = self.extract_features(text)
+
         return {
-            "bias": bias_features,
-            "narrative": narrative_features,
-            "discourse": discourse_features,
-            "graph": {**graph_features, **graph_metrics},
+            "tokens": bundle.tokens,
+            "embedding": bundle.embedding,
+            "bias": bundle.bias,
+            "narrative": bundle.narrative,
+            "discourse": bundle.discourse,
+            "linguistic": bundle.linguistic,
+            "graph": bundle.graph,
         }
 
     def extract_vector(self, text: str) -> np.ndarray:
-        """Flatten numeric features across groups into a 1D vector."""
-        grouped = self.extract_features(text)
+        bundle = self.extract_features(text)
 
-        values: list[float] = []
-        for group_name in ("bias", "narrative", "discourse", "graph"):
-            section = grouped.get(group_name, {})
-            if not isinstance(section, dict):
+        values: List[float] = []
+
+        for group in (
+            bundle.bias,
+            bundle.narrative,
+            bundle.discourse,
+            bundle.linguistic,
+            bundle.graph,
+        ):
+            if not isinstance(group, dict):
                 continue
 
-            for key in sorted(section.keys()):
-                value = section[key]
+            for key in sorted(group.keys()):
+                value = group[key]
                 if isinstance(value, (int, float)):
                     values.append(float(value))
 

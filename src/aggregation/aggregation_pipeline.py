@@ -42,8 +42,6 @@ from __future__ import annotations
 import logging
 from typing import Dict, Any
 
-import numpy as np
-
 from src.aggregation.score_normalizer import normalize_minmax
 from src.aggregation.weight_manager import WeightManager
 from src.aggregation.risk_assessment import assess_truthlens_risks

@@ -27,19 +27,31 @@ import logging
 from pathlib import Path
 from typing import Dict, Any, Optional
 
-import mlflow
+try:
+    import mlflow
+except ImportError:  # pragma: no cover - optional dependency
+    mlflow = None
 
 
 logger = logging.getLogger(__name__)
 
 
-def start_experiment(name: str = "truthlens_evaluation") -> mlflow.ActiveRun:
+def _ensure_mlflow() -> None:
+    if mlflow is None:
+        raise RuntimeError(
+            "MLflow is not installed. Install 'mlflow' to use experiment tracking."
+        )
+
+
+def start_experiment(name: str = "truthlens_evaluation") -> Any:
     """
     Start or attach to an MLflow experiment.
     """
 
     if not isinstance(name, str) or not name.strip():
         raise ValueError("Experiment name must be a non-empty string.")
+
+    _ensure_mlflow()
 
     try:
         mlflow.set_experiment(name)
@@ -58,6 +70,8 @@ def log_metrics(metrics: Dict[str, Any]) -> None:
 
     if not isinstance(metrics, dict):
         raise TypeError("metrics must be a dictionary.")
+
+    _ensure_mlflow()
 
     for key, value in metrics.items():
 
@@ -80,6 +94,8 @@ def log_params(params: Dict[str, Any]) -> None:
     if not isinstance(params, dict):
         raise TypeError("params must be a dictionary.")
 
+    _ensure_mlflow()
+
     for key, value in params.items():
 
         try:
@@ -98,6 +114,8 @@ def log_artifact(path: str | Path) -> Path:
     if not artifact_path.exists():
         raise FileNotFoundError(f"Artifact not found: {artifact_path}")
 
+    _ensure_mlflow()
+
     try:
         mlflow.log_artifact(str(artifact_path))
         logger.info("Logged artifact to MLflow: %s", artifact_path)
@@ -112,6 +130,10 @@ def end_run(status: Optional[str] = None) -> None:
     """
     End the active MLflow run.
     """
+
+    if mlflow is None:
+        logger.warning("MLflow is not installed; skipping run close.")
+        return
 
     try:
         mlflow.end_run(status=status)

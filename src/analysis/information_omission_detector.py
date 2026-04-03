@@ -30,7 +30,6 @@ Outputs:
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass
 from collections import Counter
 from typing import Dict, List

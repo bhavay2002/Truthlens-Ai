@@ -25,7 +25,7 @@ Outputs:
 from __future__ import annotations
 
 import logging
-from typing import Dict, Type, List, Optional
+from typing import Dict, List, Type
 
 from src.features.base.base_feature import BaseFeature
 

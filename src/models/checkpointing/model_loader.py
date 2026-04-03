@@ -34,7 +34,7 @@ from typing import Dict, Any, Optional
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
-from src.models.factory.model_factory import ModelFactory
+from src.models.registry.model_factory import ModelFactory
 
 logger = logging.getLogger(__name__)
 

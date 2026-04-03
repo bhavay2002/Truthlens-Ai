@@ -40,7 +40,7 @@ from typing import Any, Dict, Optional
 
 import joblib
 import torch
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoTokenizer
 
 logger = logging.getLogger(__name__)
 

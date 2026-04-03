@@ -44,16 +44,10 @@ import numpy as np
 import pandas as pd
 
 from src.evaluation.evaluator import Evaluator
-from src.evaluation.advanced_analysis import (
-    actor_graph_metrics,
-    frame_coherence,
-)
 from src.evaluation.calibration import expected_calibration_error
 from src.evaluation.uncertainty import uncertainty_statistics
 from src.evaluation.task_correlation import compute_task_correlation
-from src.evaluation.mlflow_tracker import start_experiment, log_metrics
 from src.evaluation.report_writer import save_report
-from src.evaluation.pdf_report import generate_pdf_report
 
 
 logger = logging.getLogger(__name__)
@@ -141,6 +135,15 @@ def _run_advanced_analysis(
     diagnostics: Dict[str, Any] = {}
 
     try:
+        from src.evaluation.advanced_analysis import (
+            actor_graph_metrics,
+            frame_coherence,
+        )
+    except ImportError as exc:
+        logger.warning("Advanced analysis dependencies unavailable: %s", exc)
+        return diagnostics
+
+    try:
 
         if df is not None:
             diagnostics["actor_graph"] = actor_graph_metrics(df)
@@ -224,7 +227,12 @@ def evaluate_and_save(
 
     pdf_path = Path(output_path).with_suffix(".pdf")
 
-    generate_pdf_report(report, pdf_path)
+    try:
+        from src.evaluation.pdf_report import generate_pdf_report
+    except ImportError as exc:
+        logger.warning("PDF generation skipped (dependency missing): %s", exc)
+    else:
+        generate_pdf_report(report, pdf_path)
 
     logger.info("Evaluation reports saved")
 
@@ -278,7 +286,14 @@ def run_evaluation(
         if dataset_path.exists():
             df = pd.read_csv(dataset_path)
 
-    run = start_experiment()
+    tracker_available = True
+    try:
+        from src.evaluation.mlflow_tracker import start_experiment, log_metrics
+    except ImportError as exc:
+        logger.warning("MLflow tracking disabled (dependency missing): %s", exc)
+        tracker_available = False
+    else:
+        start_experiment()
 
     report = evaluate_and_save(
         preds=preds,
@@ -288,8 +303,8 @@ def run_evaluation(
         df=df,
     )
 
-    log_metrics(report["summary"])
-
-    logger.info("MLflow experiment logged")
+    if tracker_available:
+        log_metrics(report["summary"])
+        logger.info("MLflow experiment logged")
 
     return report

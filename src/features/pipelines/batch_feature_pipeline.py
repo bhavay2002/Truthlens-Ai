@@ -91,7 +91,7 @@ class BatchFeaturePipeline:
                 features = self.pipeline.extract(ctx)
                 results.append(features)
 
-            except Exception as exc:  # noqa: BLE001
+            except Exception:  # noqa: BLE001
                 logger.exception("Feature extraction failed")
 
                 if self.fail_fast:

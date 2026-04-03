@@ -35,13 +35,14 @@ Outputs:
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 import json
 import logging
 import sys
 from pathlib import Path
 from typing import List
 
-from src.inference.run_inference import PredictionPipeline
+from src.inference.inference_engine import InferenceConfig, InferenceEngine
 
 logging.basicConfig(
     level=logging.INFO,
@@ -124,26 +125,26 @@ def load_text_file(path: str | Path) -> List[str]:
     return texts
 
 
-def run_single(pipeline: PredictionPipeline, text: str) -> None:
+def run_single(engine: InferenceEngine, text: str) -> None:
     """
     Run inference for a single article.
     """
 
     logger.info("Running single-article inference.")
 
-    result = pipeline.predict(text)
+    result = asdict(engine.predict_single(text))
 
     print(json.dumps(result, indent=2))
 
 
-def run_batch(pipeline: PredictionPipeline, texts: List[str]) -> None:
+def run_batch(engine: InferenceEngine, texts: List[str]) -> None:
     """
     Run inference for multiple articles.
     """
 
     logger.info("Running batch inference for %d texts.", len(texts))
 
-    results = pipeline.predict_batch(texts)
+    results = [asdict(item) for item in engine.predict(texts)]
 
     print(json.dumps(results, indent=2))
 
@@ -160,20 +161,23 @@ def main() -> None:
         sys.exit(1)
 
     try:
-        pipeline = PredictionPipeline(
-            model_dir=args.model_dir,
-            max_length=args.max_length,
-            device=args.device,
+        engine = InferenceEngine(
+            InferenceConfig(
+                model_path=args.model_dir,
+                tokenizer_path=None,
+                max_length=args.max_length,
+                device=args.device or "auto",
+            )
         )
 
         if args.article:
-            run_single(pipeline, args.article)
+            run_single(engine, args.article)
 
         if args.input_file:
             texts = load_text_file(args.input_file)
-            run_batch(pipeline, texts)
+            run_batch(engine, texts)
 
-    except Exception as exc:
+    except Exception:
         logger.exception("Inference failed.")
         sys.exit(1)
 

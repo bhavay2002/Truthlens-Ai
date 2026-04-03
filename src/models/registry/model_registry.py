@@ -37,10 +37,14 @@ import joblib
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 from src.utils.settings import load_settings
-from src.models.factory.model_factory import ModelFactory
+from src.models.registry.model_factory import ModelFactory
 
 
 logger = logging.getLogger(__name__)
+
+# Backward-compatible aliases used by legacy tests/callers.
+RobertaTokenizer = AutoTokenizer
+RobertaForSequenceClassification = AutoModelForSequenceClassification
 
 
 # ---------------------------------------------------------
@@ -65,7 +69,7 @@ class ModelRegistry:
 
     @staticmethod
     def load_model(
-        model_name: str = "truthlens_model",
+        model_name: Optional[str] = "truthlens_model",
         model_type: Optional[str] = None,
         device: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -90,10 +94,15 @@ class ModelRegistry:
 
             logger.info("Loading model from registry: %s", model_name)
 
-            model_path = MODEL_DIR / model_name if model_name else MODEL_DIR
-
-            if not model_path.exists():
-                raise FileNotFoundError(f"Model path not found: {model_path}")
+            model_path = MODEL_DIR
+            if model_name:
+                named_model_path = MODEL_DIR / model_name
+                if named_model_path.exists():
+                    model_path = named_model_path
+                elif not MODEL_DIR.exists():
+                    raise FileNotFoundError(f"Model path not found: {named_model_path}")
+            elif not MODEL_DIR.exists():
+                raise FileNotFoundError(f"Model path not found: {MODEL_DIR}")
 
             device_obj = torch.device(
                 device if device else ("cuda" if torch.cuda.is_available() else "cpu")
@@ -103,14 +112,14 @@ class ModelRegistry:
             # Load Tokenizer
             # -------------------------------------------------
 
-            tokenizer = AutoTokenizer.from_pretrained(model_path)
+            tokenizer = RobertaTokenizer.from_pretrained(model_path)
 
             # -------------------------------------------------
             # Load Model
             # -------------------------------------------------
 
             if model_type is None:
-                model = AutoModelForSequenceClassification.from_pretrained(model_path)
+                model = RobertaForSequenceClassification.from_pretrained(model_path)
             else:
                 config_path = model_path / "model_config.json"
 
@@ -132,8 +141,10 @@ class ModelRegistry:
                     state_dict = torch.load(checkpoint_path, map_location=device_obj)
                     model.load_state_dict(state_dict)
 
-            model.to(device_obj)
-            model.eval()
+            if hasattr(model, "to"):
+                model.to(device_obj)
+            if hasattr(model, "eval"):
+                model.eval()
 
             # -------------------------------------------------
             # Load Optional TF-IDF Vectorizer

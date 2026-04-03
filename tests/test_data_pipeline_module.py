@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from src.pipelines import data_pipeline as pipeline
+from data import data_pipeline as pipeline
 
 
 def _base_config(tmp_path: Path) -> dict:

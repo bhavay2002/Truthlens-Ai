@@ -26,19 +26,36 @@ import logging
 from pathlib import Path
 from typing import Dict, Any
 
-from reportlab.platypus import (
-    SimpleDocTemplate,
-    Paragraph,
-    Spacer,
-    Table,
-    TableStyle,
-)
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.lib.units import inch
-from reportlab.lib import colors
+try:
+    from reportlab.platypus import (
+        SimpleDocTemplate,
+        Paragraph,
+        Spacer,
+        Table,
+        TableStyle,
+    )
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.units import inch
+    from reportlab.lib import colors
+except ImportError:  # pragma: no cover - optional dependency
+    SimpleDocTemplate = None
+    Paragraph = None
+    Spacer = None
+    Table = None
+    TableStyle = None
+    getSampleStyleSheet = None
+    inch = None
+    colors = None
 
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_reportlab() -> None:
+    if SimpleDocTemplate is None:
+        raise RuntimeError(
+            "ReportLab is not installed. Install 'reportlab' to generate PDF reports."
+        )
 
 
 def _validate_report(report: Dict[str, Any]) -> None:
@@ -57,6 +74,8 @@ def _metrics_table(metrics: Dict[str, Any]):
     """
     Convert metrics dictionary into a ReportLab table.
     """
+
+    _ensure_reportlab()
 
     data = [["Metric", "Value"]]
 
@@ -87,6 +106,7 @@ def generate_pdf_report(
     """
 
     _validate_report(report)
+    _ensure_reportlab()
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)

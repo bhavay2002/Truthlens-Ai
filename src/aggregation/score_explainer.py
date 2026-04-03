@@ -29,8 +29,6 @@ from __future__ import annotations
 import logging
 from typing import Dict, Any, List, Tuple
 
-import numpy as np
-
 
 logger = logging.getLogger(__name__)
 

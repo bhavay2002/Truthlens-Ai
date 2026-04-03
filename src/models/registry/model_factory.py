@@ -42,20 +42,20 @@ from typing import Dict, Any
 
 import torch.nn as nn
 
-from ..tasks.bias_classifier import BiasClassifier, BiasClassifierConfig
-from ..tasks.ideology_classifier import (
+from ..tasks.bias.bias_classifier import BiasClassifier, BiasClassifierConfig
+from ..tasks.ideology.ideology_classifier import (
     IdeologyClassifier,
     IdeologyClassifierConfig,
 )
-from ..tasks.propaganda_detector import (
+from ..tasks.propaganda.propaganda_detector import (
     PropagandaDetector,
     PropagandaDetectorConfig,
 )
-from ..tasks.narrative_detector import (
+from ..tasks.narrative.narrative_detector import (
     NarrativeDetector,
     NarrativeDetectorConfig,
 )
-from ..tasks.emotion_classifier import (
+from ..tasks.emotion.emotion_classifier import (
     EmotionClassifier,
     EmotionClassifierConfig,
 )

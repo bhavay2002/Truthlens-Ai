@@ -39,7 +39,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, asdict
-from typing import Dict, Any, Optional
+from typing import Dict, Optional
 
 
 logger = logging.getLogger(__name__)

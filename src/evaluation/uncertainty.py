@@ -19,7 +19,7 @@ Outputs:
 from __future__ import annotations
 
 import logging
-from typing import Dict, Iterable, Tuple
+from typing import Dict, Iterable
 
 import numpy as np
 
