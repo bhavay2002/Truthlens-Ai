@@ -1,6 +1,6 @@
 ﻿# TruthLens AI Repository Structure (Current)
 
-Snapshot date: 2026-04-02 20:24:12
+Snapshot date: 2026-04-02 11:53:08
 Excluded folders: .git, .pytest_cache, __pycache__, venv/.venv/env, Lib/lib/libs/libraries, site-packages, .mypy_cache, .ruff_cache, .tox, .idea, .vscode
 
 ```text
@@ -238,30 +238,14 @@ Truthlens Ai/
 |       `-- word_frequency.png
 |-- src/
 |   |-- aggregation/
-|   |   |-- aggregation_pipeline.py
-|   |   |-- risk_assessment.py
-|   |   |-- score_explainer.py
-|   |   |-- score_normalizer.py
-|   |   |-- score_schema.py
-|   |   |-- truthlens_score_calculator.py
-|   |   `-- weight_manager.py
+|   |   `-- truthlens_score_calculator.py
 |   |-- analysis/
 |   |   |-- argument_mining.py
 |   |   |-- bias_profile_builder.py
 |   |   |-- context_omission_detector.py
-|   |   |-- discourse_coherence_analyzer.py
 |   |   |-- emotion_target_analysis.py
-|   |   |-- framing_analysis.py
-|   |   |-- ideological_language_detector.py
-|   |   |-- information_density_analyzer.py
-|   |   |-- information_omission_detector.py
 |   |   |-- narrative_conflict.py
-|   |   |-- narrative_propagation.py
-|   |   |-- narrative_role_extractor.py
-|   |   |-- narrative_temporal_analyzer.py
-|   |   |-- propaganda_pattern_detector.py
-|   |   |-- rhetorical_device_detector.py
-|   |   `-- source_attribution_analyzer.py
+|   |   `-- narrative_propagation.py
 |   |-- data/
 |   |   |-- class_balance.py
 |   |   |-- clean_data.py
@@ -275,109 +259,53 @@ Truthlens Ai/
 |   |   |-- unified_label_schema.py
 |   |   `-- validate_data.py
 |   |-- evaluation/
-|   |   |-- advanced_analysis.py
-|   |   |-- calibration.py
-|   |   |-- evaluate_saved_model.py
-|   |   |-- evaluation_dashboard.py
-|   |   |-- evaluator.py
-|   |   |-- metrics.py
-|   |   |-- mlflow_tracker.py
-|   |   |-- pdf_report.py
-|   |   |-- report_writer.py
-|   |   |-- task_correlation.py
-|   |   `-- uncertainty.py
+|   |   |-- evaluate_model.py
+|   |   `-- visualize_metrics.py
 |   |-- explainability/
-|   |   |-- attention_rollout.py
 |   |   |-- attention_visualizer.py
 |   |   |-- bias_explainer.py
 |   |   |-- emotion_explainer.py
-|   |   |-- explanation_aggregator.py
-|   |   |-- explanation_cache.py
-|   |   |-- explanation_consistency.py
-|   |   |-- explanation_metrics.py
-|   |   |-- explanation_report_generator.py
-|   |   |-- explanation_visualizer.py
 |   |   |-- lime_explainer.py
 |   |   |-- model_explainer.py
 |   |   |-- propaganda_explainer.py
-|   |   |-- shap_explainer.py
-|   |   `-- token_alignment.py
+|   |   `-- shap_explainer.py
 |   |-- features/
-|   |   |-- base/
-|   |   |   |-- base_feature.py
-|   |   |   |-- feature_config.py
-|   |   |   `-- feature_registry.py
 |   |   |-- bias/
+|   |   |   |-- bias_detector.py
 |   |   |   |-- bias_features.py
-|   |   |   |-- bias_lexicon_features.py
-|   |   |   |-- framing_features.py
-|   |   |   `-- ideological_features.py
-|   |   |-- cache/
-|   |   |   |-- cache_manager.py
-|   |   |   `-- feature_cache.py
+|   |   |   |-- bias_lexicon.py
+|   |   |   |-- framing_detector.py
+|   |   |   |-- ideology_detector.py
+|   |   |   |-- narrative_patterns.py
+|   |   |   `-- propaganda_detector.py
 |   |   |-- discourse/
-|   |   |   |-- argument_structure_features.py
 |   |   |   `-- discourse_features.py
 |   |   |-- emotion/
-|   |   |   |-- emotion_features.py
-|   |   |   |-- emotion_intensity_features.py
-|   |   |   |-- emotion_lexicon_features.py
-|   |   |   |-- emotion_target_features.py
-|   |   |   `-- emotion_trajectory_features.py
-|   |   |-- fusion/
-|   |   |   |-- feature_fusion.py
-|   |   |   |-- feature_scaling.py
-|   |   |   `-- feature_selection.py
-|   |   |-- graph/
-|   |   |   |-- entity_graph_features.py
-|   |   |   `-- interaction_graph_features.py
-|   |   |-- importance/
-|   |   |   |-- feature_ablation.py
-|   |   |   |-- permutation_importance.py
-|   |   |   `-- shap_importance.py
+|   |   |   |-- emotion_classifier.py
+|   |   |   |-- emotion_detector.py
+|   |   |   |-- emotion_feature_extractor.py
+|   |   |   |-- emotion_intensity.py
+|   |   |   |-- emotion_lexicon.py
+|   |   |   |-- emotion_patterns.py
+|   |   |   |-- emotion_polarization.py
+|   |   |   |-- emotion_score.py
+|   |   |   |-- emotion_target.py
+|   |   |   |-- emotion_trajectory.py
+|   |   |   `-- manipulation_patterns.py
 |   |   |-- narrative/
-|   |   |   |-- conflict_features.py
-|   |   |   |-- narrative_features.py
-|   |   |   |-- narrative_frame_features.py
-|   |   |   `-- narrative_role_features.py
-|   |   |-- pipelines/
-|   |   |   |-- batch_feature_pipeline.py
-|   |   |   `-- feature_pipeline.py
-|   |   |-- propaganda/
-|   |   |   |-- manipulation_patterns.py
-|   |   |   |-- propaganda_features.py
-|   |   |   `-- propaganda_lexicon_features.py
-|   |   |-- text/
-|   |   |   |-- lexical_features.py
-|   |   |   |-- semantic_features.py
-|   |   |   |-- syntactic_features.py
-|   |   |   `-- token_features.py
-|   |   |-- dataset_feature_generator.py
-|   |   |-- feature_schema_validator.py
-|   |   `-- feature_statistics.py
+|   |   |   `-- narrative_features.py
+|   |   |-- feature_fusion.py
+|   |   |-- feature_importance.py
+|   |   |-- feature_pipeline.py
+|   |   |-- metadata_features.py
+|   |   |-- source_features.py
+|   |   `-- text_features.py
 |   |-- graph/
 |   |   |-- entity_graph.py
 |   |   |-- graph_analysis.py
-|   |   |-- graph_config.py
-|   |   |-- graph_embeddings.py
-|   |   |-- graph_features.py
-|   |   |-- graph_pipeline.py
-|   |   |-- graph_utils.py
-|   |   |-- graph_visualization.py
-|   |   |-- narrative_graph_builder.py
-|   |   `-- temporal_graph.py
+|   |   `-- narrative_graph_builder.py
 |   |-- inference/
-|   |   |-- analyze_article.py
-|   |   |-- batch_inference.py
-|   |   |-- feature_preparer.py
-|   |   |-- inference_cache.py
-|   |   |-- inference_config.py
-|   |   |-- inference_engine.py
-|   |   |-- inference_logger.py
-|   |   |-- model_loader.py
-|   |   |-- prediction_pipeline.py
-|   |   |-- report_generator.py
-|   |   `-- result_formatter.py
+|   |   `-- analyze_article.py
 |   |-- models/
 |   |   |-- emotion/
 |   |   |   |-- __init__.py
@@ -416,11 +344,8 @@ Truthlens Ai/
 |   |   |-- preprocessing_pipeline.py
 |   |   `-- truthlens_pipeline.py
 |   |-- training/
-|   |   |-- checkpointing.py
 |   |   |-- cross_validation.py
-|   |   |-- hyperparameter_tuning.py
-|   |   |-- optimizer_factory.py
-|   |   `-- scheduler_factory.py
+|   |   `-- hyperparameter_tuning.py
 |   |-- utils/
 |   |   |-- config_loader.py
 |   |   |-- device_utils.py
@@ -478,6 +403,8 @@ Truthlens Ai/
 |-- CONTRIBUTING.md
 |-- docker-compose.yml
 |-- Dockerfile
+|-- evaluate.py
+|-- evaluate2.py
 |-- KNOWLEDGE.md
 |-- LICENSE
 |-- main.py
@@ -490,8 +417,11 @@ Truthlens Ai/
 |-- setup.py
 |-- source_scores.json
 |-- structure.md
-|-- structure2 copy.md
-|-- structure2.md
 |-- test.py
-`-- truthlens_learning_log.xlsx
+|-- truthlens_learning_log.xlsx
+|-- ZTEST.py
+|-- ztest2 copy.py
+|-- ztest2.py
+|-- ztest3 copy.py
+`-- ztest3.py
 ```

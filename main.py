@@ -15,7 +15,7 @@ from features.pipelines.feature_pipeline import (
     save_vectorizer,
     transform_feature_pipeline,
 )
-from src.models.train_roberta import train_model
+from training.train_transformer_model import train_model
 from src.training.cross_validation import cross_validate_model
 from src.training.hyperparameter_tuning import run_optuna
 from src.utils.input_validation import ensure_dataframe

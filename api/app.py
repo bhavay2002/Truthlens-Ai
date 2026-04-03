@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 import logging
 
-from src.models.predict import predict, predict_batch
+from models.inference.predictor import predict, predict_batch
 from src.features.bias.bias_lexicon import compute_bias_features
 from src.features.emotion.emotion_lexicon import EmotionLexiconAnalyzer
 from src.explainability.emotion_explainer import explain_emotion

@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 import torch
 
-from src.models import prediction_pipeline as pipeline_module
+from pipelines import prediction_pipeline as pipeline_module
 
 
 class _DummyTokenizer:

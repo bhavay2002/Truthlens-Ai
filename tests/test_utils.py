@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.models.model_utils import load_model, save_model
+from models.utils.model_utils import load_model, save_model
 from src.utils.helper_functions import create_folder
 from src.utils.settings import load_settings
 

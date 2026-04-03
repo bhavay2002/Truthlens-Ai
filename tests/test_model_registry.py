@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from src.models import model_registry
+from models.registry import model_registry
 
 
 class _DummyModelLoader:

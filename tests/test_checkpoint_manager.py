@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from src.models.checkpoint_manager import CheckpointManager, get_last_checkpoint
+from models.checkpointing.checkpoint_manager import CheckpointManager, get_last_checkpoint
 
 
 def _mkdir(path: Path) -> None:

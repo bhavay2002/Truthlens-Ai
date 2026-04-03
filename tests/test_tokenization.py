@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.models.train_roberta import tokenize_function
+from training.train_transformer_model import tokenize_function
 
 
 class _DummyTokenizer:

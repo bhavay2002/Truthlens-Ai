@@ -1,4 +1,4 @@
-from src.models.model_utils import save_model, load_model
+from models.utils.model_utils import save_model, load_model
 from pathlib import Path
 
 

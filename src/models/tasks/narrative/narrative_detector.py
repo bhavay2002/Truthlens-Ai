@@ -1,0 +1,195 @@
+"""
+File Name: narrative_detector.py
+Module: models.tasks.narrative
+Description:
+    Implements a transformer-based narrative detection model for the TruthLens AI
+    system. The model detects narrative roles and narrative frame signals within
+    text using contextual embeddings produced by a pretrained transformer
+    encoder followed by a multi-label classification head.
+
+    The dataset contains the following narrative labels:
+
+        hero
+        villain
+        victim
+        hero_entities
+        villain_entities
+        victim_entities
+        RE
+        HI
+        CO
+        MO
+        EC
+
+    These labels represent narrative actors and narrative frame indicators.
+    Because multiple narrative signals may appear simultaneously in a single
+    article, the model performs multi-label classification using sigmoid
+    activation and BCEWithLogitsLoss.
+
+Dependencies:
+    logging
+    typing
+    dataclasses
+    torch
+    torch.nn
+    models.encoder.transformer_encoder
+    models.heads.multilabel_head
+Inputs:
+    input_ids: Tensor (batch_size, sequence_length)
+    attention_mask: Tensor (batch_size, sequence_length)
+    labels (optional): Tensor (batch_size, 11)
+Outputs:
+    Dictionary containing logits, probabilities, predictions, and optional loss
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Dict, Optional
+
+import torch
+import torch.nn as nn
+
+from ...encoder.transformer_encoder import TransformerEncoder
+from ...heads.multilabel_head import MultiLabelHead, MultiLabelHeadConfig
+
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class NarrativeDetectorConfig:
+    """
+    Configuration for narrative detection model.
+    """
+
+    model_name: str = "roberta-base"
+    pooling: str = "cls"
+    dropout: float = 0.1
+    device: Optional[str] = None
+    threshold: float = 0.5
+
+
+class NarrativeDetector(nn.Module):
+    """
+    Transformer-based narrative detector.
+
+    Multi-label outputs representing narrative actors and narrative frames.
+    """
+
+    NUM_LABELS = 11
+
+    LABEL_MAPPING = {
+        0: "hero",
+        1: "villain",
+        2: "victim",
+        3: "hero_entities",
+        4: "villain_entities",
+        5: "victim_entities",
+        6: "RE",
+        7: "HI",
+        8: "CO",
+        9: "MO",
+        10: "EC",
+    }
+
+    def __init__(self, config: NarrativeDetectorConfig) -> None:
+        super().__init__()
+
+        if not isinstance(config, NarrativeDetectorConfig):
+            raise TypeError("config must be NarrativeDetectorConfig")
+
+        self.config = config
+
+        self.encoder = TransformerEncoder(
+            model_name=config.model_name,
+            pooling=config.pooling,
+            device=config.device,
+        )
+
+        head_config = MultiLabelHeadConfig(
+            input_dim=self.encoder.hidden_size,
+            num_labels=self.NUM_LABELS,
+            dropout=config.dropout,
+            threshold=config.threshold,
+        )
+
+        self.classifier_head = MultiLabelHead(head_config)
+
+        logger.info(
+            "NarrativeDetector initialized | model=%s | labels=%d",
+            config.model_name,
+            self.NUM_LABELS,
+        )
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        labels: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Forward pass.
+
+        Args:
+            input_ids:
+                Token IDs tensor.
+            attention_mask:
+                Attention mask tensor.
+            labels:
+                Optional multi-label tensor (batch_size, 11)
+
+        Returns:
+            Dictionary containing logits, probabilities, predictions,
+            and optional loss.
+        """
+
+        if input_ids is None or attention_mask is None:
+            raise ValueError("input_ids and attention_mask cannot be None")
+
+        encoder_outputs = self.encoder(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+        )
+
+        pooled_output = encoder_outputs["pooled_output"]
+
+        outputs = self.classifier_head(
+            pooled_output,
+            labels=labels,
+        )
+
+        return outputs
+
+    @torch.no_grad()
+    def predict(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Run inference.
+
+        Returns:
+            predictions and probabilities.
+        """
+
+        self.eval()
+
+        outputs = self.forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+        )
+
+        return {
+            "predictions": outputs["predictions"],
+            "probabilities": outputs["probabilities"],
+        }
+
+    def get_output_labels(self) -> Dict[int, str]:
+        """
+        Returns narrative label mapping.
+        """
+
+        return self.LABEL_MAPPING

@@ -42,7 +42,7 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
-from src.models.train_roberta import train_model
+from training.train_transformer_model import train_model
 from src.utils.input_validation import (
     ensure_dataframe,
     ensure_non_empty_text_column,
