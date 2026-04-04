@@ -73,7 +73,7 @@ def get_device(prefer_gpu: bool = True) -> torch.device:
         device = torch.device("cuda")
         logger.info("Using CUDA device")
 
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    elif prefer_gpu and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         device = torch.device("mps")
         logger.info("Using Apple MPS device")
 

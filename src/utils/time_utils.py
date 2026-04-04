@@ -109,12 +109,12 @@ def measure_runtime(
 
     try:
         result = func(*args, **kwargs)
-    except Exception as exc:
+    except Exception:
         logger.exception(
             "Error occurred during execution of '%s'",
             getattr(func, "__name__", "unknown_function"),
         )
-        raise exc
+        raise
 
     end_time = time.perf_counter()
 

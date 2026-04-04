@@ -104,7 +104,7 @@ def _ensure_stream_handler(
     """
 
     has_stream_handler = any(
-        isinstance(handler, logging.StreamHandler)
+        type(handler) is logging.StreamHandler
         for handler in logger.handlers
     )
 

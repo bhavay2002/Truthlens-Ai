@@ -83,6 +83,8 @@ def save_json(
 
         return path_obj
 
+    except (TypeError, ValueError):
+        raise
     except Exception as exc:
         logger.exception("Failed to save JSON file")
         raise RuntimeError(f"Unable to save JSON to {path}") from exc
@@ -124,6 +126,8 @@ def load_json(path: str | Path) -> dict[str, Any]:
 
         return data
 
+    except (FileNotFoundError, ValueError):
+        raise
     except Exception as exc:
         logger.exception("Failed to load JSON file")
         raise RuntimeError(f"Unable to load JSON from {path}") from exc
@@ -185,6 +189,8 @@ def append_json(
 
         return path_obj
 
+    except (TypeError, ValueError):
+        raise
     except Exception as exc:
         logger.exception("Failed to append JSON entry")
         raise RuntimeError(f"Unable to append JSON entry to {path}") from exc
