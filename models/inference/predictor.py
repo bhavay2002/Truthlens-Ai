@@ -44,6 +44,29 @@ def _resolve_fake_index(model: Any) -> int:
     return DEFAULT_FAKE_INDEX
 
 
+def predict_batch(texts: List[str]) -> List[List[float]]:
+    """Return [[prob_real, prob_fake], ...] for each text — used by LIME."""
+    if not texts:
+        return []
+
+    tokenizer, model = load_model_and_tokenizer()
+    batch_texts = _prepare_texts_for_inference(texts)
+
+    inputs = tokenizer(
+        batch_texts,
+        truncation=True,
+        padding="max_length",
+        max_length=512,
+        return_tensors="pt",
+    )
+
+    with torch.no_grad():
+        outputs = model(**inputs)
+        probs = torch.softmax(outputs.logits, dim=1)
+
+    return probs.tolist()
+
+
 def predict(text: str) -> dict[str, float | str]:
     ensure_non_empty_text(text)
 
