@@ -91,7 +91,8 @@ def plot_confusion_matrix(
         raise ValueError("Confusion matrix must be square")
 
     if normalize:
-        cm = cm / cm.sum(axis=1, keepdims=True)
+        row_sums = cm.sum(axis=1, keepdims=True).astype(float)
+        cm = np.where(row_sums == 0, 0.0, cm.astype(float) / np.where(row_sums == 0, 1.0, row_sums))
 
     if labels is None:
         labels = [str(i) for i in range(cm.shape[0])]
@@ -326,7 +327,8 @@ def plot_embedding_projection(
         reducer = PCA(n_components=2)
 
     elif method.lower() == "tsne":
-        reducer = TSNE(n_components=2, perplexity=30)
+        perplexity = min(30.0, max(5.0, embeddings.shape[0] - 1))
+        reducer = TSNE(n_components=2, perplexity=perplexity)
 
     else:
         raise ValueError("method must be 'pca' or 'tsne'")
