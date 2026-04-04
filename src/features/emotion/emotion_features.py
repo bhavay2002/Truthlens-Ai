@@ -29,6 +29,7 @@ Outputs:
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Dict
 
@@ -37,147 +38,86 @@ import numpy as np
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
 
+from src.features.emotion.emotion_schema import (
+    EMOTION_LABELS,
+    EMOTION_TERMS,
+)
+
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------
-# Optional Transformer Emotion Model
-# ---------------------------------------------------------------------
 
-try:
-    import torch
-    from transformers import AutoTokenizer, AutoModelForSequenceClassification
+# -------------------------------------------------------
+# Build Reverse Emotion Lookup
+# -------------------------------------------------------
 
-    MODEL_NAME = "j-hartmann/emotion-english-distilroberta-base"
+WORD_TO_EMOTION = {}
 
-    _tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    _model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME)
-
-    _model.eval()
-
-    TRANSFORMER_AVAILABLE = True
-
-    EMOTION_LABELS = [
-        "anger",
-        "disgust",
-        "fear",
-        "joy",
-        "neutral",
-        "sadness",
-        "surprise",
-    ]
-
-except Exception:  # noqa: BLE001
-    TRANSFORMER_AVAILABLE = False
-    _tokenizer = None
-    _model = None
-
-    logger.warning(
-        "Transformer emotion model not available. Using lexicon fallback."
-    )
-
-    EMOTION_LABELS = [
-        "anger",
-        "fear",
-        "joy",
-        "sadness",
-    ]
+for emotion, words in EMOTION_TERMS.items():
+    for word in words:
+        WORD_TO_EMOTION[word] = emotion
 
 
-# ---------------------------------------------------------------------
-# Lexicon Fallback
-# ---------------------------------------------------------------------
-
-LEXICON = {
-    "anger": {"angry", "rage", "furious", "hate"},
-    "fear": {"fear", "terror", "scared", "panic"},
-    "joy": {"happy", "joy", "delight", "smile"},
-    "sadness": {"sad", "cry", "sorrow", "grief"},
-}
-
+# -------------------------------------------------------
+# Fast Lexicon Emotion Detector
+# -------------------------------------------------------
 
 def _lexicon_emotions(text: str) -> Dict[str, float]:
     """
-    Basic lexicon-based emotion scoring.
+    Fast lexicon-based emotion detection using reverse lookup.
+    Complexity: O(tokens)
     """
 
-    tokens = text.lower().split()
-    counts = {emotion: 0 for emotion in LEXICON}
+    tokens = re.findall(r"\b\w+\b", text.lower())
+
+    counts = {emotion: 0 for emotion in EMOTION_LABELS}
 
     for token in tokens:
-        for emotion, words in LEXICON.items():
-            if token in words:
-                counts[emotion] += 1
+
+        emotion = WORD_TO_EMOTION.get(token)
+
+        if emotion:
+            counts[emotion] += 1
 
     total = sum(counts.values()) or 1
 
-    return {k: v / total for k, v in counts.items()}
+    return {emotion: counts[emotion] / total for emotion in EMOTION_LABELS}
 
 
-# ---------------------------------------------------------------------
-# Emotion Feature Extractor
-# ---------------------------------------------------------------------
+# -------------------------------------------------------
+# Feature Extractor
+# -------------------------------------------------------
 
 @dataclass
 @register_feature
 class EmotionFeatures(BaseFeature):
-    """
-    Extracts emotion distribution features from text.
-
-    Output features include:
-    - emotion probabilities
-    - dominant emotion
-    - emotional intensity
-    """
 
     name: str = "emotion_features"
-    description: str = "Emotion distribution and emotional intensity features"
-
-    def _transformer_emotions(self, text: str) -> Dict[str, float]:
-        """
-        Compute emotions using transformer classifier.
-        """
-
-        inputs = _tokenizer(
-            text,
-            return_tensors="pt",
-            truncation=True,
-            padding=True,
-            max_length=512,
-        )
-
-        with torch.no_grad():
-            outputs = _model(**inputs)
-
-        probs = torch.softmax(outputs.logits, dim=1).squeeze(0).cpu().numpy()
-
-        return {label: float(prob) for label, prob in zip(EMOTION_LABELS, probs)}
+    description: str = "20-class emotion distribution and intensity features"
 
     def extract(self, context: FeatureContext) -> Dict[str, float]:
-        """
-        Extract emotion-related features.
-        """
 
         if not context.text:
             raise ValueError("FeatureContext.text cannot be empty")
 
-        if TRANSFORMER_AVAILABLE:
-            emotion_scores = self._transformer_emotions(context.text)
-        else:
-            emotion_scores = _lexicon_emotions(context.text)
+        emotion_scores = _lexicon_emotions(context.text)
 
-        values = np.array(list(emotion_scores.values()))
+        values = np.array(list(emotion_scores.values()), dtype=np.float32)
 
         dominant_idx = int(np.argmax(values))
-        dominant_emotion = list(emotion_scores.keys())[dominant_idx]
+        dominant_emotion = EMOTION_LABELS[dominant_idx]
 
         intensity = float(np.max(values) - np.mean(values))
 
         features: Dict[str, float] = {}
 
+        # Emotion distribution
         for emotion, score in emotion_scores.items():
             features[f"emotion_{emotion}"] = float(score)
 
+        # Emotion intensity
         features["emotion_intensity"] = intensity
+
+        # Dominant emotion
         features[f"emotion_dominant_{dominant_emotion}"] = 1.0
 
         logger.debug(

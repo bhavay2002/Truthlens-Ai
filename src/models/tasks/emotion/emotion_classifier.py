@@ -42,9 +42,14 @@ import torch.nn as nn
 
 from ...encoder.transformer_encoder import TransformerEncoder
 from ...heads.multilabel_head import MultiLabelHead, MultiLabelHeadConfig
+from src.features.emotion.emotion_schema import EMOTION_LABELS
 
 logger = logging.getLogger(__name__)
 
+
+# ------------------------------------------------------------
+# Configuration
+# ------------------------------------------------------------
 
 @dataclass
 class EmotionClassifierConfig:
@@ -59,12 +64,18 @@ class EmotionClassifierConfig:
     threshold: float = 0.5
 
 
+# ------------------------------------------------------------
+# Emotion Classifier
+# ------------------------------------------------------------
+
 class EmotionClassifier(nn.Module):
     """
     Multi-label emotion classifier.
 
-    Predicts 20 independent emotion labels:
-        emotion_0 ... emotion_19
+    Dataset labels:
+        emotion0 ... emotion19
+
+    Emotion names are mapped from EMOTION_LABELS.
     """
 
     NUM_EMOTIONS = 20
@@ -77,11 +88,19 @@ class EmotionClassifier(nn.Module):
 
         self.config = config
 
+        # ------------------------------------------------
+        # Encoder
+        # ------------------------------------------------
+
         self.encoder = TransformerEncoder(
             model_name=config.model_name,
             pooling=config.pooling,
             device=config.device,
         )
+
+        # ------------------------------------------------
+        # Classification head
+        # ------------------------------------------------
 
         head_config = MultiLabelHeadConfig(
             input_dim=self.encoder.hidden_size,
@@ -98,30 +117,24 @@ class EmotionClassifier(nn.Module):
             self.NUM_EMOTIONS,
         )
 
+    # ------------------------------------------------------------
+    # Forward pass
+    # ------------------------------------------------------------
+
     def forward(
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         labels: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        """
-        Forward pass.
-
-        Args:
-            input_ids:
-                Token ids tensor.
-            attention_mask:
-                Attention mask tensor.
-            labels:
-                Optional multi-label tensor (batch_size, 20)
-
-        Returns:
-            Dictionary containing logits, probabilities, predictions,
-            and optional loss.
-        """
 
         if input_ids is None or attention_mask is None:
             raise ValueError("input_ids and attention_mask must be provided")
+
+        if labels is not None and labels.shape[-1] != self.NUM_EMOTIONS:
+            raise ValueError(
+                f"labels must have shape (batch_size, {self.NUM_EMOTIONS})"
+            )
 
         encoder_outputs = self.encoder(
             input_ids=input_ids,
@@ -137,18 +150,16 @@ class EmotionClassifier(nn.Module):
 
         return outputs
 
-    @torch.no_grad()
+    # ------------------------------------------------------------
+    # Inference
+    # ------------------------------------------------------------
+
+    @torch.inference_mode()
     def predict(
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
-        """
-        Run inference.
-
-        Returns:
-            predictions and probabilities.
-        """
 
         self.eval()
 
@@ -162,11 +173,20 @@ class EmotionClassifier(nn.Module):
             "probabilities": outputs["probabilities"],
         }
 
+    # ------------------------------------------------------------
+    # Label Mapping
+    # ------------------------------------------------------------
+
     def get_output_labels(self) -> Dict[int, str]:
         """
-        Return emotion label mapping.
-
-        emotion_0 ... emotion_19
+        Map numeric output indices to emotion names.
         """
 
-        return {i: f"emotion_{i}" for i in range(self.NUM_EMOTIONS)}
+        return {i: EMOTION_LABELS[i] for i in range(self.NUM_EMOTIONS)}
+
+    def get_training_labels(self) -> Dict[int, str]:
+        """
+        Return dataset label names (emotion0…emotion19).
+        """
+
+        return {i: f"emotion{i}" for i in range(self.NUM_EMOTIONS)}

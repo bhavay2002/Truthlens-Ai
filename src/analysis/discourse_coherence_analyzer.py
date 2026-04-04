@@ -24,7 +24,6 @@ Inputs:
 Outputs:
     Dictionary of discourse coherence features and optional numerical vector
 """
-
 from __future__ import annotations
 
 import logging
@@ -40,42 +39,76 @@ from spacy.tokens import Doc
 logger = logging.getLogger(__name__)
 
 
+# ------------------------------------------------------------
+# Configuration
+# ------------------------------------------------------------
+
 @dataclass(slots=True)
 class DiscourseCoherenceConfig:
-    """
-    Configuration for DiscourseCoherenceAnalyzer.
-    """
 
     spacy_model: str = "en_core_web_sm"
+    disable_components: tuple = ("ner",)
 
+
+# ------------------------------------------------------------
+# Analyzer
+# ------------------------------------------------------------
 
 class DiscourseCoherenceAnalyzer:
-    """
-    Analyzes logical flow and coherence of discourse.
-    """
+
+    # ----------------------------------------------------
+    # Discourse transition markers
+    # ----------------------------------------------------
 
     TRANSITION_MARKERS = {
-        "however",
-        "therefore",
-        "thus",
-        "meanwhile",
-        "furthermore",
-        "moreover",
-        "in contrast",
-        "on the other hand",
-        "consequently",
-        "nevertheless",
+
+        # contrast
+        "however","nevertheless","nonetheless",
+        "yet","still","though","although",
+        "in contrast","by contrast",
+        "on the other hand","despite this",
+        "even so","alternatively",
+
+        # cause
+        "therefore","thus","hence",
+        "consequently","accordingly",
+        "as a result","for this reason",
+        "because","since","due to",
+
+        # addition
+        "furthermore","moreover","additionally",
+        "in addition","also","besides",
+        "similarly","likewise",
+
+        # sequence
+        "first","second","third",
+        "next","then","afterward",
+        "subsequently","finally",
+        "meanwhile","at the same time",
+
+        # summary
+        "in conclusion","to conclude",
+        "in summary","overall",
+        "ultimately","in short",
+
+        # clarification
+        "in other words","that is",
+        "to clarify","namely",
+        "specifically","for example",
+        "for instance"
     }
 
-    def __init__(self, config: DiscourseCoherenceConfig | None = None) -> None:
-        """
-        Initialize NLP pipeline.
-        """
+    # ----------------------------------------------------
+
+    def __init__(self, config: DiscourseCoherenceConfig | None = None):
 
         self.config = config or DiscourseCoherenceConfig()
 
         try:
-            self.nlp: Language = spacy.load(self.config.spacy_model)
+            self.nlp: Language = spacy.load(
+                self.config.spacy_model,
+                disable=self.config.disable_components,
+            )
         except Exception as exc:
             logger.exception("spaCy model loading failed")
             raise RuntimeError(
@@ -83,20 +116,15 @@ class DiscourseCoherenceAnalyzer:
             ) from exc
 
         logger.info(
-            "DiscourseCoherenceAnalyzer initialized with model=%s",
+            "DiscourseCoherenceAnalyzer initialized | model=%s",
             self.config.spacy_model,
         )
 
+    # ------------------------------------------------------------
+    # Main Analysis
+    # ------------------------------------------------------------
+
     def analyze(self, text: str) -> Dict[str, float]:
-        """
-        Analyze discourse coherence in text.
-
-        Args:
-            text: Input text.
-
-        Returns:
-            Dictionary containing discourse coherence metrics.
-        """
 
         if not isinstance(text, str):
             raise ValueError("Input text must be a string")
@@ -106,46 +134,65 @@ class DiscourseCoherenceAnalyzer:
         if not text:
             raise ValueError("Input text must be non-empty")
 
-        try:
-            doc: Doc = self.nlp(text)
-        except Exception as exc:
-            logger.exception("spaCy processing failed")
-            raise RuntimeError("Text processing failed") from exc
+        doc: Doc = self.nlp(text)
 
-        sentences = [sent for sent in doc.sents]
+        sentences = list(doc.sents)
 
         features: Dict[str, float] = {}
 
         features.update(self._sentence_coherence(sentences))
+        features.update(self._topic_drift(sentences))
         features.update(self._narrative_continuity(doc))
-        features.update(self._transition_usage(doc))
+        features.update(self._transition_usage(text, doc))
 
         logger.debug("Discourse coherence features computed")
 
         return features
 
+    # ------------------------------------------------------------
+    # Sentence Coherence
+    # ------------------------------------------------------------
+
     def _sentence_coherence(self, sentences: List) -> Dict[str, float]:
-        """
-        Measure semantic similarity between adjacent sentences.
-        """
 
         if len(sentences) < 2:
             return {"sentence_coherence": 0.0}
 
-        similarities = []
-
-        for i in range(len(sentences) - 1):
-            sim = sentences[i].similarity(sentences[i + 1])
-            similarities.append(sim)
+        similarities = [
+            sentences[i].similarity(sentences[i + 1])
+            for i in range(len(sentences) - 1)
+        ]
 
         score = float(np.mean(similarities)) if similarities else 0.0
 
         return {"sentence_coherence": score}
 
+    # ------------------------------------------------------------
+    # Topic Drift Detection
+    # ------------------------------------------------------------
+
+    def _topic_drift(self, sentences: List) -> Dict[str, float]:
+
+        if len(sentences) < 2:
+            return {"topic_drift": 0.0}
+
+        similarities = [
+            sentences[i].similarity(sentences[i + 1])
+            for i in range(len(sentences) - 1)
+        ]
+
+        if not similarities:
+            return {"topic_drift": 0.0}
+
+        drift = 1.0 - float(np.mean(similarities))
+
+        return {"topic_drift": drift}
+
+    # ------------------------------------------------------------
+    # Narrative Continuity
+    # ------------------------------------------------------------
+
     def _narrative_continuity(self, doc: Doc) -> Dict[str, float]:
-        """
-        Estimate continuity using entity repetition across sentences.
-        """
 
         entities = [ent.text.lower() for ent in doc.ents]
 
@@ -158,48 +205,49 @@ class DiscourseCoherenceAnalyzer:
 
         return {"narrative_continuity": float(continuity)}
 
-    def _transition_usage(self, doc: Doc) -> Dict[str, float]:
-        """
-        Measure usage of discourse transition markers.
-        """
+    # ------------------------------------------------------------
+    # Transition Usage
+    # ------------------------------------------------------------
+
+    def _transition_usage(self, text: str, doc: Doc) -> Dict[str, float]:
 
         tokens = [token.text.lower() for token in doc if token.is_alpha]
 
-        if not tokens:
-            return {"discourse_transition_ratio": 0.0}
+        token_count = max(len(tokens), 1)
 
-        count = sum(1 for token in tokens if token in self.TRANSITION_MARKERS)
+        text_lower = text.lower()
 
-        ratio = count / max(len(tokens), 1)
+        marker_hits = 0
+
+        for marker in self.TRANSITION_MARKERS:
+
+            if " " in marker:
+                if marker in text_lower:
+                    marker_hits += 1
+            else:
+                marker_hits += tokens.count(marker)
+
+        ratio = marker_hits / token_count
 
         return {"discourse_transition_ratio": float(ratio)}
 
 
+# ------------------------------------------------------------
+# Feature Vector Conversion
+# ------------------------------------------------------------
+
 def discourse_coherence_vector(features: Dict[str, float]) -> np.ndarray:
-    """
-    Convert discourse coherence features into numeric vector.
-    """
 
-    if not isinstance(features, dict):
-        raise ValueError("features must be a dictionary")
+    ordered_keys = [
+        "sentence_coherence",
+        "topic_drift",
+        "narrative_continuity",
+        "discourse_transition_ratio",
+    ]
 
-    if not features:
-        raise ValueError("features must be a non-empty dictionary")
+    vector = np.array(
+        [float(features.get(k, 0.0)) for k in ordered_keys],
+        dtype=np.float32,
+    )
 
-    values: List[float] = []
-
-    for key, value in features.items():
-        if isinstance(value, (int, float, np.number)):
-            values.append(float(value))
-        else:
-            logger.warning("Non-numeric coherence feature skipped: %s", key)
-
-    if not values:
-        raise ValueError("No numeric values found in features")
-
-    try:
-        vector = np.array(values, dtype=np.float32)
-        return vector
-    except Exception as exc:
-        logger.exception("Discourse coherence vector conversion failed")
-        raise RuntimeError("Failed to convert coherence features") from exc
+    return vector

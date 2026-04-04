@@ -8,6 +8,22 @@ Description:
     These signals help identify conflict-driven narratives frequently used in
     propaganda, political messaging, and ideological discourse.
 
+    This module detects structured narrative conflict patterns using:
+    
+
+    1. Conflict verbs and adversarial actions
+    2. Opposition framing markers
+    3. Polarization language ("us vs them")
+    4. Actor role modeling (hero / villain / victim)
+    5. Rhetorical punctuation signals
+    
+    This implementation aligns with :
+    
+    - Political narrative analysis
+    - Propaganda detection
+    - Media framing theory
+    - Computational narrative modeling
+
 Dependencies:
     logging
     typing
@@ -27,9 +43,8 @@ from __future__ import annotations
 
 import logging
 import re
-from collections import Counter
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import spacy
@@ -40,64 +55,80 @@ from spacy.tokens import Doc
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------
+
 @dataclass(slots=True)
 class NarrativeConflictConfig:
-    """
-    Configuration for NarrativeConflictAnalyzer.
-    """
 
     spacy_model: str = "en_core_web_sm"
     normalize_ratios: bool = True
 
 
+# ---------------------------------------------------------
+# Analyzer
+# ---------------------------------------------------------
+
 class NarrativeConflictAnalyzer:
     """
-    Detects adversarial narrative structures and conflict framing patterns.
+    Extract adversarial narrative structures from text.
     """
 
-    CONFLICT_TERMS = {
-        "conflict",
-        "fight",
-        "battle",
-        "attack",
-        "war",
-        "struggle",
-        "crisis",
-        "threat",
-        "enemy",
-        "clash",
-        "oppose",
-        "confront",
+    CONFLICT_VERBS = {
+
+        "attack","assault","strike","bomb","invade","raid",
+        "kill","destroy","eliminate","retaliate","counterattack",
+        "fight","battle","clash",
+
+        "oppose","challenge","confront","block","resist",
+        "defy","undermine","overthrow","topple",
+
+        "accuse","blame","criticize","condemn","denounce",
+        "slam","rebuke","mock","dismiss",
+
+        "threaten","warn","pressure","intimidate","coerce",
+
+        "sue","investigate","prosecute","sanction","charge","impeach"
     }
+
 
     OPPOSITION_MARKERS = {
-        "versus",
-        "against",
-        "vs",
-        "oppose",
-        "opposed",
-        "conflict",
+
+        "against","versus","vs","opposed","opposing",
+
+        "conflict","confrontation","showdown","standoff",
+
+        "rival","rivalry","competitor","adversary",
+
+        "struggle","battle","fight","clash",
+
+        "ideological_clash","power_struggle","political_fight",
     }
+
 
     POLARIZATION_TERMS = {
-        "us",
-        "them",
-        "they",
-        "others",
-        "enemy",
-        "opponent",
+
+        "us","we","our","ours",
+
+        "them","they","their","others",
+
+        "enemy","opponent","adversary",
+
+        "elite","establishment","globalists",
+
+        "extremists","radicals",
+
+        "the_people","ordinary_people","corrupt_elites",
     }
 
-    EXCLAMATION_PATTERN = re.compile(r"!")
+
     QUESTION_PATTERN = re.compile(r"\?")
+    EXCLAMATION_PATTERN = re.compile(r"!")
 
-    def __init__(self, config: NarrativeConflictConfig | None = None) -> None:
-        """
-        Initialize NLP pipeline used for narrative conflict analysis.
+    # -----------------------------------------------------
 
-        Args:
-            config: Optional configuration object.
-        """
+    def __init__(self, config: Optional[NarrativeConflictConfig] = None):
 
         self.config = config or NarrativeConflictConfig()
 
@@ -105,161 +136,173 @@ class NarrativeConflictAnalyzer:
             self.nlp: Language = spacy.load(self.config.spacy_model)
         except Exception as exc:
             logger.exception("spaCy model loading failed")
-            raise RuntimeError(
-                f"Failed to load spaCy model: {self.config.spacy_model}"
-            ) from exc
+            raise RuntimeError("Failed to load spaCy model") from exc
 
-        logger.info(
-            "NarrativeConflictAnalyzer initialized with model=%s",
-            self.config.spacy_model,
-        )
+        logger.info("NarrativeConflictAnalyzer initialized")
 
-    def analyze(self, text: str) -> Dict[str, float]:
-        """
-        Analyze text for narrative conflict signals.
+    # -----------------------------------------------------
+    # Main analysis
+    # -----------------------------------------------------
 
-        Args:
-            text: Input text.
+    def analyze(
+        self,
+        text: str,
+        hero_entities: Optional[List[str]] = None,
+        villain_entities: Optional[List[str]] = None,
+        victim_entities: Optional[List[str]] = None,
+    ) -> Dict[str, float]:
 
-        Returns:
-            Dictionary containing narrative conflict features.
-        """
-
-        if not isinstance(text, str):
-            raise ValueError("Input text must be a string")
-
-        cleaned_text = text.strip()
-
-        if not cleaned_text:
+        if not isinstance(text, str) or not text.strip():
             raise ValueError("Input text must be non-empty")
 
-        try:
-            doc: Doc = self.nlp(cleaned_text)
-        except Exception as exc:
-            logger.exception("spaCy processing failed")
-            raise RuntimeError("Text processing failed") from exc
+        doc: Doc = self.nlp(text)
 
-        tokens: List[str] = [
-            token.text.lower() for token in doc if token.is_alpha
-        ]
+        tokens = [t.lemma_.lower() for t in doc if t.is_alpha]
 
         features: Dict[str, float] = {}
 
-        features.update(self._conflict_term_features(tokens))
+        features.update(self._conflict_verb_features(doc))
         features.update(self._opposition_features(tokens))
         features.update(self._polarization_features(tokens))
-        features.update(self._entity_opposition(doc))
-        features.update(self._punctuation_conflict(cleaned_text))
 
-        logger.debug("Narrative conflict features computed")
+        features.update(
+            self._actor_conflict_structure(
+                doc,
+                hero_entities,
+                villain_entities,
+                victim_entities,
+            )
+        )
+
+        features.update(self._punctuation_features(text))
 
         return features
 
-    def _conflict_term_features(self, tokens: List[str]) -> Dict[str, float]:
-        """
-        Measure frequency of conflict-related terms.
-        """
+
+    # -----------------------------------------------------
+    # Conflict verbs
+    # -----------------------------------------------------
+
+    def _conflict_verb_features(self, doc: Doc) -> Dict[str, float]:
+
+        verbs = [
+            token.lemma_.lower()
+            for token in doc
+            if token.pos_ == "VERB"
+        ]
+
+        if not verbs:
+            return {"conflict_verb_ratio": 0.0}
+
+        count = sum(1 for v in verbs if v in self.CONFLICT_VERBS)
+
+        return {"conflict_verb_ratio": count / len(verbs)}
+
+
+    # -----------------------------------------------------
+    # Opposition markers
+    # -----------------------------------------------------
+
+    def _opposition_features(self, tokens: List[str]):
 
         if not tokens:
-            return {"narrative_conflict_term_ratio": 0.0}
+            return {"opposition_marker_ratio": 0.0}
 
-        count = sum(1 for token in tokens if token in self.CONFLICT_TERMS)
+        count = sum(1 for t in tokens if t in self.OPPOSITION_MARKERS)
 
-        ratio = count / len(tokens)
+        return {"opposition_marker_ratio": count / len(tokens)}
 
-        return {"narrative_conflict_term_ratio": float(ratio)}
 
-    def _opposition_features(self, tokens: List[str]) -> Dict[str, float]:
-        """
-        Detect explicit opposition framing.
-        """
+    # -----------------------------------------------------
+    # Polarization
+    # -----------------------------------------------------
 
-        if not tokens:
-            return {"narrative_opposition_ratio": 0.0}
-
-        count = sum(1 for token in tokens if token in self.OPPOSITION_MARKERS)
-
-        ratio = count / len(tokens)
-
-        return {"narrative_opposition_ratio": float(ratio)}
-
-    def _polarization_features(self, tokens: List[str]) -> Dict[str, float]:
-        """
-        Measure polarized group framing.
-        """
+    def _polarization_features(self, tokens: List[str]):
 
         if not tokens:
-            return {"narrative_polarization_ratio": 0.0}
+            return {"polarization_ratio": 0.0}
 
-        count = sum(1 for token in tokens if token in self.POLARIZATION_TERMS)
+        count = sum(1 for t in tokens if t in self.POLARIZATION_TERMS)
 
-        ratio = count / len(tokens)
+        return {"polarization_ratio": count / len(tokens)}
 
-        return {"narrative_polarization_ratio": float(ratio)}
 
-    def _entity_opposition(self, doc: Doc) -> Dict[str, float]:
-        """
-        Estimate potential conflict between named entities.
-        """
+    # -----------------------------------------------------
+    # Actor conflict structure
+    # -----------------------------------------------------
 
-        entities = [ent.text.lower() for ent in doc.ents]
+    def _actor_conflict_structure(
+        self,
+        doc: Doc,
+        heroes: Optional[List[str]],
+        villains: Optional[List[str]],
+        victims: Optional[List[str]],
+    ) -> Dict[str, float]:
 
-        if not entities:
-            return {"narrative_entity_conflict_ratio": 0.0}
+        heroes = heroes or []
+        villains = villains or []
+        victims = victims or []
 
-        entity_counts = Counter(entities)
+        text = doc.text.lower()
 
-        repeated_entities = sum(
-            1 for _, count in entity_counts.items() if count > 1
-        )
+        hero_mentions = sum(text.count(h.lower()) for h in heroes)
+        villain_mentions = sum(text.count(v.lower()) for v in villains)
+        victim_mentions = sum(text.count(v.lower()) for v in victims)
 
-        ratio = repeated_entities / max(len(entities), 1)
+        hero_villain_conflict = min(hero_mentions, villain_mentions)
+        villain_victim_harm = min(villain_mentions, victim_mentions)
+        hero_victim_protection = min(hero_mentions, victim_mentions)
 
-        return {"narrative_entity_conflict_ratio": float(ratio)}
+        return {
+            "hero_mentions": float(hero_mentions),
+            "villain_mentions": float(villain_mentions),
+            "victim_mentions": float(victim_mentions),
 
-    def _punctuation_conflict(self, text: str) -> Dict[str, float]:
-        """
-        Capture punctuation emphasis associated with conflict rhetoric.
-        """
+            "hero_villain_conflict_score": float(hero_villain_conflict),
+            "villain_victim_harm_score": float(villain_victim_harm),
+            "hero_victim_protection_score": float(hero_victim_protection),
+        }
 
-        exclamations = len(self.EXCLAMATION_PATTERN.findall(text))
-        questions = len(self.QUESTION_PATTERN.findall(text))
+
+    # -----------------------------------------------------
+    # Punctuation rhetoric
+    # -----------------------------------------------------
+
+    def _punctuation_features(self, text: str):
 
         length = max(len(text), 1)
 
         return {
-            "narrative_conflict_exclamation_ratio": float(exclamations / length),
-            "narrative_conflict_question_ratio": float(questions / length),
+            "conflict_exclamation_ratio":
+                len(self.EXCLAMATION_PATTERN.findall(text)) / length,
+
+            "conflict_question_ratio":
+                len(self.QUESTION_PATTERN.findall(text)) / length,
         }
 
 
+# ---------------------------------------------------------
+# Vector conversion
+# ---------------------------------------------------------
+
 def narrative_conflict_vector(features: Dict[str, float]) -> np.ndarray:
-    """
-    Convert narrative conflict features into numeric vector.
-    """
 
-    if not isinstance(features, dict):
-        raise ValueError("features must be a dictionary")
+    ordered_features = [
 
-    if not features:
-        raise ValueError("features must be a non-empty dictionary")
+        "conflict_verb_ratio",
+        "opposition_marker_ratio",
+        "polarization_ratio",
 
-    numeric_values: List[float] = []
+        "hero_mentions",
+        "villain_mentions",
+        "victim_mentions",
 
-    for key, value in features.items():
-        if isinstance(value, (int, float, np.number)):
-            numeric_values.append(float(value))
-        else:
-            logger.warning("Non-numeric narrative conflict feature skipped: %s", key)
+        "hero_villain_conflict_score",
+        "villain_victim_harm_score",
+        "hero_victim_protection_score",
+    ]
 
-    if not numeric_values:
-        raise ValueError("No numeric values found in features")
-
-    try:
-        vector = np.array(numeric_values, dtype=np.float32)
-        return vector
-    except Exception as exc:
-        logger.exception("Narrative conflict vector conversion failed")
-        raise RuntimeError(
-            "Failed to convert narrative conflict features"
-        ) from exc
+    return np.array(
+        [float(features.get(f, 0.0)) for f in ordered_features],
+        dtype=np.float32,
+    )

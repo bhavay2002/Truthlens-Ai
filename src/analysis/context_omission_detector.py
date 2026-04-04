@@ -37,71 +37,138 @@ import spacy
 from spacy.language import Language
 from spacy.tokens import Doc
 
-
 logger = logging.getLogger(__name__)
 
 
+# ------------------------------------------------------------
+# Configuration
+# ------------------------------------------------------------
+
 @dataclass(slots=True)
 class ContextOmissionConfig:
-    """
-    Configuration for ContextOmissionDetector.
-    """
 
     spacy_model: str = "en_core_web_sm"
+    disable_components: tuple = ("parser",)
     normalize_ratios: bool = True
 
 
+# ------------------------------------------------------------
+# Detector
+# ------------------------------------------------------------
+
 class ContextOmissionDetector:
-    """
-    Detects linguistic patterns associated with missing or incomplete context.
-    """
+
+    # ----------------------------------------------------
+    # Vague references (unverifiable sources)
+    # ----------------------------------------------------
 
     VAGUE_REFERENCES = {
-        "they",
-        "people",
-        "many",
-        "some",
-        "others",
-        "experts",
-        "critics",
-        "sources",
-        "analysts",
+
+        "they","people","many","some","others",
+        "experts","critics","sources","analysts",
+        "officials","insiders","observers",
+        "commentators","reportedly","allegedly",
+
+        "authorities","investigators","researchers",
+        "witnesses","participants","leaders",
+        "lawmakers","politicians","administration",
+
+        "supporters","opponents","activists",
+        "analysts say","critics say","supporters say",
+        "many believe","some claim","others argue",
+
+        "it is said","it is believed","it is thought",
+        "rumor","rumors","speculation"
     }
+
+    # ----------------------------------------------------
+    # Attribution signals (source referencing)
+    # ----------------------------------------------------
 
     ATTRIBUTION_MARKERS = {
-        "according",
-        "reported",
-        "stated",
-        "claimed",
-        "said",
-        "noted",
-        "explained",
+
+        "according","according to",
+        "reported","reports","reportedly",
+        "stated","state","stating",
+        "claimed","claim","claims",
+        "said","say","says",
+        "noted","notes",
+        "explained","explain",
+        "announced","announce",
+        "revealed","reveal",
+        "confirmed","confirm",
+        "suggested","suggest",
+
+        "told","told reporters",
+        "wrote","writes",
+        "indicated","indicates",
+        "acknowledged","acknowledges",
+        "commented","comments",
+        "warned","warns"
     }
 
+    # ----------------------------------------------------
+    # Evidence signals (empirical grounding)
+    # ----------------------------------------------------
+
     EVIDENCE_MARKERS = {
-        "data",
-        "study",
-        "report",
-        "research",
-        "analysis",
-        "evidence",
-        "statistics",
+
+        "data","dataset",
+        "study","studies",
+        "report","reports",
+        "research","researchers",
+        "analysis","analysis shows",
+        "evidence","empirical evidence",
+        "statistics","statistical",
+        "survey","poll","polling",
+        "experiment","experiments",
+        "findings","results","outcomes",
+
+        "according to data",
+        "according to research",
+        "research suggests",
+        "research shows",
+        "data indicates",
+        "data suggests",
+        "statistics indicate",
+        "analysis indicates",
+        "evidence suggests"
+    }
+
+    # ----------------------------------------------------
+    # Uncertainty / speculation signals
+    # ----------------------------------------------------
+
+    UNCERTAINTY_MARKERS = {
+
+        "allegedly","reportedly","apparently",
+        "possibly","potentially",
+        "likely","unlikely",
+        "rumored","rumour","rumor",
+        "speculation","speculative",
+
+        "suggests","appears","seems",
+        "may","might","could",
+        "can","possibly","perhaps",
+
+        "it appears","it seems",
+        "it is possible",
+        "it is believed",
+        "it is thought",
+        "it remains unclear"
     }
 
     QUOTE_PATTERN = re.compile(r'"')
 
-    def __init__(self, config: ContextOmissionConfig | None = None) -> None:
-        """
-        Initialize NLP pipeline for context omission detection.
-
-        Args:
-            config: Optional configuration for detector.
-        """
+    def __init__(self, config: ContextOmissionConfig | None = None):
 
         self.config = config or ContextOmissionConfig()
 
         try:
-            self.nlp: Language = spacy.load(self.config.spacy_model)
+            self.nlp: Language = spacy.load(
+                self.config.spacy_model,
+                disable=self.config.disable_components
+            )
         except Exception as exc:
             logger.exception("spaCy model loading failed")
             raise RuntimeError(
@@ -109,139 +176,91 @@ class ContextOmissionDetector:
             ) from exc
 
         logger.info(
-            "ContextOmissionDetector initialized with model=%s",
-            self.config.spacy_model,
+            "ContextOmissionDetector initialized | model=%s",
+            self.config.spacy_model
         )
 
+    # ------------------------------------------------------------
+
     def analyze(self, text: str) -> Dict[str, float]:
-        """
-        Analyze text for signals of missing contextual information.
-
-        Args:
-            text: Input text.
-
-        Returns:
-            Dictionary containing context omission features.
-        """
 
         if not isinstance(text, str):
-            raise ValueError("Input text must be a string")
+            raise ValueError("Input text must be string")
 
-        cleaned_text = text.strip()
+        text = text.strip()
 
-        if not cleaned_text:
-            raise ValueError("Input text must be non-empty")
+        if not text:
+            raise ValueError("Input text cannot be empty")
 
-        try:
-            doc: Doc = self.nlp(cleaned_text)
-        except Exception as exc:
-            logger.exception("spaCy processing failed")
-            raise RuntimeError("Text processing failed") from exc
+        doc: Doc = self.nlp(text)
 
-        tokens: List[str] = [
-            token.text.lower() for token in doc if token.is_alpha
+        tokens = [
+            token.lemma_.lower()
+            for token in doc
+            if token.is_alpha
         ]
+
+        token_counts = Counter(tokens)
 
         features: Dict[str, float] = {}
 
-        features.update(self._vague_reference_features(tokens))
-        features.update(self._attribution_features(tokens))
-        features.update(self._evidence_features(tokens))
-        features.update(self._quote_features(cleaned_text))
+        features["context_vague_reference_ratio"] = self._term_ratio(
+            token_counts, tokens, self.VAGUE_REFERENCES
+        )
+
+        features["context_attribution_ratio"] = self._term_ratio(
+            token_counts, tokens, self.ATTRIBUTION_MARKERS
+        )
+
+        features["context_evidence_ratio"] = self._term_ratio(
+            token_counts, tokens, self.EVIDENCE_MARKERS
+        )
+
+        features["context_uncertainty_ratio"] = self._term_ratio(
+            token_counts, tokens, self.UNCERTAINTY_MARKERS
+        )
+
+        features["context_quote_ratio"] = self._quote_ratio(text)
+
         features.update(self._entity_context_features(doc))
+
+        # contextual grounding score
+        features["context_grounding_score"] = (
+            features["context_evidence_ratio"]
+            + features["context_entity_ratio"]
+        )
 
         logger.debug("Context omission features computed")
 
         return features
 
-    def _vague_reference_features(self, tokens: List[str]) -> Dict[str, float]:
-        """
-        Measure frequency of vague references.
+    # ------------------------------------------------------------
 
-        Args:
-            tokens: Tokenized words.
-
-        Returns:
-            Feature dictionary.
-        """
+    def _term_ratio(
+        self,
+        token_counts: Counter,
+        tokens: List[str],
+        lexicon: set,
+    ) -> float:
 
         if not tokens:
-            return {"context_vague_reference_ratio": 0.0}
+            return 0.0
 
-        count = sum(1 for token in tokens if token in self.VAGUE_REFERENCES)
+        hits = sum(token_counts[t] for t in lexicon if t in token_counts)
 
-        ratio = count / len(tokens)
+        return float(hits / max(len(tokens), 1))
 
-        return {"context_vague_reference_ratio": float(ratio)}
+    # ------------------------------------------------------------
 
-    def _attribution_features(self, tokens: List[str]) -> Dict[str, float]:
-        """
-        Detect attribution signals referencing external sources.
-
-        Args:
-            tokens: Tokenized words.
-
-        Returns:
-            Feature dictionary.
-        """
-
-        if not tokens:
-            return {"context_attribution_ratio": 0.0}
-
-        count = sum(1 for token in tokens if token in self.ATTRIBUTION_MARKERS)
-
-        ratio = count / len(tokens)
-
-        return {"context_attribution_ratio": float(ratio)}
-
-    def _evidence_features(self, tokens: List[str]) -> Dict[str, float]:
-        """
-        Measure presence of evidence or research references.
-
-        Args:
-            tokens: Tokenized words.
-
-        Returns:
-            Feature dictionary.
-        """
-
-        if not tokens:
-            return {"context_evidence_ratio": 0.0}
-
-        count = sum(1 for token in tokens if token in self.EVIDENCE_MARKERS)
-
-        ratio = count / len(tokens)
-
-        return {"context_evidence_ratio": float(ratio)}
-
-    def _quote_features(self, text: str) -> Dict[str, float]:
-        """
-        Detect quotation usage indicating cited statements.
-
-        Args:
-            text: Input text.
-
-        Returns:
-            Feature dictionary.
-        """
+    def _quote_ratio(self, text: str) -> float:
 
         quote_count = len(self.QUOTE_PATTERN.findall(text))
-        length = max(len(text), 1)
 
-        ratio = quote_count / length
+        return float(quote_count / max(len(text.split()), 1))
 
-        return {"context_quote_ratio": float(ratio)}
+    # ------------------------------------------------------------
 
     def _entity_context_features(self, doc: Doc) -> Dict[str, float]:
-        """
-        Measure named entity presence as contextual grounding.
-
-        Args:
-            doc: spaCy document.
-
-        Returns:
-            Feature dictionary.
-        """
 
         entities = list(doc.ents)
 
@@ -259,37 +278,26 @@ class ContextOmissionDetector:
         }
 
 
+# ------------------------------------------------------------
+# Vector Conversion
+# ------------------------------------------------------------
+
 def context_feature_vector(features: Dict[str, float]) -> np.ndarray:
-    """
-    Convert context omission features into a numerical vector.
 
-    Args:
-        features: Dictionary of context features.
+    ordered_keys = [
+        "context_vague_reference_ratio",
+        "context_attribution_ratio",
+        "context_evidence_ratio",
+        "context_uncertainty_ratio",
+        "context_quote_ratio",
+        "context_entity_ratio",
+        "context_entity_type_diversity",
+        "context_grounding_score",
+    ]
 
-    Returns:
-        NumPy feature vector.
-    """
+    vector = np.array(
+        [float(features.get(k, 0.0)) for k in ordered_keys],
+        dtype=np.float32
+    )
 
-    if not isinstance(features, dict):
-        raise ValueError("features must be a dictionary")
-
-    if not features:
-        raise ValueError("features dictionary cannot be empty")
-
-    numeric_values: List[float] = []
-
-    for key, value in features.items():
-        if isinstance(value, (int, float, np.number)):
-            numeric_values.append(float(value))
-        else:
-            logger.warning("Non-numeric feature skipped: %s", key)
-
-    if not numeric_values:
-        raise ValueError("No numeric values found in features")
-
-    try:
-        vector = np.array(numeric_values, dtype=np.float32)
-        return vector
-    except Exception as exc:
-        logger.exception("Context feature vector conversion failed")
-        raise RuntimeError("Failed to convert context features") from exc
+    return vector

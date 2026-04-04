@@ -25,7 +25,6 @@ Inputs:
 Outputs:
     Information density feature dictionary and optional numerical vector
 """
-
 from __future__ import annotations
 
 import logging
@@ -43,79 +42,125 @@ from spacy.tokens import Doc
 logger = logging.getLogger(__name__)
 
 
+# ------------------------------------------------------------
+# Configuration
+# ------------------------------------------------------------
+
 @dataclass(slots=True)
 class InformationDensityConfig:
-    """
-    Configuration for InformationDensityAnalyzer.
-    """
 
     spacy_model: str = "en_core_web_sm"
+    disable_components: tuple = ("ner",)
 
+
+# ------------------------------------------------------------
+# Analyzer
+# ------------------------------------------------------------
 
 class InformationDensityAnalyzer:
-    """
-    Measures factual vs rhetorical information density within text.
-    """
+
+    # ----------------------------------------------------
+    # Factual signals
+    # ----------------------------------------------------
 
     FACTUAL_TERMS = {
-        "data",
-        "report",
-        "study",
-        "research",
-        "statistics",
-        "analysis",
-        "according",
-        "evidence",
-        "survey",
-        "official",
+
+        "data","dataset","report","reports",
+        "study","studies","research","analysis",
+        "statistics","statistical","survey",
+        "experiment","experiments","findings",
+        "results","evidence","empirical",
+        "according","official","documented",
+        "confirmed","verified","record",
+        "measurement","observed","observation"
     }
+
+    # ----------------------------------------------------
+    # Opinion signals
+    # ----------------------------------------------------
 
     OPINION_TERMS = {
-        "believe",
-        "think",
-        "argue",
-        "claim",
-        "suggest",
-        "feel",
-        "likely",
-        "possibly",
-        "perhaps",
-        "opinion",
+
+        "believe","believes","believed",
+        "think","thinks","thought",
+        "argue","argues","argued",
+        "claim","claims","claimed",
+        "suggest","suggests","suggested",
+        "feel","feels","felt",
+        "likely","unlikely","possibly",
+        "perhaps","apparently","seems",
+        "appears","assume","assumes",
+        "arguably","probably"
     }
+
+    # ----------------------------------------------------
+    # Claim / inference signals
+    # ----------------------------------------------------
 
     CLAIM_TERMS = {
-        "therefore",
-        "thus",
-        "hence",
-        "consequently",
-        "so",
-        "clearly",
-        "obviously",
+
+        "therefore","thus","hence",
+        "consequently","accordingly",
+        "so","for_this_reason",
+        "it_follows","this_proves",
+        "this_shows","this_indicates",
+        "clearly","obviously",
+        "undoubtedly","without_doubt",
+        "ultimately"
     }
 
+    # ----------------------------------------------------
+    # Rhetorical / persuasive signals
+    # ----------------------------------------------------
+
     RHETORICAL_TERMS = {
-        "outrageous",
-        "shocking",
-        "dangerous",
-        "disaster",
-        "catastrophe",
-        "crisis",
-        "threat",
-        "corrupt",
-        "evil",
+
+        "outrageous","shocking","dangerous",
+        "disaster","catastrophe","crisis",
+        "threat","collapse","corrupt",
+        "evil","scandal","devastating",
+        "radical","extreme","unbelievable",
+        "terrifying","chaos","propaganda",
+        "manipulation","fraud","coverup"
+    }
+
+    # ----------------------------------------------------
+    # Emotional language signals
+    # ----------------------------------------------------
+
+    EMOTIONAL_TERMS = {
+
+        "fear","anger","outrage",
+        "panic","shock","concern",
+        "hope","joy","frustration",
+        "sadness","anxiety","rage"
+    }
+
+    # ----------------------------------------------------
+    # Modal speculation signals
+    # ----------------------------------------------------
+
+    MODAL_TERMS = {
+
+        "may","might","could",
+        "should","would","must",
+        "can","cannot","possibly",
+        "perhaps","likely"
     }
 
     RHETORICAL_PATTERN = re.compile(r"[!?]+")
 
-    def __init__(self, config: InformationDensityConfig | None = None) -> None:
-        """
-        Initialize NLP pipeline for information density analysis.
-        """
+    # ----------------------------------------------------
+
+    def __init__(self, config: InformationDensityConfig | None = None):
 
         self.config = config or InformationDensityConfig()
 
         try:
-            self.nlp: Language = spacy.load(self.config.spacy_model)
+            self.nlp: Language = spacy.load(
+                self.config.spacy_model,
+                disable=self.config.disable_components
+            )
         except Exception as exc:
             logger.exception("spaCy model loading failed")
             raise RuntimeError(
@@ -123,37 +168,30 @@ class InformationDensityAnalyzer:
             ) from exc
 
         logger.info(
-            "InformationDensityAnalyzer initialized with model=%s",
+            "InformationDensityAnalyzer initialized | model=%s",
             self.config.spacy_model,
         )
 
+    # ------------------------------------------------------------
+    # Main Analysis
+    # ------------------------------------------------------------
+
     def analyze(self, text: str) -> Dict[str, float]:
-        """
-        Analyze factual and rhetorical density in text.
-
-        Args:
-            text: Input text.
-
-        Returns:
-            Dictionary of information density metrics.
-        """
 
         if not isinstance(text, str):
             raise ValueError("Input text must be a string")
 
-        cleaned_text = text.strip()
+        text = text.strip()
 
-        if not cleaned_text:
+        if not text:
             raise ValueError("Input text must be non-empty")
 
-        try:
-            doc: Doc = self.nlp(cleaned_text)
-        except Exception as exc:
-            logger.exception("spaCy processing failed")
-            raise RuntimeError("Text processing failed") from exc
+        doc: Doc = self.nlp(text)
 
         tokens: List[str] = [
-            token.text.lower() for token in doc if token.is_alpha
+            token.lemma_.lower()
+            for token in doc
+            if token.is_alpha
         ]
 
         features: Dict[str, float] = {}
@@ -162,12 +200,20 @@ class InformationDensityAnalyzer:
         features.update(self._term_ratio(tokens, self.OPINION_TERMS, "opinion_density"))
         features.update(self._term_ratio(tokens, self.CLAIM_TERMS, "claim_density"))
         features.update(self._term_ratio(tokens, self.RHETORICAL_TERMS, "rhetorical_density"))
+        features.update(self._term_ratio(tokens, self.EMOTIONAL_TERMS, "emotion_density"))
+        features.update(self._term_ratio(tokens, self.MODAL_TERMS, "modal_density"))
 
-        features.update(self._punctuation_rhetoric(cleaned_text))
+        features.update(self._punctuation_rhetoric(text))
+
+        features.update(self._information_emotion_ratio(features))
 
         logger.debug("Information density features computed")
 
         return features
+
+    # ------------------------------------------------------------
+    # Lexical density
+    # ------------------------------------------------------------
 
     def _term_ratio(
         self,
@@ -175,9 +221,6 @@ class InformationDensityAnalyzer:
         lexicon: set,
         feature_name: str,
     ) -> Dict[str, float]:
-        """
-        Compute lexical density ratio.
-        """
 
         if not tokens:
             return {feature_name: 0.0}
@@ -190,10 +233,11 @@ class InformationDensityAnalyzer:
 
         return {feature_name: float(ratio)}
 
+    # ------------------------------------------------------------
+    # Rhetorical punctuation
+    # ------------------------------------------------------------
+
     def _punctuation_rhetoric(self, text: str) -> Dict[str, float]:
-        """
-        Capture rhetorical punctuation intensity.
-        """
 
         matches = self.RHETORICAL_PATTERN.findall(text)
 
@@ -203,32 +247,43 @@ class InformationDensityAnalyzer:
 
         return {"rhetorical_punctuation_density": float(score)}
 
+    # ------------------------------------------------------------
+    # Information-to-Emotion Ratio
+    # ------------------------------------------------------------
+
+    def _information_emotion_ratio(
+        self,
+        features: Dict[str, float]
+    ) -> Dict[str, float]:
+
+        factual = features.get("factual_density", 0.0)
+        emotion = features.get("emotion_density", 0.0)
+
+        ratio = factual / max(emotion, 1e-6)
+
+        return {"information_emotion_ratio": float(ratio)}
+
+
+# ------------------------------------------------------------
+# Vector Conversion
+# ------------------------------------------------------------
 
 def information_density_vector(features: Dict[str, float]) -> np.ndarray:
-    """
-    Convert information density features into numeric vector.
-    """
 
-    if not isinstance(features, dict):
-        raise ValueError("features must be a dictionary")
+    ordered_keys = [
+        "factual_density",
+        "opinion_density",
+        "claim_density",
+        "rhetorical_density",
+        "emotion_density",
+        "modal_density",
+        "rhetorical_punctuation_density",
+        "information_emotion_ratio",
+    ]
 
-    if not features:
-        raise ValueError("features must be a non-empty dictionary")
+    vector = np.array(
+        [float(features.get(k, 0.0)) for k in ordered_keys],
+        dtype=np.float32,
+    )
 
-    values: List[float] = []
-
-    for key, value in features.items():
-        if isinstance(value, (int, float, np.number)):
-            values.append(float(value))
-        else:
-            logger.warning("Non-numeric information density feature skipped: %s", key)
-
-    if not values:
-        raise ValueError("No numeric values found in features")
-
-    try:
-        vector = np.array(values, dtype=np.float32)
-        return vector
-    except Exception as exc:
-        logger.exception("Information density vector conversion failed")
-        raise RuntimeError("Failed to convert information density features") from exc
+    return vector

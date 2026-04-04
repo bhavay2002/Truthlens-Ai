@@ -8,6 +8,13 @@ Description:
     reinforcement. These signals help the TruthLens AI system identify how
     strongly a narrative is being pushed and whether it is repeatedly reinforced
     throughout the discourse.
+    The module detects structured narrative conflict patterns using:
+
+    1. Conflict verb ontology
+    2. Opposition framing markers
+    3. Polarization language detection
+    4. Phrase-level narrative conflict patterns
+    5. Actor-role narrative modeling (hero / villain / victim)
 
 Dependencies:
     logging
@@ -24,224 +31,338 @@ Outputs:
     Narrative propagation feature dictionary and optional numerical vector
 """
 
+
 from __future__ import annotations
 
 import logging
-from collections import Counter
+import re
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import spacy
 from spacy.language import Language
 from spacy.tokens import Doc
 
-
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------
+
 @dataclass(slots=True)
-class NarrativePropagationConfig:
-    """
-    Configuration for NarrativePropagationAnalyzer.
-    """
+class NarrativeConflictConfig:
 
     spacy_model: str = "en_core_web_sm"
+    normalize_ratios: bool = True
 
 
-class NarrativePropagationAnalyzer:
+# ---------------------------------------------------------
+# Conflict Lexicons
+# ---------------------------------------------------------
+
+CONFLICT_VERBS = {
+
+    "violent_conflict": {
+        "attack","assault","strike","bomb","invade","raid",
+        "kill","destroy","eliminate","retaliate","counterattack",
+        "engage","fight","battle","clash","ambush"
+    },
+
+    "political_conflict": {
+        "oppose","challenge","confront","block","resist",
+        "defy","undermine","topple","overthrow","obstruct",
+        "contest","counter"
+    },
+
+    "discursive_conflict": {
+        "accuse","blame","criticize","condemn","denounce",
+        "slam","rebuke","mock","dismiss","discredit"
+    },
+
+    "institutional_conflict": {
+        "sue","investigate","prosecute","charge",
+        "sanction","indict","impeach"
+    },
+
+    "coercion_conflict": {
+        "threaten","warn","pressure","intimidate",
+        "coerce","target","force"
+    },
+}
+
+
+OPPOSITION_MARKERS = {
+
+    "against",
+    "versus",
+    "vs",
+    "opposed",
+    "opposing",
+
+    "conflict",
+    "confrontation",
+    "showdown",
+    "standoff",
+
+    "rival",
+    "rivalry",
+    "competitor",
+    "adversary",
+
+    "struggle",
+    "battle",
+    "fight",
+    "clash",
+
+    "power_struggle",
+    "political_fight",
+    "ideological_clash",
+}
+
+
+POLARIZATION_TERMS = {
+
+    "us",
+    "we",
+    "our",
+    "ours",
+
+    "them",
+    "they",
+    "their",
+    "others",
+
+    "enemy",
+    "opponent",
+    "adversary",
+
+    "elite",
+    "establishment",
+    "globalists",
+
+    "extremists",
+    "radicals",
+
+    "the_people",
+    "ordinary_people",
+    "corrupt_elites",
+}
+
+
+CONFLICT_PHRASES = {
+
+    "war against",
+    "fight against",
+    "battle against",
+    "clash with",
+    "conflict with",
+    "power struggle",
+    "political fight",
+    "ideological battle",
+    "direct confrontation",
+    "rising tensions",
+    "growing conflict",
+}
+
+
+QUESTION_PATTERN = re.compile(r"\?")
+EXCLAMATION_PATTERN = re.compile(r"!")
+
+# ---------------------------------------------------------
+# Analyzer
+# ---------------------------------------------------------
+
+class NarrativeConflictAnalyzer:
+
     """
-    Detects narrative reinforcement and propagation patterns across text.
+    Extract adversarial narrative structures from text.
     """
 
-    NARRATIVE_KEY_TERMS = {
-        "crisis",
-        "threat",
-        "freedom",
-        "corruption",
-        "security",
-        "control",
-        "attack",
-        "defend",
-        "protect",
-        "enemy",
-        "power",
-        "rights",
-    }
+    def __init__(self, config: Optional[NarrativeConflictConfig] = None):
 
-    def __init__(self, config: NarrativePropagationConfig | None = None) -> None:
-        """
-        Initialize NLP pipeline for narrative propagation analysis.
-
-        Args:
-            config: Optional configuration object.
-        """
-
-        self.config = config or NarrativePropagationConfig()
+        self.config = config or NarrativeConflictConfig()
 
         try:
             self.nlp: Language = spacy.load(self.config.spacy_model)
         except Exception as exc:
             logger.exception("spaCy model loading failed")
-            raise RuntimeError(
-                f"Failed to load spaCy model: {self.config.spacy_model}"
-            ) from exc
+            raise RuntimeError("Failed to load spaCy model") from exc
 
-        logger.info(
-            "NarrativePropagationAnalyzer initialized with model=%s",
-            self.config.spacy_model,
-        )
+        logger.info("NarrativeConflictAnalyzer initialized")
 
-    def analyze(self, text: str) -> Dict[str, float]:
-        """
-        Analyze narrative propagation patterns in text.
 
-        Args:
-            text: Input text.
+    # -----------------------------------------------------
+    # Main analysis
+    # -----------------------------------------------------
 
-        Returns:
-            Dictionary containing narrative propagation features.
-        """
+    def analyze(
+        self,
+        text: str,
+        hero_entities: Optional[List[str]] = None,
+        villain_entities: Optional[List[str]] = None,
+        victim_entities: Optional[List[str]] = None,
+    ) -> Dict[str, float]:
 
-        if not isinstance(text, str):
-            raise ValueError("Input text must be a string")
-
-        cleaned_text = text.strip()
-
-        if not cleaned_text:
+        if not isinstance(text, str) or not text.strip():
             raise ValueError("Input text must be non-empty")
 
-        try:
-            doc: Doc = self.nlp(cleaned_text)
-        except Exception as exc:
-            logger.exception("spaCy processing failed")
-            raise RuntimeError("Text processing failed") from exc
+        doc: Doc = self.nlp(text)
 
-        sentences: List[str] = [
-            sent.text.strip() for sent in doc.sents if sent.text.strip()
-        ]
-
-        tokens: List[str] = [
-            token.text.lower() for token in doc if token.is_alpha
-        ]
+        tokens = [t.lemma_.lower() for t in doc if t.is_alpha]
 
         features: Dict[str, float] = {}
 
-        features.update(self._keyword_propagation(tokens))
-        features.update(self._sentence_reinforcement(sentences))
-        features.update(self._theme_persistence(tokens))
-        features.update(self._narrative_focus(tokens))
-
-        logger.debug("Narrative propagation features computed")
+        features.update(self._conflict_verbs(tokens))
+        features.update(self._opposition_markers(tokens))
+        features.update(self._polarization(tokens))
+        features.update(self._conflict_phrases(text.lower()))
+        features.update(self._actor_roles(text, hero_entities, villain_entities, victim_entities))
+        features.update(self._punctuation_features(text))
 
         return features
 
-    def _keyword_propagation(self, tokens: List[str]) -> Dict[str, float]:
-        """
-        Measure repetition of narrative keywords.
-        """
 
-        if not tokens:
-            return {"narrative_keyword_propagation": 0.0}
+    # -----------------------------------------------------
+    # Conflict verbs
+    # -----------------------------------------------------
 
-        counts = Counter(tokens)
+    def _conflict_verbs(self, tokens: List[str]) -> Dict[str, float]:
 
-        keyword_hits = sum(
-            counts[token] for token in counts if token in self.NARRATIVE_KEY_TERMS
-        )
+        features = {}
+        total_tokens = max(len(tokens), 1)
 
-        propagation_ratio = keyword_hits / len(tokens)
+        for category, verbs in CONFLICT_VERBS.items():
 
-        return {"narrative_keyword_propagation": float(propagation_ratio)}
+            count = sum(1 for t in tokens if t in verbs)
 
-    def _sentence_reinforcement(self, sentences: List[str]) -> Dict[str, float]:
-        """
-        Detect repeated narrative structures across sentences.
-        """
+            features[f"{category}_ratio"] = count / total_tokens
 
-        if not sentences:
-            return {"narrative_sentence_reinforcement": 0.0}
-
-        normalized = [sentence.lower() for sentence in sentences]
-
-        counts = Counter(normalized)
-
-        repeated = sum(1 for _, count in counts.items() if count > 1)
-
-        ratio = repeated / len(sentences)
-
-        return {"narrative_sentence_reinforcement": float(ratio)}
-
-    def _theme_persistence(self, tokens: List[str]) -> Dict[str, float]:
-        """
-        Estimate how persistent narrative themes remain across the text.
-        """
-
-        if not tokens:
-            return {"narrative_theme_persistence": 0.0}
-
-        counts = Counter(tokens)
-
-        frequent_terms = [term for term, count in counts.items() if count > 2]
-
-        persistence = len(frequent_terms) / len(tokens)
-
-        return {"narrative_theme_persistence": float(persistence)}
-
-    def _narrative_focus(self, tokens: List[str]) -> Dict[str, float]:
-        """
-        Estimate how concentrated the narrative is around a few key terms.
-        """
-
-        if not tokens:
-            return {"narrative_focus_score": 0.0}
-
-        counts = Counter(tokens)
-
-        most_common = counts.most_common(5)
-
-        total_hits = sum(count for _, count in most_common)
-
-        focus_score = total_hits / len(tokens)
-
-        return {"narrative_focus_score": float(focus_score)}
+        return features
 
 
-def narrative_propagation_vector(features: Dict[str, float]) -> np.ndarray:
-    """
-    Convert narrative propagation features into a numerical vector.
+    # -----------------------------------------------------
+    # Opposition markers
+    # -----------------------------------------------------
 
-    Args:
-        features: Dictionary of propagation features.
+    def _opposition_markers(self, tokens: List[str]) -> Dict[str, float]:
 
-    Returns:
-        NumPy feature vector.
-    """
+        total_tokens = max(len(tokens), 1)
 
-    if not isinstance(features, dict):
-        raise ValueError("features must be a dictionary")
+        count = sum(1 for t in tokens if t in OPPOSITION_MARKERS)
 
-    if not features:
-        raise ValueError("features must be a non-empty dictionary")
+        return {"opposition_marker_ratio": count / total_tokens}
 
-    numeric_values: List[float] = []
 
-    for key, value in features.items():
-        if isinstance(value, (int, float, np.number)):
-            numeric_values.append(float(value))
-        else:
-            logger.warning(
-                "Non-numeric narrative propagation feature skipped: %s", key
-            )
+    # -----------------------------------------------------
+    # Polarization
+    # -----------------------------------------------------
 
-    if not numeric_values:
-        raise ValueError("No numeric values found in features")
+    def _polarization(self, tokens: List[str]) -> Dict[str, float]:
 
-    try:
-        vector = np.array(numeric_values, dtype=np.float32)
-        return vector
-    except Exception as exc:
-        logger.exception("Narrative propagation vector conversion failed")
-        raise RuntimeError(
-            "Failed to convert propagation features"
-        ) from exc
+        total_tokens = max(len(tokens), 1)
+
+        count = sum(1 for t in tokens if t in POLARIZATION_TERMS)
+
+        return {"polarization_ratio": count / total_tokens}
+
+
+    # -----------------------------------------------------
+    # Phrase detection
+    # -----------------------------------------------------
+
+    def _conflict_phrases(self, text: str) -> Dict[str, float]:
+
+        count = sum(1 for phrase in CONFLICT_PHRASES if phrase in text)
+
+        return {"conflict_phrase_count": float(count)}
+
+
+    # -----------------------------------------------------
+    # Actor roles
+    # -----------------------------------------------------
+
+    def _actor_roles(
+        self,
+        text: str,
+        heroes: Optional[List[str]],
+        villains: Optional[List[str]],
+        victims: Optional[List[str]],
+    ) -> Dict[str, float]:
+
+        text = text.lower()
+
+        heroes = heroes or []
+        villains = villains or []
+        victims = victims or []
+
+        hero_mentions = sum(text.count(h.lower()) for h in heroes)
+        villain_mentions = sum(text.count(v.lower()) for v in villains)
+        victim_mentions = sum(text.count(v.lower()) for v in victims)
+
+        hero_villain_conflict = min(hero_mentions, villain_mentions)
+        villain_victim_harm = min(villain_mentions, victim_mentions)
+        hero_victim_protection = min(hero_mentions, victim_mentions)
+
+        return {
+
+            "hero_mentions": float(hero_mentions),
+            "villain_mentions": float(villain_mentions),
+            "victim_mentions": float(victim_mentions),
+
+            "hero_villain_conflict_score": float(hero_villain_conflict),
+            "villain_victim_harm_score": float(villain_victim_harm),
+            "hero_victim_protection_score": float(hero_victim_protection),
+        }
+
+
+    # -----------------------------------------------------
+    # Punctuation rhetoric
+    # -----------------------------------------------------
+
+    def _punctuation_features(self, text: str):
+
+        length = max(len(text), 1)
+
+        return {
+
+            "conflict_exclamation_ratio":
+                len(EXCLAMATION_PATTERN.findall(text)) / length,
+
+            "conflict_question_ratio":
+                len(QUESTION_PATTERN.findall(text)) / length,
+        }
+
+
+# ---------------------------------------------------------
+# Vector Conversion
+# ---------------------------------------------------------
+
+def narrative_conflict_vector(features: Dict[str, float]) -> np.ndarray:
+
+    ordered_keys = [
+
+        "violent_conflict_ratio",
+        "political_conflict_ratio",
+        "discursive_conflict_ratio",
+        "institutional_conflict_ratio",
+        "coercion_conflict_ratio",
+
+        "opposition_marker_ratio",
+        "polarization_ratio",
+        "conflict_phrase_count",
+
+        "hero_mentions",
+        "villain_mentions",
+        "victim_mentions",
+
+        "hero_villain_conflict_score",
+        "villain_victim_harm_score",
+        "hero_victim_protection_score",
+    ]
+
+    return np.array(
+        [float(features.get(k, 0.0)) for k in ordered_keys],
+        dtype=np.float32,
+    )

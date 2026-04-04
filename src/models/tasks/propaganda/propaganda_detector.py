@@ -49,21 +49,30 @@ from ...heads.classification_head import (
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------
+
 @dataclass
 class PropagandaDetectorConfig:
     """
-    Configuration for propaganda detection model.
+    Configuration for PropagandaDetector.
     """
 
     model_name: str = "roberta-base"
     pooling: str = "cls"
     dropout: float = 0.1
+    label_smoothing: float = 0.1
     device: Optional[str] = None
 
 
+# ---------------------------------------------------------
+# Propaganda Detector
+# ---------------------------------------------------------
+
 class PropagandaDetector(nn.Module):
     """
-    Transformer-based propaganda detector.
+    Transformer-based propaganda detection model.
 
     Label mapping:
         0 -> non_propaganda
@@ -80,11 +89,19 @@ class PropagandaDetector(nn.Module):
 
         self.config = config
 
+        # -------------------------------------------------
+        # Encoder
+        # -------------------------------------------------
+
         self.encoder = TransformerEncoder(
             model_name=config.model_name,
             pooling=config.pooling,
             device=config.device,
         )
+
+        # -------------------------------------------------
+        # Classification Head
+        # -------------------------------------------------
 
         head_config = ClassificationHeadConfig(
             input_dim=self.encoder.hidden_size,
@@ -94,7 +111,19 @@ class PropagandaDetector(nn.Module):
 
         self.classifier_head = ClassificationHead(head_config)
 
-        self.loss_fn = nn.CrossEntropyLoss()
+        # -------------------------------------------------
+        # Loss Function
+        # -------------------------------------------------
+
+        self.loss_fn = nn.CrossEntropyLoss(
+            label_smoothing=config.label_smoothing
+        )
+
+        # -------------------------------------------------
+        # Temperature Scaling (probability calibration)
+        # -------------------------------------------------
+
+        self.temperature = nn.Parameter(torch.ones(1))
 
         logger.info(
             "PropagandaDetector initialized | model=%s | classes=%d",
@@ -102,27 +131,16 @@ class PropagandaDetector(nn.Module):
             self.NUM_CLASSES,
         )
 
+    # -----------------------------------------------------
+    # Forward Pass
+    # -----------------------------------------------------
+
     def forward(
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         labels: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        """
-        Forward pass.
-
-        Args:
-            input_ids:
-                Token IDs tensor.
-            attention_mask:
-                Attention mask tensor.
-            labels:
-                Optional ground truth labels.
-
-        Returns:
-            Dictionary containing logits, probabilities, predictions,
-            and optional loss.
-        """
 
         if input_ids is None or attention_mask is None:
             raise ValueError("input_ids and attention_mask must be provided")
@@ -136,20 +154,31 @@ class PropagandaDetector(nn.Module):
 
         logits = self.classifier_head(pooled_output)
 
+        # Temperature scaling
+        logits = logits / self.temperature
+
         probabilities = F.softmax(logits, dim=-1)
 
         predictions = torch.argmax(probabilities, dim=-1)
+
+        confidence = torch.max(probabilities, dim=-1).values
 
         outputs: Dict[str, torch.Tensor] = {
             "logits": logits,
             "probabilities": probabilities,
             "predictions": predictions,
+            "confidence": confidence,
+            "embeddings": pooled_output,
         }
+
+        # -------------------------------------------------
+        # Loss (training)
+        # -------------------------------------------------
 
         if labels is not None:
 
             if labels.dim() != 1:
-                raise ValueError("labels must be 1D tensor (batch_size,)")
+                raise ValueError("labels must be 1D tensor")
 
             loss = self.loss_fn(logits, labels.long())
 
@@ -157,18 +186,16 @@ class PropagandaDetector(nn.Module):
 
         return outputs
 
-    @torch.no_grad()
+    # -----------------------------------------------------
+    # Inference
+    # -----------------------------------------------------
+
+    @torch.inference_mode()
     def predict(
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
-        """
-        Run inference.
-
-        Returns:
-            predictions and probabilities.
-        """
 
         self.eval()
 
@@ -180,12 +207,14 @@ class PropagandaDetector(nn.Module):
         return {
             "predictions": outputs["predictions"],
             "probabilities": outputs["probabilities"],
+            "confidence": outputs["confidence"],
         }
 
+    # -----------------------------------------------------
+    # Label Mapping
+    # -----------------------------------------------------
+
     def get_output_labels(self) -> Dict[int, str]:
-        """
-        Return propaganda label mapping.
-        """
 
         return {
             0: "non_propaganda",

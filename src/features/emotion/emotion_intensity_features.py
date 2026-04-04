@@ -41,7 +41,24 @@ import numpy as np
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
 
+from src.features.emotion.emotion_schema import (
+    EMOTION_LABELS,
+    EMOTION_TERMS,
+)
+
 logger = logging.getLogger(__name__)
+
+
+# ------------------------------------------------------------
+# Build Reverse Emotion Lookup (fast lexicon lookup)
+# ------------------------------------------------------------
+
+WORD_TO_EMOTION = {}
+
+for emotion, words in EMOTION_TERMS.items():
+    for word in words:
+        WORD_TO_EMOTION[word] = emotion
+
 
 # ------------------------------------------------------------
 # Optional Transformer Emotion Model
@@ -60,7 +77,7 @@ try:
 
     TRANSFORMER_AVAILABLE = True
 
-    EMOTION_LABELS = [
+    TRANSFORMER_LABELS = [
         "anger",
         "disgust",
         "fear",
@@ -80,33 +97,31 @@ except Exception:  # noqa: BLE001
         "EmotionIntensityFeatures will use lexicon fallback."
     )
 
-    EMOTION_LABELS = ["anger", "fear", "joy", "sadness"]
 
 # ------------------------------------------------------------
-# Lexicon fallback
+# Fast Lexicon-based Emotion Detection
 # ------------------------------------------------------------
-
-LEXICON = {
-    "anger": {"angry", "rage", "furious", "hate"},
-    "fear": {"fear", "terror", "panic", "scared"},
-    "joy": {"happy", "joy", "delight", "smile"},
-    "sadness": {"sad", "cry", "grief", "sorrow"},
-}
-
 
 def _lexicon_emotions(text: str) -> Dict[str, float]:
+    """
+    Fast lexicon-based emotion detection using reverse lookup.
+    Complexity: O(tokens)
+    """
+
     tokens = re.findall(r"\b\w+\b", text.lower())
 
-    counts = {emotion: 0 for emotion in LEXICON}
+    counts = {emotion: 0 for emotion in EMOTION_LABELS}
 
     for token in tokens:
-        for emotion, words in LEXICON.items():
-            if token in words:
-                counts[emotion] += 1
+
+        emotion = WORD_TO_EMOTION.get(token)
+
+        if emotion:
+            counts[emotion] += 1
 
     total = sum(counts.values()) or 1
 
-    return {k: v / total for k, v in counts.items()}
+    return {emotion: counts[emotion] / total for emotion in EMOTION_LABELS}
 
 
 # ------------------------------------------------------------
@@ -131,7 +146,14 @@ class EmotionIntensityFeatures(BaseFeature):
     name: str = "emotion_intensity_features"
     description: str = "Emotion strength and concentration metrics"
 
+    # --------------------------------------------------------
+
     def _transformer_emotions(self, text: str) -> Dict[str, float]:
+        """
+        Compute emotion distribution using transformer model.
+        Maps transformer outputs into TruthLens 20-emotion schema.
+        """
+
         inputs = _tokenizer(
             text,
             return_tensors="pt",
@@ -145,16 +167,47 @@ class EmotionIntensityFeatures(BaseFeature):
 
         probs = torch.softmax(outputs.logits, dim=1).squeeze(0).cpu().numpy()
 
-        return {label: float(prob) for label, prob in zip(EMOTION_LABELS, probs)}
+        scores = {emotion: 0.0 for emotion in EMOTION_LABELS}
+
+        for label, prob in zip(TRANSFORMER_LABELS, probs):
+
+            if label in scores:
+                scores[label] = float(prob)
+
+        return scores
+
+    # --------------------------------------------------------
+
+    def _hybrid_emotions(self, text: str) -> Dict[str, float]:
+        """
+        Combine transformer and lexicon emotion signals.
+        """
+
+        transformer_scores = {}
+        lexicon_scores = _lexicon_emotions(text)
+
+        if TRANSFORMER_AVAILABLE:
+            transformer_scores = self._transformer_emotions(text)
+
+        scores = {}
+
+        for emotion in EMOTION_LABELS:
+
+            t = transformer_scores.get(emotion, 0.0)
+            l = lexicon_scores.get(emotion, 0.0)
+
+            scores[emotion] = 0.7 * t + 0.3 * l
+
+        return scores
+
+    # --------------------------------------------------------
 
     def extract(self, context: FeatureContext) -> Dict[str, float]:
+
         if not context.text:
             raise ValueError("FeatureContext.text cannot be empty")
 
-        if TRANSFORMER_AVAILABLE:
-            scores = self._transformer_emotions(context.text)
-        else:
-            scores = _lexicon_emotions(context.text)
+        scores = self._hybrid_emotions(context.text)
 
         values = np.array(list(scores.values()), dtype=np.float32)
 

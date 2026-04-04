@@ -1,0 +1,24 @@
+Core Emotion Analysis
+src/analysis/emotion_target_analysis.py
+
+Emotion Feature Engineering
+src/features/emotion/emotion_features.py
+src/features/emotion/emotion_lexicon_features.py
+src/features/emotion/emotion_target_features.py
+src/features/emotion/emotion_intensity_features.py
+src/features/emotion/emotion_trajectory_features.py
+
+Emotion Model
+src/models/emotion/train_emotion_model.py
+src/models/tasks/emotion/emotion_classifier.py
+
+Label Schema
+src/data/unified_label_schema.py
+
+Pipeline Integration
+src/features/pipelines/feature_pipeline.py
+src/inference/prediction_pipeline.py
+
+src/models/multitask/multitask_truthlens_model.py
+src/models/heads/multitask_head.py
+src/models/multitask/multitask_output.py

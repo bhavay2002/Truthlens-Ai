@@ -1,35 +1,115 @@
-"""Utility loader for EmotionClassifier checkpoints."""
+"""
+Utility loader for EmotionClassifier checkpoints.
+"""
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 
-from ..tasks.emotion.emotion_classifier import EmotionClassifier, EmotionClassifierConfig
+from ..tasks.emotion.emotion_classifier import (
+    EmotionClassifier,
+    EmotionClassifierConfig,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class EmotionModelLoader:
-    """Load an emotion classifier from config/state dict artifacts."""
+    """
+    Production-grade loader for EmotionClassifier checkpoints.
+
+    Supports:
+    - raw state_dict checkpoints
+    - training checkpoints with metadata
+    - automatic device placement
+    """
+
+    # -----------------------------------------------------
+
+    @staticmethod
+    def _resolve_device(device: Optional[str]) -> torch.device:
+        """
+        Resolve compute device automatically.
+        """
+
+        if device is not None:
+            return torch.device(device)
+
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+
+        return torch.device("cpu")
+
+    # -----------------------------------------------------
+
+    @staticmethod
+    def _extract_state_dict(checkpoint: dict) -> dict:
+        """
+        Extract state_dict from different checkpoint formats.
+        """
+
+        if "state_dict" in checkpoint:
+            return checkpoint["state_dict"]
+
+        if "model_state_dict" in checkpoint:
+            return checkpoint["model_state_dict"]
+
+        return checkpoint
+
+    # -----------------------------------------------------
 
     @staticmethod
     def load(
-        model_path: str | Path,
+        model_path: Union[str, Path],
         config: Optional[EmotionClassifierConfig] = None,
         device: Optional[str] = None,
     ) -> EmotionClassifier:
+        """
+        Load EmotionClassifier from checkpoint.
+
+        Parameters
+        ----------
+        model_path : str | Path
+            Path to checkpoint file.
+
+        config : EmotionClassifierConfig
+            Optional configuration override.
+
+        device : str
+            Device placement ("cpu", "cuda").
+
+        Returns
+        -------
+        EmotionClassifier
+        """
+
+        device_obj = EmotionModelLoader._resolve_device(device)
+
         model = EmotionClassifier(config or EmotionClassifierConfig())
 
         path_obj = Path(model_path)
-        if path_obj.exists():
-            state_dict = torch.load(path_obj, map_location=device or "cpu")
-            model.load_state_dict(state_dict)
 
-        if device is not None:
-            model = model.to(device)
+        if not path_obj.exists():
+            raise FileNotFoundError(f"Emotion model checkpoint not found: {model_path}")
+
+        logger.info("Loading emotion model checkpoint: %s", path_obj)
+
+        checkpoint = torch.load(path_obj, map_location=device_obj)
+
+        state_dict = EmotionModelLoader._extract_state_dict(checkpoint)
+
+        model.load_state_dict(state_dict, strict=False)
+
+        model = model.to(device_obj)
 
         model.eval()
+
+        logger.info("Emotion model loaded successfully on device: %s", device_obj)
+
         return model
 
 

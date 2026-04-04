@@ -10,6 +10,13 @@ Description:
     These features help strengthen ideology classification models by providing
     interpretable signals derived directly from discourse.
 
+    Features detected:
+        - liberty rhetoric
+        - equality / social justice rhetoric
+        - traditionalist language
+        - anti-elite rhetoric
+        - ideological polarity signals
+
 Dependencies:
     logging
     typing
@@ -30,76 +37,162 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from collections import Counter
-from typing import Dict, List
+from typing import Dict, List, Set
 
 import numpy as np
 import spacy
 from spacy.language import Language
 from spacy.tokens import Doc
 
-
 logger = logging.getLogger(__name__)
 
 
+# ------------------------------------------------------------
+# Configuration
+# ------------------------------------------------------------
+
 @dataclass(slots=True)
 class IdeologicalLanguageConfig:
-    """
-    Configuration for IdeologicalLanguageDetector.
-    """
 
     spacy_model: str = "en_core_web_sm"
+    disable_components: tuple = ("ner", "parser")
 
+
+# ------------------------------------------------------------
+# Ideological Language Detector
+# ------------------------------------------------------------
 
 class IdeologicalLanguageDetector:
-    """
-    Detects ideological language signals in political discourse.
-    """
 
-    LIBERTY_TERMS = {
-        "liberty",
-        "freedom",
-        "rights",
-        "individual",
-        "independence",
-        "free",
+    # ----------------------------------------------------
+    # Liberty / Classical Liberal rhetoric
+    # ----------------------------------------------------
+
+    LIBERTY_TERMS: Set[str] = {
+
+        "liberty","freedom","freedoms","rights","civil_rights",
+        "individual","individualism","independence","free",
+        "autonomy","self_determination","self_governance",
+        "constitutional","constitution","civil_liberty",
+        "limited_government","personal_freedom",
+        "property_rights","economic_freedom",
+        "voluntary","consent","rule_of_law",
+        "private_property","free_speech","free_expression"
     }
 
-    EQUALITY_TERMS = {
-        "equality",
-        "justice",
-        "fairness",
-        "equity",
-        "inclusion",
-        "diversity",
+    # ----------------------------------------------------
+    # Equality / Social justice rhetoric
+    # ----------------------------------------------------
+
+    EQUALITY_TERMS: Set[str] = {
+
+        "equality","justice","fairness","equity",
+        "inclusion","diversity","representation",
+        "social_justice","equal_opportunity",
+        "equal_rights","redistribution",
+        "oppression","systemic","systemic_racism",
+        "discrimination","marginalized","minorities",
+        "intersectionality","injustice",
+        "inequality","human_rights",
+        "collective","solidarity","welfare"
     }
 
-    TRADITION_TERMS = {
-        "tradition",
-        "heritage",
-        "values",
-        "family",
-        "nation",
-        "culture",
+    # ----------------------------------------------------
+    # Traditionalist / Conservative rhetoric
+    # ----------------------------------------------------
+
+    TRADITION_TERMS: Set[str] = {
+
+        "tradition","traditional","heritage","values",
+        "family","nation","national","culture",
+        "identity","patriotism","patriotic",
+        "faith","religion","religious",
+        "community","custom","moral_values",
+        "national_identity","social_order",
+        "duty","honor","loyalty"
     }
 
-    ELITE_TERMS = {
-        "elite",
-        "establishment",
-        "bureaucrats",
-        "politicians",
-        "powerful",
-        "globalists",
+    # ----------------------------------------------------
+    # Anti-elite / Populist rhetoric
+    # ----------------------------------------------------
+
+    ELITE_TERMS: Set[str] = {
+
+        "elite","elites","establishment",
+        "bureaucrat","bureaucracy",
+        "politician","politicians",
+        "powerful","ruling_class",
+        "globalist","globalists",
+        "media","mainstream_media",
+        "corporate","corporations",
+        "oligarch","oligarchy",
+        "technocrat","technocracy",
+        "lobbyist","deep_state"
     }
 
-    def __init__(self, config: IdeologicalLanguageConfig | None = None) -> None:
-        """
-        Initialize NLP pipeline for ideological language detection.
-        """
+    # ----------------------------------------------------
+    # Economic ideology rhetoric
+    # ----------------------------------------------------
+
+    ECONOMIC_TERMS: Set[str] = {
+
+        "capitalism","capitalist",
+        "socialism","socialist",
+        "communism","communist",
+        "market","free_market",
+        "regulation","deregulation",
+        "privatization","public_sector",
+        "government_spending",
+        "taxation","wealth_tax",
+        "redistribution"
+    }
+
+    # ----------------------------------------------------
+    # Nationalism rhetoric
+    # ----------------------------------------------------
+
+    NATIONALISM_TERMS: Set[str] = {
+
+        "nation","nationalism","nationalist",
+        "sovereignty","sovereign",
+        "border","borders",
+        "immigration","immigrant",
+        "homeland","patriot",
+        "national_security"
+    }
+
+    # ----------------------------------------------------
+    # Ideological phrases (multi-word concepts)
+    # ----------------------------------------------------
+
+    IDEOLOGY_PHRASES: Set[str] = {
+
+        "social justice",
+        "free market",
+        "government control",
+        "big government",
+        "limited government",
+        "personal freedom",
+        "wealth redistribution",
+        "working class",
+        "middle class",
+        "rule of law",
+        "civil liberties",
+        "identity politics",
+        "economic inequality",
+        "national security"
+    }
+    # ------------------------------------------------------------
+
+    def __init__(self, config: IdeologicalLanguageConfig | None = None):
 
         self.config = config or IdeologicalLanguageConfig()
 
         try:
-            self.nlp: Language = spacy.load(self.config.spacy_model)
+            self.nlp: Language = spacy.load(
+                self.config.spacy_model,
+                disable=self.config.disable_components
+            )
         except Exception as exc:
             logger.exception("spaCy model loading failed")
             raise RuntimeError(
@@ -107,20 +200,13 @@ class IdeologicalLanguageDetector:
             ) from exc
 
         logger.info(
-            "IdeologicalLanguageDetector initialized with model=%s",
-            self.config.spacy_model,
+            "IdeologicalLanguageDetector initialized | model=%s",
+            self.config.spacy_model
         )
 
+    # ------------------------------------------------------------
+
     def analyze(self, text: str) -> Dict[str, float]:
-        """
-        Analyze ideological language signals in text.
-
-        Args:
-            text: Input text.
-
-        Returns:
-            Dictionary containing ideology language metrics.
-        """
 
         if not isinstance(text, str):
             raise ValueError("Input text must be a string")
@@ -136,68 +222,94 @@ class IdeologicalLanguageDetector:
             logger.exception("spaCy processing failed")
             raise RuntimeError("Text processing failed") from exc
 
-        tokens: List[str] = [
-            token.text.lower() for token in doc if token.is_alpha
+        tokens = [
+            token.lemma_.lower()
+            for token in doc
+            if token.is_alpha
         ]
+
+        token_counts = Counter(tokens)
 
         features: Dict[str, float] = {}
 
-        features.update(self._term_ratio(tokens, self.LIBERTY_TERMS, "liberty_language_ratio"))
-        features.update(self._term_ratio(tokens, self.EQUALITY_TERMS, "equality_language_ratio"))
-        features.update(self._term_ratio(tokens, self.TRADITION_TERMS, "tradition_language_ratio"))
-        features.update(self._term_ratio(tokens, self.ELITE_TERMS, "anti_elite_language_ratio"))
+        # lexical ratios
+        features["liberty_language_ratio"] = self._term_ratio(
+            token_counts, tokens, self.LIBERTY_TERMS
+        )
+
+        features["equality_language_ratio"] = self._term_ratio(
+            token_counts, tokens, self.EQUALITY_TERMS
+        )
+
+        features["tradition_language_ratio"] = self._term_ratio(
+            token_counts, tokens, self.TRADITION_TERMS
+        )
+
+        features["anti_elite_language_ratio"] = self._term_ratio(
+            token_counts, tokens, self.ELITE_TERMS
+        )
+
+        # ideological polarity
+        features["liberty_vs_equality_balance"] = (
+            features["liberty_language_ratio"]
+            - features["equality_language_ratio"]
+        )
+
+        # phrase detection
+        features["ideology_phrase_density"] = self._phrase_density(
+            text.lower()
+        )
 
         logger.debug("Ideological language features computed")
 
         return features
 
+    # ------------------------------------------------------------
+
     def _term_ratio(
         self,
+        token_counts: Counter,
         tokens: List[str],
-        lexicon: set,
-        feature_name: str,
-    ) -> Dict[str, float]:
-        """
-        Compute ideological lexical ratio.
-        """
+        lexicon: Set[str],
+    ) -> float:
 
         if not tokens:
-            return {feature_name: 0.0}
+            return 0.0
 
-        counts = Counter(tokens)
+        hits = sum(token_counts[t] for t in lexicon if t in token_counts)
 
-        hits = sum(counts[token] for token in counts if token in lexicon)
+        return float(hits / max(len(tokens), 1))
 
-        ratio = hits / max(len(tokens), 1)
+    # ------------------------------------------------------------
 
-        return {feature_name: float(ratio)}
+    def _phrase_density(self, text: str) -> float:
 
+        hits = sum(1 for phrase in self.IDEOLOGY_PHRASES if phrase in text)
+
+        return float(hits / max(len(self.IDEOLOGY_PHRASES), 1))
+
+
+# ------------------------------------------------------------
+# Vector Conversion
+# ------------------------------------------------------------
 
 def ideological_language_vector(features: Dict[str, float]) -> np.ndarray:
-    """
-    Convert ideological language features into numeric vector.
-    """
 
     if not isinstance(features, dict):
-        raise ValueError("features must be a dictionary")
+        raise ValueError("features must be dictionary")
 
-    if not features:
-        raise ValueError("features must be a non-empty dictionary")
+    ordered_keys = [
+        "liberty_language_ratio",
+        "equality_language_ratio",
+        "tradition_language_ratio",
+        "anti_elite_language_ratio",
+        "liberty_vs_equality_balance",
+        "ideology_phrase_density",
+    ]
 
-    values: List[float] = []
+    vector = np.array(
+        [float(features.get(k, 0.0)) for k in ordered_keys],
+        dtype=np.float32
+    )
 
-    for key, value in features.items():
-        if isinstance(value, (int, float, np.number)):
-            values.append(float(value))
-        else:
-            logger.warning("Non-numeric ideology feature skipped: %s", key)
-
-    if not values:
-        raise ValueError("No numeric ideology values found")
-
-    try:
-        vector = np.array(values, dtype=np.float32)
-        return vector
-    except Exception as exc:
-        logger.exception("Ideological language vector conversion failed")
-        raise RuntimeError("Failed to convert ideology features") from exc
+    return vector

@@ -31,36 +31,55 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+# ------------------------------------------------------------
+# Configuration
+# ------------------------------------------------------------
+
 @dataclass(slots=True)
 class PropagandaPatternConfig:
-    """
-    Configuration for PropagandaPatternDetector.
-    """
 
-    fear_weight_emotion: float = 0.4
-    fear_weight_rhetoric: float = 0.4
-    fear_weight_narrative: float = 0.2
+    # Fear propaganda
+    fear_weight_emotion: float = 0.35
+    fear_weight_rhetoric: float = 0.35
+    fear_weight_narrative: float = 0.30
 
-    scapegoat_weight_rhetoric: float = 0.6
-    scapegoat_weight_argument: float = 0.4
+    # Scapegoating
+    scapegoat_weight_rhetoric: float = 0.55
+    scapegoat_weight_argument: float = 0.45
 
-    polarization_weight_narrative: float = 0.6
-    polarization_weight_rhetoric: float = 0.4
+    # Polarization
+    polarization_weight_narrative: float = 0.60
+    polarization_weight_rhetoric: float = 0.40
 
+    # Emotional amplification
+    emotion_amplification_weight: float = 0.6
+    rhetoric_amplification_weight: float = 0.4
+
+    # Narrative imbalance
+    narrative_claim_weight: float = 0.5
+    narrative_evidence_weight: float = 0.5
+
+
+# ------------------------------------------------------------
+# Detector
+# ------------------------------------------------------------
 
 class PropagandaPatternDetector:
+
     """
-    Detects high-level propaganda patterns by combining multiple analytical signals.
+    Detect macro-level propaganda patterns by aggregating signals
+    from multiple analytical modules.
     """
 
-    def __init__(self, config: PropagandaPatternConfig | None = None) -> None:
-        """
-        Initialize detector configuration.
-        """
+    def __init__(self, config: PropagandaPatternConfig | None = None):
 
         self.config = config or PropagandaPatternConfig()
 
         logger.info("PropagandaPatternDetector initialized")
+
+    # ------------------------------------------------------------
+    # Main Analysis
+    # ------------------------------------------------------------
 
     def analyze(
         self,
@@ -68,61 +87,52 @@ class PropagandaPatternDetector:
         narrative_features: Dict[str, float] | None = None,
         rhetorical_features: Dict[str, float] | None = None,
         argument_features: Dict[str, float] | None = None,
+        information_features: Dict[str, float] | None = None,
     ) -> Dict[str, float]:
-        """
-        Compute propaganda pattern scores using multiple subsystem outputs.
 
-        Args:
-            emotion_features: Emotion analysis output
-            narrative_features: Narrative analysis output
-            rhetorical_features: Rhetorical device output
-            argument_features: Argument mining output
+        emotion = emotion_features or {}
+        narrative = narrative_features or {}
+        rhetoric = rhetorical_features or {}
+        argument = argument_features or {}
+        info = information_features or {}
 
-        Returns:
-            Dictionary containing propaganda pattern scores.
-        """
+        features = {}
 
-        emotion_features = emotion_features or {}
-        narrative_features = narrative_features or {}
-        rhetorical_features = rhetorical_features or {}
-        argument_features = argument_features or {}
-
-        fear_score = self._compute_fear_propaganda(
-            emotion_features,
-            narrative_features,
-            rhetorical_features,
+        features["fear_propaganda_score"] = self._fear_propaganda(
+            emotion, narrative, rhetoric
         )
 
-        scapegoat_score = self._compute_scapegoating(
-            rhetorical_features,
-            argument_features,
+        features["scapegoating_score"] = self._scapegoating(
+            rhetoric, argument
         )
 
-        polarization_score = self._compute_polarization(
-            narrative_features,
-            rhetorical_features,
+        features["polarization_score"] = self._polarization(
+            narrative, rhetoric
         )
 
-        return {
-            "fear_propaganda_score": float(fear_score),
-            "scapegoating_score": float(scapegoat_score),
-            "polarization_score": float(polarization_score),
-        }
+        features["emotional_amplification_score"] = self._emotional_amplification(
+            emotion, rhetoric
+        )
 
-    def _compute_fear_propaganda(
+        features["narrative_imbalance_score"] = self._narrative_imbalance(
+            argument, info
+        )
+
+        return features
+
+    # ------------------------------------------------------------
+    # Fear Propaganda
+    # ------------------------------------------------------------
+
+    def _fear_propaganda(
         self,
         emotion: Dict[str, float],
         narrative: Dict[str, float],
         rhetoric: Dict[str, float],
     ) -> float:
-        """
-        Estimate fear-driven propaganda intensity.
-        """
 
         emotion_signal = emotion.get("emotion_fear", 0.0)
-
         rhetoric_signal = rhetoric.get("rhetoric_fear_appeal_score", 0.0)
-
         narrative_signal = narrative.get("narrative_conflict_term_ratio", 0.0)
 
         score = (
@@ -133,37 +143,37 @@ class PropagandaPatternDetector:
 
         return float(score)
 
-    def _compute_scapegoating(
+    # ------------------------------------------------------------
+    # Scapegoating
+    # ------------------------------------------------------------
+
+    def _scapegoating(
         self,
         rhetoric: Dict[str, float],
         argument: Dict[str, float],
     ) -> float:
-        """
-        Estimate scapegoating narrative patterns.
-        """
 
         rhetoric_signal = rhetoric.get("rhetoric_scapegoating_score", 0.0)
-
-        argument_signal = argument.get("argument_contrast_ratio", 0.0)
+        contrast_signal = argument.get("argument_contrast_ratio", 0.0)
 
         score = (
             rhetoric_signal * self.config.scapegoat_weight_rhetoric
-            + argument_signal * self.config.scapegoat_weight_argument
+            + contrast_signal * self.config.scapegoat_weight_argument
         )
 
         return float(score)
 
-    def _compute_polarization(
+    # ------------------------------------------------------------
+    # Polarization
+    # ------------------------------------------------------------
+
+    def _polarization(
         self,
         narrative: Dict[str, float],
         rhetoric: Dict[str, float],
     ) -> float:
-        """
-        Estimate polarization framing intensity.
-        """
 
         narrative_signal = narrative.get("narrative_polarization_ratio", 0.0)
-
         rhetoric_signal = rhetoric.get("rhetoric_loaded_language_score", 0.0)
 
         score = (
@@ -173,38 +183,69 @@ class PropagandaPatternDetector:
 
         return float(score)
 
+    # ------------------------------------------------------------
+    # Emotional Amplification
+    # ------------------------------------------------------------
+
+    def _emotional_amplification(
+        self,
+        emotion: Dict[str, float],
+        rhetoric: Dict[str, float],
+    ) -> float:
+
+        anger = emotion.get("emotion_anger", 0.0)
+        fear = emotion.get("emotion_fear", 0.0)
+
+        rhetoric_intensity = rhetoric.get("rhetoric_emotional_intensity", 0.0)
+
+        emotion_signal = (anger + fear) / 2
+
+        score = (
+            emotion_signal * self.config.emotion_amplification_weight
+            + rhetoric_intensity * self.config.rhetoric_amplification_weight
+        )
+
+        return float(score)
+
+    # ------------------------------------------------------------
+    # Narrative Imbalance
+    # ------------------------------------------------------------
+
+    def _narrative_imbalance(
+        self,
+        argument: Dict[str, float],
+        info: Dict[str, float],
+    ) -> float:
+
+        claim_density = argument.get("argument_claim_ratio", 0.0)
+
+        evidence_density = info.get("factual_density", 0.0)
+
+        score = (
+            claim_density * self.config.narrative_claim_weight
+            - evidence_density * self.config.narrative_evidence_weight
+        )
+
+        return float(max(score, 0.0))
+
+
+# ------------------------------------------------------------
+# Vector Conversion
+# ------------------------------------------------------------
 
 def propaganda_pattern_vector(features: Dict[str, float]) -> np.ndarray:
-    """
-    Convert propaganda pattern features into numeric vector.
 
-    Args:
-        features: Propaganda feature dictionary.
+    ordered_keys = [
+        "fear_propaganda_score",
+        "scapegoating_score",
+        "polarization_score",
+        "emotional_amplification_score",
+        "narrative_imbalance_score",
+    ]
 
-    Returns:
-        NumPy vector representation.
-    """
+    vector = np.array(
+        [float(features.get(k, 0.0)) for k in ordered_keys],
+        dtype=np.float32,
+    )
 
-    if not isinstance(features, dict):
-        raise ValueError("features must be a dictionary")
-
-    if not features:
-        raise ValueError("features must be a non-empty dictionary")
-
-    values = []
-
-    for key, value in features.items():
-        if isinstance(value, (int, float, np.number)):
-            values.append(float(value))
-        else:
-            logger.warning("Non-numeric propaganda feature skipped: %s", key)
-
-    if not values:
-        raise ValueError("No numeric propaganda features found")
-
-    try:
-        vector = np.array(values, dtype=np.float32)
-        return vector
-    except Exception as exc:
-        logger.exception("Propaganda pattern vector conversion failed")
-        raise RuntimeError("Failed to convert propaganda features") from exc
+    return vector

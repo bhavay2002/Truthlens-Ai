@@ -27,110 +27,267 @@ Inputs:
 Outputs:
     Dict[str, float] representing bias-related linguistic signals
 """
-
 from __future__ import annotations
 
 import logging
 import re
 from collections import Counter
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Set
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------
-# Bias Lexicons
-# ---------------------------------------------------------------------
 
-LOADED_LANGUAGE = {
-    "radical", "extreme", "outrageous", "disaster", "corrupt",
-    "shocking", "disturbing", "devastating", "dangerous"
-}
+# ---------------------------------------------------------
+# Tokenization
+# ---------------------------------------------------------
 
-SUBJECTIVE_WORDS = {
-    "clearly", "obviously", "undoubtedly", "certainly",
-    "unfortunately", "fortunately", "remarkably"
-}
-
-UNCERTAINTY_WORDS = {
-    "allegedly", "reportedly", "apparently", "possibly",
-    "suggests", "may", "might", "could"
-}
-
-POLARIZING_WORDS = {
-    "enemy", "threat", "attack", "destroy", "fight",
-    "war", "crisis", "collapse"
-}
+TOKEN_PATTERN = re.compile(r"[A-Za-z']+")
 
 
 def _tokenize(text: str) -> List[str]:
-    """Simple tokenizer fallback."""
-    return re.findall(r"\b\w+\b", text.lower())
+    """Robust tokenizer for lexical bias detection."""
+    return TOKEN_PATTERN.findall(text.lower())
 
 
-# ---------------------------------------------------------------------
+# ---------------------------------------------------------
+# Bias Lexicons
+# ---------------------------------------------------------
+
+# ---------------------------------------------------------
+# Loaded evaluative language
+# ---------------------------------------------------------
+
+LOADED_LANGUAGE: Set[str] = {
+    "radical", "extreme", "extremist",
+    "outrageous", "absurd", "ridiculous",
+    "disaster", "catastrophe",
+    "corrupt", "corruption",
+    "shocking", "disturbing",
+    "devastating", "dangerous",
+    "reckless", "irresponsible",
+    "disgraceful", "scandalous",
+    "terrible", "horrible",
+    "awful", "pathetic",
+    "shameful", "alarming"
+}
+
+
+# ---------------------------------------------------------
+# Subjective / opinionated phrasing
+# ---------------------------------------------------------
+
+SUBJECTIVE_WORDS: Set[str] = {
+    "clearly", "obviously", "undoubtedly",
+    "certainly", "surely",
+    "apparently", "evidently",
+    "unfortunately", "fortunately",
+    "remarkably", "interestingly",
+    "surprisingly", "notably",
+    "frankly", "honestly",
+    "ironically"
+}
+
+
+# ---------------------------------------------------------
+# Uncertainty / hedging
+# ---------------------------------------------------------
+
+UNCERTAINTY_WORDS: Set[str] = {
+    "allegedly", "reportedly", "apparently",
+    "possibly", "potentially",
+    "suggests", "indicates",
+    "may", "might", "could",
+    "perhaps", "likely",
+    "unlikely", "presumably",
+    "seemingly"
+}
+
+
+# ---------------------------------------------------------
+# Polarization framing
+# ---------------------------------------------------------
+
+POLARIZING_WORDS: Set[str] = {
+    "enemy", "enemies",
+    "threat", "threats",
+    "attack", "attacks",
+    "destroy", "destruction",
+    "fight", "battle",
+    "war", "conflict",
+    "crisis", "collapse",
+    "chaos", "division",
+    "clash", "confrontation"
+}
+
+
+# ---------------------------------------------------------
+# Evaluative adjectives
+# ---------------------------------------------------------
+
+EVALUATIVE_WORDS: Set[str] = {
+    "good", "bad",
+    "terrible", "awful",
+    "excellent", "outstanding",
+    "strong", "weak",
+    "successful", "failed",
+    "effective", "ineffective",
+    "remarkable", "poor",
+    "significant", "insignificant"
+}
+
+
+# Phrase-based bias patterns
+BIAS_PHRASES = [
+
+    # certainty framing
+    r"clearly\s+shows",
+    r"it\s+is\s+obvious",
+    r"there\s+is\s+no\s+doubt",
+    r"it\s+is\s+clear\s+that",
+
+    # strong claims
+    r"the\s+truth\s+is",
+    r"the\s+reality\s+is",
+    r"what\s+this\s+really\s+means",
+
+    # rhetorical framing
+    r"the\s+fact\s+is",
+    r"everyone\s+knows",
+    r"it\s+is\s+undeniable",
+
+    # opinion framing
+    r"in\s+reality",
+    r"in\s+truth",
+]
+
+
+# ---------------------------------------------------------
+# Utility
+# ---------------------------------------------------------
+
+def _count(counter: Counter, lexicon: Set[str]) -> int:
+    return sum(counter.get(w, 0) for w in lexicon)
+
+
+def _ratio(counter: Counter, lexicon: Set[str], total: int) -> float:
+    if total == 0:
+        return 0.0
+    return _count(counter, lexicon) / total
+
+
+# ---------------------------------------------------------
 # Feature Extractor
-# ---------------------------------------------------------------------
+# ---------------------------------------------------------
 
 @dataclass
 @register_feature
 class BiasFeatures(BaseFeature):
-    """
-    Extracts bias-related linguistic signals.
 
-    Output features include:
-        bias_loaded_language_ratio
-        bias_subjective_ratio
-        bias_uncertainty_ratio
-        bias_polarization_ratio
-        bias_intensity
+    """
+    Extract bias-related linguistic signals.
+
+    Output Features
+    ---------------
+    bias_loaded_language_ratio
+    bias_subjective_ratio
+    bias_uncertainty_ratio
+    bias_polarization_ratio
+    bias_evaluative_ratio
+    bias_phrase_count
+    bias_exclamation_density
+    bias_caps_ratio
+    bias_intensity
+    bias_diversity
     """
 
     name: str = "bias_features"
     description: str = "Bias and subjective language indicators"
 
+    # -----------------------------------------------------
+
     def extract(self, context: FeatureContext) -> Dict[str, float]:
+
         if not context.text:
             raise ValueError("FeatureContext.text cannot be empty")
 
-        tokens = context.tokens or _tokenize(context.text)
+        text = context.text
+
+        tokens = context.tokens or _tokenize(text)
 
         if not tokens:
             logger.warning("No tokens available for bias feature extraction")
             return {}
 
-        token_counter = Counter(tokens)
+        counter = Counter(tokens)
         total_tokens = len(tokens)
 
-        def ratio(word_set: set) -> float:
-            count = sum(token_counter.get(w, 0) for w in word_set)
-            return count / total_tokens
+        loaded_ratio = _ratio(counter, LOADED_LANGUAGE, total_tokens)
+        subjective_ratio = _ratio(counter, SUBJECTIVE_WORDS, total_tokens)
+        uncertainty_ratio = _ratio(counter, UNCERTAINTY_WORDS, total_tokens)
+        polarization_ratio = _ratio(counter, POLARIZING_WORDS, total_tokens)
+        evaluative_ratio = _ratio(counter, EVALUATIVE_WORDS, total_tokens)
 
-        loaded_ratio = ratio(LOADED_LANGUAGE)
-        subjective_ratio = ratio(SUBJECTIVE_WORDS)
-        uncertainty_ratio = ratio(UNCERTAINTY_WORDS)
-        polarization_ratio = ratio(POLARIZING_WORDS)
+        counts = [
+            _count(counter, LOADED_LANGUAGE),
+            _count(counter, SUBJECTIVE_WORDS),
+            _count(counter, UNCERTAINTY_WORDS),
+            _count(counter, POLARIZING_WORDS),
+            _count(counter, EVALUATIVE_WORDS),
+        ]
 
-        bias_intensity = (
+        # -------------------------------------------------
+        # Phrase bias detection
+        # -------------------------------------------------
+
+        phrase_count = sum(bool(re.search(p, text.lower())) for p in BIAS_PHRASES)
+
+        # -------------------------------------------------
+        # Structural rhetoric signals
+        # -------------------------------------------------
+
+        exclamation_density = text.count("!") / max(len(text), 1)
+
+        caps_tokens = sum(1 for w in text.split() if w.isupper() and len(w) > 2)
+        caps_ratio = caps_tokens / total_tokens
+
+        # -------------------------------------------------
+        # Aggregate metrics
+        # -------------------------------------------------
+
+        intensity = (
             loaded_ratio +
             subjective_ratio +
-            polarization_ratio
-        ) / 3.0
+            polarization_ratio +
+            evaluative_ratio
+        ) / 4.0
+
+        diversity = sum(1 for c in counts if c > 0) / len(counts)
 
         features: Dict[str, float] = {
-            "bias_loaded_language_ratio": float(loaded_ratio),
-            "bias_subjective_ratio": float(subjective_ratio),
-            "bias_uncertainty_ratio": float(uncertainty_ratio),
-            "bias_polarization_ratio": float(polarization_ratio),
-            "bias_intensity": float(bias_intensity),
+
+            "bias_loaded_language_ratio": loaded_ratio,
+            "bias_subjective_ratio": subjective_ratio,
+            "bias_uncertainty_ratio": uncertainty_ratio,
+            "bias_polarization_ratio": polarization_ratio,
+            "bias_evaluative_ratio": evaluative_ratio,
+
+            "bias_phrase_count": float(phrase_count),
+
+            "bias_exclamation_density": exclamation_density,
+            "bias_caps_ratio": caps_ratio,
+
+            "bias_intensity": intensity,
+            "bias_diversity": diversity,
         }
 
         logger.debug(
-            "Bias features extracted | intensity=%.4f",
-            bias_intensity,
+            "Bias features extracted | intensity=%.4f diversity=%.4f",
+            intensity,
+            diversity,
         )
 
         return features

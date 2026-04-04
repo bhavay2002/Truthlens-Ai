@@ -2,17 +2,30 @@
 File Name: manipulation_patterns.py
 Module: Feature Engineering - Propaganda / Manipulation Patterns
 Description:
-    Detects linguistic manipulation patterns commonly used in propaganda,
-    persuasive messaging, and misinformation. The module identifies patterns
-    such as emotional manipulation, urgency framing, blame attribution,
-    scapegoating, rhetorical exaggeration, and false dilemmas.
+   The module extracts interpretable indicators used in misinformation
+    analysis pipelines. Patterns are based on research from:
 
-    These signals help characterize how language attempts to influence
-    perception or decision-making rather than simply convey information.
+• Propaganda detection literature
+• Computational rhetoric analysis
+• Disinformation detection studies
+• Political communication research
 
-    The implementation is lightweight and deterministic, relying on curated
-    pattern lexicons and structural heuristics. It integrates with the
-    TruthLens feature framework via BaseFeature and FeatureRegistry.
+Detected manipulation strategies include:
+
+    - Urgency framing
+    - Fear appeals
+    - Blame attribution
+    - Scapegoating language
+    - Absolutist rhetoric
+    - Conspiracy framing
+    - False dilemmas
+    - Sensational exaggeration
+    - Emotional intensifiers
+
+The implementation remains deterministic and lightweight,
+making it suitable for large-scale dataset processing.
+
+Outputs integrate directly with TruthLens feature pipelines.
 
 Dependencies:
     dataclasses
@@ -42,107 +55,278 @@ from src.features.base.feature_registry import register_feature
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------
+# Tokenization
+# ---------------------------------------------------------
+
+TOKEN_PATTERN = re.compile(r"[A-Za-z']+")
+
+
 def _tokenize(text: str) -> List[str]:
-    """Basic tokenizer."""
-    return re.findall(r"\b\w+\b", text.lower())
+    """Research-grade tokenizer for lexical pattern detection."""
+    return TOKEN_PATTERN.findall(text.lower())
 
 
-# ---------------------------------------------------------------------
-# Manipulation Pattern Lexicons
-# ---------------------------------------------------------------------
+# ---------------------------------------------------------
+# Manipulation Lexicons
+# ---------------------------------------------------------
+
+# ---------------------------------------------------------
+# Urgency / Call-to-Action Framing
+# ---------------------------------------------------------
 
 URGENCY_TERMS: Set[str] = {
-    "urgent", "immediately", "now", "crisis", "emergency",
-    "act", "instant", "before it's too late"
+    "urgent", "urgently", "immediately", "instant", "instantly",
+    "now", "today", "rightnow", "quick", "quickly",
+    "act", "actnow", "takeaction", "respond",
+    "hurry", "rush", "dontwait", "beforetoolate",
+    "breaking", "alert", "warning", "crisis",
+    "emergency", "critical", "time", "deadline"
 }
+
+
+# ---------------------------------------------------------
+# Fear / Threat Framing
+# ---------------------------------------------------------
+
+FEAR_TERMS: Set[str] = {
+    "threat", "danger", "attack", "attacks",
+    "terror", "terrorist", "risk",
+    "collapse", "breakdown", "destruction",
+    "catastrophe", "catastrophic",
+    "disaster", "crisis", "panic",
+    "fear", "chaos", "anarchy",
+    "invasion", "takeover", "war",
+    "threatening", "endanger", "endangered"
+}
+
+
+# ---------------------------------------------------------
+# Blame Attribution
+# ---------------------------------------------------------
 
 BLAME_TERMS: Set[str] = {
-    "blame", "fault", "responsible", "caused", "betrayed",
-    "failed", "destroyed"
+    "blame", "fault", "responsible", "responsibility",
+    "caused", "cause", "created",
+    "betrayed", "betrayal",
+    "failed", "failure",
+    "destroyed", "ruined",
+    "corrupt", "corruption",
+    "lied", "lying",
+    "misled", "deceived",
+    "guilty"
 }
 
-SCAPEGOATING_TERMS: Set[str] = {
-    "they", "them", "their", "outsiders", "immigrants",
-    "elites", "media", "establishment"
+
+# ---------------------------------------------------------
+# Scapegoating / Out-Group Framing
+# ---------------------------------------------------------
+
+SCAPEGOAT_TERMS: Set[str] = {
+    "they", "them", "their",
+    "outsiders", "foreigners",
+    "immigrants", "migrants",
+    "elites", "globalists",
+    "establishment", "bureaucrats",
+    "media", "mainstream",
+    "politicians", "government",
+    "corporations",
+    "liberals", "conservatives"
 }
+
+
+# ---------------------------------------------------------
+# Absolutist / Overgeneralized Claims
+# ---------------------------------------------------------
 
 ABSOLUTE_TERMS: Set[str] = {
-    "always", "never", "everyone", "nobody", "all", "none"
+    "always", "never",
+    "everyone", "everybody",
+    "nobody", "noone",
+    "all", "none",
+    "everything", "nothing",
+    "completely", "entirely",
+    "totally", "absolutely",
+    "withoutdoubt", "certainly"
 }
 
-FEAR_MANIPULATION_TERMS: Set[str] = {
-    "threat", "danger", "attack", "collapse",
-    "disaster", "catastrophe"
+
+# ---------------------------------------------------------
+# Conspiracy / Hidden Truth Framing
+# ---------------------------------------------------------
+
+CONSPIRACY_TERMS: Set[str] = {
+    "secret", "hidden", "coverup", "coverups",
+    "exposed", "exposing",
+    "truth", "realtruth",
+    "agenda", "scheme",
+    "plot", "conspiracy",
+    "they", "dontwant", "know",
+    "controlled", "manipulated",
+    "puppet", "deepstate",
+    "propaganda"
 }
 
+
+# ---------------------------------------------------------
+# False Dilemma / Binary Framing
+# ---------------------------------------------------------
+
+FALSE_DILEMMA_TERMS: Set[str] = {
+    "either", "or",
+    "choice", "choose",
+    "only", "option",
+    "must", "forced",
+    "nochoice",
+    "nothingelse",
+    "inevitable",
+    "cannotavoid"
+}
+
+
+# ---------------------------------------------------------
+# Sensationalism / Exaggeration
+# ---------------------------------------------------------
+
+EXAGGERATION_TERMS: Set[str] = {
+    "shocking", "unbelievable", "incredible",
+    "outrageous", "scandalous",
+    "massive", "huge", "giant",
+    "explosive", "bombshell",
+    "devastating", "dramatic",
+    "mindblowing", "stunning",
+    "historic", "recordbreaking"
+}
+
+
+# ---------------------------------------------------------
+# Emotional Intensifiers
+# ---------------------------------------------------------
+
+INTENSIFIERS: Set[str] = {
+    "very", "extremely", "incredibly",
+    "absolutely", "completely",
+    "totally", "highly",
+    "deeply", "strongly",
+    "seriously", "truly"
+}
+
+# ---------------------------------------------------------
+# Helper
+# ---------------------------------------------------------
+
+def _ratio(counter: Counter, lexicon: Set[str], total: int) -> float:
+    count = sum(counter.get(w, 0) for w in lexicon)
+    return count / total if total > 0 else 0.0
+
+
+# ---------------------------------------------------------
+# Feature
+# ---------------------------------------------------------
 
 @dataclass
 @register_feature
 class ManipulationPatterns(BaseFeature):
+
     """
-    Detects rhetorical manipulation patterns.
+    Detect rhetorical manipulation strategies.
 
     Output Features
-    ---------------
+    ----------------
+
     manipulation_urgency_ratio
+    manipulation_fear_ratio
     manipulation_blame_ratio
     manipulation_scapegoat_ratio
     manipulation_absolute_ratio
-    manipulation_fear_ratio
+    manipulation_conspiracy_ratio
+    manipulation_false_dilemma_ratio
+    manipulation_exaggeration_ratio
+    manipulation_intensifier_ratio
+
+    manipulation_exclamation_density
+    manipulation_caps_emphasis
+
     manipulation_intensity
     manipulation_diversity
     """
 
     name: str = "manipulation_patterns"
-    description: str = "Rhetorical manipulation and persuasion indicators"
+    description: str = "Propaganda and manipulation language indicators"
+
+    # -----------------------------------------------------
 
     def extract(self, context: FeatureContext) -> Dict[str, float]:
-        """Extract manipulation-related features."""
+
         if not context.text:
             raise ValueError("FeatureContext.text cannot be empty")
 
-        tokens = context.tokens or _tokenize(context.text)
+        text = context.text
+
+        tokens = context.tokens or _tokenize(text)
 
         if not tokens:
-            logger.warning("No tokens available for manipulation feature extraction")
+            logger.warning("No tokens available for manipulation analysis")
             return {}
 
-        counter = Counter(tokens)
         total_tokens = len(tokens)
+        counter = Counter(tokens)
 
-        def ratio(lexicon: Set[str]) -> float:
-            count = sum(counter.get(w, 0) for w in lexicon)
-            return count / total_tokens
+        urgency = _ratio(counter, URGENCY_TERMS, total_tokens)
+        fear = _ratio(counter, FEAR_TERMS, total_tokens)
+        blame = _ratio(counter, BLAME_TERMS, total_tokens)
+        scapegoat = _ratio(counter, SCAPEGOAT_TERMS, total_tokens)
+        absolute = _ratio(counter, ABSOLUTE_TERMS, total_tokens)
+        conspiracy = _ratio(counter, CONSPIRACY_TERMS, total_tokens)
+        dilemma = _ratio(counter, FALSE_DILEMMA_TERMS, total_tokens)
+        exaggeration = _ratio(counter, EXAGGERATION_TERMS, total_tokens)
+        intensifier = _ratio(counter, INTENSIFIERS, total_tokens)
 
-        urgency_ratio = ratio(URGENCY_TERMS)
-        blame_ratio = ratio(BLAME_TERMS)
-        scapegoat_ratio = ratio(SCAPEGOATING_TERMS)
-        absolute_ratio = ratio(ABSOLUTE_TERMS)
-        fear_ratio = ratio(FEAR_MANIPULATION_TERMS)
+        # -------------------------------------------------
+        # Structural heuristics
+        # -------------------------------------------------
+
+        exclamation_density = text.count("!") / max(len(text), 1)
+
+        caps_tokens = sum(1 for w in text.split() if w.isupper() and len(w) > 2)
+        caps_ratio = caps_tokens / total_tokens
 
         values = [
-            urgency_ratio,
-            blame_ratio,
-            scapegoat_ratio,
-            absolute_ratio,
-            fear_ratio,
+            urgency,
+            fear,
+            blame,
+            scapegoat,
+            absolute,
+            conspiracy,
+            dilemma,
+            exaggeration,
+            intensifier,
         ]
 
         intensity = sum(values) / len(values)
         diversity = sum(1 for v in values if v > 0) / len(values)
 
         features: Dict[str, float] = {
-            "manipulation_urgency_ratio": float(urgency_ratio),
-            "manipulation_blame_ratio": float(blame_ratio),
-            "manipulation_scapegoat_ratio": float(scapegoat_ratio),
-            "manipulation_absolute_ratio": float(absolute_ratio),
-            "manipulation_fear_ratio": float(fear_ratio),
-            "manipulation_intensity": float(intensity),
-            "manipulation_diversity": float(diversity),
+
+            "manipulation_urgency_ratio": urgency,
+            "manipulation_fear_ratio": fear,
+            "manipulation_blame_ratio": blame,
+            "manipulation_scapegoat_ratio": scapegoat,
+            "manipulation_absolute_ratio": absolute,
+            "manipulation_conspiracy_ratio": conspiracy,
+            "manipulation_false_dilemma_ratio": dilemma,
+            "manipulation_exaggeration_ratio": exaggeration,
+            "manipulation_intensifier_ratio": intensifier,
+
+            "manipulation_exclamation_density": exclamation_density,
+            "manipulation_caps_emphasis": caps_ratio,
+
+            "manipulation_intensity": intensity,
+            "manipulation_diversity": diversity,
         }
 
         logger.debug(
-            "Manipulation patterns extracted | intensity=%.4f diversity=%.4f",
+            "Manipulation analysis | intensity=%.4f diversity=%.4f",
             intensity,
             diversity,
         )

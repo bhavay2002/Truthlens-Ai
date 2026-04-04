@@ -26,10 +26,10 @@ Inputs:
 Outputs:
     Rhetorical feature dictionary and optional numerical vector
 """
-
 from __future__ import annotations
 
 import logging
+import re
 from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, List
@@ -43,71 +43,91 @@ from spacy.tokens import Doc
 logger = logging.getLogger(__name__)
 
 
+# ------------------------------------------------------------
+# Configuration
+# ------------------------------------------------------------
+
 @dataclass(slots=True)
 class RhetoricalDeviceConfig:
-    """
-    Configuration for RhetoricalDeviceDetector.
-    """
 
     spacy_model: str = "en_core_web_sm"
+    disable_components: tuple = ("ner",)
 
+
+# ------------------------------------------------------------
+# Detector
+# ------------------------------------------------------------
 
 class RhetoricalDeviceDetector:
-    """
-    Detects rhetorical persuasion techniques used in discourse.
-    """
+
+    # ----------------------------------------------------
+    # Exaggeration / hyperbole
+    # ----------------------------------------------------
 
     EXAGGERATION_TERMS = {
-        "always",
-        "never",
-        "everyone",
-        "no one",
-        "completely",
-        "totally",
-        "absolutely",
-        "disaster",
-        "catastrophe",
+
+        "always","never","everyone","nobody",
+        "completely","totally","absolutely",
+        "entirely","undeniably","inevitably",
+        "catastrophe","disaster","collapse"
     }
+
+    # ----------------------------------------------------
+    # Loaded ideological language
+    # ----------------------------------------------------
 
     LOADED_LANGUAGE_TERMS = {
-        "corrupt",
-        "traitor",
-        "radical",
-        "extreme",
-        "dangerous",
-        "evil",
-        "outrageous",
-        "shocking",
-        "disgrace",
+
+        "corrupt","traitor","radical",
+        "extreme","dangerous","evil",
+        "outrageous","shocking","disgrace",
+        "tyranny","propaganda","manipulation",
+        "fraud","agenda","indoctrination"
     }
+
+    # ----------------------------------------------------
+    # Emotional appeal
+    # ----------------------------------------------------
 
     EMOTIONAL_APPEAL_TERMS = {
-        "heartbreaking",
-        "tragic",
-        "devastating",
-        "hope",
-        "fear",
-        "anger",
-        "pain",
-        "suffering",
+
+        "heartbreaking","tragic","devastating",
+        "hope","fear","anger","rage",
+        "pain","suffering","panic",
+        "anxiety","outrage","despair"
     }
 
+    # ----------------------------------------------------
+    # Fear appeals
+    # ----------------------------------------------------
+
     FEAR_APPEAL_TERMS = {
-        "threat",
-        "danger",
-        "risk",
-        "crisis",
-        "attack",
-        "collapse",
-        "terror",
-        "fear",
+
+        "threat","danger","risk","crisis",
+        "attack","collapse","terror",
+        "invasion","emergency","catastrophe"
     }
+
+    # ----------------------------------------------------
+    # Intensifiers
+    # ----------------------------------------------------
+
+    INTENSIFIERS = {
+
+        "very","extremely","highly",
+        "incredibly","really","so","too"
+    }
+
+    # ----------------------------------------------------
+    # Phrase patterns
+    # ----------------------------------------------------
 
     SCAPEGOAT_PATTERNS = {
         "they are responsible",
         "they caused",
-        "blame them",
         "their fault",
+        "blame them",
+        "those people"
     }
 
     FALSE_DILEMMA_PATTERNS = {
@@ -116,20 +136,22 @@ class RhetoricalDeviceDetector:
         "no alternative",
         "only choice",
         "nothing else",
+        "no other option"
     }
 
-    def __init__(self, config: RhetoricalDeviceConfig | None = None) -> None:
-        """
-        Initialize NLP pipeline for rhetorical analysis.
+    RHETORICAL_PUNCT_PATTERN = re.compile(r"[!?]+")
 
-        Args:
-            config: Optional configuration.
-        """
+    # ----------------------------------------------------
+
+    def __init__(self, config: RhetoricalDeviceConfig | None = None):
 
         self.config = config or RhetoricalDeviceConfig()
 
         try:
-            self.nlp: Language = spacy.load(self.config.spacy_model)
+            self.nlp: Language = spacy.load(
+                self.config.spacy_model,
+                disable=self.config.disable_components
+            )
         except Exception as exc:
             logger.exception("spaCy model loading failed")
             raise RuntimeError(
@@ -137,37 +159,30 @@ class RhetoricalDeviceDetector:
             ) from exc
 
         logger.info(
-            "RhetoricalDeviceDetector initialized with model=%s",
+            "RhetoricalDeviceDetector initialized | model=%s",
             self.config.spacy_model,
         )
 
+    # ------------------------------------------------------------
+    # Main analysis
+    # ------------------------------------------------------------
+
     def analyze(self, text: str) -> Dict[str, float]:
-        """
-        Analyze rhetorical persuasion techniques in text.
-
-        Args:
-            text: Input text.
-
-        Returns:
-            Dictionary of rhetorical device features.
-        """
 
         if not isinstance(text, str):
             raise ValueError("Input text must be a string")
 
-        cleaned_text = text.strip()
+        text = text.strip()
 
-        if not cleaned_text:
+        if not text:
             raise ValueError("Input text must be non-empty")
 
-        try:
-            doc: Doc = self.nlp(cleaned_text)
-        except Exception as exc:
-            logger.exception("spaCy processing failed")
-            raise RuntimeError("Text processing failed") from exc
+        doc: Doc = self.nlp(text)
 
         tokens: List[str] = [
-            token.text.lower() for token in doc if token.is_alpha
+            token.lemma_.lower()
+            for token in doc
+            if token.is_alpha
         ]
 
         features: Dict[str, float] = {}
@@ -176,11 +191,18 @@ class RhetoricalDeviceDetector:
         features.update(self._term_ratio(tokens, self.LOADED_LANGUAGE_TERMS, "rhetoric_loaded_language_score"))
         features.update(self._term_ratio(tokens, self.EMOTIONAL_APPEAL_TERMS, "rhetoric_emotional_appeal_score"))
         features.update(self._term_ratio(tokens, self.FEAR_APPEAL_TERMS, "rhetoric_fear_appeal_score"))
+        features.update(self._term_ratio(tokens, self.INTENSIFIERS, "rhetoric_intensifier_ratio"))
 
-        features.update(self._pattern_score(cleaned_text, self.SCAPEGOAT_PATTERNS, "rhetoric_scapegoating_score"))
-        features.update(self._pattern_score(cleaned_text, self.FALSE_DILEMMA_PATTERNS, "rhetoric_false_dilemma_score"))
+        features.update(self._pattern_score(text, self.SCAPEGOAT_PATTERNS, "rhetoric_scapegoating_score"))
+        features.update(self._pattern_score(text, self.FALSE_DILEMMA_PATTERNS, "rhetoric_false_dilemma_score"))
+
+        features.update(self._rhetorical_punctuation(text))
 
         return features
+
+    # ------------------------------------------------------------
+    # Lexical ratios
+    # ------------------------------------------------------------
 
     def _term_ratio(
         self,
@@ -188,20 +210,24 @@ class RhetoricalDeviceDetector:
         lexicon: set,
         feature_name: str,
     ) -> Dict[str, float]:
-        """
-        Compute lexical rhetorical signal ratio.
-        """
 
         if not tokens:
             return {feature_name: 0.0}
 
         counts = Counter(tokens)
 
-        hits = sum(counts[token] for token in counts if token in lexicon)
+        hits = sum(
+            counts[token] for token in counts
+            if token in lexicon
+        )
 
         ratio = hits / max(len(tokens), 1)
 
         return {feature_name: float(ratio)}
+
+    # ------------------------------------------------------------
+    # Phrase pattern detection
+    # ------------------------------------------------------------
 
     def _pattern_score(
         self,
@@ -209,13 +235,13 @@ class RhetoricalDeviceDetector:
         patterns: set,
         feature_name: str,
     ) -> Dict[str, float]:
-        """
-        Detect phrase-level rhetorical patterns.
-        """
 
         text_lower = text.lower()
 
-        hits = sum(1 for pattern in patterns if pattern in text_lower)
+        hits = sum(
+            1 for pattern in patterns
+            if pattern in text_lower
+        )
 
         length = max(len(text.split()), 1)
 
@@ -223,32 +249,42 @@ class RhetoricalDeviceDetector:
 
         return {feature_name: float(score)}
 
+    # ------------------------------------------------------------
+    # Rhetorical punctuation
+    # ------------------------------------------------------------
+
+    def _rhetorical_punctuation(self, text: str) -> Dict[str, float]:
+
+        matches = self.RHETORICAL_PUNCT_PATTERN.findall(text)
+
+        length = max(len(text.split()), 1)
+
+        score = len(matches) / length
+
+        return {"rhetoric_punctuation_score": float(score)}
+
+
+# ------------------------------------------------------------
+# Feature vector conversion
+# ------------------------------------------------------------
 
 def rhetorical_feature_vector(features: Dict[str, float]) -> np.ndarray:
-    """
-    Convert rhetorical features into numeric vector.
-    """
 
-    if not isinstance(features, dict):
-        raise ValueError("features must be a dictionary")
+    ordered_keys = [
 
-    if not features:
-        raise ValueError("features must be a non-empty dictionary")
+        "rhetoric_exaggeration_score",
+        "rhetoric_loaded_language_score",
+        "rhetoric_emotional_appeal_score",
+        "rhetoric_fear_appeal_score",
+        "rhetoric_intensifier_ratio",
+        "rhetoric_scapegoating_score",
+        "rhetoric_false_dilemma_score",
+        "rhetoric_punctuation_score",
+    ]
 
-    values: List[float] = []
+    vector = np.array(
+        [float(features.get(k, 0.0)) for k in ordered_keys],
+        dtype=np.float32,
+    )
 
-    for key, value in features.items():
-        if isinstance(value, (int, float, np.number)):
-            values.append(float(value))
-        else:
-            logger.warning("Non-numeric rhetorical feature skipped: %s", key)
-
-    if not values:
-        raise ValueError("No numeric rhetorical values found")
-
-    try:
-        vector = np.array(values, dtype=np.float32)
-        return vector
-    except Exception as exc:
-        logger.exception("Rhetorical vector conversion failed")
-        raise RuntimeError("Failed to convert rhetorical features") from exc
+    return vector

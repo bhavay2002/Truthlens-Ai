@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 import torch
 import torch.nn as nn
@@ -54,51 +54,42 @@ import torch.nn as nn
 from ...encoder.transformer_encoder import TransformerEncoder
 from ...heads.multilabel_head import MultiLabelHead, MultiLabelHeadConfig
 
-
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class NarrativeDetectorConfig:
-    """
-    Configuration for narrative detection model.
-    """
 
     model_name: str = "roberta-base"
     pooling: str = "cls"
     dropout: float = 0.1
-    device: Optional[str] = None
     threshold: float = 0.5
+    device: Optional[str] = None
 
 
 class NarrativeDetector(nn.Module):
-    """
-    Transformer-based narrative detector.
 
-    Multi-label outputs representing narrative actors and narrative frames.
-    """
+    LABELS: List[str] = [
+        "hero",
+        "villain",
+        "victim",
+        "hero_entities",
+        "villain_entities",
+        "victim_entities",
+        "RE",
+        "HI",
+        "CO",
+        "MO",
+        "EC",
+    ]
 
-    NUM_LABELS = 11
+    NUM_LABELS = len(LABELS)
 
-    LABEL_MAPPING = {
-        0: "hero",
-        1: "villain",
-        2: "victim",
-        3: "hero_entities",
-        4: "villain_entities",
-        5: "victim_entities",
-        6: "RE",
-        7: "HI",
-        8: "CO",
-        9: "MO",
-        10: "EC",
-    }
+    LABEL_MAPPING = {i: label for i, label in enumerate(LABELS)}
 
-    def __init__(self, config: NarrativeDetectorConfig) -> None:
+    def __init__(self, config: NarrativeDetectorConfig):
+
         super().__init__()
-
-        if not isinstance(config, NarrativeDetectorConfig):
-            raise TypeError("config must be NarrativeDetectorConfig")
 
         self.config = config
 
@@ -129,24 +120,6 @@ class NarrativeDetector(nn.Module):
         attention_mask: torch.Tensor,
         labels: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        """
-        Forward pass.
-
-        Args:
-            input_ids:
-                Token IDs tensor.
-            attention_mask:
-                Attention mask tensor.
-            labels:
-                Optional multi-label tensor (batch_size, 11)
-
-        Returns:
-            Dictionary containing logits, probabilities, predictions,
-            and optional loss.
-        """
-
-        if input_ids is None or attention_mask is None:
-            raise ValueError("input_ids and attention_mask cannot be None")
 
         encoder_outputs = self.encoder(
             input_ids=input_ids,
@@ -167,13 +140,8 @@ class NarrativeDetector(nn.Module):
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
+        threshold: Optional[float] = None,
     ) -> Dict[str, torch.Tensor]:
-        """
-        Run inference.
-
-        Returns:
-            predictions and probabilities.
-        """
 
         self.eval()
 
@@ -182,14 +150,22 @@ class NarrativeDetector(nn.Module):
             attention_mask=attention_mask,
         )
 
+        probabilities = outputs["probabilities"]
+
+        thresh = threshold if threshold else self.config.threshold
+
+        predictions = (probabilities >= thresh).int()
+
         return {
-            "predictions": outputs["predictions"],
-            "probabilities": outputs["probabilities"],
+            "predictions": predictions,
+            "probabilities": probabilities,
+            "labels": self.LABEL_MAPPING,
         }
 
     def get_output_labels(self) -> Dict[int, str]:
-        """
-        Returns narrative label mapping.
-        """
 
         return self.LABEL_MAPPING
+
+    def get_label_list(self) -> List[str]:
+
+        return self.LABELS

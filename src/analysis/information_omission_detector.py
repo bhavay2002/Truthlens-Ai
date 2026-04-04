@@ -43,59 +43,89 @@ from spacy.tokens import Doc
 logger = logging.getLogger(__name__)
 
 
+# ------------------------------------------------------------
+# Configuration
+# ------------------------------------------------------------
+
 @dataclass(slots=True)
 class InformationOmissionConfig:
-    """
-    Configuration for InformationOmissionDetector.
-    """
 
     spacy_model: str = "en_core_web_sm"
+    disable_components: tuple = ("ner",)
 
+
+# ------------------------------------------------------------
+# Detector
+# ------------------------------------------------------------
 
 class InformationOmissionDetector:
-    """
-    Detects advanced information omission signals in discourse.
-    """
+
+    # ----------------------------------------------------
+    # Counterargument markers
+    # ----------------------------------------------------
 
     COUNTERARGUMENT_MARKERS = {
-        "however",
-        "but",
-        "although",
-        "though",
-        "nevertheless",
-        "on the other hand",
-        "yet",
+
+        "however","but","although","though",
+        "yet","nevertheless","nonetheless",
+        "still","despite","despite_this",
+        "on_the_other_hand","in_contrast",
+        "alternatively","even_so"
     }
+
+    # ----------------------------------------------------
+    # Evidence markers
+    # ----------------------------------------------------
 
     EVIDENCE_MARKERS = {
-        "evidence",
-        "data",
-        "study",
-        "research",
-        "report",
-        "analysis",
-        "statistics",
+
+        "evidence","data","dataset",
+        "study","studies","research",
+        "analysis","report","reports",
+        "statistics","survey",
+        "experiment","experiments",
+        "findings","results",
+        "according","according_to",
+        "empirical","documented"
     }
+
+    # ----------------------------------------------------
+    # Claim markers
+    # ----------------------------------------------------
 
     CLAIM_MARKERS = {
-        "therefore",
-        "thus",
-        "clearly",
-        "obviously",
-        "shows",
-        "proves",
-        "demonstrates",
+
+        "therefore","thus","hence",
+        "consequently","accordingly",
+        "clearly","obviously",
+        "undoubtedly","without_doubt",
+        "shows","proves","demonstrates",
+        "confirms","indicates"
     }
 
-    def __init__(self, config: InformationOmissionConfig | None = None) -> None:
-        """
-        Initialize NLP pipeline.
-        """
+    # ----------------------------------------------------
+    # Framing markers
+    # ----------------------------------------------------
+
+    FRAMING_MARKERS = {
+
+        "clearly","obviously",
+        "undeniably","without_doubt",
+        "everyone_knows","it_is_clear",
+        "there_is_no_doubt"
+    }
+
+    # ----------------------------------------------------
+
+    def __init__(self, config: InformationOmissionConfig | None = None):
 
         self.config = config or InformationOmissionConfig()
 
         try:
-            self.nlp: Language = spacy.load(self.config.spacy_model)
+            self.nlp: Language = spacy.load(
+                self.config.spacy_model,
+                disable=self.config.disable_components
+            )
         except Exception as exc:
             logger.exception("spaCy model loading failed")
             raise RuntimeError(
@@ -103,20 +133,15 @@ class InformationOmissionDetector:
             ) from exc
 
         logger.info(
-            "InformationOmissionDetector initialized with model=%s",
+            "InformationOmissionDetector initialized | model=%s",
             self.config.spacy_model,
         )
 
+    # ------------------------------------------------------------
+    # Main Analysis
+    # ------------------------------------------------------------
+
     def analyze(self, text: str) -> Dict[str, float]:
-        """
-        Analyze omission patterns in text.
-
-        Args:
-            text: Input text.
-
-        Returns:
-            Dictionary of omission indicators.
-        """
 
         if not isinstance(text, str):
             raise ValueError("Input text must be a string")
@@ -126,14 +151,12 @@ class InformationOmissionDetector:
         if not text:
             raise ValueError("Input text must be non-empty")
 
-        try:
-            doc: Doc = self.nlp(text)
-        except Exception as exc:
-            logger.exception("spaCy processing failed")
-            raise RuntimeError("Text processing failed") from exc
+        doc: Doc = self.nlp(text)
 
         tokens: List[str] = [
-            token.text.lower() for token in doc if token.is_alpha
+            token.lemma_.lower()
+            for token in doc
+            if token.is_alpha
         ]
 
         features: Dict[str, float] = {}
@@ -141,54 +164,63 @@ class InformationOmissionDetector:
         features.update(self._missing_counterarguments(tokens))
         features.update(self._one_sided_framing(tokens))
         features.update(self._evidence_chain_strength(tokens))
+        features.update(self._claim_evidence_balance(tokens))
 
         logger.debug("Information omission features computed")
 
         return features
 
+    # ------------------------------------------------------------
+    # Missing counterarguments
+    # ------------------------------------------------------------
+
     def _missing_counterarguments(self, tokens: List[str]) -> Dict[str, float]:
-        """
-        Estimate likelihood of missing counterarguments.
-        """
 
         if not tokens:
             return {"missing_counterargument_score": 0.0}
 
         counter_hits = sum(
-            1 for token in tokens if token in self.COUNTERARGUMENT_MARKERS
+            1 for token in tokens
+            if token in self.COUNTERARGUMENT_MARKERS
         )
 
         score = 1.0 - (counter_hits / max(len(tokens), 1))
 
         return {"missing_counterargument_score": float(score)}
 
+    # ------------------------------------------------------------
+    # One-sided framing
+    # ------------------------------------------------------------
+
     def _one_sided_framing(self, tokens: List[str]) -> Dict[str, float]:
-        """
-        Detect strong claim language without balancing signals.
-        """
 
         if not tokens:
             return {"one_sided_framing_score": 0.0}
 
         claim_hits = sum(
-            1 for token in tokens if token in self.CLAIM_MARKERS
+            1 for token in tokens
+            if token in self.CLAIM_MARKERS
         )
 
         counter_hits = sum(
-            1 for token in tokens if token in self.COUNTERARGUMENT_MARKERS
+            1 for token in tokens
+            if token in self.COUNTERARGUMENT_MARKERS
         )
 
-        if claim_hits == 0:
-            return {"one_sided_framing_score": 0.0}
+        framing_hits = sum(
+            1 for token in tokens
+            if token in self.FRAMING_MARKERS
+        )
 
-        score = claim_hits / max(counter_hits + 1, 1)
+        score = (claim_hits + framing_hits) / max(counter_hits + 1, 1)
 
         return {"one_sided_framing_score": float(score)}
 
+    # ------------------------------------------------------------
+    # Evidence chain strength
+    # ------------------------------------------------------------
+
     def _evidence_chain_strength(self, tokens: List[str]) -> Dict[str, float]:
-        """
-        Estimate completeness of evidence chains.
-        """
 
         if not tokens:
             return {"incomplete_evidence_score": 0.0}
@@ -196,7 +228,9 @@ class InformationOmissionDetector:
         counts = Counter(tokens)
 
         evidence_hits = sum(
-            counts[token] for token in counts if token in self.EVIDENCE_MARKERS
+            counts[token]
+            for token in counts
+            if token in self.EVIDENCE_MARKERS
         )
 
         ratio = evidence_hits / max(len(tokens), 1)
@@ -205,32 +239,46 @@ class InformationOmissionDetector:
 
         return {"incomplete_evidence_score": float(score)}
 
+    # ------------------------------------------------------------
+    # Claim vs Evidence balance
+    # ------------------------------------------------------------
+
+    def _claim_evidence_balance(self, tokens: List[str]) -> Dict[str, float]:
+
+        claim_hits = sum(
+            1 for token in tokens
+            if token in self.CLAIM_MARKERS
+        )
+
+        evidence_hits = sum(
+            1 for token in tokens
+            if token in self.EVIDENCE_MARKERS
+        )
+
+        if claim_hits == 0:
+            return {"claim_evidence_imbalance": 0.0}
+
+        imbalance = claim_hits / max(evidence_hits + 1, 1)
+
+        return {"claim_evidence_imbalance": float(imbalance)}
+
+
+# ------------------------------------------------------------
+# Vector Conversion
+# ------------------------------------------------------------
 
 def information_omission_vector(features: Dict[str, float]) -> np.ndarray:
-    """
-    Convert omission features into numeric vector.
-    """
 
-    if not isinstance(features, dict):
-        raise ValueError("features must be a dictionary")
+    ordered_keys = [
+        "missing_counterargument_score",
+        "one_sided_framing_score",
+        "incomplete_evidence_score",
+        "claim_evidence_imbalance",
+    ]
 
-    if not features:
-        raise ValueError("features must be a non-empty dictionary")
+    vector = np.array(
+        [float(features.get(k, 0.0)) for k in ordered_keys],
+        dtype=np.float32,
+    )
 
-    values: List[float] = []
-
-    for key, value in features.items():
-        if isinstance(value, (int, float, np.number)):
-            values.append(float(value))
-        else:
-            logger.warning("Non-numeric omission feature skipped: %s", key)
-
-    if not values:
-        raise ValueError("No numeric values found in features")
-
-    try:
-        vector = np.array(values, dtype=np.float32)
-        return vector
-    except Exception as exc:
-        logger.exception("Omission vector conversion failed")
-        raise RuntimeError("Failed to convert omission features") from exc
+    return vector

@@ -28,78 +28,121 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import Dict, List
+from collections import Counter
 
 import numpy as np
 import spacy
 from spacy.language import Language
 from spacy.tokens import Doc
 
-
 logger = logging.getLogger(__name__)
 
 
+# ------------------------------------------------------------
+# Configuration
+# ------------------------------------------------------------
+
 @dataclass(slots=True)
 class ArgumentMiningConfig:
-    """
-    Configuration for ArgumentMiningAnalyzer.
-    """
 
     spacy_model: str = "en_core_web_sm"
+    disable_components: tuple = ("ner",)
 
+
+# ------------------------------------------------------------
+# Argument Mining Analyzer
+# ------------------------------------------------------------
 
 class ArgumentMiningAnalyzer:
-    """
-    Extracts argument structure signals from text.
-    """
+
+    # ----------------------------------------------------
+    # Claim indicators
+    # ----------------------------------------------------
 
     CLAIM_MARKERS = {
-        "therefore",
-        "thus",
-        "hence",
-        "consequently",
-        "so",
-        "clearly",
-        "obviously",
+
+        "therefore","thus","hence","consequently","so",
+        "accordingly","as a result","for this reason",
+        "it follows","it follows that",
+        "this proves","this shows","this demonstrates",
+        "this indicates","this confirms",
+        "clearly","obviously","undoubtedly",
+        "without doubt","there is no doubt",
+        "in conclusion","to conclude","overall",
+        "ultimately","in summary"
     }
+
+    # ----------------------------------------------------
+    # Premise indicators
+    # ----------------------------------------------------
 
     PREMISE_MARKERS = {
-        "because",
-        "since",
-        "given",
-        "as",
-        "considering",
-        "due",
+
+        "because","since","given","as",
+        "considering","due to","owing to",
+        "based on","in light of",
+        "for the reason that",
+        "seeing that","inasmuch as",
+        "assuming that","insofar as"
     }
+
+    # ----------------------------------------------------
+    # Supporting evidence indicators
+    # ----------------------------------------------------
 
     SUPPORT_MARKERS = {
-        "for example",
-        "for instance",
-        "evidence",
-        "demonstrates",
-        "shows",
+
+        "for example","for instance","as an example",
+        "to illustrate","as evidence",
+        "evidence","empirical evidence",
+        "data shows","data suggest",
+        "studies show","research indicates",
+        "research shows","statistics show",
+        "statistics indicate",
+        "according to","reports show",
+        "analysis shows","findings suggest"
     }
+
+    # ----------------------------------------------------
+    # Counterargument / contrast markers
+    # ----------------------------------------------------
 
     CONTRAST_MARKERS = {
-        "however",
-        "but",
-        "although",
-        "though",
-        "yet",
-        "nevertheless",
+
+        "however","but","although","though",
+        "yet","nevertheless","nonetheless",
+        "on the other hand","in contrast",
+        "by contrast","alternatively",
+        "despite","despite this",
+        "even though","whereas",
+        "while","still"
     }
 
-    def __init__(self, config: ArgumentMiningConfig | None = None) -> None:
-        """
-        Initialize NLP pipeline used for argument mining.
+    # ----------------------------------------------------
+    # Rebuttal markers
+    # ----------------------------------------------------
 
-        Args:
-            config: Optional configuration object.
-        """
+    REBUTTAL_MARKERS = {
+
+        "however","nonetheless","still",
+        "nevertheless","despite this",
+        "even so","regardless",
+        "that said","having said that",
+        "nonetheless","yet still",
+        "in spite of this",
+        "contrary to this",
+        "despite these claims"
+    }
+
+    def __init__(self, config: ArgumentMiningConfig | None = None):
 
         self.config = config or ArgumentMiningConfig()
 
         try:
-            self.nlp: Language = spacy.load(self.config.spacy_model)
+            self.nlp: Language = spacy.load(
+                self.config.spacy_model,
+                disable=self.config.disable_components
+            )
         except Exception as exc:
             logger.exception("spaCy model loading failed")
             raise RuntimeError(
@@ -107,115 +150,106 @@ class ArgumentMiningAnalyzer:
             ) from exc
 
         logger.info(
-            "ArgumentMiningAnalyzer initialized with model=%s",
-            self.config.spacy_model,
+            "ArgumentMiningAnalyzer initialized | model=%s",
+            self.config.spacy_model
         )
 
+    # ------------------------------------------------------------
+
     def analyze(self, text: str) -> Dict[str, float]:
-        """
-        Analyze argumentative structures in text.
-
-        Args:
-            text: Input text.
-
-        Returns:
-            Dictionary containing argument mining features.
-        """
 
         if not isinstance(text, str):
-            raise ValueError("Input text must be a string")
+            raise ValueError("Input text must be string")
 
-        cleaned_text = text.strip()
+        text = text.strip()
 
-        if not cleaned_text:
-            raise ValueError("Input text must be a non-empty string")
+        if not text:
+            raise ValueError("Input text must be non-empty")
 
-        try:
-            doc: Doc = self.nlp(cleaned_text)
-        except Exception as exc:
-            logger.exception("spaCy processing failed")
-            raise RuntimeError("Text processing failed") from exc
+        doc: Doc = self.nlp(text)
 
-        tokens: List[str] = [
-            token.text.lower() for token in doc if token.is_alpha
+        tokens = [
+            token.lemma_.lower()
+            for token in doc
+            if token.is_alpha
         ]
+
+        token_counts = Counter(tokens)
 
         features: Dict[str, float] = {}
 
-        features.update(self._claim_features(tokens))
-        features.update(self._premise_features(tokens))
-        features.update(self._support_features(cleaned_text))
-        features.update(self._contrast_features(tokens))
+        features["argument_claim_ratio"] = self._marker_ratio(
+            text, tokens, token_counts, self.CLAIM_MARKERS
+        )
+
+        features["argument_premise_ratio"] = self._marker_ratio(
+            text, tokens, token_counts, self.PREMISE_MARKERS
+        )
+
+        features["argument_support_ratio"] = self._phrase_ratio(
+            text, self.SUPPORT_MARKERS
+        )
+
+        features["argument_contrast_ratio"] = self._marker_ratio(
+            text, tokens, token_counts, self.CONTRAST_MARKERS
+        )
+
+        features["argument_rebuttal_ratio"] = self._phrase_ratio(
+            text, self.REBUTTAL_MARKERS
+        )
+
         features.update(self._argument_density(doc))
+
+        features["argument_complexity"] = (
+            features["argument_clause_density"]
+            + features["argument_verb_density"]
+        )
 
         logger.debug("Argument mining features computed")
 
         return features
 
-    def _claim_features(self, tokens: List[str]) -> Dict[str, float]:
-        """
-        Detect claim-related discourse markers.
-        """
+    # ------------------------------------------------------------
+
+    def _marker_ratio(
+        self,
+        text: str,
+        tokens: List[str],
+        token_counts: Counter,
+        markers: set
+    ) -> float:
 
         if not tokens:
-            return {"argument_claim_ratio": 0.0}
+            return 0.0
 
-        count = sum(1 for token in tokens if token in self.CLAIM_MARKERS)
+        hits = sum(token_counts[t] for t in markers if t in token_counts)
 
-        ratio = count / len(tokens)
+        return float(hits / max(len(tokens), 1))
 
-        return {"argument_claim_ratio": float(ratio)}
+    # ------------------------------------------------------------
 
-    def _premise_features(self, tokens: List[str]) -> Dict[str, float]:
-        """
-        Detect premise indicators supporting arguments.
-        """
-
-        if not tokens:
-            return {"argument_premise_ratio": 0.0}
-
-        count = sum(1 for token in tokens if token in self.PREMISE_MARKERS)
-
-        ratio = count / len(tokens)
-
-        return {"argument_premise_ratio": float(ratio)}
-
-    def _support_features(self, text: str) -> Dict[str, float]:
-        """
-        Detect supporting evidence patterns.
-        """
+    def _phrase_ratio(
+        self,
+        text: str,
+        phrases: set
+    ) -> float:
 
         text_lower = text.lower()
 
-        support_hits = sum(
-            1 for marker in self.SUPPORT_MARKERS if marker in text_lower
-        )
+        hits = sum(1 for phrase in phrases if phrase in text_lower)
 
-        length = max(len(text.split()), 1)
+        return float(hits / max(len(text.split()), 1))
 
-        return {"argument_support_ratio": float(support_hits / length)}
-
-    def _contrast_features(self, tokens: List[str]) -> Dict[str, float]:
-        """
-        Detect counterargument or contrast signals.
-        """
-
-        if not tokens:
-            return {"argument_contrast_ratio": 0.0}
-
-        count = sum(1 for token in tokens if token in self.CONTRAST_MARKERS)
-
-        ratio = count / len(tokens)
-
-        return {"argument_contrast_ratio": float(ratio)}
+    # ------------------------------------------------------------
 
     def _argument_density(self, doc: Doc) -> Dict[str, float]:
-        """
-        Estimate argument density using verbs and clauses.
-        """
 
-        verbs = [token for token in doc if token.pos_ == "VERB"]
-        clauses = [token for token in doc if token.dep_ in {"ccomp", "xcomp"}]
+        verbs = [t for t in doc if t.pos_ == "VERB"]
+
+        clauses = [
+            t for t in doc
+            if t.dep_ in {"ccomp", "xcomp", "advcl"}
+        ]
 
         total_tokens = max(len(doc), 1)
 
@@ -225,31 +259,26 @@ class ArgumentMiningAnalyzer:
         }
 
 
+# ------------------------------------------------------------
+# Feature Vector Conversion
+# ------------------------------------------------------------
+
 def argument_feature_vector(features: Dict[str, float]) -> np.ndarray:
-    """
-    Convert argument features dictionary into numeric vector.
-    """
 
-    if not isinstance(features, dict):
-        raise ValueError("features must be a dictionary")
+    ordered_keys = [
+        "argument_claim_ratio",
+        "argument_premise_ratio",
+        "argument_support_ratio",
+        "argument_contrast_ratio",
+        "argument_rebuttal_ratio",
+        "argument_verb_density",
+        "argument_clause_density",
+        "argument_complexity",
+    ]
 
-    if not features:
-        raise ValueError("features must be a non-empty dictionary")
+    vector = np.array(
+        [float(features.get(k, 0.0)) for k in ordered_keys],
+        dtype=np.float32
+    )
 
-    numeric_values: List[float] = []
-
-    for key, value in features.items():
-        if isinstance(value, (int, float, np.number)):
-            numeric_values.append(float(value))
-        else:
-            logger.warning("Non-numeric argument feature skipped: %s", key)
-
-    if not numeric_values:
-        raise ValueError("No numeric values found in features")
-
-    try:
-        vector = np.array(numeric_values, dtype=np.float32)
-        return vector
-    except Exception as exc:
-        logger.exception("Argument feature vector conversion failed")
-        raise RuntimeError("Failed to convert argument features") from exc
+    return vector

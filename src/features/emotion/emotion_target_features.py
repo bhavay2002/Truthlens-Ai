@@ -39,7 +39,13 @@ from typing import Dict, List
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
 
+from src.features.emotion.emotion_schema import (
+    EMOTION_LABELS,
+    EMOTION_TERMS,
+)
+
 logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------
 # Optional spaCy NLP pipeline
@@ -50,37 +56,50 @@ try:
 
     _NLP = spacy.load("en_core_web_sm")
     SPACY_AVAILABLE = True
+
 except Exception:  # noqa: BLE001
     _NLP = None
     SPACY_AVAILABLE = False
+
     logger.warning(
         "spaCy not available. EmotionTargetFeatures will use fallback heuristics."
     )
 
+
 # ---------------------------------------------------------------------
-# Emotion lexicon
+# Reverse emotion lookup (fast)
 # ---------------------------------------------------------------------
 
-EMOTION_WORDS = {
-    "anger": {"angry", "rage", "furious", "hate"},
-    "fear": {"fear", "terror", "panic", "scared"},
-    "joy": {"happy", "joy", "delight", "smile"},
-    "sadness": {"sad", "cry", "grief", "sorrow"},
-}
+WORD_TO_EMOTION: Dict[str, str] = {}
 
-# Flatten emotion vocabulary
-EMOTION_VOCAB = set().union(*EMOTION_WORDS.values())
+for emotion, words in EMOTION_TERMS.items():
+    for word in words:
+        WORD_TO_EMOTION[word] = emotion
 
+
+EMOTION_VOCAB = set(WORD_TO_EMOTION.keys())
+
+
+# ---------------------------------------------------------------------
 # Pronoun groups
+# ---------------------------------------------------------------------
+
 FIRST_PERSON = {"i", "me", "my", "mine", "we", "our", "us"}
 SECOND_PERSON = {"you", "your", "yours"}
 THIRD_PERSON = {"he", "she", "they", "them", "their", "his", "her", "its"}
 
 
+# ---------------------------------------------------------------------
+# Tokenizer
+# ---------------------------------------------------------------------
+
 def _simple_tokenize(text: str) -> List[str]:
-    """Fallback tokenizer."""
     return re.findall(r"\b\w+\b", text.lower())
 
+
+# ---------------------------------------------------------------------
+# Feature Extractor
+# ---------------------------------------------------------------------
 
 @dataclass
 @register_feature
@@ -88,89 +107,110 @@ class EmotionTargetFeatures(BaseFeature):
     """
     Detects which targets emotional language is directed toward.
 
-    Output features include:
-    - emotion_target_self_ratio
-    - emotion_target_other_ratio
-    - emotion_target_entity_ratio
-    - emotion_target_group_ratio
+    Output Features
+    ---------------
+    emotion_target_self_ratio
+    emotion_target_other_ratio
+    emotion_target_entity_ratio
+    emotion_target_group_ratio
+    emotion_target_density
+    emotion_target_diversity
     """
 
     name: str = "emotion_target_features"
     description: str = "Emotion direction and target detection"
 
+    # ------------------------------------------------------------
+
     def _extract_spacy(self, text: str) -> Dict[str, float]:
-        """Use spaCy to detect emotion targets."""
+
         doc = _NLP(text)
 
         self_targets = 0
         other_targets = 0
         entity_targets = 0
         group_targets = 0
-        total_emotions = 0
+
+        emotion_count = 0
+        active_targets = set()
 
         for token in doc:
-            if token.text.lower() in EMOTION_VOCAB:
-                total_emotions += 1
 
-                # Check nearby tokens
+            if token.text.lower() in EMOTION_VOCAB:
+
+                emotion_count += 1
+
                 for neighbor in token.subtree:
+
                     t = neighbor.text.lower()
 
                     if t in FIRST_PERSON:
                         self_targets += 1
+                        active_targets.add("self")
+
                     elif t in SECOND_PERSON or t in THIRD_PERSON:
                         other_targets += 1
+                        active_targets.add("other")
 
-                # Named entity targets
                 if token.ent_type_:
                     entity_targets += 1
+                    active_targets.add("entity")
 
-                # Plural noun heuristic
                 if token.tag_ == "NNS":
                     group_targets += 1
+                    active_targets.add("group")
 
-        total_emotions = total_emotions or 1
+        emotion_count = emotion_count or 1
 
         return {
-            "emotion_target_self_ratio": float(self_targets / total_emotions),
-            "emotion_target_other_ratio": float(other_targets / total_emotions),
-            "emotion_target_entity_ratio": float(entity_targets / total_emotions),
-            "emotion_target_group_ratio": float(group_targets / total_emotions),
+            "emotion_target_self_ratio": self_targets / emotion_count,
+            "emotion_target_other_ratio": other_targets / emotion_count,
+            "emotion_target_entity_ratio": entity_targets / emotion_count,
+            "emotion_target_group_ratio": group_targets / emotion_count,
+            "emotion_target_density": emotion_count / len(doc),
+            "emotion_target_diversity": len(active_targets) / 4,
         }
 
+    # ------------------------------------------------------------
+
     def _extract_fallback(self, text: str) -> Dict[str, float]:
-        """Fallback rule-based detection."""
+
         tokens = _simple_tokenize(text)
 
         emotion_positions = [
-            i for i, t in enumerate(tokens) if t in EMOTION_VOCAB
+            i for i, token in enumerate(tokens) if token in EMOTION_VOCAB
         ]
 
         self_targets = 0
         other_targets = 0
 
         for pos in emotion_positions:
+
             window = tokens[max(0, pos - 3) : pos + 4]
 
             for w in window:
+
                 if w in FIRST_PERSON:
                     self_targets += 1
+
                 elif w in SECOND_PERSON or w in THIRD_PERSON:
                     other_targets += 1
 
         total_emotions = len(emotion_positions) or 1
 
         return {
-            "emotion_target_self_ratio": float(self_targets / total_emotions),
-            "emotion_target_other_ratio": float(other_targets / total_emotions),
+            "emotion_target_self_ratio": self_targets / total_emotions,
+            "emotion_target_other_ratio": other_targets / total_emotions,
             "emotion_target_entity_ratio": 0.0,
             "emotion_target_group_ratio": 0.0,
+            "emotion_target_density": total_emotions / len(tokens),
+            "emotion_target_diversity": 0.0,
         }
 
+    # ------------------------------------------------------------
+
     def extract(self, context: FeatureContext) -> Dict[str, float]:
-        """
-        Extract emotion target features.
-        """
+
         if not context.text:
             raise ValueError("FeatureContext.text cannot be empty")
 

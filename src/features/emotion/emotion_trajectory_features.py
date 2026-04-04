@@ -39,11 +39,30 @@ import numpy as np
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
 
+from src.features.emotion.emotion_schema import (
+    EMOTION_LABELS,
+    EMOTION_TERMS,
+)
+
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------
-# Optional Transformer Emotion Model
-# ---------------------------------------------------------------------
+
+# ------------------------------------------------------------
+# Reverse Emotion Lookup (fast)
+# ------------------------------------------------------------
+
+WORD_TO_EMOTION: Dict[str, str] = {}
+
+for emotion, words in EMOTION_TERMS.items():
+    for word in words:
+        WORD_TO_EMOTION[word] = emotion
+
+EMOTION_VOCAB = set(WORD_TO_EMOTION.keys())
+
+
+# ------------------------------------------------------------
+# Optional Transformer Model
+# ------------------------------------------------------------
 
 try:
     import torch
@@ -57,46 +76,58 @@ try:
 
     TRANSFORMER_AVAILABLE = True
 
-except Exception:  # noqa: BLE001
+    TRANSFORMER_LABELS = [
+        "anger",
+        "disgust",
+        "fear",
+        "joy",
+        "neutral",
+        "sadness",
+        "surprise",
+    ]
+
+except Exception:
     TRANSFORMER_AVAILABLE = False
     _tokenizer = None
     _model = None
     logger.warning("Transformer emotion model unavailable. Using lexicon fallback.")
 
-# ---------------------------------------------------------------------
-# Lexicon fallback
-# ---------------------------------------------------------------------
 
-LEXICON = {
-    "anger": {"angry", "rage", "furious", "hate"},
-    "fear": {"fear", "terror", "panic", "scared"},
-    "joy": {"happy", "joy", "delight", "smile"},
-    "sadness": {"sad", "cry", "grief", "sorrow"},
-}
-
-EMOTION_VOCAB = set().union(*LEXICON.values())
-
+# ------------------------------------------------------------
+# Sentence splitter
+# ------------------------------------------------------------
 
 def _split_sentences(text: str) -> List[str]:
-    """Split text into sentences."""
     sentences = re.split(r"[.!?]+", text)
     return [s.strip() for s in sentences if s.strip()]
 
 
+# ------------------------------------------------------------
+# Lexicon score
+# ------------------------------------------------------------
+
 def _lexicon_score(text: str) -> float:
-    """Compute simple emotional intensity score using lexicon."""
+
     tokens = re.findall(r"\b\w+\b", text.lower())
 
     if not tokens:
         return 0.0
 
-    emotion_count = sum(1 for t in tokens if t in EMOTION_VOCAB)
+    emotion_count = 0
+
+    for token in tokens:
+        if token in EMOTION_VOCAB:
+            emotion_count += 1
 
     return emotion_count / len(tokens)
 
 
+# ------------------------------------------------------------
+# Transformer score
+# ------------------------------------------------------------
+
 def _transformer_score(text: str) -> float:
-    """Compute emotional intensity using transformer probabilities."""
+
     inputs = _tokenizer(
         text,
         return_tensors="pt",
@@ -113,24 +144,45 @@ def _transformer_score(text: str) -> float:
     return float(np.max(probs) - np.mean(probs))
 
 
+# ------------------------------------------------------------
+# Hybrid segment score
+# ------------------------------------------------------------
+
+def _hybrid_score(text: str) -> float:
+
+    lex_score = _lexicon_score(text)
+
+    if TRANSFORMER_AVAILABLE:
+        tr_score = _transformer_score(text)
+        return 0.7 * tr_score + 0.3 * lex_score
+
+    return lex_score
+
+
+# ------------------------------------------------------------
+# Feature Extractor
+# ------------------------------------------------------------
+
 @dataclass
 @register_feature
 class EmotionTrajectoryFeatures(BaseFeature):
     """
     Captures how emotion evolves through the text.
 
-    Output features include:
+    Output features:
         emotion_traj_mean
         emotion_traj_std
         emotion_traj_slope
         emotion_traj_peak_position
         emotion_traj_volatility
+        emotion_traj_range
     """
 
     name: str = "emotion_trajectory_features"
     description: str = "Emotion evolution and trajectory statistics"
 
     def _segment_scores(self, text: str) -> List[float]:
+
         sentences = _split_sentences(text)
 
         if not sentences:
@@ -138,17 +190,14 @@ class EmotionTrajectoryFeatures(BaseFeature):
 
         scores: List[float] = []
 
-        for s in sentences:
-            if TRANSFORMER_AVAILABLE:
-                score = _transformer_score(s)
-            else:
-                score = _lexicon_score(s)
-
+        for sentence in sentences:
+            score = _hybrid_score(sentence)
             scores.append(score)
 
         return scores
 
     def extract(self, context: FeatureContext) -> Dict[str, float]:
+
         if not context.text:
             raise ValueError("FeatureContext.text cannot be empty")
 
@@ -160,7 +209,6 @@ class EmotionTrajectoryFeatures(BaseFeature):
         mean_val = float(np.mean(scores))
         std_val = float(np.std(scores))
 
-        # Linear trend
         x = np.arange(len(scores))
         slope = float(np.polyfit(x, scores, 1)[0])
 
@@ -168,12 +216,15 @@ class EmotionTrajectoryFeatures(BaseFeature):
 
         volatility = float(np.mean(np.abs(np.diff(scores))))
 
+        range_val = float(np.max(scores) - np.min(scores))
+
         features: Dict[str, float] = {
             "emotion_traj_mean": mean_val,
             "emotion_traj_std": std_val,
             "emotion_traj_slope": slope,
             "emotion_traj_peak_position": peak_position,
             "emotion_traj_volatility": volatility,
+            "emotion_traj_range": range_val,
         }
 
         logger.debug(

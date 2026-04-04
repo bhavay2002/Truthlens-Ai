@@ -43,95 +43,105 @@ from spacy.tokens import Doc
 logger = logging.getLogger(__name__)
 
 
+# ------------------------------------------------------------
+# Configuration
+# ------------------------------------------------------------
+
 @dataclass(slots=True)
 class FramingAnalysisConfig:
-    """
-    Configuration for FramingAnalyzer.
-    """
 
     spacy_model: str = "en_core_web_sm"
+    disable_components: tuple = ("ner",)
 
+
+# ------------------------------------------------------------
+# Framing Analyzer
+# ------------------------------------------------------------
 
 class FramingAnalyzer:
-    """
-    Detects common media framing strategies in political discourse.
-    """
+
+    # ----------------------------------------------------
+    # Conflict Frame
+    # ----------------------------------------------------
 
     CONFLICT_TERMS = {
-        "conflict",
-        "fight",
-        "battle",
-        "war",
-        "clash",
-        "attack",
-        "oppose",
-        "confront",
-        "dispute",
-        "rival",
+
+        "conflict","fight","battle","war","clash","attack","confront",
+        "dispute","rival","struggle","tension","hostility","standoff",
+        "confrontation","showdown","retaliation","counterattack",
+        "escalation","political_fight","power_struggle","ideological_clash"
     }
+
+    # ----------------------------------------------------
+    # Economic Frame
+    # ----------------------------------------------------
 
     ECONOMIC_TERMS = {
-        "economy",
-        "economic",
-        "market",
-        "jobs",
-        "tax",
-        "trade",
-        "budget",
-        "cost",
-        "financial",
-        "growth",
+
+        "economy","economic","market","markets",
+        "jobs","employment","unemployment","labor",
+        "tax","taxes","trade","budget","spending",
+        "cost","financial","finance","growth",
+        "inflation","investment","recession",
+        "deficit","debt","revenue","funding",
+        "economic_growth","economic_policy","fiscal_policy"
     }
+
+    # ----------------------------------------------------
+    # Moral / Ethical Frame
+    # ----------------------------------------------------
 
     MORAL_TERMS = {
-        "moral",
-        "ethics",
-        "values",
-        "justice",
-        "right",
-        "wrong",
-        "duty",
-        "principle",
-        "virtue",
+
+        "moral","ethic","ethics","value","values",
+        "justice","fairness","right","wrong",
+        "duty","principle","virtue","integrity",
+        "honor","honour","conscience","morality",
+        "ethical","responsibility","moral_obligation",
+        "social_justice","human_rights"
     }
+
+    # ----------------------------------------------------
+    # Human Interest Frame
+    # ----------------------------------------------------
 
     HUMAN_INTEREST_TERMS = {
-        "family",
-        "children",
-        "community",
-        "people",
-        "victim",
-        "life",
-        "story",
-        "emotion",
-        "suffering",
-        "experience",
+
+        "family","children","child","community",
+        "people","citizen","victim","life",
+        "story","personal_story","emotion",
+        "suffering","experience","personal",
+        "struggle","hardship","tragedy",
+        "survivor","human_impact","daily_life"
     }
 
-    RESPONSIBILITY_TERMS = {
-        "responsible",
-        "blame",
-        "accountable",
-        "duty",
-        "failure",
-        "government",
-        "policy",
-        "decision",
-        "authority",
+    # ----------------------------------------------------
+    # Security / Threat Frame
+    # ----------------------------------------------------
+
+    SECURITY_TERMS = {
+
+        "security","national_security","safety",
+        "threat","risk","danger","crisis",
+        "terror","terrorism","extremism",
+        "attack","defense","protection",
+        "surveillance","law_enforcement",
+        "border_security","military",
+        "counterterrorism","emergency",
+        "public_safety"
     }
 
-    def __init__(self, config: FramingAnalysisConfig | None = None) -> None:
-        """
-        Initialize NLP pipeline for framing analysis.
+    # ----------------------------------------------------
 
-        Args:
-            config: Optional configuration object.
-        """
+    def __init__(self, config: FramingAnalysisConfig | None = None):
 
         self.config = config or FramingAnalysisConfig()
 
         try:
-            self.nlp: Language = spacy.load(self.config.spacy_model)
+            self.nlp: Language = spacy.load(
+                self.config.spacy_model,
+                disable=self.config.disable_components
+            )
         except Exception as exc:
             logger.exception("spaCy model loading failed")
             raise RuntimeError(
@@ -139,37 +149,30 @@ class FramingAnalyzer:
             ) from exc
 
         logger.info(
-            "FramingAnalyzer initialized with model=%s",
+            "FramingAnalyzer initialized | model=%s",
             self.config.spacy_model,
         )
 
+    # ------------------------------------------------------------
+    # Main analysis
+    # ------------------------------------------------------------
+
     def analyze(self, text: str) -> Dict[str, float]:
-        """
-        Analyze framing strategies in text.
-
-        Args:
-            text: Input text.
-
-        Returns:
-            Dictionary containing framing scores.
-        """
 
         if not isinstance(text, str):
             raise ValueError("Input text must be a string")
 
-        cleaned_text = text.strip()
+        text = text.strip()
 
-        if not cleaned_text:
+        if not text:
             raise ValueError("Input text must be non-empty")
 
-        try:
-            doc: Doc = self.nlp(cleaned_text)
-        except Exception as exc:
-            logger.exception("spaCy processing failed")
-            raise RuntimeError("Text processing failed") from exc
+        doc: Doc = self.nlp(text)
 
         tokens: List[str] = [
-            token.text.lower() for token in doc if token.is_alpha
+            token.lemma_.lower()
+            for token in doc
+            if token.is_alpha
         ]
 
         features: Dict[str, float] = {}
@@ -178,11 +181,16 @@ class FramingAnalyzer:
         features.update(self._frame_score(tokens, self.ECONOMIC_TERMS, "frame_economic_score"))
         features.update(self._frame_score(tokens, self.MORAL_TERMS, "frame_moral_score"))
         features.update(self._frame_score(tokens, self.HUMAN_INTEREST_TERMS, "frame_human_interest_score"))
-        features.update(self._frame_score(tokens, self.RESPONSIBILITY_TERMS, "frame_responsibility_score"))
+        features.update(self._frame_score(tokens, self.SECURITY_TERMS, "frame_security_score"))
 
-        logger.debug("Framing features computed")
+        features.update(self._frame_dominance(features))
+        features.update(self._frame_diversity(features))
 
         return features
+
+    # ------------------------------------------------------------
+    # Frame scoring
+    # ------------------------------------------------------------
 
     def _frame_score(
         self,
@@ -190,61 +198,74 @@ class FramingAnalyzer:
         lexicon: set,
         feature_name: str,
     ) -> Dict[str, float]:
-        """
-        Compute framing score based on lexicon frequency.
-
-        Args:
-            tokens: Tokenized text.
-            lexicon: Lexicon of frame-specific terms.
-            feature_name: Output feature name.
-
-        Returns:
-            Dictionary with frame score.
-        """
 
         if not tokens:
             return {feature_name: 0.0}
 
         counts = Counter(tokens)
 
-        frame_hits = sum(counts[token] for token in counts if token in lexicon)
+        hits = sum(
+            counts[token]
+            for token in counts
+            if token in lexicon
+        )
 
-        ratio = frame_hits / max(len(tokens), 1)
+        ratio = hits / max(len(tokens), 1)
 
         return {feature_name: float(ratio)}
 
+    # ------------------------------------------------------------
+    # Frame dominance
+    # ------------------------------------------------------------
+
+    def _frame_dominance(self, features: Dict[str, float]) -> Dict[str, float]:
+
+        frame_scores = [
+            v for k, v in features.items()
+            if k.startswith("frame_")
+        ]
+
+        if not frame_scores:
+            return {"frame_dominance_score": 0.0}
+
+        return {"frame_dominance_score": float(max(frame_scores))}
+
+    # ------------------------------------------------------------
+    # Frame diversity
+    # ------------------------------------------------------------
+
+    def _frame_diversity(self, features: Dict[str, float]) -> Dict[str, float]:
+
+        frame_scores = [
+            v for k, v in features.items()
+            if k.startswith("frame_")
+        ]
+
+        active_frames = sum(1 for score in frame_scores if score > 0)
+
+        diversity = active_frames / max(len(frame_scores), 1)
+
+        return {"frame_diversity_score": float(diversity)}
+
+
+# ------------------------------------------------------------
+# Vector conversion
+# ------------------------------------------------------------
 
 def framing_feature_vector(features: Dict[str, float]) -> np.ndarray:
-    """
-    Convert framing feature dictionary into numeric vector.
 
-    Args:
-        features: Frame features.
+    ordered_keys = [
 
-    Returns:
-        NumPy vector.
-    """
+        "frame_conflict_score",
+        "frame_economic_score",
+        "frame_moral_score",
+        "frame_human_interest_score",
+        "frame_security_score",
+    ]
 
-    if not isinstance(features, dict):
-        raise ValueError("features must be a dictionary")
+    vector = np.array(
+        [float(features.get(k, 0.0)) for k in ordered_keys],
+        dtype=np.float32,
+    )
 
-    if not features:
-        raise ValueError("features must be a non-empty dictionary")
-
-    numeric_values: List[float] = []
-
-    for key, value in features.items():
-        if isinstance(value, (int, float, np.number)):
-            numeric_values.append(float(value))
-        else:
-            logger.warning("Non-numeric framing feature skipped: %s", key)
-
-    if not numeric_values:
-        raise ValueError("No numeric values found in features")
-
-    try:
-        vector = np.array(numeric_values, dtype=np.float32)
-        return vector
-    except Exception as exc:
-        logger.exception("Framing vector conversion failed")
-        raise RuntimeError("Failed to convert framing features") from exc
+    return vector

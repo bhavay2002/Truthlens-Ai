@@ -23,12 +23,12 @@ Inputs:
 Outputs:
     Source attribution feature dictionary and optional numerical vector
 """
-
 from __future__ import annotations
 
 import logging
 import re
 from dataclasses import dataclass
+from collections import Counter
 from typing import Dict, List
 
 import numpy as np
@@ -36,70 +36,88 @@ import spacy
 from spacy.language import Language
 from spacy.tokens import Doc
 
+
 logger = logging.getLogger(__name__)
 
 
+# ------------------------------------------------------------
+# Configuration
+# ------------------------------------------------------------
+
 @dataclass(slots=True)
 class SourceAttributionConfig:
-    """
-    Configuration for SourceAttributionAnalyzer.
-    """
 
     spacy_model: str = "en_core_web_sm"
+    disable_components: tuple = ("parser",)
 
+
+# ------------------------------------------------------------
+# Analyzer
+# ------------------------------------------------------------
 
 class SourceAttributionAnalyzer:
-    """
-    Detects attribution patterns indicating who is cited as authority.
-    """
+
+    # ----------------------------------------------------
+    # Expert attribution signals
+    # ----------------------------------------------------
 
     EXPERT_TERMS = {
-        "expert",
-        "experts",
-        "analyst",
-        "analysts",
-        "researcher",
-        "researchers",
-        "scientist",
-        "scientists",
-        "professor",
-        "economist",
-        "official",
-        "authority",
+
+        "expert","experts","analyst","analysts",
+        "researcher","researchers","scientist","scientists",
+        "professor","economist","doctor","official",
+        "authority","specialist"
     }
+
+    # ----------------------------------------------------
+    # Anonymous sources
+    # ----------------------------------------------------
 
     ANONYMOUS_TERMS = {
-        "sources",
-        "source",
-        "insiders",
-        "officials",
-        "people",
-        "critics",
-        "observers",
+
+        "sources","source","insiders","officials",
+        "people","critics","observers","commentators",
+        "analysts","individuals"
     }
+
+    # ----------------------------------------------------
+    # Evidence / credibility indicators
+    # ----------------------------------------------------
 
     CREDIBILITY_TERMS = {
-        "report",
-        "study",
-        "data",
-        "analysis",
-        "evidence",
-        "according",
-        "statistics",
-        "survey",
+
+        "report","study","research","analysis",
+        "data","dataset","statistics",
+        "evidence","survey","findings",
+        "according","confirmed","documented"
     }
 
-    QUOTE_PATTERN = re.compile(r'"')
+    # ----------------------------------------------------
+    # Attribution verbs
+    # ----------------------------------------------------
 
-    def __init__(self, config: SourceAttributionConfig | None = None) -> None:
-        """
-        Initialize NLP pipeline.
-        """
+    ATTRIBUTION_VERBS = {
+
+        "say","said","report","reported",
+        "state","stated","claim","claimed",
+        "explain","explained","note","noted",
+        "argue","argued","announce","announced",
+        "confirm","confirmed"
+    }
+
+    QUOTE_PATTERN = re.compile(r"[\"“”']")
+
+    # ----------------------------------------------------
+
+    def __init__(self, config: SourceAttributionConfig | None = None):
 
         self.config = config or SourceAttributionConfig()
 
         try:
-            self.nlp: Language = spacy.load(self.config.spacy_model)
+            self.nlp: Language = spacy.load(
+                self.config.spacy_model,
+                disable=self.config.disable_components
+            )
         except Exception as exc:
             logger.exception("spaCy model loading failed")
             raise RuntimeError(
@@ -107,20 +125,15 @@ class SourceAttributionAnalyzer:
             ) from exc
 
         logger.info(
-            "SourceAttributionAnalyzer initialized with model=%s",
+            "SourceAttributionAnalyzer initialized | model=%s",
             self.config.spacy_model,
         )
 
+    # ------------------------------------------------------------
+    # Main analysis
+    # ------------------------------------------------------------
+
     def analyze(self, text: str) -> Dict[str, float]:
-        """
-        Analyze source attribution patterns.
-
-        Args:
-            text: Input text.
-
-        Returns:
-            Dictionary containing attribution signals.
-        """
 
         if not isinstance(text, str):
             raise ValueError("Input text must be a string")
@@ -130,14 +143,12 @@ class SourceAttributionAnalyzer:
         if not text:
             raise ValueError("Input text must be non-empty")
 
-        try:
-            doc: Doc = self.nlp(text)
-        except Exception as exc:
-            logger.exception("spaCy processing failed")
-            raise RuntimeError("Text processing failed") from exc
+        doc: Doc = self.nlp(text)
 
         tokens: List[str] = [
-            token.text.lower() for token in doc if token.is_alpha
+            token.lemma_.lower()
+            for token in doc
+            if token.is_alpha
         ]
 
         features: Dict[str, float] = {}
@@ -145,9 +156,18 @@ class SourceAttributionAnalyzer:
         features.update(self._term_ratio(tokens, self.EXPERT_TERMS, "expert_attribution_ratio"))
         features.update(self._term_ratio(tokens, self.ANONYMOUS_TERMS, "anonymous_source_ratio"))
         features.update(self._term_ratio(tokens, self.CREDIBILITY_TERMS, "credibility_indicator_ratio"))
+        features.update(self._term_ratio(tokens, self.ATTRIBUTION_VERBS, "attribution_verb_ratio"))
+
         features.update(self._quote_ratio(text))
+        features.update(self._entity_source_ratio(doc))
+
+        features.update(self._source_balance_score(features))
 
         return features
+
+    # ------------------------------------------------------------
+    # Lexical ratios
+    # ------------------------------------------------------------
 
     def _term_ratio(
         self,
@@ -155,56 +175,83 @@ class SourceAttributionAnalyzer:
         lexicon: set,
         feature_name: str,
     ) -> Dict[str, float]:
-        """
-        Compute lexical attribution signal ratio.
-        """
 
         if not tokens:
             return {feature_name: 0.0}
 
-        count = sum(1 for token in tokens if token in lexicon)
+        counts = Counter(tokens)
 
-        ratio = count / max(len(tokens), 1)
+        hits = sum(
+            counts[token]
+            for token in counts
+            if token in lexicon
+        )
+
+        ratio = hits / max(len(tokens), 1)
 
         return {feature_name: float(ratio)}
 
+    # ------------------------------------------------------------
+    # Quotation ratio
+    # ------------------------------------------------------------
+
     def _quote_ratio(self, text: str) -> Dict[str, float]:
-        """
-        Detect quotation usage indicating attributed speech.
-        """
 
         quotes = len(self.QUOTE_PATTERN.findall(text))
 
-        length = max(len(text), 1)
+        length = max(len(text.split()), 1)
 
         return {"quotation_ratio": float(quotes / length)}
 
+    # ------------------------------------------------------------
+    # Named entity source detection
+    # ------------------------------------------------------------
+
+    def _entity_source_ratio(self, doc: Doc) -> Dict[str, float]:
+
+        entities = [ent for ent in doc.ents if ent.label_ in ("PERSON", "ORG")]
+
+        ratio = len(entities) / max(len(doc), 1)
+
+        return {"named_source_ratio": float(ratio)}
+
+    # ------------------------------------------------------------
+    # Source balance score
+    # ------------------------------------------------------------
+
+    def _source_balance_score(
+        self,
+        features: Dict[str, float]
+    ) -> Dict[str, float]:
+
+        expert = features.get("expert_attribution_ratio", 0.0)
+        anonymous = features.get("anonymous_source_ratio", 0.0)
+
+        balance = expert - anonymous
+
+        return {"source_credibility_balance": float(balance)}
+
+
+# ------------------------------------------------------------
+# Feature vector conversion
+# ------------------------------------------------------------
 
 def source_attribution_vector(features: Dict[str, float]) -> np.ndarray:
-    """
-    Convert attribution features into numeric vector.
-    """
 
-    if not isinstance(features, dict):
-        raise ValueError("features must be a dictionary")
+    ordered_keys = [
 
-    if not features:
-        raise ValueError("features must be a non-empty dictionary")
+        "expert_attribution_ratio",
+        "anonymous_source_ratio",
+        "credibility_indicator_ratio",
+        "attribution_verb_ratio",
+        "quotation_ratio",
+        "named_source_ratio",
+        "source_credibility_balance",
+    ]
 
-    values: List[float] = []
+    vector = np.array(
+        [float(features.get(k, 0.0)) for k in ordered_keys],
+        dtype=np.float32,
+    )
 
-    for key, value in features.items():
-        if isinstance(value, (int, float, np.number)):
-            values.append(float(value))
-        else:
-            logger.warning("Non-numeric attribution feature skipped: %s", key)
-
-    if not values:
-        raise ValueError("No numeric values found in features")
-
-    try:
-        vector = np.array(values, dtype=np.float32)
-        return vector
-    except Exception as exc:
-        logger.exception("Source attribution vector conversion failed")
-        raise RuntimeError("Failed to convert attribution features") from exc
+    return vector

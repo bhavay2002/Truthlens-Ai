@@ -34,63 +34,64 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, List
 
+import numpy as np
+
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
+
+from src.features.emotion.emotion_schema import (
+    EMOTION_LABELS,
+    EMOTION_TERMS,
+)
 
 logger = logging.getLogger(__name__)
 
 
+# -----------------------------------------------------
+# Tokenizer
+# -----------------------------------------------------
+
 def _tokenize(text: str) -> List[str]:
-    """Simple tokenizer fallback."""
+    """Lightweight tokenizer."""
     return re.findall(r"\b\w+\b", text.lower())
 
 
-# ---------------------------------------------------------------------
-# Emotion Lexicon
-# ---------------------------------------------------------------------
+# -----------------------------------------------------
+# Reverse Emotion Lookup (fast)
+# -----------------------------------------------------
 
-EMOTION_LEXICON: Dict[str, List[str]] = {
-    "anger": ["anger", "angry", "rage", "furious", "hate", "hostile"],
-    "fear": ["fear", "scared", "terror", "panic", "afraid"],
-    "joy": ["joy", "happy", "delight", "smile", "pleased"],
-    "sadness": ["sad", "sorrow", "grief", "cry", "depressed"],
-    "surprise": ["surprised", "astonished", "shocked"],
-    "disgust": ["disgust", "repulsive", "nasty"],
-}
+WORD_TO_EMOTION: Dict[str, str] = {}
+
+for emotion, words in EMOTION_TERMS.items():
+    for word in words:
+        WORD_TO_EMOTION[word] = emotion
 
 
-# ---------------------------------------------------------------------
+# -----------------------------------------------------
 # Feature Extractor
-# ---------------------------------------------------------------------
+# -----------------------------------------------------
 
 @dataclass
 @register_feature
 class EmotionLexiconFeatures(BaseFeature):
     """
-    Extracts emotion features using lexicon matching.
+    Extract emotion features using lexicon matching.
 
     Output Features
     ---------------
-    - lexicon_emotion_<emotion>
-    - lexicon_emotion_intensity
-    - lexicon_emotion_diversity
+    lexicon_emotion_<emotion>
+    lexicon_emotion_intensity
+    lexicon_emotion_diversity
+    lexicon_emotion_density
+    lexicon_emotion_entropy
     """
 
     name: str = "emotion_lexicon_features"
     description: str = "Lexicon-based emotion feature extractor"
 
+    # -------------------------------------------------
+
     def extract(self, context: FeatureContext) -> Dict[str, float]:
-        """
-        Extract emotion lexicon features from text.
-
-        Parameters
-        ----------
-        context : FeatureContext
-
-        Returns
-        -------
-        Dict[str, float]
-        """
 
         if not context.text:
             raise ValueError("FeatureContext.text cannot be empty")
@@ -101,35 +102,65 @@ class EmotionLexiconFeatures(BaseFeature):
             logger.warning("No tokens available for emotion lexicon extraction")
             return {}
 
-        token_counter = Counter(tokens)
+        counts: Dict[str, int] = {emotion: 0 for emotion in EMOTION_LABELS}
 
-        emotion_counts: Dict[str, int] = {emotion: 0 for emotion in EMOTION_LEXICON}
+        for token in tokens:
 
-        for emotion, lex_words in EMOTION_LEXICON.items():
-            for word in lex_words:
-                emotion_counts[emotion] += token_counter.get(word, 0)
+            emotion = WORD_TO_EMOTION.get(token)
 
-        total_emotion_tokens = sum(emotion_counts.values())
+            if emotion:
+                counts[emotion] += 1
+
+        total_emotion_tokens = sum(counts.values())
 
         if total_emotion_tokens == 0:
             total_emotion_tokens = 1
 
         features: Dict[str, float] = {}
 
-        for emotion, count in emotion_counts.items():
-            features[f"lexicon_emotion_{emotion}"] = float(count / total_emotion_tokens)
+        # -------------------------------------------------
+        # Emotion distribution
+        # -------------------------------------------------
 
+        for emotion, count in counts.items():
+            features[f"lexicon_emotion_{emotion}"] = count / total_emotion_tokens
+
+        # -------------------------------------------------
         # Emotion intensity
-        intensity = max(emotion_counts.values()) / total_emotion_tokens
-        features["lexicon_emotion_intensity"] = float(intensity)
+        # -------------------------------------------------
 
+        max_count = max(counts.values())
+        features["lexicon_emotion_intensity"] = max_count / total_emotion_tokens
+
+        # -------------------------------------------------
         # Emotion diversity
-        non_zero = sum(1 for v in emotion_counts.values() if v > 0)
-        features["lexicon_emotion_diversity"] = float(non_zero / len(emotion_counts))
+        # -------------------------------------------------
+
+        active_emotions = sum(1 for v in counts.values() if v > 0)
+
+        features["lexicon_emotion_diversity"] = active_emotions / len(EMOTION_LABELS)
+
+        # -------------------------------------------------
+        # Emotion density (emotion tokens / total tokens)
+        # -------------------------------------------------
+
+        features["lexicon_emotion_density"] = total_emotion_tokens / len(tokens)
+
+        # -------------------------------------------------
+        # Emotion entropy
+        # -------------------------------------------------
+
+        values = np.array(list(features[f"lexicon_emotion_{e}"] for e in EMOTION_LABELS))
+
+        eps = 1e-9
+        entropy = -np.sum(values * np.log(values + eps))
+
+        features["lexicon_emotion_entropy"] = float(entropy)
 
         logger.debug(
-            "Emotion lexicon features extracted | total_tokens=%d",
+            "Emotion lexicon features extracted | tokens=%d emotion_tokens=%d",
             len(tokens),
+            total_emotion_tokens,
         )
 
         return features

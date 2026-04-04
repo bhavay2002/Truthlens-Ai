@@ -51,23 +51,32 @@ from ...heads.classification_head import (
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------
+
 @dataclass
 class IdeologyClassifierConfig:
     """
-    Configuration for ideology classifier.
+    Configuration for IdeologyClassifier.
     """
 
     model_name: str = "roberta-base"
     pooling: str = "cls"
     dropout: float = 0.1
+    label_smoothing: float = 0.1
     device: Optional[str] = None
 
+
+# ---------------------------------------------------------
+# Ideology Classifier
+# ---------------------------------------------------------
 
 class IdeologyClassifier(nn.Module):
     """
     Transformer-based ideology classification model.
 
-    Label mapping:
+    Predicts:
         0 -> left
         1 -> center
         2 -> right
@@ -83,11 +92,19 @@ class IdeologyClassifier(nn.Module):
 
         self.config = config
 
+        # -------------------------------------------------
+        # Encoder
+        # -------------------------------------------------
+
         self.encoder = TransformerEncoder(
             model_name=config.model_name,
             pooling=config.pooling,
             device=config.device,
         )
+
+        # -------------------------------------------------
+        # Classification Head
+        # -------------------------------------------------
 
         head_config = ClassificationHeadConfig(
             input_dim=self.encoder.hidden_size,
@@ -97,13 +114,29 @@ class IdeologyClassifier(nn.Module):
 
         self.classifier_head = ClassificationHead(head_config)
 
-        self.loss_fn = nn.CrossEntropyLoss()
+        # -------------------------------------------------
+        # Loss Function
+        # -------------------------------------------------
+
+        self.loss_fn = nn.CrossEntropyLoss(
+            label_smoothing=config.label_smoothing
+        )
+
+        # -------------------------------------------------
+        # Temperature Scaling (probability calibration)
+        # -------------------------------------------------
+
+        self.temperature = nn.Parameter(torch.ones(1))
 
         logger.info(
             "IdeologyClassifier initialized | model=%s | classes=%d",
             config.model_name,
             self.NUM_CLASSES,
         )
+
+    # -----------------------------------------------------
+    # Forward Pass
+    # -----------------------------------------------------
 
     def forward(
         self,
@@ -116,15 +149,15 @@ class IdeologyClassifier(nn.Module):
 
         Args:
             input_ids:
-                Token ids tensor.
+                Token ids tensor (batch_size, seq_len)
             attention_mask:
-                Attention mask tensor.
+                Attention mask tensor (batch_size, seq_len)
             labels:
-                Optional ground truth labels.
+                Optional ground truth labels
 
         Returns:
             Dictionary containing logits, probabilities, predictions,
-            and optional loss.
+            confidence scores, embeddings, and optional loss.
         """
 
         if input_ids is None or attention_mask is None:
@@ -139,15 +172,26 @@ class IdeologyClassifier(nn.Module):
 
         logits = self.classifier_head(pooled_output)
 
+        # Apply temperature scaling
+        logits = logits / self.temperature
+
         probabilities = F.softmax(logits, dim=-1)
 
         predictions = torch.argmax(probabilities, dim=-1)
+
+        confidence = torch.max(probabilities, dim=-1).values
 
         outputs: Dict[str, torch.Tensor] = {
             "logits": logits,
             "probabilities": probabilities,
             "predictions": predictions,
+            "confidence": confidence,
+            "embeddings": pooled_output,
         }
+
+        # -------------------------------------------------
+        # Loss computation (training)
+        # -------------------------------------------------
 
         if labels is not None:
 
@@ -160,7 +204,11 @@ class IdeologyClassifier(nn.Module):
 
         return outputs
 
-    @torch.no_grad()
+    # -----------------------------------------------------
+    # Inference
+    # -----------------------------------------------------
+
+    @torch.inference_mode()
     def predict(
         self,
         input_ids: torch.Tensor,
@@ -170,7 +218,7 @@ class IdeologyClassifier(nn.Module):
         Run inference.
 
         Returns:
-            predictions and probabilities.
+            predictions, probabilities, confidence
         """
 
         self.eval()
@@ -183,7 +231,12 @@ class IdeologyClassifier(nn.Module):
         return {
             "predictions": outputs["predictions"],
             "probabilities": outputs["probabilities"],
+            "confidence": outputs["confidence"],
         }
+
+    # -----------------------------------------------------
+    # Label Mapping
+    # -----------------------------------------------------
 
     def get_output_labels(self) -> Dict[int, str]:
         """
