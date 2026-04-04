@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -74,7 +74,7 @@ class ExplanationReportGenerator:
 
         payload = {
             "article_id": article_id,
-            "generated_at": datetime.utcnow().isoformat(),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
             "explanation": explanation,
         }
 

@@ -372,6 +372,8 @@ def explain_bias(model, tokenizer, text):
     if not text.strip():
         raise ValueError("text must not be empty")
 
+    integrated_gradients_result: List[Dict[str, Any]] = []
+
     try:
 
         shap_importance = compute_shap_importance(model, tokenizer, text)
@@ -380,11 +382,13 @@ def explain_bias(model, tokenizer, text):
 
         logger.warning("SHAP failed: %s", e)
 
-        shap_importance = compute_integrated_gradients(
+        integrated_gradients_result = compute_integrated_gradients(
             model,
             tokenizer,
             text,
         )
+
+        shap_importance = integrated_gradients_result
 
     tokens = [t["token"] for t in shap_importance]
     scores = [t["importance"] for t in shap_importance]
@@ -412,13 +416,16 @@ def explain_bias(model, tokenizer, text):
 
     heatmap = generate_bias_heatmap(token_importance)
 
-    explanation = BiasExplanation(
-        token_importance=token_importance,
-        integrated_gradients=compute_integrated_gradients(
+    if not integrated_gradients_result:
+        integrated_gradients_result = compute_integrated_gradients(
             model,
             tokenizer,
             text,
-        ),
+        )
+
+    explanation = BiasExplanation(
+        token_importance=token_importance,
+        integrated_gradients=integrated_gradients_result,
         attention_scores=attention_scores,
         biased_tokens=biased_tokens,
         sentence_bias_scores=sentence_scores,

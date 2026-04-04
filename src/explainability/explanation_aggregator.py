@@ -179,6 +179,10 @@ class ExplanationAggregator:
         if not methods or tokens is None:
             raise ValueError("No valid explanation sources provided.")
 
+        min_length = min(len(m) for m in methods)
+        methods = [m[:min_length] for m in methods]
+        tokens = list(tokens)[:min_length]
+
         matrix = np.vstack(methods)
 
         final_scores = matrix.sum(axis=0)

@@ -87,6 +87,7 @@ class ExplanationVisualizer:
 
         plt.tight_layout()
         plt.show()
+        plt.close(fig)
 
     def plot_importance_bar(
         self,
@@ -121,6 +122,7 @@ class ExplanationVisualizer:
 
         plt.tight_layout()
         plt.show()
+        plt.close(fig)
 
     def plot_attention_map(
         self,
@@ -154,6 +156,7 @@ class ExplanationVisualizer:
 
         plt.tight_layout()
         plt.show()
+        plt.close(fig)
 
     def plot_explanation_comparison(
         self,
@@ -208,3 +211,4 @@ class ExplanationVisualizer:
 
         plt.tight_layout()
         plt.show()
+        plt.close(fig)
