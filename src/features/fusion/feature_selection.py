@@ -227,7 +227,13 @@ class FeatureSelectionPipeline:
 
         reduced = self.selector.transform(matrix)
 
-        selected_keys = [self.feature_order[i] for i in self.selector.selected_indices]
+        selected_indices = getattr(self.selector, "selected_indices", None)
+        if selected_indices is None:
+            raise AttributeError(
+                f"Selector {type(self.selector).__name__} must have a "
+                "'selected_indices' attribute after fitting"
+            )
+        selected_keys = [self.feature_order[i] for i in selected_indices]
 
         return _matrix_to_dict(reduced, selected_keys)
 
@@ -251,6 +257,12 @@ class FeatureSelectionPipeline:
 
         reduced = self.selector.transform(matrix)
 
-        selected_keys = [keys[i] for i in self.selector.selected_indices]
+        selected_indices = getattr(self.selector, "selected_indices", None)
+        if selected_indices is None:
+            raise AttributeError(
+                f"Selector {type(self.selector).__name__} must have a "
+                "'selected_indices' attribute after fitting"
+            )
+        selected_keys = [keys[i] for i in selected_indices]
 
         return _matrix_to_dict(reduced, selected_keys)

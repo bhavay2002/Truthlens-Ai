@@ -131,20 +131,20 @@ class DatasetFeatureGenerator:
 
         if self.cache_manager:
             features = self._cached_extract(contexts)
+            pipeline = self.pipeline.pipeline
+            if pipeline.scaler:
+                if fit:
+                    pipeline.fit_scaler(features)
+                features = pipeline.transform_scaler(features)
+            if pipeline.selector:
+                if fit:
+                    pipeline.fit_selector(features, labels)
+                features = pipeline.transform_selector(features)
         else:
-            features = self.pipeline.extract(contexts)
-
-        if fit:
             features = self.pipeline.pipeline.process(
                 contexts,
                 labels=labels,
-                fit=True,
-            )
-        else:
-            features = self.pipeline.pipeline.process(
-                contexts,
-                labels=labels,
-                fit=False,
+                fit=fit,
             )
 
         if not features:

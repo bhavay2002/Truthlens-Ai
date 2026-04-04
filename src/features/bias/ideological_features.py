@@ -29,6 +29,8 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, List, Set
 
+import numpy as np
+
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
 
@@ -169,8 +171,6 @@ class IdeologicalFeatures(BaseFeature):
         # -------------------------------------------------
         # entropy of ideological distribution
         # -------------------------------------------------
-
-        import numpy as np
 
         arr = np.array([left_ratio, right_ratio], dtype=float)
 
