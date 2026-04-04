@@ -114,7 +114,7 @@ def load_checkpoint(
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
-    checkpoint = torch.load(checkpoint_path, map_location=map_location)
+    checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=False)
 
     model.load_state_dict(checkpoint["model_state_dict"])
 
@@ -155,8 +155,8 @@ def resume_training(
         map_location=map_location,
     )
 
-    epoch = state.get("epoch", 0)
-    step = state.get("step", 0)
+    epoch = state.get("epoch") or 0
+    step = state.get("step") or 0
 
     logger.info(
         "Resuming training from epoch=%s step=%s",

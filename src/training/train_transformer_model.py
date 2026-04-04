@@ -257,6 +257,11 @@ def train_model(
 
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
+        if label_column != "label":
+            train_df = train_df.rename(columns={label_column: "label"})
+            val_df = val_df.rename(columns={label_column: "label"})
+            resolved_test_df = resolved_test_df.rename(columns={label_column: "label"})
+
         train_dataset = _to_hf_dataset(train_df)
         val_dataset = _to_hf_dataset(val_df)
         test_dataset = _to_hf_dataset(resolved_test_df)
@@ -280,7 +285,7 @@ def train_model(
         val_dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "label"])
         test_dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "label"])
 
-        num_labels = len(df[label_column].unique())
+        num_labels = df[label_column].dropna().nunique()
 
         model = AutoModelForSequenceClassification.from_pretrained(
             MODEL_NAME,
