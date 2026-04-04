@@ -1,4 +1,4 @@
-﻿"""
+"""
 File Name: cross_validation.py
 Module: TruthLens AI - Training Cross Validation
 Description:

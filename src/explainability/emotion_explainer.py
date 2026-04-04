@@ -1,4 +1,4 @@
-﻿"""
+"""
 File Name: emotion_explainer.py
 Module: Explainability - Emotion Analysis
 Description:

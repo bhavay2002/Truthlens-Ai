@@ -1,34 +1,6 @@
 """
 File Name: narrative_temporal_analyzer.py
 Module: Narrative Analysis - Temporal Narrative Structure
-Description:
-    Analyzes temporal narrative structure within text for the TruthLens AI
-    system. The module detects linguistic signals related to past framing,
-    crisis escalation, and urgency language. These features help identify
-    narratives that attempt to create panic, urgency, or historical framing
-    to influence interpretation of events.
-
-    Temporal narrative signals are particularly important in propaganda,
-    crisis reporting, and political messaging where urgency or escalation
-    framing is used to shape audience perception.
-
-Dependencies:
-    logging
-    typing
-    dataclasses
-    collections
-    numpy
-    spacy
-
-Inputs:
-    Raw text string
-
-Outputs:
-    Dictionary of temporal narrative features and optional numerical vector
-"""
-"""
-File Name: narrative_temporal_analyzer.py
-Module: Narrative Analysis - Temporal Narrative Structure
 
 Description
 -----------

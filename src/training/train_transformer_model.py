@@ -1,4 +1,4 @@
-﻿"""
+"""
 File Name: train_truthlens_model.py
 Module: training
 Description:

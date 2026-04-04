@@ -2,31 +2,6 @@
 File Name: prediction_pipeline.py
 Module: Prediction Pipeline
 Description:
-    Executes trained ML models to produce structured predictions for multiple
-    analytical tasks including bias detection, ideology classification,
-    propaganda detection, emotion analysis, and credibility estimation.
-
-    The pipeline coordinates feature preparation, device placement, model
-    inference, and result aggregation. It is designed to ensure deterministic
-    inference behavior consistent with the training pipeline.
-
-Dependencies:
-    logging
-    typing
-    dataclasses
-    numpy
-    torch
-
-Inputs:
-    Prepared feature vectors or tensors.
-
-Outputs:
-    Structured prediction dictionary containing outputs from multiple models.
-"""
-"""
-File Name: prediction_pipeline.py
-Module: Prediction Pipeline
-Description:
     Executes trained ML models to produce structured predictions for
     TruthLens analytical tasks including:
 

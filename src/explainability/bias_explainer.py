@@ -1,4 +1,4 @@
-﻿"""
+"""
 File Name: bias_explainer.py
 Module: Explainability - Bias Analysis
 Description:

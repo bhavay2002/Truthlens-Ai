@@ -1,4 +1,4 @@
-﻿"""
+"""
 File Name: predictor.py
 Module: TruthLens Inference - Prediction Pipeline
 Description:
