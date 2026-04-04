@@ -92,8 +92,6 @@ ASSERTIVE_WORDS: Set[str] = {
     "clearly","obviously","undoubtedly","certainly",
     "definitely","surely","evidently","plainly",
     "unquestionably","indisputably","undeniably",
-    "withoutdoubt","beyondquestion",
-    "noquestion","ofcourse"
 }
 
 

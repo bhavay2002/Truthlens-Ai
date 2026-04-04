@@ -92,12 +92,12 @@ FEAR_APPEAL: Set[str] = {
 
 EXAGGERATION: Set[str] = {
     "always", "never", "everyone", "everybody",
-    "nobody", "noone", "all", "none",
+    "nobody", "all", "none",
     "completely", "absolutely", "totally",
-    "entirely", "withoutdoubt",
+    "entirely",
     "undeniable", "guaranteed",
     "inevitable", "certainly",
-    "perfectly", "entirely"
+    "perfectly",
 }
 
 

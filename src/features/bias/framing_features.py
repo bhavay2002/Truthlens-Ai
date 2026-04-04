@@ -143,10 +143,6 @@ class FramingFeatures(BaseFeature):
     frame_security_ratio
     frame_human_interest_ratio
     frame_conflict_ratio
-    frame_responsibility_ratio
-    frame_policy_ratio
-    frame_crisis_ratio
-    frame_identity_ratio
 
     frame_phrase_count
     frame_quote_density

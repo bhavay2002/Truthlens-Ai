@@ -60,7 +60,7 @@ class FeatureContext:
     metadata: Optional[Dict[str, Any]] = None
     tokens: Optional[List[str]] = None
     embeddings: Optional[Any] = None
-    cache: Optional[Dict[str, Any]] = field(default_factory=dict)
+    cache: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

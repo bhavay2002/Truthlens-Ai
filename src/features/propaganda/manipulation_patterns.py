@@ -77,9 +77,9 @@ def _tokenize(text: str) -> List[str]:
 
 URGENCY_TERMS: Set[str] = {
     "urgent", "urgently", "immediately", "instant", "instantly",
-    "now", "today", "rightnow", "quick", "quickly",
-    "act", "actnow", "takeaction", "respond",
-    "hurry", "rush", "dontwait", "beforetoolate",
+    "now", "today", "quick", "quickly",
+    "act", "respond",
+    "hurry", "rush",
     "breaking", "alert", "warning", "crisis",
     "emergency", "critical", "time", "deadline"
 }
@@ -142,12 +142,12 @@ SCAPEGOAT_TERMS: Set[str] = {
 ABSOLUTE_TERMS: Set[str] = {
     "always", "never",
     "everyone", "everybody",
-    "nobody", "noone",
+    "nobody",
     "all", "none",
     "everything", "nothing",
     "completely", "entirely",
     "totally", "absolutely",
-    "withoutdoubt", "certainly"
+    "certainly"
 }
 
 
@@ -156,14 +156,14 @@ ABSOLUTE_TERMS: Set[str] = {
 # ---------------------------------------------------------
 
 CONSPIRACY_TERMS: Set[str] = {
-    "secret", "hidden", "coverup", "coverups",
+    "secret", "hidden", "cover",
     "exposed", "exposing",
-    "truth", "realtruth",
+    "truth",
     "agenda", "scheme",
     "plot", "conspiracy",
-    "they", "dontwant", "know",
+    "they", "know",
     "controlled", "manipulated",
-    "puppet", "deepstate",
+    "puppet",
     "propaganda"
 }
 
@@ -177,10 +177,7 @@ FALSE_DILEMMA_TERMS: Set[str] = {
     "choice", "choose",
     "only", "option",
     "must", "forced",
-    "nochoice",
-    "nothingelse",
     "inevitable",
-    "cannotavoid"
 }
 
 
@@ -194,8 +191,8 @@ EXAGGERATION_TERMS: Set[str] = {
     "massive", "huge", "giant",
     "explosive", "bombshell",
     "devastating", "dramatic",
-    "mindblowing", "stunning",
-    "historic", "recordbreaking"
+    "stunning",
+    "historic",
 }
 
 

@@ -87,10 +87,12 @@ class VarianceThresholdSelector:
 
     threshold: float = 0.0
     selected_indices: List[int] = field(default_factory=list)
+    fitted: bool = False
 
     def fit(self, X: np.ndarray) -> None:
         variances = np.var(X, axis=0)
         self.selected_indices = [i for i, v in enumerate(variances) if v > self.threshold]
+        self.fitted = True
 
         logger.debug(
             "VarianceThresholdSelector fitted | kept=%d removed=%d",
@@ -99,8 +101,11 @@ class VarianceThresholdSelector:
         )
 
     def transform(self, X: np.ndarray) -> np.ndarray:
-        if not self.selected_indices:
+        if not self.fitted:
             raise RuntimeError("Selector must be fitted before transform")
+
+        if not self.selected_indices:
+            return np.empty((X.shape[0], 0), dtype=X.dtype)
 
         return X[:, self.selected_indices]
 
@@ -113,6 +118,7 @@ class CorrelationSelector:
 
     threshold: float = 0.95
     selected_indices: List[int] = field(default_factory=list)
+    fitted: bool = False
 
     def fit(self, X: np.ndarray) -> None:
         corr = np.corrcoef(X, rowvar=False)
@@ -125,6 +131,7 @@ class CorrelationSelector:
                     keep.remove(j)
 
         self.selected_indices = sorted(list(keep))
+        self.fitted = True
 
         logger.debug(
             "CorrelationSelector fitted | kept=%d removed=%d",
@@ -133,8 +140,11 @@ class CorrelationSelector:
         )
 
     def transform(self, X: np.ndarray) -> np.ndarray:
-        if not self.selected_indices:
+        if not self.fitted:
             raise RuntimeError("Selector must be fitted before transform")
+
+        if not self.selected_indices:
+            return np.empty((X.shape[0], 0), dtype=X.dtype)
 
         return X[:, self.selected_indices]
 
@@ -148,6 +158,7 @@ class TopKSelector:
     k: int = 50
     method: str = "variance"
     selected_indices: List[int] = field(default_factory=list)
+    fitted: bool = False
 
     def fit(self, X: np.ndarray, y: Optional[np.ndarray] = None) -> None:
         if self.method == "variance":
@@ -168,6 +179,7 @@ class TopKSelector:
         ranked = np.argsort(scores)[::-1]
 
         self.selected_indices = ranked[: self.k].tolist()
+        self.fitted = True
 
         logger.debug(
             "TopKSelector fitted | k=%d method=%s",
@@ -176,8 +188,11 @@ class TopKSelector:
         )
 
     def transform(self, X: np.ndarray) -> np.ndarray:
-        if not self.selected_indices:
+        if not self.fitted:
             raise RuntimeError("Selector must be fitted before transform")
+
+        if not self.selected_indices:
+            return np.empty((X.shape[0], 0), dtype=X.dtype)
 
         return X[:, self.selected_indices]
 

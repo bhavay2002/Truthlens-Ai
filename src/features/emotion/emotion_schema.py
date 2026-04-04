@@ -39,6 +39,12 @@ EMOTION_LABELS = [
 
 EMOTION_TERMS = {
 
+    "neutral": {
+        "neutral", "objective", "balanced", "impartial",
+        "straightforward", "factual", "plain", "normal",
+        "ordinary", "typical", "standard", "unbiased"
+    },
+
     "admiration": {
         "admire","admiration","respect","praise","commend","applaud",
         "appreciate","revere","esteem","honor","look_up_to","inspire"

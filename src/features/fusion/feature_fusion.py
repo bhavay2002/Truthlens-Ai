@@ -35,6 +35,7 @@ Outputs:
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Dict, List
 
@@ -61,7 +62,8 @@ class FeatureFusion:
         names = [f.name for f in self.features]
 
         if len(names) != len(set(names)):
-            duplicates = set([x for x in names if names.count(x) > 1])
+            counts = Counter(names)
+            duplicates = {name for name, cnt in counts.items() if cnt > 1}
             raise ValueError(f"Duplicate feature extractors detected: {duplicates}")
 
     def extract(self, context: FeatureContext) -> Dict[str, float]:
