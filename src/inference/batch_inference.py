@@ -199,8 +199,8 @@ class BatchInferenceEngine:
             text = row[self.config.text_column]
 
             metadata = {
-                "title": row.get("title"),
-                "source": row.get("source"),
+                "title": row["title"] if "title" in row.index else None,
+                "source": row["source"] if "source" in row.index else None,
             }
 
             try:

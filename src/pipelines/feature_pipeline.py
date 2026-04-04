@@ -95,7 +95,7 @@ class FeaturePipeline:
             entity_graph = self.entity_graph_builder.build_graph(text)
             graph_features = self.entity_graph_builder.extract_graph_features(entity_graph)
             graph_metrics = self.graph_analyzer.analyze(entity_graph)
-            graph_bundle = {**graph_features, **graph_metrics}
+            graph_bundle = {**graph_features.to_dict(), **graph_metrics.to_dict()}
         except Exception as exc:
             logger.exception("Feature extraction failed")
             raise RuntimeError("Feature pipeline execution failed") from exc

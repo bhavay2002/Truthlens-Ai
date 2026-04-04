@@ -121,7 +121,7 @@ class ArticleAnalyzer:
             logger.exception("Article analysis pipeline failed")
             raise RuntimeError("Article analysis failed") from exc
 
-        graph_section = {**graph_features, **graph_metrics}
+        graph_section = {**graph_features.to_dict(), **graph_metrics.to_dict()}
 
         profile = self.profile_builder.build_profile(
             bias_features=feature_sections["bias"],

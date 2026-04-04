@@ -255,7 +255,8 @@ class PredictionPipeline:
             eps = 1e-9
             entropy = -np.sum(values * np.log(values + eps))
 
-            normalized_entropy = entropy / np.log(len(values))
+            n = len(values)
+            normalized_entropy = entropy / np.log(n) if n > 1 else 0.0
 
             emotion_score = (
                 0.5 * (1.0 - max_intensity)

@@ -95,7 +95,7 @@ class ModelLoader:
             return None
 
         try:
-            model = torch.load(path, map_location=self.device)
+            model = torch.load(path, map_location=self.device, weights_only=True)
             if isinstance(model, torch.nn.Module):
                 model.to(self.device)
                 model.eval()

@@ -37,7 +37,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -84,7 +84,7 @@ class ReportGenerator:
         """
         Generate ISO formatted timestamp.
         """
-        return datetime.utcnow().isoformat()
+        return datetime.now(timezone.utc).isoformat()
 
     def _validate_section(self, section: Optional[Dict[str, Any]], name: str) -> Dict[str, Any]:
         """

@@ -41,7 +41,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -100,7 +100,7 @@ class ResultFormatter:
         """
         Generate ISO timestamp.
         """
-        return datetime.utcnow().isoformat()
+        return datetime.now(timezone.utc).isoformat()
 
     def format_api_response(
         self,

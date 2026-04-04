@@ -11,6 +11,7 @@ pandas>=2.0.0
 # NLP Libraries
 spacy>=3.7.0
 nltk>=3.8.0
+langdetect>=1.0.9
 vaderSentiment>=3.3.2
 contractions>=0.1.73
 https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0.tar.gz
