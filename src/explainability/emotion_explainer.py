@@ -102,7 +102,6 @@ INTENSIFIER_ADVERBS = {
     "wildly",
     "terribly",
     "awfully",
-    "terribly",
     "desperately",
     "badly",
 

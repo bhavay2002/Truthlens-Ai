@@ -112,9 +112,7 @@ class EmotionLexiconFeatures(BaseFeature):
                 counts[emotion] += 1
 
         total_emotion_tokens = sum(counts.values())
-
-        if total_emotion_tokens == 0:
-            total_emotion_tokens = 1
+        total_emotion_tokens_safe = total_emotion_tokens if total_emotion_tokens > 0 else 1
 
         features: Dict[str, float] = {}
 
@@ -123,14 +121,14 @@ class EmotionLexiconFeatures(BaseFeature):
         # -------------------------------------------------
 
         for emotion, count in counts.items():
-            features[f"lexicon_emotion_{emotion}"] = count / total_emotion_tokens
+            features[f"lexicon_emotion_{emotion}"] = count / total_emotion_tokens_safe
 
         # -------------------------------------------------
         # Emotion intensity
         # -------------------------------------------------
 
         max_count = max(counts.values())
-        features["lexicon_emotion_intensity"] = max_count / total_emotion_tokens
+        features["lexicon_emotion_intensity"] = max_count / total_emotion_tokens_safe
 
         # -------------------------------------------------
         # Emotion diversity

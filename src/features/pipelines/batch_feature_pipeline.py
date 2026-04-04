@@ -175,8 +175,6 @@ class BatchFeaturePipeline:
         Execute full pipeline including scaling and selection.
         """
 
-        features = self.extract(contexts)
-
         if fit:
             features = self.pipeline.process(contexts, labels=labels, fit=True)
         else:

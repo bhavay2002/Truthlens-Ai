@@ -36,6 +36,7 @@ Outputs:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 from dataclasses import dataclass, field
@@ -75,10 +76,9 @@ class CacheManager:
 
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
 
-    def _namespace_path(self, namespace: str) -> Optional[Path]:
-        if not self.base_cache_dir:
-            return None
-        return self.base_cache_dir / namespace
+    def _namespace_path(self, namespace: str) -> Path:
+        base = self.base_cache_dir if self.base_cache_dir else Path("cache")
+        return base / namespace
 
     def register_namespace(self, namespace: str) -> None:
         """
@@ -93,11 +93,7 @@ class CacheManager:
 
             cache_dir = self._namespace_path(namespace)
 
-            cache = FeatureCache(
-                cache_dir=cache_dir,
-                use_memory_cache=self.enable_memory_cache,
-                max_memory_items=self.max_memory_items,
-            )
+            cache = FeatureCache(cache_dir=cache_dir)
 
             self.namespaces[namespace] = CacheNamespace(
                 name=namespace,
@@ -116,6 +112,13 @@ class CacheManager:
 
         return self.namespaces[namespace].cache
 
+    def _context_key(self, context: FeatureContext) -> str:
+        """
+        Derive a stable cache key from a FeatureContext.
+        """
+        raw = (context.text or "").encode("utf-8")
+        return hashlib.md5(raw).hexdigest()  # noqa: S324
+
     def get_or_compute(
         self,
         namespace: str,
@@ -127,9 +130,16 @@ class CacheManager:
         """
 
         cache = self.get_cache(namespace)
+        key = self._context_key(context)
 
         try:
-            result = cache.get_or_compute(context, compute_fn)
+            cached = cache.load(key)
+            if cached is not None:
+                logger.debug("Cache hit | namespace=%s", namespace)
+                return cached
+
+            result = compute_fn(context)
+            cache.save(key, result)
             return result
 
         except Exception as exc:  # noqa: BLE001
@@ -138,7 +148,7 @@ class CacheManager:
 
     def clear_namespace(self, namespace: str) -> None:
         """
-        Clear both memory and disk cache for a namespace.
+        Clear the disk cache for a namespace.
         """
 
         if namespace not in self.namespaces:
@@ -146,8 +156,7 @@ class CacheManager:
 
         cache = self.namespaces[namespace].cache
 
-        cache.clear_memory()
-        cache.clear_disk()
+        cache.clear()
 
         logger.info("Cache namespace cleared: %s", namespace)
 
