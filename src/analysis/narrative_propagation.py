@@ -174,7 +174,7 @@ EXCLAMATION_PATTERN = re.compile(r"!")
 # Analyzer
 # ---------------------------------------------------------
 
-class NarrativeConflictAnalyzer:
+class NarrativePropagationAnalyzer:
 
     """
     Extract adversarial narrative structures from text.
@@ -190,7 +190,7 @@ class NarrativeConflictAnalyzer:
             logger.exception("spaCy model loading failed")
             raise RuntimeError("Failed to load spaCy model") from exc
 
-        logger.info("NarrativeConflictAnalyzer initialized")
+        logger.info("NarrativePropagationAnalyzer initialized")
 
 
     # -----------------------------------------------------

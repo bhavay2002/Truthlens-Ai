@@ -234,11 +234,19 @@ class FramingAnalyzer:
     # Frame diversity
     # ------------------------------------------------------------
 
+    _BASE_FRAME_KEYS = {
+        "frame_conflict_score",
+        "frame_economic_score",
+        "frame_moral_score",
+        "frame_human_interest_score",
+        "frame_security_score",
+    }
+
     def _frame_diversity(self, features: Dict[str, float]) -> Dict[str, float]:
 
         frame_scores = [
             v for k, v in features.items()
-            if k.startswith("frame_")
+            if k in self._BASE_FRAME_KEYS
         ]
 
         active_frames = sum(1 for score in frame_scores if score > 0)

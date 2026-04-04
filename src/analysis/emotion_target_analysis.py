@@ -283,6 +283,7 @@ class EmotionTargetAnalyzer:
             features["emotion_target_focus"] = 0.0
             features["emotion_expression_ratio"] = float(expression_ratio)
             features["emotion_type_diversity"] = float(emotion_types)
+            features["dominant_emotion_strength"] = float(dominant_emotion_freq)
 
             return features
 
