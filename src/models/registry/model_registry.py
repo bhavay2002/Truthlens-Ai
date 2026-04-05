@@ -28,6 +28,7 @@ Outputs:
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -45,6 +46,37 @@ logger = logging.getLogger(__name__)
 # Backward-compatible aliases used by legacy tests/callers.
 RobertaTokenizer = AutoTokenizer
 RobertaForSequenceClassification = AutoModelForSequenceClassification
+
+MULTITASK_MODEL_TYPE = "multitask_truthlens"
+
+
+def _load_multitask_model(model_path: Path, device: torch.device):
+    """Load a saved MultiTaskTruthLensModel from pytorch_model.bin."""
+    from src.models.multitask.multitask_truthlens_model import (
+        MultiTaskTruthLensConfig,
+        MultiTaskTruthLensModel,
+    )
+
+    config_path = model_path / "config.json"
+    with open(config_path, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+
+    model_cfg = MultiTaskTruthLensConfig(
+        model_name=cfg.get("model_name", "roberta-base"),
+        dropout=cfg.get("dropout", 0.1),
+        pooling=cfg.get("pooling", "cls"),
+    )
+    model = MultiTaskTruthLensModel(config=model_cfg)
+
+    weights_path = model_path / "pytorch_model.bin"
+    if weights_path.exists():
+        state_dict = torch.load(weights_path, map_location=device, weights_only=True)
+        model.load_state_dict(state_dict)
+        logger.info("Loaded MultiTaskTruthLensModel weights from %s", weights_path)
+    else:
+        logger.warning("No pytorch_model.bin found; using randomly initialised weights")
+
+    return model
 
 
 # ---------------------------------------------------------
@@ -118,7 +150,17 @@ class ModelRegistry:
             # Load Model
             # -------------------------------------------------
 
-            if model_type is None:
+            # Detect saved model type from config.json
+            saved_config_path = model_path / "config.json"
+            saved_model_type = None
+            if saved_config_path.exists():
+                with open(saved_config_path, "r", encoding="utf-8") as f:
+                    saved_cfg = json.load(f)
+                saved_model_type = saved_cfg.get("model_type")
+
+            if model_type is None and saved_model_type == MULTITASK_MODEL_TYPE:
+                model = _load_multitask_model(model_path, device_obj)
+            elif model_type is None:
                 model = RobertaForSequenceClassification.from_pretrained(model_path)
             else:
                 config_path = model_path / "model_config.json"
@@ -127,8 +169,6 @@ class ModelRegistry:
                     raise FileNotFoundError(
                         f"Missing model_config.json required for factory models: {config_path}"
                     )
-
-                import json
 
                 with open(config_path, "r", encoding="utf-8") as f:
                     config_dict = json.load(f)

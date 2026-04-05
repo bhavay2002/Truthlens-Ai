@@ -66,6 +66,29 @@ def _resolve_fake_index(model: Any) -> int:
     return DEFAULT_FAKE_INDEX
 
 
+def _extract_probs(outputs: Any, model: Any) -> "torch.Tensor":
+    """
+    Extract a [batch, 2] probability tensor from either a standard HuggingFace
+    model output (with .logits) or a MultiTaskTruthLensModel output dict.
+
+    For the multitask model the propaganda head is used as the fake/real proxy:
+        index 0 = non_propaganda (Real)
+        index 1 = propaganda (Fake)
+    """
+    if isinstance(outputs, dict):
+        propaganda = outputs.get("propaganda", {})
+        probs = propaganda.get("probabilities")
+        if probs is None:
+            logits = propaganda.get("logits")
+            if logits is not None:
+                probs = torch.softmax(logits, dim=1)
+            else:
+                raise ValueError("MultiTask model output missing propaganda probabilities")
+        return probs
+    else:
+        return torch.softmax(outputs.logits, dim=1)
+
+
 def predict_batch(texts: List[str]) -> List[List[float]]:
     """Return [[prob_real, prob_fake], ...] for each text — used by LIME."""
     if not texts:
@@ -86,7 +109,7 @@ def predict_batch(texts: List[str]) -> List[List[float]]:
 
     with torch.no_grad():
         outputs = model(**inputs)
-        probs = torch.softmax(outputs.logits, dim=1)
+        probs = _extract_probs(outputs, model)
 
     return probs.cpu().tolist()
 
@@ -109,10 +132,10 @@ def predict(text: str) -> dict[str, float | str]:
 
     with torch.no_grad():
         outputs = model(**inputs)
-        probs = torch.softmax(outputs.logits, dim=1)
+        probs = _extract_probs(outputs, model)
 
     probs_cpu = probs.cpu()
-    fake_index = _resolve_fake_index(model)
+    fake_index = 1
     pred_index = int(torch.argmax(probs_cpu, dim=1).item())
 
     fake_probability = float(probs_cpu[0, fake_index].item())

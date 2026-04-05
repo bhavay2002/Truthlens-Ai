@@ -34,7 +34,7 @@ MODEL_SUBPACKAGES = (
     "narrative",
     "propaganda",
 )
-LIME_NUM_SAMPLES = 256
+LIME_NUM_SAMPLES = 16
 EMOTION_ANALYZER = EmotionLexiconAnalyzer()
 
 app = FastAPI(
