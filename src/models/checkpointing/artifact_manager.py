@@ -43,6 +43,9 @@ from src.models.export import (
     TorchScriptExportConfig,
     TorchScriptExporter,
 )
+from src.models.metadata.model_card import ModelCard
+from src.models.metadata.model_metadata import ModelMetadata
+from src.models.metadata.model_versioning import ModelVersionInfo, ModelVersionRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -335,3 +338,166 @@ class ArtifactManager:
             artifacts[item.name] = item
 
         return artifacts
+
+    # -------------------------------------------------
+    # ModelCard Methods
+    # -------------------------------------------------
+
+    def save_model_card(
+        self,
+        card: ModelCard,
+        file_name: str = "model_card.json",
+        markdown_file_name: str = "model_card.md",
+    ) -> Path:
+        """
+        Serialize a ModelCard to JSON (and optionally Markdown) in the artifact directory.
+
+        Parameters
+        ----------
+        card : ModelCard
+        file_name : str
+            JSON output file name.
+        markdown_file_name : str
+            Markdown output file name.
+
+        Returns
+        -------
+        Path
+            Path to the saved JSON model card.
+        """
+
+        json_path = self.artifact_dir / file_name
+        md_path = self.artifact_dir / markdown_file_name
+
+        try:
+            card.save_json(json_path)
+            card.save_markdown(md_path)
+            logger.info("ModelCard saved: %s, %s", json_path, md_path)
+        except Exception as exc:
+            logger.exception("Failed to save ModelCard")
+            raise RuntimeError("ModelCard saving failed") from exc
+
+        return json_path
+
+    def load_model_card(self, file_name: str = "model_card.json") -> Dict[str, Any]:
+        """
+        Load a ModelCard from a JSON file in the artifact directory.
+
+        Parameters
+        ----------
+        file_name : str
+
+        Returns
+        -------
+        Dict[str, Any]
+            Raw model card dictionary.
+        """
+
+        import json as _json
+
+        path = self.artifact_dir / file_name
+
+        if not path.exists():
+            raise FileNotFoundError(f"ModelCard file not found: {path}")
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                card_dict = _json.load(f)
+            logger.info("ModelCard loaded: %s", path)
+            return card_dict
+        except Exception as exc:
+            logger.exception("Failed to load ModelCard")
+            raise RuntimeError("ModelCard loading failed") from exc
+
+    # -------------------------------------------------
+    # ModelMetadata Methods
+    # -------------------------------------------------
+
+    def save_model_metadata(
+        self,
+        metadata: ModelMetadata,
+        file_name: str = "metadata.json",
+    ) -> Path:
+        """
+        Serialize a ModelMetadata object to JSON in the artifact directory.
+
+        Parameters
+        ----------
+        metadata : ModelMetadata
+        file_name : str
+
+        Returns
+        -------
+        Path
+        """
+
+        path = self.artifact_dir / file_name
+
+        try:
+            saved = metadata.save_json(path)
+            logger.info("ModelMetadata saved: %s", saved)
+            return saved
+        except Exception as exc:
+            logger.exception("Failed to save ModelMetadata")
+            raise RuntimeError("ModelMetadata saving failed") from exc
+
+    def load_model_metadata(self, file_name: str = "metadata.json") -> ModelMetadata:
+        """
+        Load a ModelMetadata object from a JSON file in the artifact directory.
+
+        Parameters
+        ----------
+        file_name : str
+
+        Returns
+        -------
+        ModelMetadata
+        """
+
+        path = self.artifact_dir / file_name
+
+        if not path.exists():
+            raise FileNotFoundError(f"ModelMetadata file not found: {path}")
+
+        try:
+            metadata = ModelMetadata.load_json(path)
+            logger.info("ModelMetadata loaded: %s", path)
+            return metadata
+        except Exception as exc:
+            logger.exception("Failed to load ModelMetadata")
+            raise RuntimeError("ModelMetadata loading failed") from exc
+
+    # -------------------------------------------------
+    # ModelVersionRegistry Methods
+    # -------------------------------------------------
+
+    def register_model_version(
+        self,
+        version_info: ModelVersionInfo,
+        registry_dir: Optional[str | Path] = None,
+    ) -> Path:
+        """
+        Register a model version in the version registry.
+
+        Parameters
+        ----------
+        version_info : ModelVersionInfo
+        registry_dir : str | Path, optional
+            Directory for the version registry. Defaults to artifact_dir.
+
+        Returns
+        -------
+        Path
+            Path to the registered version directory.
+        """
+
+        target_dir = Path(registry_dir) if registry_dir else self.artifact_dir
+
+        try:
+            registry = ModelVersionRegistry(target_dir)
+            version_path = registry.register_version(version_info)
+            logger.info("Model version registered: %s -> %s", version_info.version, version_path)
+            return version_path
+        except Exception as exc:
+            logger.exception("Failed to register model version")
+            raise RuntimeError("Model version registration failed") from exc

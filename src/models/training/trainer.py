@@ -31,7 +31,8 @@ Outputs:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Optional, Any, List
 
@@ -40,6 +41,22 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from ..checkpointing.checkpoint_manager import CheckpointManager
+from ..metadata.model_card import (
+    DatasetInfo,
+    EthicalConsiderations,
+    EvaluationResults,
+    ModelArtifacts as ModelCardArtifacts,
+    ModelCard,
+    ModelDetails,
+    TrainingConfig as CardTrainingConfig,
+)
+from ..metadata.model_metadata import (
+    ArtifactPaths,
+    ModelIdentity,
+    ModelMetadata,
+    RuntimeEnvironment,
+    TrainingProvenance,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +75,12 @@ class TrainerConfig:
     checkpoint_dir: Optional[str] = None
     checkpoint_every_steps: int = 0
     max_checkpoints: int = 3
+    model_name: str = "truthlens_model"
+    model_version: str = "1.0.0"
+    architecture: str = "transformer"
+    dataset_name: str = "unknown"
+    framework: str = "pytorch"
+    author: str = "TruthLens"
 
 
 class Trainer:
@@ -284,3 +307,153 @@ class Trainer:
                 moved_batch[key] = value
 
         return moved_batch
+
+    def save_model_metadata(
+        self,
+        output_dir: str | Path,
+        metrics: Optional[Dict[str, float]] = None,
+        checkpoint_dir: Optional[str] = None,
+    ) -> Path:
+        """
+        Build and persist a ModelMetadata file alongside trained artifacts.
+
+        Parameters
+        ----------
+        output_dir : str | Path
+            Directory where metadata.json will be written.
+        metrics : dict, optional
+            Evaluation metrics to embed in the metadata.
+        checkpoint_dir : str, optional
+            Override for checkpoint directory in artifact paths.
+
+        Returns
+        -------
+        Path
+            Path to the saved metadata.json file.
+        """
+
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        identity = ModelIdentity(
+            model_name=self.config.model_name,
+            version=self.config.model_version,
+            architecture=self.config.architecture,
+        )
+
+        provenance = TrainingProvenance(
+            dataset_name=self.config.dataset_name,
+            dataset_version=None,
+            experiment_name=None,
+            run_id=None,
+            framework=self.config.framework,
+            seed=None,
+        )
+
+        artifacts = ArtifactPaths(
+            model_weights=str(output_path / "model.pt"),
+            config_file=str(output_path / "config.json"),
+            tokenizer_path=str(output_path / "tokenizer"),
+            training_logs=None,
+            checkpoint_directory=checkpoint_dir or self.config.checkpoint_dir,
+        )
+
+        runtime = RuntimeEnvironment(
+            python_version=sys.version.split()[0],
+            framework_version=torch.__version__,
+            cuda_version=torch.version.cuda,
+            hardware=str(self.device),
+            device_count=torch.cuda.device_count() if torch.cuda.is_available() else 0,
+        )
+
+        metadata = ModelMetadata(
+            identity=identity,
+            provenance=provenance,
+            artifacts=artifacts,
+            runtime=runtime,
+            metrics=metrics,
+        )
+
+        save_path = metadata.save_json(output_path / "metadata.json")
+        logger.info("ModelMetadata saved: %s", save_path)
+        return save_path
+
+    def save_model_card(
+        self,
+        output_dir: str | Path,
+        metrics: Optional[Dict[str, float]] = None,
+        dataset_source: Optional[str] = None,
+    ) -> Path:
+        """
+        Build and persist a ModelCard (JSON + Markdown) alongside trained artifacts.
+
+        Parameters
+        ----------
+        output_dir : str | Path
+            Directory where model_card.json and model_card.md will be written.
+        metrics : dict, optional
+            Evaluation metrics to embed in the card.
+        dataset_source : str, optional
+            Human-readable source description for the training dataset.
+
+        Returns
+        -------
+        Path
+            Path to the saved model_card.json file.
+        """
+
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        details = ModelDetails(
+            name=self.config.model_name,
+            version=self.config.model_version,
+            architecture=self.config.architecture,
+            description=f"TruthLens {self.config.architecture} model for misinformation detection.",
+            author=self.config.author,
+        )
+
+        dataset_info = DatasetInfo(
+            name=self.config.dataset_name,
+            source=dataset_source,
+        )
+
+        training_cfg = CardTrainingConfig(
+            framework=self.config.framework,
+            epochs=self.config.epochs,
+            batch_size=1,
+            optimizer="adam",
+            learning_rate=1e-5,
+            hardware=str(self.device),
+        )
+
+        eval_metrics: Dict[str, float] = metrics if metrics else {"placeholder": 0.0}
+        evaluation = EvaluationResults(metrics=eval_metrics)
+
+        ethics = EthicalConsiderations(
+            intended_use="Misinformation and propaganda detection in news text.",
+            out_of_scope_use="Not intended for legal decisions or high-stakes autonomous actions.",
+            limitations="Performance may degrade on domains not covered in training data.",
+            bias_risks="Potential bias from training data distribution.",
+        )
+
+        card_artifacts = ModelCardArtifacts(
+            model_weights=str(output_path / "model.pt"),
+            tokenizer=str(output_path / "tokenizer"),
+            config_file=str(output_path / "config.json"),
+            checkpoint_dir=self.config.checkpoint_dir,
+        )
+
+        card = ModelCard(
+            model_details=details,
+            datasets=[dataset_info],
+            training=training_cfg,
+            evaluation=evaluation,
+            ethics=ethics,
+            artifacts=card_artifacts,
+        )
+
+        json_path = card.save_json(output_path / "model_card.json")
+        card.save_markdown(output_path / "model_card.md")
+        logger.info("ModelCard saved: %s", json_path)
+        return json_path

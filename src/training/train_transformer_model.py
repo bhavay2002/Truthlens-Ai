@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import logging
 import math
+import sys
 from pathlib import Path
 from typing import Any, Tuple
 
@@ -77,6 +78,23 @@ from src.models.export import (
 )
 from src.models.checkpointing.artifact_manager import ArtifactManager
 from src.models.checkpointing.checkpoint_manager import CheckpointManager
+from src.models.metadata.model_card import (
+    DatasetInfo,
+    EthicalConsiderations,
+    EvaluationResults,
+    ModelArtifacts as ModelCardArtifacts,
+    ModelCard,
+    ModelDetails,
+    TrainingConfig as CardTrainingConfig,
+)
+from src.models.metadata.model_metadata import (
+    ArtifactPaths,
+    ModelIdentity,
+    ModelMetadata,
+    RuntimeEnvironment,
+    TrainingProvenance,
+)
+from src.models.metadata.model_versioning import ModelVersionInfo, ModelVersionRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -376,6 +394,112 @@ def train_model(
 
         trainer.save_model(str(MODEL_PATH))
         tokenizer.save_pretrained(str(MODEL_PATH))
+
+        # ----------------------------------------------------------
+        # Persist ModelMetadata, ModelCard, and register version
+        # ----------------------------------------------------------
+        try:
+            final_metrics: dict = {}
+            if trainer.state and trainer.state.log_history:
+                for entry in reversed(trainer.state.log_history):
+                    for key in ("eval_accuracy", "eval_f1", "eval_precision", "eval_recall", "eval_roc_auc"):
+                        if key in entry and key not in final_metrics:
+                            final_metrics[key.replace("eval_", "")] = float(entry[key])
+
+            identity = ModelIdentity(
+                model_name=MODEL_NAME,
+                version="1.0.0",
+                architecture=MODEL_NAME,
+            )
+            provenance = TrainingProvenance(
+                dataset_name="truthlens_dataset",
+                dataset_version=None,
+                experiment_name=None,
+                run_id=None,
+                framework="pytorch",
+                seed=SEED,
+            )
+            artifact_paths = ArtifactPaths(
+                model_weights=str(MODEL_PATH / "pytorch_model.bin"),
+                config_file=str(MODEL_PATH / "config.json"),
+                tokenizer_path=str(MODEL_PATH),
+                training_logs=str(LOGS_DIR),
+                checkpoint_directory=str(MODELS_DIR),
+            )
+            runtime_env = RuntimeEnvironment(
+                python_version=sys.version.split()[0],
+                framework_version=torch.__version__,
+                cuda_version=torch.version.cuda,
+                hardware="cuda" if torch.cuda.is_available() else "cpu",
+                device_count=torch.cuda.device_count() if torch.cuda.is_available() else 0,
+            )
+            model_metadata = ModelMetadata(
+                identity=identity,
+                provenance=provenance,
+                artifacts=artifact_paths,
+                runtime=runtime_env,
+                metrics=final_metrics or None,
+            )
+            model_metadata.save_json(MODEL_PATH / "metadata.json")
+
+            model_details = ModelDetails(
+                name=MODEL_NAME,
+                version="1.0.0",
+                architecture=MODEL_NAME,
+                description="TruthLens transformer model for misinformation detection.",
+                author="TruthLens",
+            )
+            dataset_info = DatasetInfo(name="truthlens_dataset")
+            card_training = CardTrainingConfig(
+                framework="pytorch",
+                epochs=epochs,
+                batch_size=batch_size,
+                optimizer="adamw",
+                learning_rate=learning_rate,
+                hardware="cuda" if torch.cuda.is_available() else "cpu",
+                seed=SEED,
+            )
+            eval_results = EvaluationResults(
+                metrics=final_metrics if final_metrics else {"placeholder": 0.0},
+                validation_dataset="validation_split",
+            )
+            ethics = EthicalConsiderations(
+                intended_use="Misinformation and propaganda detection in news text.",
+                out_of_scope_use="Not intended for legal decisions or high-stakes autonomous actions.",
+                limitations="Performance may degrade on domains outside training distribution.",
+                bias_risks="Potential bias from training data distribution.",
+            )
+            card_artifact_paths = ModelCardArtifacts(
+                model_weights=str(MODEL_PATH / "pytorch_model.bin"),
+                tokenizer=str(MODEL_PATH),
+                config_file=str(MODEL_PATH / "config.json"),
+                training_logs=str(LOGS_DIR),
+            )
+            model_card = ModelCard(
+                model_details=model_details,
+                datasets=[dataset_info],
+                training=card_training,
+                evaluation=eval_results,
+                ethics=ethics,
+                artifacts=card_artifact_paths,
+            )
+            model_card.save_json(MODEL_PATH / "model_card.json")
+            model_card.save_markdown(MODEL_PATH / "model_card.md")
+
+            version_registry = ModelVersionRegistry(MODELS_DIR)
+            version_info = ModelVersionInfo(
+                model_name=MODEL_NAME,
+                version="1.0.0",
+                description="TruthLens transformer classifier",
+                metrics=final_metrics or None,
+                artifact_path=str(MODEL_PATH),
+            )
+            version_registry.register_version(version_info)
+
+            logger.info("Model metadata, card, and version registration complete")
+
+        except Exception as _meta_exc:
+            logger.warning("Metadata/card/versioning step failed (non-fatal): %s", _meta_exc)
 
         export_formats = params.get("export_formats", [])
         if isinstance(export_formats, str):

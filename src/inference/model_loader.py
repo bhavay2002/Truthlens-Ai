@@ -42,6 +42,10 @@ import joblib
 import torch
 from transformers import AutoTokenizer
 
+from src.models.metadata.model_metadata import ModelMetadata
+from src.models.metadata.model_card import ModelCard
+from src.models.metadata.model_versioning import ModelVersionInfo
+
 logger = logging.getLogger(__name__)
 
 
@@ -57,6 +61,8 @@ class ModelArtifacts:
     feature_scaler: Optional[Any] = None
     feature_selector: Optional[Any] = None
     feature_schema: Optional[Dict[str, Any]] = None
+    model_metadata: Optional[ModelMetadata] = None
+    model_card: Optional[Dict[str, Any]] = None
 
 
 class ModelLoader:
@@ -205,6 +211,9 @@ class ModelLoader:
 
         artifacts.feature_schema = self._load_json(schema_path)
 
+        artifacts.model_metadata = self.load_model_metadata()
+        artifacts.model_card = self.load_model_card()
+
         logger.info("All model artifacts loaded successfully")
 
         return artifacts
@@ -240,3 +249,48 @@ class ModelLoader:
         Load feature schema.
         """
         return self._load_json(self.models_dir / "feature_schema.json")
+
+    def load_model_metadata(self) -> Optional[ModelMetadata]:
+        """
+        Load ModelMetadata from metadata.json in the models directory.
+
+        Returns
+        -------
+        Optional[ModelMetadata]
+            Parsed ModelMetadata, or None if the file does not exist.
+        """
+
+        path = self.models_dir / "metadata.json"
+
+        if not path.exists():
+            logger.debug("No metadata.json found at %s", path)
+            return None
+
+        try:
+            metadata = ModelMetadata.load_json(path)
+            logger.info("ModelMetadata loaded from %s", path)
+            return metadata
+        except Exception as exc:
+            logger.warning("Failed to load ModelMetadata: %s", exc)
+            return None
+
+    def load_model_card(self) -> Optional[Dict[str, Any]]:
+        """
+        Load the raw ModelCard dictionary from model_card.json in the models directory.
+
+        Returns
+        -------
+        Optional[Dict[str, Any]]
+            Parsed model card dictionary, or None if the file does not exist.
+        """
+
+        path = self.models_dir / "model_card.json"
+
+        if not path.exists():
+            logger.debug("No model_card.json found at %s", path)
+            return None
+
+        raw = self._load_json(path)
+        if raw is not None:
+            logger.info("ModelCard loaded from %s", path)
+        return raw

@@ -39,6 +39,8 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 from src.utils.settings import load_settings
 from src.models.registry.model_factory import ModelFactory
+from src.models.metadata.model_metadata import ModelMetadata
+from src.models.metadata.model_versioning import ModelVersionInfo, ModelVersionRegistry
 
 
 logger = logging.getLogger(__name__)
@@ -204,6 +206,19 @@ class ModelRegistry:
             else:
                 logger.debug("No TF-IDF vectorizer found")
 
+            # -------------------------------------------------
+            # Load Optional ModelMetadata
+            # -------------------------------------------------
+
+            metadata: Optional[ModelMetadata] = None
+            metadata_path = model_path / "metadata.json"
+            if metadata_path.exists():
+                try:
+                    metadata = ModelMetadata.load_json(metadata_path)
+                    logger.info("ModelMetadata loaded from %s", metadata_path)
+                except Exception as meta_exc:
+                    logger.warning("Failed to load ModelMetadata: %s", meta_exc)
+
             logger.info("Model registry load complete")
 
             return {
@@ -211,12 +226,82 @@ class ModelRegistry:
                 "tokenizer": tokenizer,
                 "vectorizer": vectorizer,
                 "device": device_obj,
+                "metadata": metadata,
             }
 
         except Exception as exc:
 
             logger.exception("Failed to load model from registry")
             raise RuntimeError("Model registry loading failed") from exc
+
+    @staticmethod
+    def list_versions(
+        model_name: str,
+        registry_dir: Optional[str] = None,
+    ) -> list:
+        """
+        List all registered versions for a model name.
+
+        Parameters
+        ----------
+        model_name : str
+        registry_dir : str, optional
+            Registry directory. Defaults to MODEL_DIR.
+
+        Returns
+        -------
+        list[ModelVersionInfo]
+        """
+
+        target_dir = Path(registry_dir) if registry_dir else MODEL_DIR
+        registry = ModelVersionRegistry(target_dir)
+        return registry.list_versions(model_name)
+
+    @staticmethod
+    def get_latest_version(
+        model_name: str,
+        registry_dir: Optional[str] = None,
+    ) -> Optional[ModelVersionInfo]:
+        """
+        Retrieve the latest registered version for a model.
+
+        Parameters
+        ----------
+        model_name : str
+        registry_dir : str, optional
+
+        Returns
+        -------
+        Optional[ModelVersionInfo]
+        """
+
+        target_dir = Path(registry_dir) if registry_dir else MODEL_DIR
+        registry = ModelVersionRegistry(target_dir)
+        return registry.get_latest_version(model_name)
+
+    @staticmethod
+    def get_version(
+        model_name: str,
+        version: str,
+        registry_dir: Optional[str] = None,
+    ) -> Optional[ModelVersionInfo]:
+        """
+        Retrieve a specific version of a model.
+
+        Parameters
+        ----------
+        model_name : str
+        version : str
+        registry_dir : str, optional
+
+        Returns
+        -------
+        Optional[ModelVersionInfo]
+        """
+
+        target_dir = Path(registry_dir) if registry_dir else MODEL_DIR
+        registry = ModelVersionRegistry(target_dir)
+        return registry.get_version(model_name, version)
 
 
 # ---------------------------------------------------------
