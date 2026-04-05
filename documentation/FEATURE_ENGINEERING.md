@@ -1,483 +1,335 @@
+# Feature Engineering
 
-# FEATURE_ENGINEERING.md
+This document describes the **feature engineering system used in TruthLens AI**.
 
-# TruthLens AI Feature Engineering System
-
-This document describes the  **feature engineering system used in TruthLens AI** .
-
-Feature engineering converts **raw article text into structured signals** that can be used by machine learning models and analysis modules.
-
-TruthLens uses a **multi-layer feature system** combining:
-
-* lexical features
-* semantic features
-* syntactic features
-* ideological signals
-* narrative features
-* propaganda signals
-* emotional signals
-* graph-based features
-
-These features provide  **structured information that helps the model detect misinformation patterns** .
+Feature engineering converts **raw article text into structured signals** that can be used by machine learning models and analysis modules. TruthLens uses a **multi-layer feature system** that is modular, interpretable, and extensible.
 
 ---
 
-# Feature Engineering Overview
+## Overview
 
-Feature extraction pipeline:
-
-```text
+```
 Article Text
-      ↓
-Text Preprocessing
-      ↓
+       ↓
+Text Preprocessing (cleaning, normalization)
+       ↓
 Tokenization
-      ↓
-Feature Extractors
-      ↓
-Feature Fusion
-      ↓
-Unified Feature Representation
+       ↓
+┌──────────────────────────────────────────────────┐
+│  Parallel Feature Extractors                     │
+│  ├── Text Features (lexical, semantic, syntactic)│
+│  ├── Bias Features (lexicon density, framing)    │
+│  ├── Emotion Features (20-label intensity)       │
+│  ├── Narrative Features (frame, roles)           │
+│  ├── Propaganda Features (manipulation patterns) │
+│  ├── Discourse Features (argument structure)     │
+│  └── Graph Features (entity interactions)        │
+└──────────────────────────────────────────────────┘
+       ↓
+Feature Fusion (scaling, selection)
+       ↓
+Unified Feature Representation → Model Input
 ```
 
-Features are generated using modules located in:
-
-```text
-src/features/
-```
-
-The system is designed to support  **modular feature extraction and scalable experimentation** .
+All feature extractors are located in `src/features/` and inherit from `BaseFeature` via a `FeatureContext` object.
 
 ---
 
-# Feature Categories
+## Base System
 
-TruthLens extracts features from multiple dimensions of article content.
+### `FeatureContext`
 
-| Feature Category    | Description                      |
-| ------------------- | -------------------------------- |
-| Text Features       | Basic linguistic properties      |
-| Bias Features       | Indicators of ideological bias   |
-| Emotion Features    | Emotional tone and intensity     |
-| Narrative Features  | Narrative framing signals        |
-| Propaganda Features | Manipulative rhetoric patterns   |
-| Discourse Features  | Argument structure and coherence |
-| Graph Features      | Entity interaction signals       |
+Every feature extractor receives a `FeatureContext` object as input:
+
+```python
+from src.features.base.base_feature import FeatureContext
+
+context = FeatureContext(text="News article text here...")
+```
+
+`FeatureContext` standardizes the input surface so any feature extractor can be composed into a pipeline without knowing about other extractors.
+
+### `BaseFeature`
+
+All extractors implement a single `.extract(context: FeatureContext) -> dict` method that returns a flat dictionary of feature names to numeric values:
+
+```python
+extractor = BiasLexiconFeatures()
+features = extractor.extract(context)
+# → {"bias_lexicon_density": 0.04, "evaluative_word_count": 2, ...}
+```
 
 ---
 
-# Text Features
+## Feature Categories
 
-Text features capture **basic linguistic properties** of articles.
-
-Location:
-
-```text
-src/features/text/
-```
-
-Examples include:
-
-* token counts
-* sentence length statistics
-* word frequency distributions
-* lexical diversity
-* syntactic complexity
-
-Example modules:
-
-```text
-lexical_features.py
-semantic_features.py
-syntactic_features.py
-token_features.py
-```
-
-These features provide  **baseline linguistic signals** .
+| Category    | Location                    | Description                           |
+|-------------|-----------------------------|---------------------------------------|
+| Text        | `src/features/text/`        | Basic linguistic properties           |
+| Bias        | `src/features/bias/`        | Ideological bias and framing signals  |
+| Emotion     | `src/features/emotion/`     | Emotional tone and intensity          |
+| Narrative   | `src/features/narrative/`   | Story structure and frame detection   |
+| Propaganda  | `src/features/propaganda/`  | Manipulative rhetoric patterns        |
+| Discourse   | `src/features/discourse/`   | Argument structure and coherence      |
+| Graph       | `src/features/graph/`       | Entity interaction signals            |
 
 ---
 
-# Bias Features
+## Text Features — `src/features/text/`
 
-Bias features detect  **ideological framing and partisan language** .
+Capture **basic linguistic properties** of articles.
 
-Location:
+| Module                    | Features Extracted                                        |
+|---------------------------|-----------------------------------------------------------|
+| `lexical_features.py`     | Token count, unique token ratio, lexical diversity        |
+| `semantic_features.py`    | Contextual embedding signals, semantic density            |
+| `syntactic_features.py`   | Sentence length distribution, parse tree complexity       |
+| `token_features.py`       | TF-IDF top terms, character n-gram statistics             |
 
-```text
-src/features/bias/
-```
-
-Examples include:
-
-* ideological lexicons
-* framing language
-* partisan indicators
-
-Modules:
-
-```text
-bias_features.py
-bias_lexicon_features.py
-framing_features.py
-ideological_features.py
-```
-
-These features help identify  **politically biased narratives** .
+**Example features:**
+- `avg_sentence_length` — average word count per sentence
+- `lexical_diversity` — unique tokens / total tokens
+- `tfidf_top_terms` — top-N TF-IDF weighted terms per document
 
 ---
 
-# Emotion Features
+## Bias Features — `src/features/bias/`
 
-Emotion features analyze the  **emotional tone of articles** .
+Detect **ideological framing and partisan language** patterns.
 
-Location:
+| Module                      | Features Extracted                                    |
+|-----------------------------|-------------------------------------------------------|
+| `bias_lexicon_features.py`  | Lexicon density, evaluative/assertive word counts     |
+| `bias_features.py`          | Aggregate bias signal composition                     |
+| `framing_features.py`       | Narrative framing strategy indicators                 |
+| `ideological_features.py`   | Political ideology markers                            |
 
-```text
-src/features/emotion/
-```
+**Key feature — `bias_lexicon_density`:**
+Ratio of bias-indicative tokens to total article tokens. Used directly in `compute_bias_features()` to determine media bias level:
+- `< 0.05` → `"center"`
+- `0.05–0.15` → `"lean"`
+- `≥ 0.15` → `"strong"`
 
-Examples:
-
-* emotion intensity
-* emotional trajectory across the article
-* emotional target detection
-
-Modules:
-
-```text
-emotion_features.py
-emotion_intensity_features.py
-emotion_lexicon_features.py
-emotion_target_features.py
-emotion_trajectory_features.py
-```
-
-Emotion features help detect  **emotionally manipulative content** .
+**API wrapper:** `src/features/bias/bias_lexicon.py` provides `compute_bias_features(text)` which returns a `BiasResult` containing:
+- `bias_score` — normalized float (0.0–1.0)
+- `media_bias` — "center" / "lean" / "strong"
+- `biased_tokens` — list of detected bias-loaded words
+- `sentence_heatmap` — per-sentence bias scores
 
 ---
 
-# Narrative Features
+## Emotion Features — `src/features/emotion/`
 
-Narrative features capture  **story structure and framing techniques** .
+Analyze the **emotional tone of articles** across 20 emotion labels.
 
-Location:
+| Module                           | Features Extracted                              |
+|----------------------------------|-------------------------------------------------|
+| `emotion_lexicon_features.py`    | Per-emotion lexicon match counts                |
+| `emotion_features.py`            | Aggregate emotion signal vector                 |
+| `emotion_intensity_features.py`  | Emotional intensity and volatility              |
+| `emotion_trajectory_features.py` | Emotional arc across article sections           |
+| `emotion_target_features.py`     | Target entities of emotional language           |
+| `emotion_schema.py`              | Canonical 20-label emotion schema (`EMOTION_LABELS`) |
 
-```text
-src/features/narrative/
-```
+**Emotion labels:** admiration, amusement, anger, annoyance, approval, caring, confusion, curiosity, desire, disappointment, disapproval, disgust, embarrassment, excitement, fear, gratitude, grief, joy, love, nervousness, optimism, pride, realization, relief, remorse, sadness, surprise, neutral
 
-Examples include:
+**Feature key format:** `lexicon_emotion_{emotion_name}` → float score per emotion
 
-* narrative frames
-* conflict detection
-* narrative roles
-
-Modules:
-
-```text
-narrative_features.py
-narrative_frame_features.py
-narrative_role_features.py
-conflict_features.py
-```
-
-These features identify  **strategic storytelling used in misinformation** .
+**API wrapper:** `src/features/emotion/emotion_lexicon.py` provides `EmotionLexiconAnalyzer().analyze(text)` which returns an `EmotionResult` containing:
+- `dominant_emotion` — the highest-scoring emotion (or `"neutral"` if all scores are 0)
+- `emotion_scores` — dict of all 20 emotion scores
+- `emotion_distribution` — normalized probability distribution
 
 ---
 
-# Propaganda Features
+## Narrative Features — `src/features/narrative/`
 
-Propaganda features detect  **persuasive and manipulative rhetoric** .
+Capture **story structure and framing techniques** used in articles.
 
-Location:
+| Module                       | Features Extracted                                   |
+|------------------------------|------------------------------------------------------|
+| `narrative_features.py`      | General narrative signal composition                 |
+| `narrative_frame_features.py`| Frame category detection (Resolution, Human Interest, Conflict, Moral, Economic) |
+| `narrative_role_features.py` | Hero / Villain / Victim role assignment              |
+| `conflict_features.py`       | Adversarial framing and conflict intensity           |
 
-```text
-src/features/propaganda/
-```
-
-Examples include:
-
-* loaded language
-* fear appeals
-* exaggeration patterns
-
-Modules:
-
-```text
-propaganda_features.py
-propaganda_lexicon_features.py
-manipulation_patterns.py
-```
-
-These features detect  **propaganda techniques used in misinformation campaigns** .
+**Narrative frame categories (from config):**
+| Code | Frame           |
+|------|-----------------|
+| RE   | Resolution      |
+| HI   | Human Interest  |
+| CO   | Conflict        |
+| MO   | Moral           |
+| EC   | Economic        |
 
 ---
 
-# Discourse Features
+## Propaganda Features — `src/features/propaganda/`
 
-Discourse features analyze the  **argument structure of articles** .
+Detect **persuasive and manipulative rhetoric** patterns.
 
-Location:
+| Module                           | Features Extracted                          |
+|----------------------------------|---------------------------------------------|
+| `propaganda_features.py`         | Aggregate propaganda signal                 |
+| `propaganda_lexicon_features.py` | Loaded language, flag words, emotionalization |
+| `manipulation_patterns.py`       | Fear appeals, exaggeration, false dichotomy |
 
-```text
-src/features/discourse/
-```
-
-Examples:
-
-* argument structure
-* claim–evidence relationships
-* discourse coherence
-
-Modules:
-
-```text
-argument_structure_features.py
-discourse_features.py
-```
-
-These features evaluate  **logical consistency and information structure** .
+These features directly feed the propaganda detection task head and the aggregation scoring engine.
 
 ---
 
-# Graph-Based Features
+## Discourse Features — `src/features/discourse/`
 
-Graph features capture  **relationships between entities and interactions** .
+Analyze the **argument structure and logical coherence** of articles.
 
-Location:
+| Module                          | Features Extracted                         |
+|---------------------------------|--------------------------------------------|
+| `discourse_features.py`         | Discourse connective analysis              |
+| `argument_structure_features.py`| Claim–evidence relationship detection      |
 
-```text
-src/features/graph/
-```
-
-Examples:
-
-* entity interaction patterns
-* narrative propagation signals
-
-Modules:
-
-```text
-entity_graph_features.py
-interaction_graph_features.py
-```
-
-Graph features help detect  **coordinated narratives or information spread** .
+Discourse coherence is used as a positive credibility signal in the aggregation layer — well-structured arguments are more likely to reflect factual reporting.
 
 ---
 
-# Feature Fusion
+## Graph Features — `src/features/graph/`
 
-After individual features are extracted, they are  **combined into a unified representation** .
+Capture **relationships between named entities and interactions** in articles.
 
-Location:
+| Module                         | Features Extracted                            |
+|--------------------------------|-----------------------------------------------|
+| `entity_graph_features.py`     | Entity co-occurrence, centrality, connectivity|
+| `interaction_graph_features.py`| Interaction pattern density, narrative hubs   |
 
-```text
-src/features/fusion/
+Graph construction uses **spaCy NER** for entity extraction and **NetworkX** for graph computation.
+
+---
+
+## Feature Fusion — `src/features/fusion/`
+
+After individual features are extracted, they are combined into a unified representation.
+
 ```
-
-Fusion pipeline:
-
-```text
-Multiple Feature Sets
-        ↓
-Feature Scaling
-        ↓
-Feature Selection
-        ↓
-Feature Fusion
-        ↓
+Multiple Feature Dictionaries
+       ↓
+Feature Normalization / Scaling (StandardScaler / MinMaxScaler)
+       ↓
+Feature Selection (variance threshold, top-K importance)
+       ↓
 Unified Feature Vector
 ```
 
-Modules:
-
-```text
-feature_fusion.py
-feature_scaling.py
-feature_selection.py
-```
+| Module                 | Purpose                                     |
+|------------------------|---------------------------------------------|
+| `feature_fusion.py`    | Combines feature dicts from all extractors  |
+| `feature_scaling.py`   | Normalizes numerical feature values         |
+| `feature_selection.py` | Drops low-variance or redundant features    |
 
 ---
 
-# Feature Pipelines
+## Feature Pipelines — `src/features/pipelines/`
 
-Feature pipelines coordinate feature extraction across modules.
+Feature pipelines orchestrate the complete extraction workflow.
 
-Location:
+| Pipeline                   | Purpose                                    |
+|----------------------------|--------------------------------------------|
+| `feature_pipeline.py`      | Standard single-article feature extraction |
+| `batch_feature_pipeline.py`| Batch processing for dataset-scale runs    |
 
-```text
-src/features/pipelines/
+**Pipeline flow:**
 ```
-
-Key pipelines:
-
-| Pipeline                  | Purpose                             |
-| ------------------------- | ----------------------------------- |
-| feature_pipeline.py       | standard feature extraction         |
-| batch_feature_pipeline.py | batch processing for large datasets |
-
-Pipeline flow:
-
-```text
-Input Dataset
-      ↓
-Feature Extractors
-      ↓
-Feature Fusion
-      ↓
-Output Feature Matrix
-```
-
----
-
-# Feature Caching
-
-Feature extraction can be computationally expensive.
-
-TruthLens includes a  **feature caching system** .
-
-Location:
-
-```text
-src/features/cache/
-```
-
-Cache components:
-
-```text
-cache_manager.py
-feature_cache.py
-```
-
-Benefits:
-
-* faster training iterations
-* reduced computation cost
-* reusable feature outputs
-
----
-
-# Feature Importance
-
-TruthLens includes tools to analyze  **feature importance** .
-
-Location:
-
-```text
-src/features/importance/
-```
-
-Methods include:
-
-* permutation importance
-* SHAP importance
-* feature ablation
-
-Modules:
-
-```text
-feature_ablation.py
-permutation_importance.py
-shap_importance.py
-```
-
-These tools help determine  **which signals most influence predictions** .
-
----
-
-# Feature Validation
-
-Feature validation ensures correctness and consistency.
-
-Location:
-
-```text
-src/features/
-```
-
-Modules:
-
-```text
-feature_schema_validator.py
-feature_statistics.py
-dataset_feature_generator.py
-```
-
-Validation checks include:
-
-* feature schema integrity
-* missing values
-* feature distribution checks
-
----
-
-# Feature Engineering Principles
-
-TruthLens feature system follows several design principles.
-
-### Modularity
-
-Each feature module is independent.
-
-### Interpretability
-
-Features are designed to be understandable and explainable.
-
-### Extensibility
-
-New feature modules can be added easily.
-
-### Efficiency
-
-Caching and batch pipelines improve performance.
-
----
-
-# Feature Engineering Workflow
-
-Complete workflow:
-
-```text
-Article Text
-      ↓
+Input Text / Dataset
+       ↓
 Preprocessing
-      ↓
-Tokenization
-      ↓
-Feature Extraction
-      ↓
+       ↓
+Feature Extractors (all categories)
+       ↓
 Feature Fusion
-      ↓
-Feature Validation
-      ↓
-Model Input
+       ↓
+Output Feature Matrix (ready for model or training)
 ```
 
 ---
 
-# Future Improvements
+## Feature Caching — `src/features/cache/`
 
-Planned feature engineering improvements include:
+Feature extraction is computationally expensive, especially for large datasets. TruthLens includes a caching layer.
 
-* multilingual feature extraction
-* advanced discourse features
-* knowledge graph features
-* misinformation propagation signals
-* temporal narrative features
+| Module            | Purpose                            |
+|-------------------|------------------------------------|
+| `cache_manager.py`| Cache lifecycle management          |
+| `feature_cache.py`| Stores and retrieves feature outputs|
+
+Caching speeds up repeated training experiments without re-running the full extraction pipeline.
 
 ---
 
-If you want, I can also generate  **one extremely useful document for ML engineers** :
+## Feature Importance — `src/features/importance/`
 
-**`PIPELINES.md`**
+Tools to analyze **which features most influence predictions**.
 
-It would explain  **every pipeline in your system** :
+| Module                      | Method                                     |
+|-----------------------------|---------------------------------------------|
+| `permutation_importance.py` | Shuffles features and measures accuracy drop|
+| `shap_importance.py`        | SHAP values for global feature attribution  |
+| `feature_ablation.py`       | Removes feature groups and measures impact  |
 
-* data pipeline
-* feature pipeline
-* training pipeline
-* inference pipeline
-* TruthLens analysis pipeline
+---
 
-That will make the architecture **much easier for contributors to understand.**
+## Feature Validation — `src/features/`
+
+| Module                       | Purpose                                      |
+|------------------------------|----------------------------------------------|
+| `feature_schema_validator.py`| Validates feature dict keys and value types  |
+| `feature_statistics.py`      | Computes distribution stats for all features |
+| `dataset_feature_generator.py`| Generates features for a full dataset CSV   |
+
+---
+
+## TF-IDF Features (config-driven)
+
+TF-IDF features are configured in `config/config.yaml`:
+
+```yaml
+features:
+  tfidf:
+    enabled: true
+    max_features: 5000
+    top_terms_per_doc: 4
+```
+
+The TF-IDF vectorizer is trained on the training set and persisted to `models/tfidf_vectorizer.joblib`.
+
+---
+
+## Adding a New Feature Extractor
+
+1. Create a new module in the appropriate `src/features/{category}/` directory.
+2. Subclass `BaseFeature` and implement the `.extract(context)` method.
+3. Return a flat `dict[str, float]` of feature names to values.
+4. Register the extractor in the relevant feature pipeline.
+5. Add tests in `tests/test_features/`.
+
+Example:
+
+```python
+from src.features.base.base_feature import BaseFeature, FeatureContext
+
+class MyNewFeature(BaseFeature):
+    def extract(self, context: FeatureContext) -> dict:
+        tokens = context.text.lower().split()
+        return {
+            "my_feature_word_count": len(tokens),
+        }
+```
+
+---
+
+## Design Principles
+
+**Modularity** — Each feature extractor is independent. Adding or removing one does not affect others.
+
+**Interpretability** — Feature names are human-readable strings that map directly to linguistic concepts.
+
+**Extensibility** — The `BaseFeature` / `FeatureContext` pattern makes it straightforward to add new signal types.
+
+**Efficiency** — Feature caching and batch pipelines support large-scale dataset processing without redundant computation.

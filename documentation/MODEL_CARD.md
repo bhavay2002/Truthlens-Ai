@@ -1,123 +1,147 @@
+# Model Card — TruthLens AI
 
-# MODEL_CARD.md
-
-# TruthLens AI Model Card
-
-This document describes the  **TruthLens AI model** , including its architecture, training data, intended uses, evaluation results, and limitations.
-
-TruthLens AI is designed for  **misinformation detection and credibility analysis of news articles** .
+This document describes the **TruthLens AI model**, including its architecture, training data, input/output formats, evaluation metrics, intended uses, and known limitations.
 
 ---
 
-# Model Overview
+## Model Overview
 
-| Attribute         | Description                                                                   |
-| ----------------- | ----------------------------------------------------------------------------- |
-| Model Name        | TruthLens AI                                                                  |
-| Model Type        | Transformer-based multi-task NLP system                                       |
-| Base Architecture | RoBERTa Transformer Encoder                                                   |
-| Tasks             | Fake news detection, bias detection, propaganda detection, narrative analysis |
-| Framework         | PyTorch                                                                       |
-| Interface         | FastAPI inference service                                                     |
-| Language          | English                                                                       |
-
-TruthLens combines **machine learning predictions with linguistic analysis and credibility scoring** to evaluate the reliability of news content.
+| Attribute          | Value                                                                 |
+|--------------------|-----------------------------------------------------------------------|
+| Model Name         | TruthLens AI                                                          |
+| Version            | 2.0.0                                                                 |
+| Model Type         | Transformer-based multi-task NLP system                               |
+| Base Architecture  | RoBERTa (`roberta-base`)                                              |
+| Tasks              | Fake news detection, bias detection, propaganda detection, ideology, emotion, narrative |
+| Framework          | PyTorch + Hugging Face Transformers                                   |
+| Tokenizer          | RoBERTa tokenizer, max length 256                                     |
+| Interface          | FastAPI REST service (port 5000)                                      |
+| Language Support   | English                                                               |
+| Trained Model Path | `models/truthlens_model/`                                             |
 
 ---
 
-# Model Architecture
+## Model Architecture
 
-The TruthLens system uses a **multi-layer architecture** composed of:
+TruthLens uses a **shared encoder with six task-specific classification heads**:
 
-1. Transformer encoder
-2. Task-specific prediction heads
-3. Linguistic analysis modules
-4. Graph reasoning modules
-5. Explainability tools
-6. Score aggregation engine
-
-Simplified architecture:
-
-```text
+```
 Article Text
-      ↓
-Tokenizer
-      ↓
-Transformer Encoder (RoBERTa)
-      ↓
-Task Heads
-   ├── Fake News Classifier
-   ├── Bias Detector
-   ├── Emotion Classifier
-   ├── Ideology Detector
-   ├── Propaganda Detector
-   └── Narrative Detector
-      ↓
-Linguistic Analysis Modules
-      ↓
-Graph Reasoning
-      ↓
-Explainability Layer
-      ↓
-TruthLens Credibility Score
+       ↓
+RoBERTa Tokenizer (max_length=256)
+       ↓
+Shared RoBERTa Encoder (roberta-base, 12 layers, 768 hidden dim)
+       ↓
+┌───────────────────────────────────────────────────────────┐
+│  Task Heads                                               │
+│                                                           │
+│  ├── Bias Detection        3-class classification         │
+│  │                         (cross_entropy loss)           │
+│  │                                                        │
+│  ├── Ideology Detection    3-class classification         │
+│  │                         (cross_entropy loss)           │
+│  │                                                        │
+│  ├── Propaganda Detection  Binary classification          │
+│  │                         (cross_entropy loss)           │
+│  │                                                        │
+│  ├── Emotion Detection     20-label multi-label           │
+│  │                         (binary_cross_entropy loss)    │
+│  │                                                        │
+│  ├── Narrative Roles       Hero / Villain / Victim        │
+│  │                         (binary_cross_entropy loss)    │
+│  │                                                        │
+│  └── Frame Detection       RE / HI / CO / MO / EC        │
+│                            (binary_cross_entropy loss)    │
+└───────────────────────────────────────────────────────────┘
+       ↓
+Per-task softmax / sigmoid outputs
 ```
 
----
-
-# Training Data
-
-TruthLens uses multiple datasets covering  **misinformation, bias, emotion, narrative framing, and propaganda** .
-
-| Task                   | Dataset                 |
-| ---------------------- | ----------------------- |
-| Fake News Detection    | ISOT, LIAR, FakeNewsNet |
-| Bias Detection         | BABE, BASIL, MBIC       |
-| Emotion Classification | GoEmotions, SemEval     |
-| Ideology Detection     | AllSides                |
-| Narrative Analysis     | FrameNet                |
-| Propaganda Detection   | PTC Propaganda Dataset  |
-
-These datasets are merged using a  **unified label schema** .
+**Architecture settings:**
+- Shared encoder: `roberta-base`
+- Dropout: 0.1
+- Architecture type: `multitask_transformer`
 
 ---
 
-# Training Procedure
+## Training Data
 
-Training pipeline:
+TruthLens is trained on multiple public datasets unified under a shared label schema:
 
-```text
-Dataset Loading
-      ↓
-Data Cleaning
-      ↓
-Feature Engineering
-      ↓
-Train / Validation Split
-      ↓
-Transformer Training
-      ↓
-Model Evaluation
-      ↓
-Checkpoint Saving
+| Task                    | Datasets                               |
+|-------------------------|----------------------------------------|
+| Fake News Detection     | ISOT, LIAR, FakeNewsNet                |
+| Bias Detection          | BABE, BASIL, MBIC                      |
+| Emotion Classification  | GoEmotions, SemEval                    |
+| Ideology Detection      | AllSides                               |
+| Narrative Analysis      | FrameNet                               |
+| Propaganda Detection    | PTC Propaganda Dataset                 |
+
+Datasets are stored in `data/raw/` organized by task, then merged into `data/processed/unified_dataset.csv`.
+
+**Data split ratios:**
+- Train: 70%
+- Validation: 15%
+- Test: 15%
+
+**Preprocessing steps applied:**
+1. Unicode normalization
+2. URL removal
+3. HTML tag stripping
+4. Contraction expansion
+5. Lowercasing
+6. Whitespace normalization
+7. Minimum word count filtering (≥30 words)
+
+---
+
+## Training Procedure
+
+**Entry point:** `python main.py`
+
+**Training pipeline:**
+```
+Dataset Loading (data/splits/train.csv)
+       ↓
+Feature Engineering (TF-IDF + lexical features)
+       ↓
+MultiTaskTruthLensModel initialization
+       ↓
+Multi-task training loop
+  - Optimizer: AdamW (weight_decay=0.01)
+  - Learning rate: 2.0e-5
+  - Scheduler: linear warmup (warmup_ratio=0.1)
+  - Batch size: 8
+  - Gradient accumulation steps: 2
+  - Gradient clipping: 1.0
+  - FP16: enabled
+  - Epochs: 4
+  - Early stopping: patience=2, metric=eval_loss
+       ↓
+Checkpoint saved to models/truthlens_model/
 ```
 
-Training configuration includes:
-
-* optimizer: AdamW
-* learning rate: configurable
-* batch size: configurable
-* scheduler: linear warmup
-
-Hyperparameter tuning and cross-validation are supported.
+Hyperparameter tuning is supported via Optuna (`hyperparameter_tuning.enabled: true` in config).
 
 ---
 
-# Input Format
+## Input Format
 
 The model accepts **news article text** as input.
 
-Example:
+Constraints:
+- Minimum length: 10 characters
+- Maximum length: 10,000 characters
+- Language: English
 
+**`POST /predict` request:**
+```json
+{
+  "text": "Breaking news: Scientists discover a new species in the Amazon rainforest."
+}
+```
+
+**`POST /analyze` request:**
 ```json
 {
   "text": "Breaking news: Scientists discover a new species in the Amazon rainforest."
@@ -126,150 +150,164 @@ Example:
 
 ---
 
-# Output Format
+## Output Format
 
-Example model output:
+### `/predict` response
 
 ```json
 {
+  "text": "Breaking news: Scientists discover a new sp...",
   "prediction": "REAL",
-  "confidence": 0.91,
-  "bias_score": 0.42,
-  "propaganda_score": 0.37,
-  "narrative_manipulation_score": 0.28,
-  "truthlens_score": 0.76
+  "fake_probability": 0.0812,
+  "confidence": 0.9188
 }
 ```
 
-Where:
+| Field             | Type   | Description                                      |
+|-------------------|--------|--------------------------------------------------|
+| `text`            | string | First 100 characters of the input text           |
+| `prediction`      | string | `"REAL"` or `"FAKE"`                             |
+| `fake_probability`| float  | Probability the article is fake (0.0–1.0)        |
+| `confidence`      | float  | Model confidence in the predicted class (0.0–1.0)|
 
-| Field                        | Description                          |
-| ---------------------------- | ------------------------------------ |
-| prediction                   | Fake vs real classification          |
-| confidence                   | Model confidence                     |
-| bias_score                   | Estimated ideological bias           |
-| propaganda_score             | Probability of propaganda techniques |
-| narrative_manipulation_score | Narrative manipulation indicator     |
-| truthlens_score              | Final credibility score              |
+### `/analyze` response
 
----
-
-# Evaluation
-
-Evaluation metrics include:
-
-* Accuracy
-* Precision
-* Recall
-* F1 Score
-* ROC-AUC
-* Calibration metrics
-
-Evaluation reports are stored in:
-
-```text
-reports/
+```json
+{
+  "text": "Breaking news: Scientists discover a new sp...",
+  "prediction": "REAL",
+  "fake_probability": 0.0812,
+  "confidence": 0.9188,
+  "bias": {
+    "bias_score": 0.0312,
+    "media_bias": "center",
+    "biased_tokens": [],
+    "sentence_heatmap": [
+      { "sentence": "Breaking news: Scientists discover...", "bias_score": 0.0 }
+    ]
+  },
+  "emotion": {
+    "dominant_emotion": "neutral",
+    "emotion_scores": { "joy": 0.0, "fear": 0.0, "anger": 0.0, "...": "..." },
+    "emotion_distribution": { "joy": 0.0, "fear": 0.0, "...": "..." }
+  },
+  "explainability": {
+    "emotion_explanation": { "...": "..." },
+    "lime": {
+      "text": "...",
+      "important_features": [
+        { "feature": "scientists", "weight": 0.045 },
+        { "feature": "discover", "weight": 0.038 }
+      ]
+    }
+  }
+}
 ```
 
+**Media bias levels:**
+- `"center"` — bias_score < 0.05
+- `"lean"` — bias_score 0.05–0.15
+- `"strong"` — bias_score ≥ 0.15
+
+**Emotion labels (20-label set):** admiration, amusement, anger, annoyance, approval, caring, confusion, curiosity, desire, disappointment, disapproval, disgust, embarrassment, excitement, fear, gratitude, grief, joy, love, nervousness, optimism, pride, realization, relief, remorse, sadness, surprise, neutral
+
 ---
 
-# Intended Use
+## Evaluation Metrics
+
+| Metric       | Task Type                     |
+|--------------|-------------------------------|
+| Accuracy     | All classification tasks      |
+| Precision    | All classification tasks      |
+| Recall       | All classification tasks      |
+| F1 Score     | All classification tasks      |
+| Micro F1     | Multi-label (emotion)         |
+| Macro F1     | Multi-label (emotion)         |
+| ROC-AUC      | Multi-label (emotion)         |
+
+Evaluation results are saved to `reports/evaluation_results.json`. Confusion matrices are saved to `reports/confusion_matrix.png`.
+
+---
+
+## Health Check
+
+The `/health` endpoint reports model availability:
+
+```json
+{
+  "status": "healthy",
+  "model_path": "/workspace/models/truthlens_model",
+  "model_exists": true,
+  "model_files_complete": true,
+  "training_text_column": "text",
+  "vectorizer_required": false,
+  "vectorizer_exists": true,
+  "vectorizer_fallback_enabled": true,
+  "vectorizer_effective_ready": true,
+  "vectorizer_path": "/workspace/models/tfidf_vectorizer.joblib"
+}
+```
+
+Status values: `"healthy"` · `"degraded"` (model not trained yet) · `"unhealthy"` (startup error)
+
+---
+
+## Intended Use
 
 TruthLens AI is intended for:
 
-* misinformation detection research
-* media credibility analysis
-* journalism tools
-* academic NLP research
-* news monitoring systems
+- Misinformation detection research and academic NLP
+- Media credibility analysis tools
+- Journalism assistance and newsroom fact-checking support
+- News monitoring and aggregation platforms
+- Building explainable credibility scoring systems
 
-Possible deployment scenarios:
-
-* fact-checking systems
-* misinformation monitoring dashboards
-* news aggregation platforms
-
----
-
-# Out-of-Scope Use
-
-TruthLens should  **not be used as the sole authority for determining factual truth** .
-
-The system:
-
-* cannot replace human fact-checking
-* may misclassify satire or opinion pieces
-* should not be used for censorship decisions without human oversight
+**Example deployment scenarios:**
+- Browser extension that evaluates news articles in real time
+- Backend service for a fact-checking dashboard
+- Research tool for studying narrative framing in media
 
 ---
 
-# Ethical Considerations
+## Out-of-Scope Use
 
-Because TruthLens analyzes political and media content, several ethical considerations apply:
+TruthLens **must not be used as the sole authority** for determining factual truth.
 
-### Bias in Training Data
-
-Training datasets may contain political or cultural biases.
-
-### Misuse Risk
-
-Automated credibility scoring could be misused for censorship or political manipulation.
-
-### Transparency
-
-Explainability modules are included to improve transparency of model decisions.
+- It cannot replace human fact-checkers or domain experts
+- It should not be the basis for automated content removal or censorship without human review
+- It may misclassify satire, parody, or opinion pieces as fake news
+- It is not suitable for languages other than English without retraining
 
 ---
 
-# Limitations
+## Ethical Considerations
 
-Known limitations include:
+**Bias in training data:** The training datasets reflect political and cultural perspectives present in English-language media. The model's outputs may reflect these biases.
 
-* primarily trained on **English-language datasets**
-* may struggle with **sarcasm or satire**
-* performance depends on **training dataset quality**
-* limited ability to verify factual claims directly
+**Misuse risk:** Automated credibility scoring could be weaponized for political manipulation or targeted suppression of legitimate journalism. Human oversight is essential.
 
-TruthLens focuses on  **linguistic and structural signals** , not factual verification.
+**Transparency:** Explainability modules (SHAP, LIME) are included to give users visibility into *why* a prediction was made, not just what the prediction is.
 
----
-
-# Explainability
-
-TruthLens includes multiple explanation methods:
-
-* SHAP explanations
-* LIME explanations
-* attention visualization
-* feature importance analysis
-
-These tools help users understand  **why a prediction was made** .
+**Accountability:** No prediction should be acted upon without a human reviewing the explanation output alongside it.
 
 ---
 
-# Versioning
+## Limitations
 
-Model versions are managed using:
-
-* checkpoint manager
-* model registry
-* model metadata files
-
-Each model version includes:
-
-* configuration
-* training parameters
-* dataset information
-* evaluation results
+- Trained primarily on **English-language datasets** — limited effectiveness on other languages
+- May struggle with **satire, parody, and opinion journalism** that uses exaggerated language
+- **Factual verification is not performed** — the system evaluates linguistic and structural signals, not truth of claims
+- Performance depends on **dataset quality and coverage** of the specific domain
+- Transformer encoder has a **maximum input of 256 tokens** — longer articles are truncated
+- Model must be **trained before inference is available** — health endpoint reports `degraded` status on a fresh deployment
 
 ---
 
-# Future Improvements
+## Versioning
 
-Planned improvements include:
+Model versions are tracked via:
+- Checkpoint directory: `models/truthlens_model/`
+- Required files: `config.json`, `tokenizer.json`, `model.safetensors` (or `pytorch_model.bin`)
+- Model registry: `src/models/registry/model_registry.py`
 
-* multilingual misinformation detection
-* improved narrative analysis models
-* knowledge graph integration
-* real-time news monitoring pipelines
-* improved factual verification modules
+Each model version records: configuration, training hyperparameters, dataset sources, and evaluation results.
