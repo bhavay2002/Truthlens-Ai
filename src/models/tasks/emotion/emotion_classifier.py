@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -43,10 +43,7 @@ import torch.nn as nn
 from ...base.base_model import BaseModel
 from ...encoder.transformer_encoder import TransformerEncoder
 from ...heads.multilabel_head import MultiLabelHead, MultiLabelHeadConfig
-from ...training.loss_functions import LossConfig, LossFactory
 from ...training.trainer import Trainer, TrainerConfig
-from ...training.training_step import TrainingStep, TrainingStepConfig
-from ...training.training_utils import TrainingMetrics, get_device, move_batch_to_device
 from src.features.emotion.emotion_schema import EMOTION_LABELS
 
 logger = logging.getLogger(__name__)
@@ -195,3 +192,27 @@ class EmotionClassifier(BaseModel):
         """
 
         return {i: f"emotion{i}" for i in range(self.NUM_EMOTIONS)}
+
+    def create_trainer(
+        self,
+        optimizer: torch.optim.Optimizer,
+        scheduler: Optional[Any] = None,
+        config: Optional[TrainerConfig] = None,
+    ) -> Trainer:
+        """
+        Build a TruthLensTrainer for this model.
+        """
+        from dataclasses import replace as _replace
+
+        effective_config = config if config is not None else TrainerConfig()
+        effective_config = _replace(
+            effective_config,
+            architecture=type(self).__name__,
+            model_name=self.config.model_name,
+        )
+        return Trainer(
+            model=self,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            config=effective_config,
+        )

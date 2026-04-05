@@ -49,10 +49,7 @@ from src.utils.input_validation import (
     ensure_positive_int,
 )
 from src.utils.settings import load_settings
-from src.models.training.trainer import Trainer as TruthLensTrainer, TrainerConfig
-from src.models.training.training_step import TrainingStep, TrainingStepConfig
-from src.models.training.training_utils import TrainingMetrics, get_device
-from src.models.training.loss_functions import LossConfig, LossFactory
+from src.models.training.training_utils import TrainingMetrics
 
 
 logger = logging.getLogger(__name__)

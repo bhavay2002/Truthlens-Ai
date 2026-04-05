@@ -50,8 +50,6 @@ from ...heads.classification_head import (
 )
 from ...training.loss_functions import LossConfig, LossFactory
 from ...training.trainer import Trainer, TrainerConfig
-from ...training.training_step import TrainingStep, TrainingStepConfig
-from ...training.training_utils import TrainingMetrics, get_device, move_batch_to_device
 
 logger = logging.getLogger(__name__)
 
@@ -123,8 +121,11 @@ class IdeologyClassifier(BaseModel):
         # Loss Function
         # -------------------------------------------------
 
-        self.loss_fn = nn.CrossEntropyLoss(
-            label_smoothing=config.label_smoothing
+        self.loss_fn = LossFactory.create(
+            LossConfig(
+                loss_type="multi_class",
+                label_smoothing=config.label_smoothing,
+            )
         )
 
         # -------------------------------------------------
@@ -253,3 +254,27 @@ class IdeologyClassifier(BaseModel):
             1: "center",
             2: "right",
         }
+
+    def create_trainer(
+        self,
+        optimizer: torch.optim.Optimizer,
+        scheduler: Optional[Any] = None,
+        config: Optional[TrainerConfig] = None,
+    ) -> Trainer:
+        """
+        Build a TruthLensTrainer for this model.
+        """
+        from dataclasses import replace as _replace
+
+        effective_config = config if config is not None else TrainerConfig()
+        effective_config = _replace(
+            effective_config,
+            architecture=type(self).__name__,
+            model_name=self.config.model_name,
+        )
+        return Trainer(
+            model=self,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            config=effective_config,
+        )

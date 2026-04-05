@@ -46,8 +46,6 @@ from ...heads.classification_head import (
 )
 from ...training.loss_functions import LossConfig, LossFactory
 from ...training.trainer import Trainer, TrainerConfig
-from ...training.training_step import TrainingStep, TrainingStepConfig
-from ...training.training_utils import TrainingMetrics, get_device, move_batch_to_device
 
 logger = logging.getLogger(__name__)
 

@@ -50,6 +50,8 @@ from ..heads.multilabel_head import MultiLabelHead, MultiLabelHeadConfig
 from ..ensemble.ensemble_model import EnsembleConfig, EnsembleModel
 from ..ensemble.stacking_ensemble import StackingEnsembleConfig, StackingEnsembleModel
 from ..ensemble.weighted_ensemble import WeightedEnsembleConfig, WeightedEnsembleModel
+from ..training.loss_functions import LossConfig, LossFactory
+from ..training.trainer import Trainer, TrainerConfig
 
 logger = logging.getLogger(__name__)
 
@@ -164,8 +166,12 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
         # Loss functions
         # ----------------------------------------------------
 
-        self.loss_ce = nn.CrossEntropyLoss(label_smoothing=0.1)
-        self.loss_bce = nn.BCEWithLogitsLoss()
+        self.loss_ce = LossFactory.create(
+            LossConfig(loss_type="multi_class", label_smoothing=0.1)
+        )
+        self.loss_bce = LossFactory.create(
+            LossConfig(loss_type="multi_label")
+        )
 
         # temperature scaling
         self.temperature = nn.Parameter(torch.ones(1))
@@ -395,3 +401,42 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
                 outputs["loss_breakdown"] = loss_dict
 
         return outputs
+
+    # ------------------------------------------------------------
+    # Trainer factory
+    # ------------------------------------------------------------
+
+    def create_trainer(
+        self,
+        optimizer: torch.optim.Optimizer,
+        scheduler: Optional[Any] = None,
+        config: Optional[TrainerConfig] = None,
+    ) -> Trainer:
+        """
+        Build a TruthLensTrainer for this model.
+
+        Parameters
+        ----------
+        optimizer : torch.optim.Optimizer
+        scheduler : optional LR scheduler
+        config : TrainerConfig, optional
+            Falls back to a default TrainerConfig if not supplied.
+
+        Returns
+        -------
+        Trainer
+        """
+        from dataclasses import replace as _replace
+
+        effective_config = config if config is not None else TrainerConfig()
+        effective_config = _replace(
+            effective_config,
+            architecture=type(self).__name__,
+            model_name=self.config.model_name,
+        )
+        return Trainer(
+            model=self,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            config=effective_config,
+        )
