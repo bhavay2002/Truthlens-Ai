@@ -85,7 +85,7 @@ PROPAGANDA_LABEL = get_config_value(
 
 NARRATIVE_COLUMNS = ["hero", "villain", "victim"]
 FRAME_COLUMNS = ["RE", "HI", "CO", "MO", "EC"]
-EMOTION_COLUMNS = [f"emotion_{label}" for label in EMOTION_LABELS]
+EMOTION_COLUMNS = [f"emotion_{i}" for i in range(len(EMOTION_LABELS))]
 
 
 # -----------------------------------------------------
