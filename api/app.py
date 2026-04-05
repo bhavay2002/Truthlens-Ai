@@ -7,6 +7,9 @@ import logging
 from models.inference.predictor import predict, predict_batch
 from src.analysis.argument_mining import ArgumentMiningAnalyzer
 from src.analysis.bias_profile_builder import BiasProfileBuilder
+from src.graph.graph_pipeline import GraphPipeline
+from src.graph.graph_embeddings import GraphEmbeddingGenerator
+from src.graph.temporal_graph import TemporalGraphAnalyzer
 from src.analysis.context_omission_detector import ContextOmissionDetector
 from src.analysis.discourse_coherence_analyzer import DiscourseCoherenceAnalyzer
 from src.analysis.emotion_target_analysis import EmotionTargetAnalyzer
@@ -70,6 +73,9 @@ NARRATIVE_TEMPORAL_ANALYZER = NarrativeTemporalAnalyzer()
 PROPAGANDA_PATTERN_DETECTOR = PropagandaPatternDetector()
 RHETORICAL_DETECTOR = RhetoricalDeviceDetector()
 SOURCE_ATTRIBUTION_ANALYZER = SourceAttributionAnalyzer()
+GRAPH_PIPELINE = GraphPipeline()
+GRAPH_EMBEDDING_GENERATOR = GraphEmbeddingGenerator()
+TEMPORAL_GRAPH_ANALYZER = TemporalGraphAnalyzer()
 
 app = FastAPI(
     title=APP_TITLE,
@@ -111,6 +117,7 @@ class AnalysisResponse(BaseModel):
     discourse: dict[str, Any]
     propaganda_analysis: dict[str, Any]
     credibility_profile: dict[str, Any]
+    graph_analysis: dict[str, Any]
     explainability: dict[str, Any]
 
 
@@ -132,6 +139,18 @@ def _safe_run(fn, *args, **kwargs) -> dict:
         name = getattr(fn, "__qualname__", type(fn).__name__)
         logger.warning("Analysis step '%s' failed: %s", name, exc)
         return {}
+
+
+def _serialize_graph_result(result: dict) -> dict:
+    """Convert any numpy arrays in a graph pipeline result to Python lists
+    so the response is JSON-serializable."""
+    out = {}
+    for k, v in result.items():
+        if hasattr(v, "tolist"):
+            out[k] = v.tolist()
+        else:
+            out[k] = v
+    return out
 
 
 def _build_project_view() -> dict[str, Any]:
@@ -390,7 +409,36 @@ def analyze_news(request: NewsRequest):
             ideology_predictions=ideological,
         )
 
-        # ── 9. Explainability ──────────────────────────────────────────────────
+        # ── 9. Graph analysis ──────────────────────────────────────────────────
+        raw_graph_result: dict = _safe_run(GRAPH_PIPELINE.run, request.text)
+        graph_result: dict = _serialize_graph_result(raw_graph_result)
+
+        # Generate entity graph embeddings if the entity graph is available
+        entity_graph: dict = graph_result.get("entity_graph", {})
+        entity_embeddings: list = []
+        if entity_graph:
+            try:
+                embedding_arr = GRAPH_EMBEDDING_GENERATOR.generate_embedding(entity_graph)
+                entity_embeddings = embedding_arr.tolist()
+            except Exception as emb_err:
+                logger.warning("Entity graph embedding failed: %s", emb_err)
+
+        # Temporal graph is separate from the main pipeline
+        raw_temporal = _safe_run(
+            lambda t: TEMPORAL_GRAPH_ANALYZER.analyze(t).to_dict(), request.text
+        )
+
+        graph_analysis: dict = {
+            "entity_graph": entity_graph,
+            "entity_graph_metrics": graph_result.get("entity_graph_metrics", {}),
+            "entity_embeddings": entity_embeddings,
+            "narrative_graph": graph_result.get("narrative_graph", {}),
+            "narrative_graph_metrics": graph_result.get("narrative_graph_metrics", {}),
+            "graph_features": graph_result.get("graph_features", {}),
+            "temporal_graph": raw_temporal,
+        }
+
+        # ── 10. Explainability ─────────────────────────────────────────────────
         emotion_explanation = _safe_run(explain_emotion, request.text)
         try:
             lime_result = explain_prediction(
@@ -407,7 +455,7 @@ def analyze_news(request: NewsRequest):
                 "error": "lime_unavailable",
             }
 
-        # ── 10. Build response ─────────────────────────────────────────────────
+        # ── 11. Build response ─────────────────────────────────────────────────
         return AnalysisResponse(
             text=_preview_text(request.text),
             prediction=prediction,
@@ -446,6 +494,7 @@ def analyze_news(request: NewsRequest):
             },
             propaganda_analysis=propaganda_patterns,
             credibility_profile=credibility_profile,
+            graph_analysis=graph_analysis,
             explainability={
                 "emotion_explanation": emotion_explanation,
                 "lime": lime_result,
