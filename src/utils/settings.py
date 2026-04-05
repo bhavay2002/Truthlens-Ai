@@ -178,19 +178,23 @@ def load_settings() -> AppSettings:
 
     model = ModelSettings(
         name=str(
-            get_config_value(
+            _first_defined(
                 config,
-                "model",
-                "name",
-                default="roberta-base",
+                (
+                    ("model", "encoder", "name"),
+                    ("model", "name"),
+                ),
+                "roberta-base",
             )
         ),
         max_length=int(
-            get_config_value(
+            _first_defined(
                 config,
-                "model",
-                "max_length",
-                default=256,
+                (
+                    ("model", "encoder", "max_length"),
+                    ("model", "max_length"),
+                ),
+                256,
             )
         ),
         path=get_path(
@@ -203,19 +207,23 @@ def load_settings() -> AppSettings:
 
     features = FeaturesSettings(
         tfidf_max_features=int(
-            get_config_value(
+            _first_defined(
                 config,
-                "features",
-                "tfidf_max_features",
-                default=5000,
+                (
+                    ("features", "tfidf", "max_features"),
+                    ("features", "tfidf_max_features"),
+                ),
+                5000,
             )
         ),
         tfidf_top_terms_per_doc=int(
-            get_config_value(
+            _first_defined(
                 config,
-                "features",
-                "tfidf_top_terms_per_doc",
-                default=4,
+                (
+                    ("features", "tfidf", "top_terms_per_doc"),
+                    ("features", "tfidf_top_terms_per_doc"),
+                ),
+                4,
             )
         ),
     )

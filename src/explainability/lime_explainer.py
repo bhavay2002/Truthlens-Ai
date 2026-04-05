@@ -98,7 +98,18 @@ def _extract_fake_probabilities_from_batch(
 
     for item in batch_result:
         try:
-            probabilities.append(_extract_fake_probability(item))
+            if isinstance(item, dict):
+                probabilities.append(_extract_fake_probability(item))
+            elif (
+                isinstance(item, (list, tuple))
+                and len(item) >= 2
+            ):
+                # predict_batch returns [prob_real, prob_fake, ...]
+                probabilities.append(float(item[1]))
+            elif hasattr(item, "__len__") and len(item) >= 2:
+                probabilities.append(float(item[1]))
+            else:
+                return None
         except Exception:
             return None
 

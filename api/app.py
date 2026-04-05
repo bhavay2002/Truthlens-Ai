@@ -148,7 +148,7 @@ def predict_news(request: NewsRequest):
         NewsResponse with prediction results
     """
     try:
-        logger.info(f"Received prediction request for text of length: {len(request.text)}")
+        logger.info("Received prediction request for text of length: %d", len(request.text))
         
         # Get prediction
         prediction_result = predict(request.text)
@@ -170,20 +170,20 @@ def predict_news(request: NewsRequest):
             confidence=round(confidence, 4)
         )
         
-        logger.info(f"Prediction: {prediction} with confidence: {confidence:.4f}")
+        logger.info("Prediction: %s with confidence: %.4f", prediction, confidence)
         return response
         
     except FileNotFoundError as e:
-        logger.error(f"Model not found: {e}")
+        logger.error("Model not found: %s", e)
         raise HTTPException(
             status_code=503,
             detail="Model not available. Please train the model first."
         )
     except ValueError as e:
-        logger.error(f"Invalid input: {e}")
+        logger.error("Invalid input: %s", e)
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Prediction error: {e}")
+        logger.error("Prediction error: %s", e)
         raise HTTPException(
             status_code=500,
             detail="Internal server error during prediction"
@@ -231,7 +231,7 @@ def health_check():
             "vectorizer_path": str(VECTORIZER_PATH),
         }
     except Exception as e:
-        logger.error(f"Health check failed: {e}")
+        logger.error("Health check failed: %s", e)
         return {
             "status": "unhealthy",
             "error": str(e),
