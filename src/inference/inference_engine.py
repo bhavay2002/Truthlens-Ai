@@ -33,8 +33,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Union, Any
 
+import numpy as np
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from src.inference.feature_preparer import FeaturePreparer
+from src.inference.prediction_pipeline import PredictionPipeline
+from src.inference.report_generator import ReportGenerator
+from src.models.calibration import IsotonicCalibrator, TemperatureScaler
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +65,8 @@ class PredictionResult:
     text: str
     predicted_label: Union[int, str]
     probabilities: Optional[List[float]] = None
+    calibrated_probabilities: Optional[List[float]] = None
+    ensemble_probabilities: Optional[List[float]] = None
     logits: Optional[List[float]] = None
 
 
@@ -75,12 +82,33 @@ class InferenceEngine:
     - Output formatting
     """
 
-    def __init__(self, config: InferenceConfig) -> None:
+    def __init__(
+        self,
+        config: InferenceConfig,
+        *,
+        feature_preparer: Optional[FeaturePreparer] = None,
+        prediction_pipeline: Optional[PredictionPipeline] = None,
+        report_generator: Optional[ReportGenerator] = None,
+        article_analyzer: Optional[Any] = None,
+        temperature_scaler: Optional[TemperatureScaler] = None,
+        isotonic_calibrator: Optional[IsotonicCalibrator] = None,
+        ensemble_model: Optional[torch.nn.Module] = None,
+    ) -> None:
         self.config = config
         self.device = self._resolve_device(config.device)
         self.model = None
         self.tokenizer = None
         self.label_map: Optional[Dict[int, str]] = None
+        self.feature_preparer = feature_preparer
+        self.prediction_pipeline = prediction_pipeline
+        self.report_generator = report_generator or ReportGenerator()
+        self.article_analyzer = article_analyzer
+        self.temperature_scaler = temperature_scaler
+        self.isotonic_calibrator = isotonic_calibrator
+        self.ensemble_model = ensemble_model
+        if self.ensemble_model is not None:
+            self.ensemble_model.to(self.device)
+            self.ensemble_model.eval()
 
         self._load_model()
 
@@ -198,12 +226,15 @@ class InferenceEngine:
 
                 encoded = {k: v.to(self.device) for k, v in encoded.items()}
 
-                outputs = self.model(**encoded)
-                logits = outputs.logits
-
+                logits = self._compute_logits(encoded)
                 probabilities = torch.softmax(logits, dim=-1)
+                calibrated_probabilities = self._apply_calibration(logits, probabilities)
 
-                predicted_indices = torch.argmax(probabilities, dim=-1)
+                ensemble_probabilities = self._apply_ensemble(encoded)
+                if ensemble_probabilities is not None:
+                    predicted_indices = torch.argmax(ensemble_probabilities, dim=-1)
+                else:
+                    predicted_indices = torch.argmax(calibrated_probabilities, dim=-1)
 
                 for i, text in enumerate(batch):
                     label_idx = predicted_indices[i].item()
@@ -215,12 +246,24 @@ class InferenceEngine:
                     )
 
                     probs = probabilities[i].tolist()
+                    calibrated_probs = calibrated_probabilities[i].tolist()
+                    ensemble_probs = (
+                        ensemble_probabilities[i].tolist()
+                        if ensemble_probabilities is not None
+                        else None
+                    )
                     logit_values = logits[i].tolist()
 
                     result = PredictionResult(
                         text=text,
                         predicted_label=label,
                         probabilities=probs if self.config.return_probabilities else None,
+                        calibrated_probabilities=(
+                            calibrated_probs if self.config.return_probabilities else None
+                        ),
+                        ensemble_probabilities=(
+                            ensemble_probs if self.config.return_probabilities else None
+                        ),
                         logits=logit_values,
                     )
 
@@ -263,3 +306,152 @@ class InferenceEngine:
                 p.numel() for p in self.model.parameters() if p.requires_grad
             ),
         }
+
+    def predict_from_feature_dict(
+        self,
+        features: Dict[str, Any],
+        *,
+        article_text: Optional[str] = None,
+        title: Optional[str] = None,
+        source: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Integrate FeaturePreparer + src.inference.prediction_pipeline + ReportGenerator.
+        """
+        if self.feature_preparer is None:
+            raise RuntimeError("FeaturePreparer not configured")
+        if self.prediction_pipeline is None:
+            raise RuntimeError("PredictionPipeline not configured")
+
+        prepared = self.feature_preparer.prepare_single(features)
+        if isinstance(prepared, torch.Tensor):
+            tensor = prepared
+        else:
+            tensor = torch.tensor(prepared, dtype=torch.float32)
+
+        prediction = self.prediction_pipeline.predict(tensor)
+
+        report = self.report_generator.generate_report(
+            article_text=article_text or str(features.get("text", "")),
+            title=title,
+            source=source,
+            bias_analysis={"bias": prediction.get("bias")},
+            emotion_analysis={"emotion": prediction.get("emotion")},
+            narrative_structure={},
+            entity_graph={},
+            credibility_score=prediction.get("credibility_score"),
+        )
+
+        return {
+            "prediction": prediction,
+            "report": report,
+        }
+
+    def analyze_text(
+        self,
+        text: str,
+        *,
+        title: Optional[str] = None,
+        source: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Integrate src.inference.analyze_article + ReportGenerator via engine.
+        """
+        if self.article_analyzer is None:
+            raise RuntimeError("ArticleAnalyzer not configured")
+
+        analysis = self.article_analyzer.analyze(text)
+
+        report = self.report_generator.generate_report(
+            article_text=text,
+            title=title,
+            source=source,
+            bias_analysis=analysis.get("bias_features", {}),
+            emotion_analysis=analysis.get("emotion_features", {}),
+            narrative_structure=analysis.get("narrative_features", {}),
+            entity_graph=analysis.get("graph_pipeline", {}),
+            credibility_score=analysis.get("scores", {}).get("truthlens_credibility_score"),
+        )
+
+        return {
+            "analysis": analysis,
+            "report": report,
+        }
+
+    def set_temperature_scaler(self, scaler: TemperatureScaler) -> None:
+        self.temperature_scaler = scaler
+
+    def set_isotonic_calibrator(self, calibrator: IsotonicCalibrator) -> None:
+        self.isotonic_calibrator = calibrator
+
+    def set_ensemble_model(self, ensemble_model: torch.nn.Module) -> None:
+        self.ensemble_model = ensemble_model
+        self.ensemble_model.to(self.device)
+        self.ensemble_model.eval()
+
+    def _apply_calibration(
+        self,
+        logits: torch.Tensor,
+        probabilities: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.temperature_scaler is not None:
+            try:
+                calibrated = self.temperature_scaler.predict_proba(
+                    logits.to(self.temperature_scaler.device)
+                )
+                return calibrated.to(probabilities.device)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Temperature scaling skipped in InferenceEngine: %s", exc)
+
+        if self.isotonic_calibrator is not None:
+            try:
+                probs_np = probabilities.detach().cpu().numpy().astype(np.float64)
+                calibrated_np = self.isotonic_calibrator.predict_proba(probs_np)
+                return torch.tensor(
+                    calibrated_np,
+                    dtype=probabilities.dtype,
+                    device=probabilities.device,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Isotonic calibration skipped in InferenceEngine: %s", exc)
+
+        return probabilities
+
+    def _compute_logits(self, encoded: Dict[str, torch.Tensor]) -> torch.Tensor:
+        if self.model is None:
+            raise RuntimeError("Model not loaded")
+        outputs = self.model(**encoded)
+        if not hasattr(outputs, "logits"):
+            raise RuntimeError("Inference model output missing logits")
+        return outputs.logits
+
+    def _apply_ensemble(
+        self,
+        encoded: Dict[str, torch.Tensor],
+    ) -> Optional[torch.Tensor]:
+        if self.ensemble_model is None:
+            return None
+
+        try:
+            maybe_outputs = self.ensemble_model(**encoded)
+            if isinstance(maybe_outputs, torch.Tensor):
+                logits = maybe_outputs
+            elif isinstance(maybe_outputs, dict) and "logits" in maybe_outputs:
+                logits = maybe_outputs["logits"]
+            else:
+                logits = None
+        except Exception:  # noqa: BLE001
+            logits = None
+
+        if logits is None:
+            if "input_ids" in encoded and isinstance(encoded["input_ids"], torch.Tensor):
+                logits = self.ensemble_model(encoded["input_ids"])
+            else:
+                logger.warning("Ensemble model skipped: incompatible input signature.")
+                return None
+
+        if not isinstance(logits, torch.Tensor):
+            logger.warning("Ensemble model output is not a tensor. Skipping ensemble.")
+            return None
+
+        return torch.softmax(logits, dim=-1)

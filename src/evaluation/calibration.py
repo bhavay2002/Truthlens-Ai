@@ -31,7 +31,8 @@ from typing import Iterable, Tuple
 
 import numpy as np
 import matplotlib.pyplot as plt
-from sklearn.calibration import calibration_curve
+import torch
+from src.models.calibration import CalibrationMetricConfig, CalibrationMetrics
 
 
 logger = logging.getLogger(__name__)
@@ -73,27 +74,21 @@ def expected_calibration_error(
     """
 
     y_true_arr, probs_arr = _validate_inputs(y_true, probs)
+    metric = CalibrationMetrics(CalibrationMetricConfig(n_bins=n_bins))
 
-    bins = np.linspace(0.0, 1.0, n_bins + 1)
-    bin_ids = np.digitize(probs_arr, bins) - 1
+    if probs_arr.ndim == 1:
+        probs_2d = np.stack([1.0 - probs_arr, probs_arr], axis=1)
+    else:
+        probs_2d = probs_arr
 
-    ece = 0.0
-    total = len(probs_arr)
+    labels = y_true_arr.astype(np.int64)
+    if labels.min() < 0:
+        raise ValueError("Labels must be non-negative integers for calibration.")
 
-    for i in range(n_bins):
-
-        mask = bin_ids == i
-        bin_count = np.sum(mask)
-
-        if bin_count == 0:
-            continue
-
-        acc = np.mean(y_true_arr[mask])
-        conf = np.mean(probs_arr[mask])
-
-        ece += np.abs(acc - conf) * (bin_count / total)
-
-    ece = float(ece)
+    ece = metric.expected_calibration_error(
+        torch.tensor(probs_2d, dtype=torch.float32),
+        torch.tensor(labels, dtype=torch.long),
+    )
 
     logger.info("Expected Calibration Error (ECE): %.6f", ece)
 
@@ -112,11 +107,20 @@ def plot_reliability_diagram(
 
     y_true_arr, probs_arr = _validate_inputs(y_true, probs)
 
-    prob_true, prob_pred = calibration_curve(
-        y_true_arr,
-        probs_arr,
-        n_bins=n_bins
+    metric = CalibrationMetrics(CalibrationMetricConfig(n_bins=n_bins))
+
+    if probs_arr.ndim == 1:
+        probs_2d = np.stack([1.0 - probs_arr, probs_arr], axis=1)
+    else:
+        probs_2d = probs_arr
+
+    labels = y_true_arr.astype(np.int64)
+    stats = metric.reliability_statistics(
+        torch.tensor(probs_2d, dtype=torch.float32),
+        torch.tensor(labels, dtype=torch.long),
     )
+    prob_true = stats["bin_accuracy"]
+    prob_pred = stats["bin_confidence"]
 
     output_path = Path(save_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -61,6 +61,9 @@ class ScoreWeights:
     final_manipulation: float = 0.3
     final_ideology: float = 0.2
 
+    analysis_influence_manipulation: float = 0.15
+    analysis_influence_credibility: float = 0.10
+
 
 class TruthLensScoreCalculator:
     """
@@ -85,17 +88,20 @@ class TruthLensScoreCalculator:
         discourse_score = self._aggregate_section(profile.get("discourse", {}))
         graph_score = self._aggregate_section(profile.get("graph", {}))
         ideology_score = self._aggregate_section(profile.get("ideology", {}))
+        analysis_score = self._aggregate_section(profile.get("analysis", {}))
 
         manipulation_risk = self._compute_manipulation_risk(
             bias_score,
             emotion_score,
             narrative_score,
+            analysis_score,
         )
 
         credibility_score = self._compute_credibility(
             bias_score,
             discourse_score,
             graph_score,
+            analysis_score,
         )
 
         truthlens_score = self._compute_final_score(
@@ -148,6 +154,7 @@ class TruthLensScoreCalculator:
         bias_score: float,
         emotion_score: float,
         narrative_score: float,
+        analysis_score: float,
     ) -> float:
         """
         Estimate narrative manipulation risk.
@@ -157,6 +164,7 @@ class TruthLensScoreCalculator:
             self.weights.bias * bias_score
             + self.weights.emotion * emotion_score
             + self.weights.narrative * narrative_score
+            + self.weights.analysis_influence_manipulation * analysis_score
         )
 
         return float(np.clip(risk, 0.0, 1.0))
@@ -166,6 +174,7 @@ class TruthLensScoreCalculator:
         bias_score: float,
         discourse_score: float,
         graph_score: float,
+        analysis_score: float,
     ) -> float:
         """
         Estimate credibility based on discourse structure and bias signals.
@@ -175,6 +184,7 @@ class TruthLensScoreCalculator:
             self.weights.discourse * discourse_score
             + self.weights.graph * graph_score
             - self.weights.credibility_bias_penalty * bias_score
+            + self.weights.analysis_influence_credibility * analysis_score
         )
 
         return float(np.clip(credibility, 0.0, 1.0))

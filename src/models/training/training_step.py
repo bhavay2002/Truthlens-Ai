@@ -28,10 +28,13 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Optional, Any
 
 import torch
 import torch.nn as nn
+
+from ..checkpointing.checkpoint_manager import CheckpointManager
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +49,9 @@ class TrainingStepConfig:
     max_grad_norm: float = 1.0
     use_mixed_precision: bool = False
     device: Optional[str] = None
+    checkpoint_dir: Optional[str] = None
+    checkpoint_every_steps: int = 0
+    max_checkpoints: int = 3
 
 
 class TrainingStep:
@@ -74,6 +80,10 @@ class TrainingStep:
         )
 
         self.scaler = torch.cuda.amp.GradScaler(enabled=config.use_mixed_precision)
+
+        self.checkpoint_manager: Optional[CheckpointManager] = None
+        if config.checkpoint_dir:
+            self.checkpoint_manager = CheckpointManager(Path(config.checkpoint_dir))
 
         logger.info("TrainingStep initialized on device %s", self.device)
 
@@ -117,6 +127,24 @@ class TrainingStep:
                 self.scheduler.step()
 
             self.optimizer.zero_grad()
+
+            if (
+                self.checkpoint_manager is not None
+                and self.config.checkpoint_every_steps > 0
+                and (step + 1) % self.config.checkpoint_every_steps == 0
+            ):
+                self.checkpoint_manager.save_checkpoint(
+                    step=step + 1,
+                    model_state_dict=self.model.state_dict(),
+                    optimizer_state_dict=self.optimizer.state_dict(),
+                    scheduler_state_dict=(
+                        self.scheduler.state_dict() if self.scheduler is not None else None
+                    ),
+                    metadata={"step_loss": float(loss.detach().item())},
+                )
+                self.checkpoint_manager.cleanup_old_checkpoints(
+                    max_checkpoints=self.config.max_checkpoints
+                )
 
         return loss.detach()
 

@@ -32,32 +32,15 @@ from __future__ import annotations
 import itertools
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
+from src.graph.graph_analysis import GraphAnalyzer
+from src.graph.narrative_graph_builder import NarrativeGraphBuilder
 
 logger = logging.getLogger(__name__)
-
-try:
-    import networkx as nx
-
-    NETWORKX_AVAILABLE = True
-except Exception:  # noqa: BLE001
-    NETWORKX_AVAILABLE = False
-    logger.warning("networkx not available. Interaction graph metrics limited.")
-
-try:
-    import spacy
-
-    _NLP = spacy.load("en_core_web_sm")
-    SPACY_AVAILABLE = True
-except Exception:  # noqa: BLE001
-    _NLP = None
-    SPACY_AVAILABLE = False
-    logger.warning("spaCy not available. Using heuristic entity detection.")
-
 
 def _split_sentences(text: str) -> List[str]:
     """Basic sentence segmentation."""
@@ -71,10 +54,7 @@ def _heuristic_entities(sentence: str) -> List[str]:
 
 
 def _extract_entities(sentence: str) -> List[str]:
-    """Extract named entities using spaCy if available."""
-    if SPACY_AVAILABLE:
-        doc = _NLP(sentence)
-        return list({ent.text for ent in doc.ents})
+    """Fallback entity extraction."""
     return _heuristic_entities(sentence)
 
 
@@ -96,60 +76,86 @@ class InteractionGraphFeatures(BaseFeature):
 
     name: str = "interaction_graph_features"
     description: str = "Graph-based interaction structure indicators"
+    _builder: NarrativeGraphBuilder | None = field(default=None, init=False, repr=False)
+    _analyzer: GraphAnalyzer | None = field(default=None, init=False, repr=False)
+
+    def initialize(self) -> None:
+        if self._builder is not None and self._analyzer is not None:
+            return
+        try:
+            self._builder = NarrativeGraphBuilder()
+            self._analyzer = GraphAnalyzer()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "InteractionGraphFeatures using fallback due to graph init failure: %s",
+                exc,
+            )
+            self._builder = None
+            self._analyzer = None
 
     def extract(self, context: FeatureContext) -> Dict[str, float]:
 
         if not context.text:
             raise ValueError("FeatureContext.text cannot be empty")
 
-        sentences = _split_sentences(context.text)
+        if self._builder is not None and self._analyzer is not None:
+            graph = self._builder.build_graph(context.text)
+            narrative_metrics = self._builder.extract_graph_features(graph).to_dict()
+            graph_metrics = self._analyzer.analyze(graph).to_dict()
 
+            features: Dict[str, float] = {
+                "interaction_node_count": float(
+                    narrative_metrics.get("narrative_graph_nodes", 0.0)
+                ),
+                "interaction_edge_count": float(
+                    narrative_metrics.get("narrative_graph_edges", 0.0)
+                ),
+                "interaction_avg_degree": float(
+                    narrative_metrics.get("narrative_graph_avg_degree", 0.0)
+                ),
+                "interaction_density": float(
+                    narrative_metrics.get("narrative_graph_density", 0.0)
+                ),
+                "interaction_clustering": float(
+                    graph_metrics.get("graph_clustering_estimate", 0.0)
+                ),
+                "interaction_component_count": float(
+                    narrative_metrics.get("narrative_graph_components", 0.0)
+                ),
+            }
+
+            for key, value in narrative_metrics.items():
+                features[f"interaction_native_{key}"] = float(value)
+
+            for key, value in graph_metrics.items():
+                features[f"interaction_native_{key}"] = float(value)
+
+            return features
+
+        # Fallback when graph subsystem is unavailable.
+        sentences = _split_sentences(context.text)
         nodes = set()
         edges = []
 
         for sentence in sentences:
             entities = _extract_entities(sentence)
-
             nodes.update(entities)
-
             for pair in itertools.combinations(entities, 2):
                 edges.append(pair)
 
         node_count = len(nodes)
         edge_count = len(edges)
+        density = 0.0
+        if node_count > 1:
+            density = edge_count / (node_count * (node_count - 1))
 
-        if not NETWORKX_AVAILABLE or node_count == 0:
-            return {
-                "interaction_node_count": float(node_count),
-                "interaction_edge_count": float(edge_count),
-                "interaction_avg_degree": 0.0,
-                "interaction_density": 0.0,
-                "interaction_clustering": 0.0,
-                "interaction_component_count": 0.0,
-            }
-
-        G = nx.Graph()
-
-        G.add_nodes_from(nodes)
-        G.add_edges_from(edges)
-
-        degrees = [deg for _, deg in G.degree()]
-
-        avg_degree = sum(degrees) / len(degrees) if degrees else 0.0
-
-        density = nx.density(G)
-
-        clustering = nx.average_clustering(G) if node_count > 1 else 0.0
-
-        component_count = nx.number_connected_components(G)
-
-        features: Dict[str, float] = {
+        features = {
             "interaction_node_count": float(node_count),
             "interaction_edge_count": float(edge_count),
-            "interaction_avg_degree": float(avg_degree),
+            "interaction_avg_degree": float(edge_count / max(node_count, 1)),
             "interaction_density": float(density),
-            "interaction_clustering": float(clustering),
-            "interaction_component_count": float(component_count),
+            "interaction_clustering": 0.0,
+            "interaction_component_count": 0.0,
         }
 
         logger.debug(

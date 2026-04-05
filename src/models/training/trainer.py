@@ -32,12 +32,14 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Optional, Any, List
 
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
+from ..checkpointing.checkpoint_manager import CheckpointManager
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +55,9 @@ class TrainerConfig:
     max_grad_norm: float = 1.0
     device: Optional[str] = None
     log_every_steps: int = 50
+    checkpoint_dir: Optional[str] = None
+    checkpoint_every_steps: int = 0
+    max_checkpoints: int = 3
 
 
 class Trainer:
@@ -84,6 +89,11 @@ class Trainer:
         )
 
         self.model.to(self.device)
+        self.global_step = 0
+
+        self.checkpoint_manager: Optional[CheckpointManager] = None
+        if config.checkpoint_dir:
+            self.checkpoint_manager = CheckpointManager(Path(config.checkpoint_dir))
 
         logger.info("Trainer initialized on device %s", self.device)
 
@@ -105,11 +115,28 @@ class Trainer:
 
             logger.info("Starting epoch %d/%d", epoch + 1, self.config.epochs)
 
-            train_loss = self._train_epoch(train_loader)
+            train_loss = self._train_epoch(train_loader, epoch)
 
             history["train_loss"].append(train_loss)
 
             logger.info("Epoch %d training loss: %.6f", epoch + 1, train_loss)
+
+            if self.checkpoint_manager is not None:
+                self.checkpoint_manager.save_checkpoint(
+                    step=self.global_step,
+                    model_state_dict=self.model.state_dict(),
+                    optimizer_state_dict=self.optimizer.state_dict(),
+                    scheduler_state_dict=(
+                        self.scheduler.state_dict() if self.scheduler is not None else None
+                    ),
+                    metadata={
+                        "epoch": epoch + 1,
+                        "train_loss": float(train_loss),
+                    },
+                )
+                self.checkpoint_manager.cleanup_old_checkpoints(
+                    max_checkpoints=self.config.max_checkpoints
+                )
 
             if val_loader is not None:
 
@@ -121,7 +148,7 @@ class Trainer:
 
         return history
 
-    def _train_epoch(self, dataloader: DataLoader) -> float:
+    def _train_epoch(self, dataloader: DataLoader, epoch: int) -> float:
         """
         Train model for a single epoch.
         """
@@ -147,6 +174,7 @@ class Trainer:
 
             total_loss += loss.item()
             step_count += 1
+            self.global_step += 1
 
             if (step + 1) % self.config.gradient_accumulation_steps == 0:
 
@@ -161,6 +189,27 @@ class Trainer:
                     self.scheduler.step()
 
                 self.optimizer.zero_grad()
+
+            if (
+                self.checkpoint_manager is not None
+                and self.config.checkpoint_every_steps > 0
+                and self.global_step % self.config.checkpoint_every_steps == 0
+            ):
+                self.checkpoint_manager.save_checkpoint(
+                    step=self.global_step,
+                    model_state_dict=self.model.state_dict(),
+                    optimizer_state_dict=self.optimizer.state_dict(),
+                    scheduler_state_dict=(
+                        self.scheduler.state_dict() if self.scheduler is not None else None
+                    ),
+                    metadata={
+                        "epoch": epoch + 1,
+                        "step_loss": float(loss.item()),
+                    },
+                )
+                self.checkpoint_manager.cleanup_old_checkpoints(
+                    max_checkpoints=self.config.max_checkpoints
+                )
 
             if (step + 1) % self.config.log_every_steps == 0:
                 logger.info(

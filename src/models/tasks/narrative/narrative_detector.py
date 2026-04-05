@@ -51,6 +51,7 @@ from typing import Dict, Optional, List
 import torch
 import torch.nn as nn
 
+from ...base.base_model import BaseModel
 from ...encoder.transformer_encoder import TransformerEncoder
 from ...heads.multilabel_head import MultiLabelHead, MultiLabelHeadConfig
 
@@ -67,7 +68,7 @@ class NarrativeDetectorConfig:
     device: Optional[str] = None
 
 
-class NarrativeDetector(nn.Module):
+class NarrativeDetector(BaseModel):
 
     LABELS: List[str] = [
         "hero",

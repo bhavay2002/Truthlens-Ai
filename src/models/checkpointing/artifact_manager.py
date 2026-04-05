@@ -35,8 +35,25 @@ from typing import Any, Dict, Optional
 
 import torch
 import joblib
+from src.models.export import (
+    ONNXExportConfig,
+    ONNXExporter,
+    QuantizationConfig,
+    QuantizationEngine,
+    TorchScriptExportConfig,
+    TorchScriptExporter,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _quant_backend() -> str:
+    supported = list(torch.backends.quantized.supported_engines)
+    if "fbgemm" in supported:
+        return "fbgemm"
+    if "qnnpack" in supported:
+        return "qnnpack"
+    return supported[0] if supported else "qnnpack"
 
 
 class ArtifactManager:
@@ -131,6 +148,81 @@ class ArtifactManager:
         except Exception as exc:
             logger.exception("Failed to save metadata")
             raise RuntimeError("Metadata saving failed") from exc
+
+        return path
+
+    def export_onnx(
+        self,
+        model: torch.nn.Module,
+        example_input: torch.Tensor,
+        file_name: str = "model.onnx",
+        config: ONNXExportConfig | None = None,
+    ) -> Path:
+        """
+        Export model artifact to ONNX format.
+        """
+
+        path = self.artifact_dir / file_name
+        exporter = ONNXExporter(config=config)
+
+        try:
+            exporter.export(model=model, example_input=example_input, output_path=path)
+            logger.info("ONNX artifact exported: %s", path)
+        except Exception as exc:
+            logger.exception("Failed to export ONNX artifact")
+            raise RuntimeError("ONNX export failed") from exc
+
+        return path
+
+    def export_torchscript(
+        self,
+        model: torch.nn.Module,
+        example_input: torch.Tensor,
+        file_name: str = "model.ts.pt",
+        config: TorchScriptExportConfig | None = None,
+    ) -> Path:
+        """
+        Export model artifact to TorchScript format.
+        """
+
+        path = self.artifact_dir / file_name
+        exporter = TorchScriptExporter(config=config)
+
+        try:
+            exporter.export(model=model, example_input=example_input, output_path=path)
+            logger.info("TorchScript artifact exported: %s", path)
+        except Exception as exc:
+            logger.exception("Failed to export TorchScript artifact")
+            raise RuntimeError("TorchScript export failed") from exc
+
+        return path
+
+    def export_quantized_model(
+        self,
+        model: torch.nn.Module,
+        file_name: str = "model.quantized.pt",
+        config: QuantizationConfig | None = None,
+    ) -> Path:
+        """
+        Quantize model and save quantized state dict.
+        """
+
+        path = self.artifact_dir / file_name
+        if config is None:
+            config = QuantizationConfig(
+                method="dynamic",
+                device="cpu",
+                backend=_quant_backend(),
+            )
+        engine = QuantizationEngine(config=config)
+
+        try:
+            quantized_model = engine.apply(model)
+            torch.save(quantized_model.state_dict(), path)
+            logger.info("Quantized model artifact saved: %s", path)
+        except Exception as exc:
+            logger.exception("Failed to export quantized model artifact")
+            raise RuntimeError("Quantized export failed") from exc
 
         return path
 

@@ -37,15 +37,19 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, List
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ..base.multitask_base_model import MultiTaskBaseModel
 from ..encoder.transformer_encoder import TransformerEncoder
 from ..heads.classification_head import ClassificationHead, ClassificationHeadConfig
 from ..heads.multilabel_head import MultiLabelHead, MultiLabelHeadConfig
+from ..ensemble.ensemble_model import EnsembleConfig, EnsembleModel
+from ..ensemble.stacking_ensemble import StackingEnsembleConfig, StackingEnsembleModel
+from ..ensemble.weighted_ensemble import WeightedEnsembleConfig, WeightedEnsembleModel
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +78,7 @@ class MultiTaskTruthLensConfig:
 # Model
 # ------------------------------------------------------------
 
-class MultiTaskTruthLensModel(nn.Module):
+class MultiTaskTruthLensModel(MultiTaskBaseModel):
 
     # Label definitions
     BIAS_LABELS = ["non_bias", "bias"]
@@ -95,7 +99,19 @@ class MultiTaskTruthLensModel(nn.Module):
 
     def __init__(self, config: MultiTaskTruthLensConfig):
 
-        super().__init__()
+        task_configs = {
+            "bias": {"num_classes": self.NUM_BIAS, "type": "classification"},
+            "ideology": {"num_classes": self.NUM_IDEOLOGY, "type": "classification"},
+            "propaganda": {"num_classes": self.NUM_PROPAGANDA, "type": "classification"},
+            "narrative": {"num_classes": self.NUM_NARRATIVE, "type": "multilabel"},
+            "narrative_frame": {
+                "num_classes": self.NUM_NARRATIVE_FRAMES,
+                "type": "multilabel",
+            },
+            "emotion": {"num_classes": self.NUM_EMOTIONS, "type": "multilabel"},
+        }
+
+        super().__init__(task_configs=task_configs)
 
         self.config = config
 
@@ -139,6 +155,11 @@ class MultiTaskTruthLensModel(nn.Module):
             MultiLabelHeadConfig(hidden, self.NUM_EMOTIONS, dropout=config.dropout)
         )
 
+        # Optional ensemble wrappers for classification heads.
+        self.bias_ensemble: Optional[nn.Module] = None
+        self.ideology_ensemble: Optional[nn.Module] = None
+        self.propaganda_ensemble: Optional[nn.Module] = None
+
         # ----------------------------------------------------
         # Loss functions
         # ----------------------------------------------------
@@ -151,6 +172,106 @@ class MultiTaskTruthLensModel(nn.Module):
 
         logger.info("MultiTaskTruthLensModel initialized")
 
+    def encode(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        **_: Any,
+    ) -> torch.Tensor:
+        encoder_outputs = self.encoder(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+        )
+        return encoder_outputs["pooled_output"]
+
+    def configure_task_ensembles(
+        self,
+        *,
+        bias_models: Optional[List[nn.Module]] = None,
+        ideology_models: Optional[List[nn.Module]] = None,
+        propaganda_models: Optional[List[nn.Module]] = None,
+        strategy: str = "average",
+        weights: Optional[List[float]] = None,
+        bias_meta_model: Optional[nn.Module] = None,
+        ideology_meta_model: Optional[nn.Module] = None,
+        propaganda_meta_model: Optional[nn.Module] = None,
+    ) -> None:
+        """
+        Integrate ensemble modules for task-specific classification heads.
+        """
+        self.bias_ensemble = self._build_task_ensemble(
+            base_models=bias_models,
+            strategy=strategy,
+            weights=weights,
+            meta_model=bias_meta_model,
+        )
+        self.ideology_ensemble = self._build_task_ensemble(
+            base_models=ideology_models,
+            strategy=strategy,
+            weights=weights,
+            meta_model=ideology_meta_model,
+        )
+        self.propaganda_ensemble = self._build_task_ensemble(
+            base_models=propaganda_models,
+            strategy=strategy,
+            weights=weights,
+            meta_model=propaganda_meta_model,
+        )
+
+    def _build_task_ensemble(
+        self,
+        *,
+        base_models: Optional[List[nn.Module]],
+        strategy: str,
+        weights: Optional[List[float]],
+        meta_model: Optional[nn.Module],
+    ) -> Optional[nn.Module]:
+        if not base_models:
+            return None
+
+        device_str = self.config.device or ("cuda" if torch.cuda.is_available() else "cpu")
+
+        if strategy == "weighted_average":
+            return WeightedEnsembleModel(
+                models=base_models,
+                config=WeightedEnsembleConfig(
+                    weights=weights,
+                    device=device_str,
+                ),
+            )
+
+        if strategy == "stacking":
+            if meta_model is None:
+                raise ValueError("meta_model must be provided for stacking strategy.")
+            return StackingEnsembleModel(
+                base_models=base_models,
+                meta_model=meta_model,
+                config=StackingEnsembleConfig(device=device_str),
+            )
+
+        return EnsembleModel(
+            models=base_models,
+            config=EnsembleConfig(
+                strategy=strategy,
+                weights=weights,
+                device=device_str,
+            ),
+        )
+
+    @staticmethod
+    def _extract_ensemble_logits(outputs: Any) -> torch.Tensor:
+        if isinstance(outputs, torch.Tensor):
+            return outputs
+        if isinstance(outputs, dict):
+            for key in ("logits", "ensemble_logits"):
+                value = outputs.get(key)
+                if isinstance(value, torch.Tensor):
+                    return value
+            for value in outputs.values():
+                if isinstance(value, torch.Tensor):
+                    return value
+        raise RuntimeError("Unsupported ensemble output format.")
+
     # ------------------------------------------------------------
     # Forward
     # ------------------------------------------------------------
@@ -162,12 +283,7 @@ class MultiTaskTruthLensModel(nn.Module):
         labels: Optional[Dict[str, torch.Tensor]] = None,
     ) -> Dict[str, Any]:
 
-        encoder_outputs = self.encoder(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-        )
-
-        pooled = encoder_outputs["pooled_output"]
+        pooled = self.encode(input_ids=input_ids, attention_mask=attention_mask)
 
         # stabilize temperature
         temperature = torch.clamp(self.temperature, 0.5, 5.0)
@@ -176,9 +292,25 @@ class MultiTaskTruthLensModel(nn.Module):
         # Task heads
         # ----------------------------------------------------
 
-        bias_logits = self.bias_head(pooled) / temperature
-        ideology_logits = self.ideology_head(pooled) / temperature
-        propaganda_logits = self.propaganda_head(pooled) / temperature
+        if self.bias_ensemble is not None:
+            bias_logits = self._extract_ensemble_logits(self.bias_ensemble(pooled))
+        else:
+            bias_logits = self.bias_head(pooled)
+        bias_logits = bias_logits / temperature
+
+        if self.ideology_ensemble is not None:
+            ideology_logits = self._extract_ensemble_logits(self.ideology_ensemble(pooled))
+        else:
+            ideology_logits = self.ideology_head(pooled)
+        ideology_logits = ideology_logits / temperature
+
+        if self.propaganda_ensemble is not None:
+            propaganda_logits = self._extract_ensemble_logits(
+                self.propaganda_ensemble(pooled)
+            )
+        else:
+            propaganda_logits = self.propaganda_head(pooled)
+        propaganda_logits = propaganda_logits / temperature
 
         narrative_outputs = self.narrative_head(pooled)
         narrative_frame_outputs = self.narrative_frame_head(pooled)

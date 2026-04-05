@@ -34,6 +34,14 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import torch
+from src.models.export import (
+    ONNXExportConfig,
+    ONNXExporter,
+    QuantizationConfig,
+    QuantizationEngine,
+    TorchScriptExportConfig,
+    TorchScriptExporter,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -41,6 +49,15 @@ logger = logging.getLogger(__name__)
 
 CHECKPOINT_FILE = "checkpoint.pt"
 METADATA_FILE = "metadata.json"
+
+
+def _quant_backend() -> str:
+    supported = list(torch.backends.quantized.supported_engines)
+    if "fbgemm" in supported:
+        return "fbgemm"
+    if "qnnpack" in supported:
+        return "qnnpack"
+    return supported[0] if supported else "qnnpack"
 
 
 def _ensure_dir(path: Path) -> None:
@@ -57,6 +74,9 @@ def save_checkpoint(
     epoch: Optional[int] = None,
     step: Optional[int] = None,
     metadata: Optional[Dict[str, Any]] = None,
+    export_formats: Optional[list[str]] = None,
+    export_model: Optional[torch.nn.Module] = None,
+    export_example_input: Optional[torch.Tensor] = None,
 ) -> Path:
     """
     Save model checkpoint.
@@ -92,6 +112,15 @@ def save_checkpoint(
             json.dump(metadata, f, indent=4)
 
         logger.info("Checkpoint metadata saved: %s", metadata_path)
+
+    if export_formats:
+        target_model = export_model if export_model is not None else model
+        _export_artifacts(
+            model=target_model,
+            checkpoint_dir=checkpoint_dir,
+            export_formats=export_formats,
+            example_input=export_example_input,
+        )
 
     return checkpoint_path
 
@@ -186,3 +215,64 @@ def list_checkpoints(checkpoint_root: str | Path) -> list[Path]:
     ]
 
     return sorted(checkpoints)
+
+
+def _export_artifacts(
+    *,
+    model: torch.nn.Module,
+    checkpoint_dir: Path,
+    export_formats: list[str],
+    example_input: Optional[torch.Tensor],
+) -> None:
+    export_dir = checkpoint_dir / "exports"
+    _ensure_dir(export_dir)
+
+    requested = {fmt.strip().lower() for fmt in export_formats}
+
+    if "torchscript" in requested:
+        if example_input is None:
+            logger.warning("Skipping TorchScript export: example_input not provided.")
+        else:
+            exporter = TorchScriptExporter(
+                TorchScriptExportConfig(device="cpu", verify_export=False)
+            )
+            try:
+                exporter.export(
+                    model=model,
+                    example_input=example_input.detach().cpu(),
+                    output_path=export_dir / "model.ts.pt",
+                )
+                logger.info("TorchScript export saved at %s", export_dir / "model.ts.pt")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("TorchScript export failed: %s", exc)
+
+    if "onnx" in requested:
+        if example_input is None:
+            logger.warning("Skipping ONNX export: example_input not provided.")
+        else:
+            exporter = ONNXExporter(
+                ONNXExportConfig(device="cpu", verify_export=False)
+            )
+            try:
+                exporter.export(
+                    model=model,
+                    example_input=example_input.detach().cpu(),
+                    output_path=export_dir / "model.onnx",
+                )
+                logger.info("ONNX export saved at %s", export_dir / "model.onnx")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("ONNX export failed: %s", exc)
+
+    if "quantized" in requested:
+        engine = QuantizationEngine(
+            QuantizationConfig(method="dynamic", device="cpu", backend=_quant_backend())
+        )
+        try:
+            quantized_model = engine.apply(model)
+            torch.save(
+                quantized_model.state_dict(),
+                export_dir / "model.quantized.pt",
+            )
+            logger.info("Quantized export saved at %s", export_dir / "model.quantized.pt")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Quantized export failed: %s", exc)

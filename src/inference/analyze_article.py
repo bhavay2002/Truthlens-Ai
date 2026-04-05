@@ -32,14 +32,23 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+
+import numpy as np
+import torch
 
 from src.features.base.base_feature import FeatureContext
 from src.features.pipelines.feature_pipeline import FeaturePipeline
 from src.graph.entity_graph import EntityGraphBuilder
 from src.graph.graph_analysis import GraphAnalyzer
+from src.graph.narrative_graph_builder import NarrativeGraphBuilder
+from src.graph.graph_pipeline import GraphPipeline
 from src.analysis.bias_profile_builder import BiasProfileBuilder
+from src.analysis.integration_runner import AnalysisIntegrationRunner
 from src.aggregation.truthlens_score_calculator import TruthLensScoreCalculator
+from src.inference.feature_preparer import FeaturePreparer
+from src.inference.prediction_pipeline import PredictionPipeline as InferencePredictionPipeline
+from src.inference.report_generator import ReportGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -55,12 +64,26 @@ class ArticleAnalyzer:
     graph_analyzer: GraphAnalyzer
     profile_builder: BiasProfileBuilder
     score_calculator: TruthLensScoreCalculator
+    narrative_graph_builder: Optional[NarrativeGraphBuilder] = None
+    graph_pipeline: Optional[GraphPipeline] = None
+    analysis_runner: AnalysisIntegrationRunner | None = None
+    inference_prediction_pipeline: InferencePredictionPipeline | None = None
+    inference_feature_preparer: FeaturePreparer | None = None
+    report_generator: ReportGenerator | None = None
 
     def __post_init__(self) -> None:
         """
         Initialize the feature pipeline.
         """
         self.feature_pipeline.initialize()
+        if self.narrative_graph_builder is None:
+            self.narrative_graph_builder = NarrativeGraphBuilder()
+        if self.graph_pipeline is None:
+            self.graph_pipeline = GraphPipeline()
+        if self.analysis_runner is None:
+            self.analysis_runner = AnalysisIntegrationRunner()
+        if self.report_generator is None:
+            self.report_generator = ReportGenerator()
         logger.info("ArticleAnalyzer initialized")
 
     def _extract_feature_sections(
@@ -116,12 +139,57 @@ class ArticleAnalyzer:
             )
 
             graph_metrics = self.graph_analyzer.analyze(entity_graph)
+            narrative_graph = (
+                self.narrative_graph_builder.build_graph(text)
+                if self.narrative_graph_builder is not None
+                else {}
+            )
+            narrative_graph_features = (
+                self.narrative_graph_builder.extract_graph_features(narrative_graph).to_dict()
+                if self.narrative_graph_builder is not None
+                else {}
+            )
+            narrative_graph_metrics = (
+                self.graph_analyzer.analyze(narrative_graph).to_dict()
+                if narrative_graph
+                else {}
+            )
+            graph_pipeline_output = (
+                self.graph_pipeline.run(text)
+                if self.graph_pipeline is not None
+                else {}
+            )
+            analysis_modules = (
+                self.analysis_runner.analyze_text(text)
+                if self.analysis_runner is not None
+                else {}
+            )
 
         except Exception as exc:  # noqa: BLE001
             logger.exception("Article analysis pipeline failed")
             raise RuntimeError("Article analysis failed") from exc
 
-        graph_section = {**graph_features.to_dict(), **graph_metrics.to_dict()}
+        graph_section = {
+            **graph_features.to_dict(),
+            **graph_metrics.to_dict(),
+            **narrative_graph_features,
+            **narrative_graph_metrics,
+            **(
+                graph_pipeline_output.get("graph_features", {})
+                if isinstance(graph_pipeline_output, dict)
+                else {}
+            ),
+            **(
+                graph_pipeline_output.get("entity_graph_metrics", {})
+                if isinstance(graph_pipeline_output, dict)
+                else {}
+            ),
+            **(
+                graph_pipeline_output.get("narrative_graph_metrics", {})
+                if isinstance(graph_pipeline_output, dict)
+                else {}
+            ),
+        }
 
         profile = self.profile_builder.build_profile(
             bias_features=feature_sections["bias"],
@@ -135,14 +203,69 @@ class ArticleAnalyzer:
 
         scores = self.score_calculator.compute_scores(profile)
 
+        prediction_output: Dict[str, Any] = {}
+        if (
+            self.inference_prediction_pipeline is not None
+            and self.inference_feature_preparer is not None
+        ):
+            try:
+                prepared = self.inference_feature_preparer.prepare_single(
+                    {"text": text, **fused_features}
+                )
+                if isinstance(prepared, np.ndarray):
+                    prepared_tensor = torch.tensor(prepared, dtype=torch.float32)
+                else:
+                    prepared_tensor = prepared
+                prediction_output = self.inference_prediction_pipeline.predict(
+                    prepared_tensor
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Inference prediction integration skipped: %s", exc)
+
+        inference_report: Dict[str, Any] = {}
+        if self.report_generator is not None:
+            try:
+                inference_report = self.report_generator.generate_report(
+                    article_text=text,
+                    bias_analysis={
+                        "features": feature_sections["bias"],
+                        "prediction": prediction_output.get("bias"),
+                    },
+                    emotion_analysis={
+                        "features": feature_sections["emotion"],
+                        "prediction": prediction_output.get("emotion"),
+                    },
+                    narrative_structure={
+                        "features": feature_sections["narrative"],
+                        "analysis_modules": analysis_modules.get("narrative_conflict", {}),
+                    },
+                    entity_graph={
+                        "entity_graph": entity_graph,
+                        "narrative_graph": narrative_graph,
+                        "graph_metrics": graph_section,
+                    },
+                    credibility_score=prediction_output.get(
+                        "credibility_score",
+                        scores.get("truthlens_credibility_score"),
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Report generation integration skipped: %s", exc)
+
         report: Dict[str, Any] = {
             "bias_features": feature_sections["bias"],
             "emotion_features": feature_sections["emotion"],
             "narrative_features": feature_sections["narrative"],
             "discourse_features": feature_sections["discourse"],
             "graph_features": graph_section,
+            "entity_graph": entity_graph,
+            "narrative_graph": narrative_graph,
+            "graph_pipeline": graph_pipeline_output,
+            "analysis_modules": analysis_modules,
             "profile": profile,
             "scores": scores,
+            "predictions": prediction_output,
+            "inference_report": inference_report,
         }
 
         logger.info("Article analysis completed")

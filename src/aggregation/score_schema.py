@@ -60,3 +60,4 @@ class TruthLensAggregationOutputSchema(TypedDict):
     raw_scores: TruthLensScoreSchema
     risks: TruthLensRiskSchema
     explanations: Dict[str, Any]
+    analysis_modules: Dict[str, Any]

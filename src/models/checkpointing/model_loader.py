@@ -35,6 +35,8 @@ import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 from src.models.registry.model_factory import ModelFactory
+from src.models.checkpointing.checkpoint_manager import CheckpointManager
+from src.models.checkpointing.artifact_manager import ArtifactManager
 
 logger = logging.getLogger(__name__)
 
@@ -91,10 +93,13 @@ class ModelLoader:
 
             logger.info("Model loaded successfully on device: %s", self.device)
 
+            metadata = self._load_metadata_optional()
+
             return {
                 "model": model,
                 "tokenizer": tokenizer,
                 "device": self.device,
+                "metadata": metadata,
             }
 
         except Exception as exc:
@@ -154,11 +159,36 @@ class ModelLoader:
             model = ModelFactory.create(model_type, model_params)
 
             if checkpoint_file.exists():
-                state_dict = torch.load(checkpoint_file, map_location=self.device, weights_only=True)
+                state_dict = torch.load(
+                    checkpoint_file,
+                    map_location=self.device,
+                    weights_only=True,
+                )
                 model.load_state_dict(state_dict)
+            else:
+                checkpoint_manager = CheckpointManager(self.model_dir / "checkpoint_bundle")
+                latest_checkpoint = checkpoint_manager.get_latest_checkpoint()
+                if latest_checkpoint is not None:
+                    checkpoint_data = checkpoint_manager.load_checkpoint(latest_checkpoint)
+                    model.load_state_dict(checkpoint_data["model_state_dict"])
 
             return model
 
         except Exception as exc:
             logger.exception("Failed to construct model from configuration")
             raise RuntimeError("Model construction failed") from exc
+
+    def _load_metadata_optional(self) -> Dict[str, Any]:
+        checkpoint_bundle_dir = self.model_dir / "checkpoint_bundle"
+
+        if not checkpoint_bundle_dir.exists():
+            return {}
+
+        try:
+            artifact_manager = ArtifactManager(checkpoint_bundle_dir)
+            return artifact_manager.load_metadata()
+        except FileNotFoundError:
+            return {}
+        except Exception:
+            logger.warning("Failed to load checkpoint metadata", exc_info=True)
+            return {}

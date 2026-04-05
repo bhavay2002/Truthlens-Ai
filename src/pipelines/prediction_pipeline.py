@@ -32,12 +32,15 @@ Outputs:
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import torch
 
 from src.features.pipelines.feature_pipeline import transform_feature_pipeline
+from src.graph.graph_features import GraphFeatureExtractor
+from src.graph.graph_pipeline import GraphPipeline
+from src.inference.inference_engine import InferenceEngine
 from src.utils.input_validation import (
     ensure_non_empty_text,
     ensure_non_empty_text_list,
@@ -59,7 +62,7 @@ class Predictor:
     Production inference class for TruthLens model predictions.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, inference_engine: Optional[InferenceEngine] = None) -> None:
         """
         Initialize prediction assets.
         """
@@ -67,13 +70,50 @@ class Predictor:
         self._model: Any | None = None
         self._tokenizer: Any | None = None
         self._vectorizer: Any | None = None
+        self._graph_extractor: GraphFeatureExtractor | None = None
+        self._graph_pipeline: GraphPipeline | None = None
+        self._inference_engine = inference_engine
 
         self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        try:
+            self._graph_extractor = GraphFeatureExtractor()
+            self._graph_pipeline = GraphPipeline()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Graph subsystem unavailable in Predictor: %s", exc)
+            self._graph_extractor = None
+            self._graph_pipeline = None
 
         logger.info(
             "Predictor initialized",
             extra={"device": str(self._device)},
         )
+
+    def set_inference_engine(self, engine: InferenceEngine) -> None:
+        """
+        Attach an InferenceEngine to reuse src.inference inference path.
+        """
+        self._inference_engine = engine
+
+    def _predict_with_inference_engine(self, text: str) -> Dict[str, Any]:
+        if self._inference_engine is None:
+            raise RuntimeError("InferenceEngine not configured")
+
+        result = self._inference_engine.predict_single(text)
+
+        probabilities: Dict[str, float] = {}
+        probs = result.probabilities or []
+        for idx, prob in enumerate(probs):
+            label = f"LABEL_{idx}"
+            probabilities[label] = float(prob)
+
+        confidence_value = max(probabilities.values()) if probabilities else 0.0
+
+        return {
+            "prediction": str(result.predicted_label),
+            "confidence": float(confidence_value),
+            "probabilities": probabilities,
+            "model_version": None,
+        }
 
     def _get_assets(self) -> Tuple[Any, Any, Any]:
         """
@@ -180,48 +220,56 @@ class Predictor:
 
         logger.info("Running prediction pipeline")
 
-        model, tokenizer, vectorizer = self._get_assets()
+        if self._inference_engine is not None:
+            inference_output = self._predict_with_inference_engine(text)
+            prediction = str(inference_output["prediction"])
+            confidence_value = float(inference_output["confidence"])
+            probabilities = dict(inference_output["probabilities"])
+            model_version = inference_output.get("model_version")
+        else:
+            model, tokenizer, vectorizer = self._get_assets()
 
-        model_text = self._prepare_model_text(text, vectorizer)
+            model_text = self._prepare_model_text(text, vectorizer)
 
-        try:
-            inputs = tokenizer(
-                model_text,
-                truncation=True,
-                padding="max_length",
-                max_length=MAX_LENGTH,
-                return_tensors="pt",
-            )
+            try:
+                inputs = tokenizer(
+                    model_text,
+                    truncation=True,
+                    padding="max_length",
+                    max_length=MAX_LENGTH,
+                    return_tensors="pt",
+                )
 
-            model_inputs = {
-                key: value.to(self._device) for key, value in inputs.items()
-            }
+                model_inputs = {
+                    key: value.to(self._device) for key, value in inputs.items()
+                }
 
-            with torch.no_grad():
-                outputs = model(**model_inputs)
+                with torch.no_grad():
+                    outputs = model(**model_inputs)
 
-                logits = outputs.logits
+                    logits = outputs.logits
 
-                probs = torch.softmax(logits, dim=1)
+                    probs = torch.softmax(logits, dim=1)
 
-                confidence, pred_class = torch.max(probs, dim=1)
+                    confidence, pred_class = torch.max(probs, dim=1)
 
-        except Exception as exc:
-            logger.exception("Model inference failed")
-            raise RuntimeError("Inference failed") from exc
+            except Exception as exc:
+                logger.exception("Model inference failed")
+                raise RuntimeError("Inference failed") from exc
 
-        id2label = self._resolve_id2label(model)
+            id2label = self._resolve_id2label(model)
 
-        prediction = self._label_for_index(int(pred_class.item()), id2label)
+            prediction = self._label_for_index(int(pred_class.item()), id2label)
 
-        confidence_value = float(confidence.item())
+            confidence_value = float(confidence.item())
 
-        probabilities: Dict[str, float] = {}
+            probabilities: Dict[str, float] = {}
 
-        for i in range(int(probs.shape[1])):
-            label = self._label_for_index(i, id2label)
+            for i in range(int(probs.shape[1])):
+                label = self._label_for_index(i, id2label)
 
-            probabilities[label] = float(probs[0][i].item())
+                probabilities[label] = float(probs[0][i].item())
+            model_version = getattr(model.config, "model_version", None)
 
         logger.info(
             "Prediction completed | class=%s | confidence=%.3f",
@@ -229,11 +277,29 @@ class Predictor:
             confidence_value,
         )
 
+        graph_features: Dict[str, float] = {}
+        graph_summary: Dict[str, Any] = {}
+        try:
+            if self._graph_extractor is not None:
+                graph_features = self._graph_extractor.extract_features(text)
+            if self._graph_pipeline is not None:
+                pipeline_output = self._graph_pipeline.run(text)
+                graph_summary = {
+                    "entity_graph_metrics": pipeline_output.get("entity_graph_metrics", {}),
+                    "narrative_graph_metrics": pipeline_output.get(
+                        "narrative_graph_metrics", {}
+                    ),
+                }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Graph enrichment skipped during prediction: %s", exc)
+
         return {
             "prediction": prediction,
             "confidence": confidence_value,
             "probabilities": probabilities,
-            "model_version": getattr(model.config, "model_version", None),
+            "model_version": model_version,
+            "graph_features": graph_features,
+            "graph_summary": graph_summary,
         }
 
     def predict_batch(self, texts: List[str]) -> List[Dict[str, Any]]:
@@ -265,6 +331,8 @@ _model: Any | None = None
 _tokenizer: Any | None = None
 _vectorizer: Any | None = None
 _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+_graph_feature_extractor: GraphFeatureExtractor | None = None
+_graph_pipeline: GraphPipeline | None = None
 
 
 def _get_assets() -> Tuple[Any, Any, Any]:
@@ -284,6 +352,16 @@ def _get_assets() -> Tuple[Any, Any, Any]:
 
         _model.to(_device)
         _model.eval()
+
+    global _graph_feature_extractor, _graph_pipeline
+    if _graph_feature_extractor is None or _graph_pipeline is None:
+        try:
+            _graph_feature_extractor = GraphFeatureExtractor()
+            _graph_pipeline = GraphPipeline()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Graph subsystem unavailable for module prediction: %s", exc)
+            _graph_feature_extractor = None
+            _graph_pipeline = None
 
     return _model, _tokenizer, _vectorizer
 
@@ -363,10 +441,26 @@ def predict_text(text: str) -> Dict[str, Any]:
         label = _label_for_index(i, id2label)
         probabilities[label] = float(probs[0][i].item())
 
+    graph_features: Dict[str, float] = {}
+    graph_summary: Dict[str, Any] = {}
+    try:
+        if _graph_feature_extractor is not None:
+            graph_features = _graph_feature_extractor.extract_features(text)
+        if _graph_pipeline is not None:
+            pipeline_output = _graph_pipeline.run(text)
+            graph_summary = {
+                "entity_graph_metrics": pipeline_output.get("entity_graph_metrics", {}),
+                "narrative_graph_metrics": pipeline_output.get("narrative_graph_metrics", {}),
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Graph enrichment skipped during module prediction: %s", exc)
+
     return {
         "prediction": prediction,
         "confidence": confidence_value,
         "probabilities": probabilities,
+        "graph_features": graph_features,
+        "graph_summary": graph_summary,
     }
 
 

@@ -139,6 +139,48 @@ class ReportGenerator:
 
         return report
 
+    def generate_from_inference_outputs(
+        self,
+        *,
+        article_text: str,
+        prediction: Optional[Dict[str, Any]] = None,
+        analysis: Optional[Dict[str, Any]] = None,
+        title: Optional[str] = None,
+        source: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Integrate report generation directly from src.inference outputs.
+        """
+
+        prediction = prediction or {}
+        analysis = analysis or {}
+
+        return self.generate_report(
+            article_text=article_text,
+            title=title,
+            source=source,
+            bias_analysis={
+                "features": analysis.get("bias_features", {}),
+                "prediction": prediction.get("bias"),
+            },
+            emotion_analysis={
+                "features": analysis.get("emotion_features", {}),
+                "prediction": prediction.get("emotion"),
+            },
+            narrative_structure={
+                "features": analysis.get("narrative_features", {}),
+                "analysis_modules": analysis.get("analysis_modules", {}),
+            },
+            entity_graph={
+                "graph_features": analysis.get("graph_features", {}),
+                "graph_pipeline": analysis.get("graph_pipeline", {}),
+            },
+            credibility_score=prediction.get(
+                "credibility_score",
+                analysis.get("scores", {}).get("truthlens_credibility_score"),
+            ),
+        )
+
     def to_json(self, report: Dict[str, Any]) -> str:
         """
         Convert report to JSON string.

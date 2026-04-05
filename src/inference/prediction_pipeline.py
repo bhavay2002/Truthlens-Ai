@@ -22,6 +22,7 @@ import numpy as np
 import torch
 
 from src.features.emotion.emotion_schema import EMOTION_LABELS
+from src.inference.feature_preparer import FeaturePreparer
 
 logger = logging.getLogger(__name__)
 
@@ -318,3 +319,22 @@ class PredictionPipeline:
         logger.debug("Prediction result: %s", result)
 
         return result
+
+    def predict_from_feature_dict(
+        self,
+        feature_dict: Dict[str, Any],
+        *,
+        feature_preparer: FeaturePreparer,
+    ) -> Dict[str, Any]:
+        """
+        Integrate FeaturePreparer path directly into prediction pipeline.
+        """
+
+        prepared = feature_preparer.prepare_single(feature_dict)
+
+        if isinstance(prepared, torch.Tensor):
+            tensor = prepared
+        else:
+            tensor = torch.tensor(prepared, dtype=torch.float32)
+
+        return self.predict(tensor)

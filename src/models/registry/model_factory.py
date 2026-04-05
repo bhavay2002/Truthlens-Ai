@@ -38,6 +38,7 @@ Outputs:
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Dict, Any
 
 import torch.nn as nn
@@ -129,3 +130,21 @@ class ModelFactory:
             return MultiTaskTruthLensModel(cfg)
 
         raise RuntimeError("Model creation failed unexpectedly")
+
+    @staticmethod
+    def create_from_checkpoint(
+        model_dir: str | Path,
+        device: str | None = None,
+    ) -> nn.Module:
+        """
+        Construct model from checkpoint bundle/configured artifacts.
+        """
+        from ..checkpointing.model_loader import ModelLoader
+
+        loaded = ModelLoader(model_dir=model_dir, device=device).load()
+        model = loaded.get("model")
+
+        if not isinstance(model, nn.Module):
+            raise RuntimeError("Loaded checkpoint did not provide a valid torch model")
+
+        return model

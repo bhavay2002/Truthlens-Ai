@@ -52,6 +52,7 @@ from typing import Any, Tuple
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn as nn
 from datasets import Dataset
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score
 from sklearn.model_selection import train_test_split
@@ -66,6 +67,16 @@ from transformers.trainer_utils import get_last_checkpoint as hf_get_last_checkp
 
 from src.utils.input_validation import ensure_dataframe, ensure_non_empty_text_column
 from src.utils.settings import load_settings
+from src.models.export import (
+    ONNXExportConfig,
+    ONNXExporter,
+    QuantizationConfig,
+    QuantizationEngine,
+    TorchScriptExportConfig,
+    TorchScriptExporter,
+)
+from src.models.checkpointing.artifact_manager import ArtifactManager
+from src.models.checkpointing.checkpoint_manager import CheckpointManager
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +98,32 @@ MODELS_DIR = Path(SETTINGS.paths.models_dir)
 LOGS_DIR = Path(SETTINGS.paths.logs_dir)
 MODEL_PATH = Path(SETTINGS.model.path)
 TEST_SET_PATH = Path(SETTINGS.data.test_set_path)
+
+
+class _HFExportWrapper(nn.Module):
+    """
+    Adapter to expose HuggingFace classification model with tensor-only forward.
+    """
+
+    def __init__(self, model: nn.Module) -> None:
+        super().__init__()
+        self.model = model
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        outputs = self.model(input_ids=input_ids)
+        logits = getattr(outputs, "logits", None)
+        if logits is None:
+            raise RuntimeError("Expected HuggingFace model output to include logits.")
+        return logits
+
+
+def _quant_backend() -> str:
+    supported = list(torch.backends.quantized.supported_engines)
+    if "fbgemm" in supported:
+        return "fbgemm"
+    if "qnnpack" in supported:
+        return "qnnpack"
+    return supported[0] if supported else "qnnpack"
 
 
 def compute_metrics(eval_pred: Tuple[np.ndarray, np.ndarray]) -> dict:
@@ -340,6 +377,51 @@ def train_model(
         trainer.save_model(str(MODEL_PATH))
         tokenizer.save_pretrained(str(MODEL_PATH))
 
+        export_formats = params.get("export_formats", [])
+        if isinstance(export_formats, str):
+            export_formats = [export_formats]
+
+        if export_formats:
+            _export_trained_artifacts(
+                model=trainer.model,
+                train_dataset=train_dataset,
+                export_formats=[str(x) for x in export_formats],
+                export_root=MODEL_PATH / "exports",
+            )
+
+        example_input = _build_export_example_input(train_dataset)
+        checkpoint_bundle_dir = MODEL_PATH / "checkpoint_bundle"
+        checkpoint_manager = CheckpointManager(checkpoint_bundle_dir)
+        artifact_manager = ArtifactManager(checkpoint_bundle_dir)
+
+        checkpoint_metadata = {
+            "model_name": MODEL_NAME,
+            "num_labels": int(num_labels),
+            "export_formats": export_formats,
+            "epoch": epochs,
+        }
+
+        checkpoint_manager.save_checkpoint(
+            step=int(getattr(trainer.state, "global_step", 0)),
+            model_state_dict=trainer.model.state_dict(),
+            metadata=checkpoint_metadata,
+        )
+        artifact_manager.save_metadata(checkpoint_metadata)
+
+        wrapped_export_model = _HFExportWrapper(trainer.model).cpu().eval()
+        if "torchscript" in {fmt.strip().lower() for fmt in export_formats} and example_input is not None:
+            artifact_manager.export_torchscript(
+                model=wrapped_export_model,
+                example_input=example_input.detach().cpu(),
+            )
+        if "onnx" in {fmt.strip().lower() for fmt in export_formats} and example_input is not None:
+            artifact_manager.export_onnx(
+                model=wrapped_export_model,
+                example_input=example_input.detach().cpu(),
+            )
+        if "quantized" in {fmt.strip().lower() for fmt in export_formats}:
+            artifact_manager.export_quantized_model(model=wrapped_export_model)
+
         resolved_test_df.to_csv(TEST_SET_PATH, index=False)
 
         logger.info("Training completed successfully")
@@ -349,3 +431,74 @@ def train_model(
     except Exception:
         logger.exception("Training pipeline failed")
         raise
+
+
+def _build_export_example_input(train_dataset: Dataset) -> torch.Tensor | None:
+    try:
+        sample = train_dataset[0]
+        input_ids = sample.get("input_ids")
+        if isinstance(input_ids, torch.Tensor):
+            return input_ids.unsqueeze(0)
+        if isinstance(input_ids, list):
+            return torch.tensor([input_ids], dtype=torch.long)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to build export example input: %s", exc)
+    return None
+
+
+def _export_trained_artifacts(
+    *,
+    model: nn.Module,
+    train_dataset: Dataset,
+    export_formats: list[str],
+    export_root: Path,
+) -> None:
+    export_root.mkdir(parents=True, exist_ok=True)
+    wrapped_model = _HFExportWrapper(model).cpu().eval()
+    example_input = _build_export_example_input(train_dataset)
+
+    if example_input is None:
+        logger.warning("Skipping model exports: no example input available.")
+        return
+
+    requested = {fmt.strip().lower() for fmt in export_formats}
+
+    if "torchscript" in requested:
+        try:
+            TorchScriptExporter(
+                TorchScriptExportConfig(device="cpu", verify_export=False)
+            ).export(
+                model=wrapped_model,
+                example_input=example_input.detach().cpu(),
+                output_path=export_root / "model.ts.pt",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("TorchScript export skipped due to error: %s", exc)
+
+    if "onnx" in requested:
+        try:
+            ONNXExporter(
+                ONNXExportConfig(device="cpu", verify_export=False)
+            ).export(
+                model=wrapped_model,
+                example_input=example_input.detach().cpu(),
+                output_path=export_root / "model.onnx",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ONNX export skipped due to error: %s", exc)
+
+    if "quantized" in requested:
+        try:
+            quantized_model = QuantizationEngine(
+                QuantizationConfig(
+                    method="dynamic",
+                    device="cpu",
+                    backend=_quant_backend(),
+                )
+            ).apply(wrapped_model)
+            torch.save(
+                quantized_model.state_dict(),
+                export_root / "model.quantized.pt",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Quantized export skipped due to error: %s", exc)

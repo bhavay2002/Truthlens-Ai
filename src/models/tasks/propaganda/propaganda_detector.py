@@ -40,6 +40,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ...base.base_model import BaseModel
 from ...encoder.transformer_encoder import TransformerEncoder
 from ...heads.classification_head import (
     ClassificationHead,
@@ -70,7 +71,7 @@ class PropagandaDetectorConfig:
 # Propaganda Detector
 # ---------------------------------------------------------
 
-class PropagandaDetector(nn.Module):
+class PropagandaDetector(BaseModel):
     """
     Transformer-based propaganda detection model.
 

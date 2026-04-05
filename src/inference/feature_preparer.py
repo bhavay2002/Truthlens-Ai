@@ -47,6 +47,7 @@ from typing import Dict, List, Optional, Any
 
 import numpy as np
 import torch
+from src.graph.graph_pipeline import GraphPipeline
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,7 @@ class FeaturePreparationConfig:
     apply_feature_selection: bool = True
     return_tensor: bool = True
     dtype: str = "float32"
+    derive_graph_features: bool = True
 
 
 class FeaturePreparer:
@@ -86,11 +88,18 @@ class FeaturePreparer:
         self.scaler = scaler
         self.selector = selector
         self.device = device
+        self.graph_pipeline: GraphPipeline | None = None
 
         if not config.feature_schema:
             raise ValueError("Feature schema cannot be empty")
 
         self.feature_index = {name: idx for idx, name in enumerate(config.feature_schema)}
+        if self.config.derive_graph_features:
+            try:
+                self.graph_pipeline = GraphPipeline()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("GraphPipeline unavailable in FeaturePreparer: %s", exc)
+                self.graph_pipeline = None
 
         logger.info(
             "FeaturePreparer initialized with %d features",
@@ -110,6 +119,57 @@ class FeaturePreparer:
 
             if not isinstance(value, (int, float)):
                 raise TypeError(f"Feature value must be numeric: {key}")
+
+    def _flatten_numeric(self, prefix: str, value: Any, output: Dict[str, float]) -> None:
+        if isinstance(value, (int, float)):
+            output[prefix] = float(value)
+            return
+
+        if isinstance(value, (list, tuple, set)):
+            output[f"{prefix}_count"] = float(len(value))
+            return
+
+        if isinstance(value, dict):
+            for sub_key, sub_value in value.items():
+                clean_key = str(sub_key).strip().replace(" ", "_")
+                next_prefix = f"{prefix}_{clean_key}" if prefix else clean_key
+                self._flatten_numeric(next_prefix, sub_value, output)
+
+    def _prepare_flat_features(self, features: Dict[str, Any]) -> Dict[str, float]:
+        flat: Dict[str, float] = {}
+
+        for key, value in features.items():
+            if key == "text":
+                continue
+            self._flatten_numeric(str(key), value, flat)
+
+        if self.graph_pipeline is not None:
+            text = features.get("text")
+            if isinstance(text, str) and text.strip():
+                try:
+                    graph_output = self.graph_pipeline.run(text)
+
+                    graph_features = graph_output.get("graph_features", {})
+                    if isinstance(graph_features, dict):
+                        for k, v in graph_features.items():
+                            if isinstance(v, (int, float)):
+                                flat.setdefault(str(k), float(v))
+
+                    entity_metrics = graph_output.get("entity_graph_metrics", {})
+                    if isinstance(entity_metrics, dict):
+                        for k, v in entity_metrics.items():
+                            if isinstance(v, (int, float)):
+                                flat.setdefault(f"graph_pipeline_{k}", float(v))
+
+                    narrative_metrics = graph_output.get("narrative_graph_metrics", {})
+                    if isinstance(narrative_metrics, dict):
+                        for k, v in narrative_metrics.items():
+                            if isinstance(v, (int, float)):
+                                flat.setdefault(f"graph_pipeline_{k}", float(v))
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Graph feature derivation skipped: %s", exc)
+
+        return flat
 
     def _dict_to_vector(self, features: Dict[str, float]) -> np.ndarray:
         """
@@ -155,13 +215,14 @@ class FeaturePreparer:
             logger.exception("Feature selection failed")
             raise RuntimeError("Feature selection transformation failed") from exc
 
-    def prepare_single(self, features: Dict[str, float]) -> np.ndarray | torch.Tensor:
+    def prepare_single(self, features: Dict[str, Any]) -> np.ndarray | torch.Tensor:
         """
         Prepare a single feature dictionary.
         """
-        self._validate_feature_dict(features)
+        flat_features = self._prepare_flat_features(features)
+        self._validate_feature_dict(flat_features)
 
-        vector = self._dict_to_vector(features)
+        vector = self._dict_to_vector(flat_features)
         matrix = vector.reshape(1, -1)
 
         matrix = self._apply_scaling(matrix)
@@ -179,7 +240,7 @@ class FeaturePreparer:
 
     def prepare_batch(
         self,
-        feature_dicts: List[Dict[str, float]],
+        feature_dicts: List[Dict[str, Any]],
     ) -> np.ndarray | torch.Tensor:
         """
         Prepare batch feature dictionaries.
@@ -193,8 +254,9 @@ class FeaturePreparer:
         vectors: List[np.ndarray] = []
 
         for features in feature_dicts:
-            self._validate_feature_dict(features)
-            vec = self._dict_to_vector(features)
+            flat_features = self._prepare_flat_features(features)
+            self._validate_feature_dict(flat_features)
+            vec = self._dict_to_vector(flat_features)
             vectors.append(vec)
 
         matrix = np.vstack(vectors)

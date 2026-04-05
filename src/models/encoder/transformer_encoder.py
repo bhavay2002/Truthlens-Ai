@@ -35,6 +35,7 @@ import torch
 import torch.nn as nn
 from transformers import AutoConfig, AutoModel
 
+from ..base.base_model import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,7 @@ class EncoderOutput:
     pooled_output: torch.Tensor
 
 
-class TransformerEncoder(nn.Module):
+class TransformerEncoder(BaseModel):
     """
     Generic transformer encoder wrapper for NLP models.
 
@@ -92,7 +93,7 @@ class TransformerEncoder(nn.Module):
         self.model_name = model_name
         self.pooling = pooling
 
-        self.device = torch.device(
+        target_device = torch.device(
             device if device else ("cuda" if torch.cuda.is_available() else "cpu")
         )
 
@@ -110,7 +111,7 @@ class TransformerEncoder(nn.Module):
         if freeze_encoder:
             self.freeze()
 
-        self.to(self.device)
+        self.set_device(target_device)
 
         logger.info(
             "TransformerEncoder initialized | model=%s | pooling=%s | hidden=%d",

@@ -38,6 +38,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ...base.base_model import BaseModel
 from ...encoder.transformer_encoder import TransformerEncoder
 from ...heads.classification_head import (
     ClassificationHead,
@@ -60,7 +61,7 @@ class BiasClassifierConfig:
     device: Optional[str] = None
 
 
-class BiasClassifier(nn.Module):
+class BiasClassifier(BaseModel):
     """
     Binary bias classifier.
 

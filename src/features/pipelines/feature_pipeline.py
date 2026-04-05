@@ -39,9 +39,11 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import FeatureRegistry
+from src.features.feature_bootstrap import bootstrap_feature_registry
 from src.features.fusion.feature_fusion import FeatureFusion
 from src.features.fusion.feature_scaling import FeatureScalingPipeline
 from src.features.fusion.feature_selection import FeatureSelectionPipeline
+from src.graph.graph_pipeline import GraphPipeline
 
 logger = logging.getLogger(__name__)
 
@@ -65,11 +67,13 @@ class FeaturePipeline:
 
     features: List[BaseFeature] = field(default_factory=list)
     fusion: Optional[FeatureFusion] = None
+    graph_pipeline: GraphPipeline | None = field(default=None, init=False, repr=False)
 
     def initialize(self) -> None:
         """
         Initialize feature extractors using FeatureRegistry.
         """
+        bootstrap_feature_registry()
 
         if self.feature_names is None:
             self.feature_names = FeatureRegistry.list_features()
@@ -79,6 +83,11 @@ class FeaturePipeline:
         ]
 
         self.fusion = FeatureFusion(self.features)
+        try:
+            self.graph_pipeline = GraphPipeline()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("GraphPipeline unavailable in FeaturePipeline: %s", exc)
+            self.graph_pipeline = None
 
         logger.info(
             "FeaturePipeline initialized | feature_count=%d",
@@ -94,6 +103,26 @@ class FeaturePipeline:
             raise RuntimeError("FeaturePipeline must be initialized before extraction")
 
         features = self.fusion.extract(context)
+
+        if self.graph_pipeline is not None:
+            try:
+                graph_output = self.graph_pipeline.run(context.text)
+                context.cache["graph_pipeline_output"] = graph_output
+
+                graph_features = graph_output.get("graph_features", {})
+                if isinstance(graph_features, dict):
+                    for key, value in graph_features.items():
+                        if isinstance(value, (int, float)):
+                            features.setdefault(key, float(value))
+
+                for section_name in ("entity_graph_metrics", "narrative_graph_metrics"):
+                    section = graph_output.get(section_name, {})
+                    if isinstance(section, dict):
+                        for key, value in section.items():
+                            if isinstance(value, (int, float)):
+                                features.setdefault(f"graph_pipeline_{key}", float(value))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("GraphPipeline feature merge skipped: %s", exc)
 
         logger.debug("Feature extraction completed | feature_count=%d", len(features))
 

@@ -32,6 +32,7 @@ from src.graph.entity_graph import EntityGraphBuilder
 from src.graph.narrative_graph_builder import NarrativeGraphBuilder
 from src.graph.graph_analysis import GraphAnalyzer
 from src.graph.graph_features import GraphFeatureExtractor
+from src.analysis.integration_runner import AnalysisIntegrationRunner
 
 
 logger = logging.getLogger(__name__)
@@ -83,6 +84,7 @@ class GraphPipeline:
 
         self.graph_analyzer = GraphAnalyzer()
         self.graph_feature_extractor = GraphFeatureExtractor()
+        self.analysis_runner = AnalysisIntegrationRunner()
 
         logger.info("GraphPipeline initialized")
 
@@ -137,6 +139,7 @@ class GraphPipeline:
         features = self.graph_feature_extractor.extract_features(text)
 
         results["graph_features"] = features
+        results["analysis_modules"] = self.analysis_runner.analyze_text(text)
 
         # -------------------------------------------
         # Feature Vector

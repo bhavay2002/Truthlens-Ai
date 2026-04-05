@@ -57,6 +57,8 @@ from src.inference.prediction_pipeline import (
 )
 from src.inference.report_generator import ReportGenerator
 from src.inference.result_formatter import ResultFormatter
+from src.analysis.integration_runner import AnalysisIntegrationRunner
+from src.graph.graph_pipeline import GraphPipeline
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +123,8 @@ class BatchInferenceEngine:
 
         self.report_generator = ReportGenerator()
         self.formatter = ResultFormatter()
+        self.analysis_runner = AnalysisIntegrationRunner()
+        self.graph_pipeline = GraphPipeline()
 
         logger.info("BatchInferenceEngine initialized")
 
@@ -162,6 +166,8 @@ class BatchInferenceEngine:
         prepared_features = self.feature_preparer.prepare_single(features_dict)
 
         prediction = self.prediction_pipeline.predict(prepared_features)
+        analysis_modules = self.analysis_runner.analyze_text(text)
+        graph_outputs = self.graph_pipeline.run(text)
 
         report = self.report_generator.generate_report(
             article_text=text,
@@ -169,8 +175,8 @@ class BatchInferenceEngine:
             source=metadata.get("source") if metadata else None,
             bias_analysis={"bias": prediction.get("bias")},
             emotion_analysis={"emotion": prediction.get("emotion")},
-            narrative_structure={},
-            entity_graph={},
+            narrative_structure=analysis_modules.get("narrative_propagation", {}),
+            entity_graph=graph_outputs,
             credibility_score=prediction.get("credibility_score"),
         )
 
@@ -179,6 +185,7 @@ class BatchInferenceEngine:
         result = {
             "prediction": api_output,
             "report": report,
+            "analysis_modules": analysis_modules,
         }
 
         return result

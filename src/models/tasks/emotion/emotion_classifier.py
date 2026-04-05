@@ -40,6 +40,7 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
+from ...base.base_model import BaseModel
 from ...encoder.transformer_encoder import TransformerEncoder
 from ...heads.multilabel_head import MultiLabelHead, MultiLabelHeadConfig
 from src.features.emotion.emotion_schema import EMOTION_LABELS
@@ -68,7 +69,7 @@ class EmotionClassifierConfig:
 # Emotion Classifier
 # ------------------------------------------------------------
 
-class EmotionClassifier(nn.Module):
+class EmotionClassifier(BaseModel):
     """
     Multi-label emotion classifier.
 

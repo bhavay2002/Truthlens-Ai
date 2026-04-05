@@ -42,6 +42,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ...base.base_model import BaseModel
 from ...encoder.transformer_encoder import TransformerEncoder
 from ...heads.classification_head import (
     ClassificationHead,
@@ -72,7 +73,7 @@ class IdeologyClassifierConfig:
 # Ideology Classifier
 # ---------------------------------------------------------
 
-class IdeologyClassifier(nn.Module):
+class IdeologyClassifier(BaseModel):
     """
     Transformer-based ideology classification model.
 

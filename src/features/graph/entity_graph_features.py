@@ -34,31 +34,15 @@ from __future__ import annotations
 
 import logging
 import re
-import itertools
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
+from src.graph.entity_graph import EntityGraphBuilder
+from src.graph.graph_analysis import GraphAnalyzer
 
 logger = logging.getLogger(__name__)
-
-try:
-    import networkx as nx
-    NETWORKX_AVAILABLE = True
-except Exception:
-    NETWORKX_AVAILABLE = False
-    logger.warning("networkx not available. Graph metrics will be approximated.")
-
-try:
-    import spacy
-    _NLP = spacy.load("en_core_web_sm")
-    SPACY_AVAILABLE = True
-except Exception:
-    _NLP = None
-    SPACY_AVAILABLE = False
-    logger.warning("spaCy not available. Using heuristic entity detection.")
-
 
 def _sentence_split(text: str) -> List[str]:
     """Basic sentence splitter."""
@@ -74,10 +58,7 @@ def _heuristic_entities(sentence: str) -> List[str]:
 
 
 def _extract_entities(sentence: str) -> List[str]:
-    """Extract named entities using spaCy if available."""
-    if SPACY_AVAILABLE:
-        doc = _NLP(sentence)
-        return list({ent.text for ent in doc.ents})
+    """Fallback entity extraction."""
     return _heuristic_entities(sentence)
 
 
@@ -98,61 +79,74 @@ class EntityGraphFeatures(BaseFeature):
 
     name: str = "entity_graph_features"
     description: str = "Entity interaction graph statistics"
+    _builder: EntityGraphBuilder | None = field(default=None, init=False, repr=False)
+    _analyzer: GraphAnalyzer | None = field(default=None, init=False, repr=False)
+
+    def initialize(self) -> None:
+        if self._builder is not None and self._analyzer is not None:
+            return
+        try:
+            self._builder = EntityGraphBuilder()
+            self._analyzer = GraphAnalyzer()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "EntityGraphFeatures using heuristic fallback due to graph init failure: %s",
+                exc,
+            )
+            self._builder = None
+            self._analyzer = None
 
     def extract(self, context: FeatureContext) -> Dict[str, float]:
 
         if not context.text:
             raise ValueError("FeatureContext.text cannot be empty")
 
+        if self._builder is not None and self._analyzer is not None:
+            graph = self._builder.build_graph(context.text)
+            entity_metrics = self._builder.extract_graph_features(graph).to_dict()
+            graph_metrics = self._analyzer.analyze(graph).to_dict()
+
+            features: Dict[str, float] = {
+                "entity_count": float(entity_metrics.get("entity_graph_nodes", 0.0)),
+                "entity_edge_count": float(entity_metrics.get("entity_graph_edges", 0.0)),
+                "entity_avg_degree": float(entity_metrics.get("entity_graph_avg_degree", 0.0)),
+                "entity_density": float(entity_metrics.get("entity_graph_density", 0.0)),
+                "entity_centralization": float(
+                    graph_metrics.get("graph_centralization", 0.0)
+                ),
+            }
+
+            for key, value in entity_metrics.items():
+                features[f"entity_native_{key}"] = float(value)
+
+            for key, value in graph_metrics.items():
+                features[f"entity_native_{key}"] = float(value)
+
+            return features
+
+        # Fallback when graph subsystem is unavailable.
         sentences = _sentence_split(context.text)
-
-        entity_pairs = []
-
         entities = set()
+        edge_count = 0
 
         for sent in sentences:
             sent_entities = _extract_entities(sent)
-
             entities.update(sent_entities)
-
-            for pair in itertools.combinations(sent_entities, 2):
-                entity_pairs.append(pair)
+            n = len(sent_entities)
+            if n > 1:
+                edge_count += (n * (n - 1)) // 2
 
         entity_count = len(entities)
-        edge_count = len(entity_pairs)
+        density = 0.0
+        if entity_count > 1:
+            density = edge_count / (entity_count * (entity_count - 1))
 
-        if not NETWORKX_AVAILABLE or entity_count == 0:
-            return {
-                "entity_count": float(entity_count),
-                "entity_edge_count": float(edge_count),
-                "entity_avg_degree": 0.0,
-                "entity_density": 0.0,
-                "entity_centralization": 0.0,
-            }
-
-        G = nx.Graph()
-
-        for e in entities:
-            G.add_node(e)
-
-        for u, v in entity_pairs:
-            G.add_edge(u, v)
-
-        degrees = [deg for _, deg in G.degree()]
-
-        avg_degree = sum(degrees) / len(degrees) if degrees else 0.0
-
-        density = nx.density(G)
-
-        max_deg = max(degrees) if degrees else 0
-        centralization = max_deg / max(len(entities) - 1, 1)
-
-        features: Dict[str, float] = {
+        features = {
             "entity_count": float(entity_count),
             "entity_edge_count": float(edge_count),
-            "entity_avg_degree": float(avg_degree),
+            "entity_avg_degree": float(edge_count / max(entity_count, 1)),
             "entity_density": float(density),
-            "entity_centralization": float(centralization),
+            "entity_centralization": 0.0,
         }
 
         logger.debug(
