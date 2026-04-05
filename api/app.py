@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, List, Optional
+
+import torch
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, ConfigDict
@@ -43,6 +45,32 @@ from src.inference.inference_engine import (
     InferenceEngine,
     InferenceConfig as EngineConfig,
 )
+
+# ── src.models.calibration integration ────────────────────────────────────────
+from src.models.calibration.calibration_metrics import (
+    CalibrationMetrics,
+    CalibrationMetricConfig,
+)
+from src.models.calibration.temperature_scaling import (
+    TemperatureScaler,
+    TemperatureScalingConfig,
+)
+from src.models.calibration.isotonic_calibration import (
+    IsotonicCalibrator,
+    IsotonicCalibrationConfig,
+)
+
+# ── src.models.ensemble integration ───────────────────────────────────────────
+from src.models.ensemble.ensemble_model import EnsembleConfig
+from src.models.ensemble.weighted_ensemble import WeightedEnsembleConfig
+
+# ── src.models.export integration ─────────────────────────────────────────────
+from src.models.export.onnx_export import ONNXExporter, ONNXExportConfig
+from src.models.export.torchscript_export import (
+    TorchScriptExporter,
+    TorchScriptExportConfig,
+)
+from src.models.export.quantization import QuantizationEngine, QuantizationConfig
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -130,6 +158,35 @@ def _get_inference_engine() -> Optional[InferenceEngine]:
     return _INFERENCE_ENGINE
 
 
+# ── src.models.calibration singletons ─────────────────────────────────────────
+CALIBRATION_METRICS = CalibrationMetrics()
+
+# TemperatureScaler and IsotonicCalibrator require validation data to fit, so
+# they are exposed only through info/metrics endpoints rather than as eager
+# singletons that would call .fit() at startup.
+
+# ── src.models.export singletons ──────────────────────────────────────────────
+ONNX_EXPORTER = ONNXExporter(ONNXExportConfig(verify_export=False))
+TORCHSCRIPT_EXPORTER = TorchScriptExporter(TorchScriptExportConfig(verify_export=False))
+
+# QuantizationEngine raises ValueError if the requested backend is not
+# available (e.g. 'fbgemm' on some ARM builds), so it is initialised lazily.
+_QUANTIZATION_ENGINE: Optional[QuantizationEngine] = None
+
+
+def _get_quantization_engine(method: str = "dynamic") -> Optional[QuantizationEngine]:
+    """Return a QuantizationEngine for the given method, or None if unavailable."""
+    global _QUANTIZATION_ENGINE
+    if _QUANTIZATION_ENGINE is None:
+        try:
+            _QUANTIZATION_ENGINE = QuantizationEngine(
+                QuantizationConfig(method=method, backend="fbgemm")
+            )
+        except (ValueError, RuntimeError) as exc:
+            logger.warning("QuantizationEngine not available: %s", exc)
+    return _QUANTIZATION_ENGINE
+
+
 app = FastAPI(
     title=APP_TITLE,
     description=APP_DESCRIPTION,
@@ -215,6 +272,101 @@ class ModelInfoResponse(BaseModel):
     num_parameters: Optional[int]
     num_trainable_parameters: Optional[int]
     label_map: Optional[dict[str, Any]]
+
+
+# ── Calibration models ─────────────────────────────────────────────────────────
+
+class CalibrationMetricsRequest(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "probabilities": [[0.8, 0.2], [0.3, 0.7], [0.6, 0.4]],
+                "labels": [0, 1, 0],
+                "n_bins": 15,
+            }
+        }
+    )
+    probabilities: List[List[float]] = Field(
+        ...,
+        description="Per-sample probability distributions [[p_real, p_fake], ...] for each article",
+    )
+    labels: List[int] = Field(
+        ...,
+        description="Ground-truth class indices (0=real, 1=fake) for each article",
+    )
+    n_bins: int = Field(default=15, ge=2, le=100, description="Number of calibration bins (2–100)")
+
+
+class CalibrationMetricsResponse(BaseModel):
+    ece: float = Field(..., description="Expected Calibration Error (lower is better)")
+    mce: float = Field(..., description="Maximum Calibration Error (lower is better)")
+    brier_score: float = Field(..., description="Brier Score (lower is better)")
+    nll: float = Field(..., description="Negative Log-Likelihood (lower is better)")
+    n_samples: int
+    n_bins: int
+
+
+# ── Ensemble models ────────────────────────────────────────────────────────────
+
+class EnsemblePredictRequest(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "model_probabilities": [
+                    [0.7, 0.3],
+                    [0.4, 0.6],
+                    [0.6, 0.4],
+                ],
+                "weights": [0.5, 0.3, 0.2],
+                "strategy": "weighted_average",
+            }
+        }
+    )
+    model_probabilities: List[List[float]] = Field(
+        ...,
+        description=(
+            "Probability vectors from each model [[p_real, p_fake], ...]. "
+            "Each inner list must have exactly 2 values that sum to 1."
+        ),
+    )
+    weights: Optional[List[float]] = Field(
+        default=None,
+        description="Per-model weights for 'weighted_average' strategy. Must match length of model_probabilities.",
+    )
+    strategy: str = Field(
+        default="average",
+        description="Combination strategy: 'average', 'weighted_average', or 'majority_vote'",
+    )
+
+
+class EnsemblePredictResponse(BaseModel):
+    strategy: str
+    ensemble_probabilities: List[float] = Field(
+        ..., description="Combined [p_real, p_fake] probability pair"
+    )
+    prediction: str
+    fake_probability: float
+    confidence: float
+    num_models: int
+
+
+# ── Export models ──────────────────────────────────────────────────────────────
+
+class ExportRequest(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={"example": {"output_path": "exports/model.onnx"}}
+    )
+    output_path: str = Field(
+        ...,
+        description="Destination file path for the exported model artifact",
+    )
+
+
+class ExportResponse(BaseModel):
+    format: str
+    output_path: str
+    success: bool
+    message: str
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -314,6 +466,13 @@ def home():
             "report": "/report",
             "inference_model_info": "/inference/model-info",
             "cache_clear": "/cache/clear",
+            "calibration_info": "/calibration/info",
+            "calibration_metrics": "/calibration/metrics",
+            "ensemble_info": "/ensemble/info",
+            "ensemble_predict": "/ensemble/predict",
+            "export_info": "/export/info",
+            "export_onnx": "/export/onnx",
+            "export_torchscript": "/export/torchscript",
             "health": "/health",
             "project_view": "/project-view",
             "docs": "/docs",
@@ -884,3 +1043,404 @@ def clear_inference_cache():
     except Exception as exc:
         logger.error("Cache clear failed: %s", exc)
         raise HTTPException(status_code=500, detail="Failed to clear inference cache")
+
+
+# ── Calibration endpoints ──────────────────────────────────────────────────────
+
+@app.get("/calibration/info")
+def calibration_info():
+    """
+    Describe the calibration strategies available in TruthLens.
+
+    Returns metadata about each method — no ground-truth labels required.
+    To evaluate your model's calibration, call POST /calibration/metrics.
+    """
+    return {
+        "methods": {
+            "temperature_scaling": {
+                "class": "TemperatureScaler",
+                "description": (
+                    "Learns a single scalar temperature T that divides logits before "
+                    "softmax.  T > 1 softens (reduces over-confidence), T < 1 sharpens. "
+                    "Very fast to fit; requires only a validation set of logits + labels."
+                ),
+                "reference": "Guo et al. (2017) — 'On Calibration of Modern Neural Networks'",
+                "parameters": {
+                    "lr": TemperatureScalingConfig().lr,
+                    "max_iter": TemperatureScalingConfig().max_iter,
+                    "tolerance": TemperatureScalingConfig().tolerance,
+                },
+            },
+            "isotonic_regression": {
+                "class": "IsotonicCalibrator",
+                "description": (
+                    "Fits a non-parametric monotonically non-decreasing function per class "
+                    "using scikit-learn IsotonicRegression.  More flexible than temperature "
+                    "scaling but requires more calibration data.  Uses a one-vs-rest strategy."
+                ),
+                "reference": "Zadrozny & Elkan (2002) — 'Transforming Classifier Scores into Accurate Multiclass Probability Estimates'",
+                "parameters": {
+                    "out_of_bounds": IsotonicCalibrationConfig().out_of_bounds,
+                    "increasing": IsotonicCalibrationConfig().increasing,
+                },
+            },
+        },
+        "metrics_endpoint": "POST /calibration/metrics",
+        "note": (
+            "Both calibration methods require a held-out validation set with ground-truth "
+            "labels. They should be applied after training — not during live inference."
+        ),
+    }
+
+
+@app.post("/calibration/metrics", response_model=CalibrationMetricsResponse)
+def compute_calibration_metrics(request: CalibrationMetricsRequest):
+    """
+    Compute calibration quality metrics for a set of model predictions.
+
+    Accepts probability distributions and corresponding ground-truth labels,
+    then returns ECE, MCE, Brier Score, and NLL.  Useful for evaluating how
+    well-calibrated the current model is before deciding whether to apply
+    temperature scaling or isotonic regression.
+
+    **probabilities** — one row per sample: [p_real, p_fake]
+    **labels**        — ground-truth index per sample (0=real, 1=fake)
+    """
+    try:
+        n = len(request.probabilities)
+        if n == 0:
+            raise HTTPException(status_code=400, detail="probabilities list must not be empty")
+        if len(request.labels) != n:
+            raise HTTPException(
+                status_code=400,
+                detail=f"probabilities has {n} rows but labels has {len(request.labels)} entries",
+            )
+
+        metrics_obj = CalibrationMetrics(CalibrationMetricConfig(n_bins=request.n_bins))
+
+        probs_tensor = torch.tensor(request.probabilities, dtype=torch.float32)
+        labels_tensor = torch.tensor(request.labels, dtype=torch.long)
+
+        metrics = metrics_obj.compute_all_metrics(probs_tensor, labels_tensor)
+
+        logger.info(
+            "Calibration metrics computed for %d samples: ECE=%.4f MCE=%.4f",
+            n,
+            metrics["ece"],
+            metrics["mce"],
+        )
+
+        return CalibrationMetricsResponse(
+            ece=round(metrics["ece"], 6),
+            mce=round(metrics["mce"], 6),
+            brier_score=round(metrics["brier_score"], 6),
+            nll=round(metrics["nll"], 6),
+            n_samples=n,
+            n_bins=request.n_bins,
+        )
+
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        logger.error("Calibration metrics input error: %s", exc)
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.error("Calibration metrics computation failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Internal server error during calibration metric computation")
+
+
+# ── Ensemble endpoints ─────────────────────────────────────────────────────────
+
+@app.get("/ensemble/info")
+def ensemble_info():
+    """
+    Describe the ensemble strategies supported by TruthLens.
+
+    Because ensemble models require multiple pre-loaded PyTorch modules,
+    they are built at training/evaluation time — not during live inference.
+    This endpoint documents what's available and how to use it via the
+    POST /ensemble/predict convenience endpoint.
+    """
+    return {
+        "strategies": {
+            "average": {
+                "class": "EnsembleModel",
+                "description": "Averages logits from all member models before applying softmax.",
+                "requires_weights": False,
+            },
+            "weighted_average": {
+                "class": "EnsembleModel / WeightedEnsembleModel",
+                "description": (
+                    "Each model's logits are multiplied by its assigned weight before "
+                    "summation.  Weights are automatically normalised to sum to 1."
+                ),
+                "requires_weights": True,
+            },
+            "majority_vote": {
+                "class": "EnsembleModel",
+                "description": (
+                    "Each model votes for a class; the class with the most votes wins. "
+                    "Final probabilities are the vote counts divided by total votes."
+                ),
+                "requires_weights": False,
+            },
+            "stacking": {
+                "class": "StackingEnsembleModel",
+                "description": (
+                    "Base models produce intermediate probability vectors which are "
+                    "concatenated and fed to a trainable meta-learner for the final prediction."
+                ),
+                "requires_weights": False,
+                "requires_meta_model": True,
+            },
+        },
+        "predict_endpoint": "POST /ensemble/predict",
+        "note": (
+            "POST /ensemble/predict accepts raw probability vectors from multiple sources "
+            "and combines them without needing physical model instances. "
+            "For full nn.Module-level ensembling, use EnsembleModel or WeightedEnsembleModel "
+            "directly in your training pipeline."
+        ),
+    }
+
+
+@app.post("/ensemble/predict", response_model=EnsemblePredictResponse)
+def ensemble_predict(request: EnsemblePredictRequest):
+    """
+    Combine probability predictions from multiple model sources.
+
+    Accepts a list of [p_real, p_fake] probability vectors — one per model —
+    and combines them using the chosen strategy.  No physical PyTorch models
+    are required; this endpoint operates on already-computed probabilities,
+    making it useful for model-agnostic ensembling at inference time.
+
+    **strategies**: average, weighted_average, majority_vote
+    """
+    try:
+        valid_strategies = {"average", "weighted_average", "majority_vote"}
+        if request.strategy not in valid_strategies:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown strategy '{request.strategy}'. Must be one of {sorted(valid_strategies)}.",
+            )
+
+        n_models = len(request.model_probabilities)
+        if n_models == 0:
+            raise HTTPException(status_code=400, detail="model_probabilities must not be empty")
+
+        for i, probs in enumerate(request.model_probabilities):
+            if len(probs) != 2:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"model_probabilities[{i}] must have exactly 2 values [p_real, p_fake]",
+                )
+
+        probs_tensor = torch.tensor(request.model_probabilities, dtype=torch.float32)
+
+        if request.strategy == "average":
+            combined = torch.mean(probs_tensor, dim=0)
+
+        elif request.strategy == "weighted_average":
+            if request.weights is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="weights must be provided for 'weighted_average' strategy",
+                )
+            if len(request.weights) != n_models:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"weights length ({len(request.weights)}) must match number of models ({n_models})",
+                )
+            weights_tensor = torch.tensor(request.weights, dtype=torch.float32)
+            weight_sum = weights_tensor.sum()
+            if weight_sum <= 0:
+                raise HTTPException(status_code=400, detail="Sum of weights must be positive")
+            weights_tensor = weights_tensor / weight_sum
+            combined = torch.sum(probs_tensor * weights_tensor.unsqueeze(1), dim=0)
+
+        else:  # majority_vote
+            votes = torch.argmax(probs_tensor, dim=1)
+            n_classes = probs_tensor.shape[1]
+            vote_counts = torch.zeros(n_classes)
+            for v in votes:
+                vote_counts[v] += 1
+            combined = vote_counts / vote_counts.sum()
+
+        combined_list = combined.tolist()
+        fake_prob = round(combined_list[1], 4)
+        confidence = round(float(combined.max().item()), 4)
+        prediction = "FAKE" if fake_prob > 0.5 else "REAL"
+
+        logger.info(
+            "Ensemble predict (%s, %d models): %s (fake_prob=%.4f)",
+            request.strategy,
+            n_models,
+            prediction,
+            fake_prob,
+        )
+
+        return EnsemblePredictResponse(
+            strategy=request.strategy,
+            ensemble_probabilities=[round(p, 4) for p in combined_list],
+            prediction=prediction,
+            fake_probability=fake_prob,
+            confidence=confidence,
+            num_models=n_models,
+        )
+
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        logger.error("Ensemble predict input error: %s", exc)
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.error("Ensemble predict failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Internal server error during ensemble prediction")
+
+
+# ── Export endpoints ───────────────────────────────────────────────────────────
+
+@app.get("/export/info")
+def export_info():
+    """
+    Describe the model export and quantization formats supported by TruthLens.
+
+    Exporting requires the model to be trained and available at the configured
+    path.  Use POST /export/onnx or POST /export/torchscript to trigger an
+    export once the model is ready.
+    """
+    engine = _get_inference_engine()
+    model_ready = engine is not None
+
+    return {
+        "model_ready": model_ready,
+        "model_path": str(MODEL_PATH),
+        "formats": {
+            "onnx": {
+                "class": "ONNXExporter",
+                "endpoint": "POST /export/onnx",
+                "description": (
+                    "Exports the model to ONNX (Open Neural Network Exchange) format. "
+                    "Enables deployment on ONNX Runtime, TensorRT, CoreML, and other "
+                    "hardware-accelerated inference engines."
+                ),
+                "config": {
+                    "opset_version": ONNXExportConfig().opset_version,
+                    "dynamic_batch": ONNXExportConfig().dynamic_batch,
+                    "verify_export": False,
+                },
+                "dependencies": ["onnx", "onnxruntime"],
+            },
+            "torchscript": {
+                "class": "TorchScriptExporter",
+                "endpoint": "POST /export/torchscript",
+                "description": (
+                    "Exports the model to TorchScript (.pt) format using tracing. "
+                    "Enables Python-free deployment via the PyTorch C++ runtime, "
+                    "mobile environments, and high-performance inference services."
+                ),
+                "config": {
+                    "method": TorchScriptExportConfig().method,
+                    "verify_export": False,
+                },
+            },
+        },
+        "quantization": {
+            "class": "QuantizationEngine",
+            "methods": {
+                "dynamic": "Quantizes weights at load time; activations at run time.  No calibration data needed.",
+                "static": "Quantizes both weights and activations using calibration data. Requires a representative dataset.",
+                "qat": "Quantization Aware Training — inserts fake-quantization nodes before fine-tuning.",
+            },
+            "note": (
+                "Quantization is applied to the exported model artifact, not the live "
+                "serving model. Integrate QuantizationEngine into your training/export pipeline."
+            ),
+        },
+    }
+
+
+@app.post("/export/onnx", response_model=ExportResponse)
+def export_onnx(request: ExportRequest):
+    """
+    Export the loaded TruthLens model to ONNX format.
+
+    Requires the model to be trained and the InferenceEngine to be available.
+    The exported .onnx file is written to the path specified in output_path.
+    """
+    try:
+        engine = _get_inference_engine()
+        if engine is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Model not available. Train the model first before exporting.",
+            )
+
+        model = engine.model
+        if model is None:
+            raise HTTPException(status_code=503, detail="Model not loaded in InferenceEngine")
+
+        max_length = SETTINGS.model.max_length
+        example_input = torch.zeros(1, max_length, dtype=torch.long)
+
+        output_path = ONNX_EXPORTER.export(model, example_input, request.output_path)
+
+        logger.info("ONNX export completed: %s", output_path)
+        return ExportResponse(
+            format="onnx",
+            output_path=str(output_path),
+            success=True,
+            message=f"Model successfully exported to ONNX at '{output_path}'",
+        )
+
+    except HTTPException:
+        raise
+    except RuntimeError as exc:
+        logger.error("ONNX export failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"ONNX export failed: {exc}")
+    except Exception as exc:
+        logger.error("Unexpected ONNX export error: %s", exc)
+        raise HTTPException(status_code=500, detail="Internal server error during ONNX export")
+
+
+@app.post("/export/torchscript", response_model=ExportResponse)
+def export_torchscript(request: ExportRequest):
+    """
+    Export the loaded TruthLens model to TorchScript (.pt) format.
+
+    Requires the model to be trained and the InferenceEngine to be available.
+    The exported .pt file is written to the path specified in output_path.
+    """
+    try:
+        engine = _get_inference_engine()
+        if engine is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Model not available. Train the model first before exporting.",
+            )
+
+        model = engine.model
+        if model is None:
+            raise HTTPException(status_code=503, detail="Model not loaded in InferenceEngine")
+
+        max_length = SETTINGS.model.max_length
+        example_input = torch.zeros(1, max_length, dtype=torch.long)
+
+        output_path = TORCHSCRIPT_EXPORTER.export(model, example_input, request.output_path)
+
+        logger.info("TorchScript export completed: %s", output_path)
+        return ExportResponse(
+            format="torchscript",
+            output_path=str(output_path),
+            success=True,
+            message=f"Model successfully exported to TorchScript at '{output_path}'",
+        )
+
+    except HTTPException:
+        raise
+    except RuntimeError as exc:
+        logger.error("TorchScript export failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"TorchScript export failed: {exc}")
+    except Exception as exc:
+        logger.error("Unexpected TorchScript export error: %s", exc)
+        raise HTTPException(status_code=500, detail="Internal server error during TorchScript export")

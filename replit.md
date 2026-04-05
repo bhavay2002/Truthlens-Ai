@@ -10,50 +10,86 @@ TruthLens AI is a multi-layer AI platform for misinformation detection and news 
 - **Port**: 5000
 
 ## Key API Endpoints
-- `GET /` — Health check, lists all endpoints
-- `GET /health` — Detailed health check (model availability)
-- `POST /predict` — Predict fake/real for news text
-- `POST /analyze` — Full analysis with bias, emotion, and explainability
+
+### Core prediction
+- `POST /predict` — Predict fake/real for news text (1-hour memory cache)
+- `POST /batch-predict` — Predict for up to 50 texts at once; cache-aware
+- `POST /analyze` — Full deep analysis (bias, emotion, narrative, graph, LIME)
+- `POST /report` — Lightweight structured report (bias + emotion + credibility)
+
+### Calibration
+- `GET /calibration/info` — Describe available calibration strategies (temperature scaling, isotonic regression)
+- `POST /calibration/metrics` — Compute ECE, MCE, Brier Score, NLL from probability + label arrays
+
+### Ensemble
+- `GET /ensemble/info` — Describe available ensemble strategies
+- `POST /ensemble/predict` — Combine probability vectors from multiple models (average / weighted_average / majority_vote)
+
+### Export
+- `GET /export/info` — Describe ONNX, TorchScript, and quantization options
+- `POST /export/onnx` — Export loaded model to ONNX (requires trained model)
+- `POST /export/torchscript` — Export loaded model to TorchScript (requires trained model)
+
+### Inference meta
+- `GET /inference/model-info` — InferenceEngine model metadata (params, device, label map)
+- `POST /cache/clear` — Clear the in-memory prediction cache
+
+### Utility
+- `GET /` — Index; lists all available endpoints
+- `GET /health` — Detailed health check (model availability, cache size)
 - `GET /project-view` — Project structure and configuration info
 - `GET /docs` — Interactive Swagger API documentation
 
 ## Project Structure
 ```
-api/          - FastAPI application
+api/          - FastAPI application (app.py)
 src/          - Core source code
-  aggregation/  - Credibility score calculation
-  analysis/     - Bias, narrative, propaganda analysis
-  features/     - Feature engineering (lexical, semantic, etc.)
-    bias/       - Bias detection features
-    emotion/    - Emotion analysis features
-  models/       - Model implementations
-  inference/    - Inference logic
+  analysis/   - Bias, narrative, propaganda, discourse analysis
+  features/   - Feature engineering (bias, emotion, lexical, semantic)
+  models/
+    calibration/  - CalibrationMetrics, TemperatureScaler, IsotonicCalibrator
+    ensemble/     - EnsembleModel, WeightedEnsembleModel, StackingEnsembleModel
+    export/       - ONNXExporter, TorchScriptExporter, QuantizationEngine
+  inference/  - InferenceCache, InferenceEngine, InferenceLogger,
+                ResultFormatter, ReportGenerator, FeaturePreparer,
+                ModelLoader, PredictionPipeline
   explainability/ - SHAP/LIME explanations
-  graph/        - Entity/narrative graph analysis
-  utils/        - Configuration, logging, utilities
-models/       - Trained model artifacts (created during training)
-  inference/  - Predictor module (predict, predict_batch)
-  registry/   - Model registry
+  graph/      - Entity/narrative graph analysis
+  utils/      - Configuration, logging, device, time, JSON utilities
+models/       - Trained model artifacts
+  inference/  - predictor.py (predict, predict_batch)
+  registry/   - ModelRegistry
 config/       - YAML configuration files
 tests/        - Pytest test suite
 ```
 
+## Integrated Subsystems (api/app.py singletons)
+
+| Singleton | Class | Purpose |
+|---|---|---|
+| `INFERENCE_CACHE` | `InferenceCache` | 1-hour in-memory cache for /predict, /analyze, /report |
+| `INFERENCE_LOGGER` | `InferenceLogger` | Structured JSON inference event logging |
+| `RESULT_FORMATTER` | `ResultFormatter` | Validates /predict response schema |
+| `REPORT_GENERATOR` | `ReportGenerator` | Powers /report endpoint |
+| `CALIBRATION_METRICS` | `CalibrationMetrics` | Powers /calibration/metrics |
+| `ONNX_EXPORTER` | `ONNXExporter` | Powers /export/onnx |
+| `TORCHSCRIPT_EXPORTER` | `TorchScriptExporter` | Powers /export/torchscript |
+| `_INFERENCE_ENGINE` | `InferenceEngine` | Lazy singleton for /batch-predict, /inference/model-info |
+| `_QUANTIZATION_ENGINE` | `QuantizationEngine` | Lazy singleton (fbgemm backend guard) |
+
 ## Important Notes
-- Model must be trained before `/predict` and `/analyze` work fully
+- Model must be trained before `/predict`, `/analyze`, and export endpoints work fully
 - Health endpoint shows "degraded" when no model is trained — this is expected
-- `src/features/bias/bias_lexicon.py` and `src/features/emotion/emotion_lexicon.py` are wrapper modules created during import setup
-- `models/inference/predictor.py` contains both `predict` and `predict_batch` functions
-- All `src/` subdirectories have `__init__.py` files for Python package imports
+- The tokenizer requires `sentencepiece` or `protobuf` — a pre-existing environment issue
+- `models/inference/predictor.py` contains `predict` and `predict_batch` (the RoBERTa backend)
+- Export endpoints return 503 when InferenceEngine cannot be initialised (missing model)
+- All `src/` subdirectories have populated `__init__.py` files
 
 ## Running
-The app runs via workflow: `python -m uvicorn api.app:app --host 0.0.0.0 --port 5000 --reload --reload-dir api --reload-dir src --reload-dir config --reload-dir models`
-(reload dirs are scoped to avoid re-triggering on `.pythonlibs` package installs)
+```
+python -m uvicorn api.app:app --host 0.0.0.0 --port 5000 --reload \
+  --reload-dir api --reload-dir src --reload-dir config --reload-dir models
+```
 
 ## Configuration
 Main config: `config/config.yaml` — model paths, training params, API settings
-
-## Bug Fixes Applied
-- **`src/utils/config_loader.py`** — Fixed `load_app_config` to read from `data` (not `dataset`) key matching the actual config.yaml schema; fixed model name path to read from `model.encoder.name`; made `experiment` section optional with sensible defaults (it doesn't exist in config.yaml).
-- **`models/inference/predictor.py`** — Added module-level model caching so the model is only loaded once per process instead of on every request; added `model.eval()` after loading; added device-aware input handling so tokenizer tensors are moved to the same device as the model before inference; moved `.cpu()` call to results to ensure safe return.
-- **`src/features/emotion/emotion_lexicon.py`** — Fixed dominant emotion detection to correctly return `"neutral"` when all emotion scores are zero (previously returned the first emotion label arbitrarily).
-- **`src/features/bias/bias_lexicon.py`** — Removed unused `field` import from `dataclasses`.
