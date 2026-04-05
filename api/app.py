@@ -5,6 +5,22 @@ from typing import Any
 import logging
 
 from models.inference.predictor import predict, predict_batch
+from src.analysis.argument_mining import ArgumentMiningAnalyzer
+from src.analysis.bias_profile_builder import BiasProfileBuilder
+from src.analysis.context_omission_detector import ContextOmissionDetector
+from src.analysis.discourse_coherence_analyzer import DiscourseCoherenceAnalyzer
+from src.analysis.emotion_target_analysis import EmotionTargetAnalyzer
+from src.analysis.framing_analysis import FramingAnalyzer
+from src.analysis.ideological_language_detector import IdeologicalLanguageDetector
+from src.analysis.information_density_analyzer import InformationDensityAnalyzer
+from src.analysis.information_omission_detector import InformationOmissionDetector
+from src.analysis.narrative_conflict import NarrativeConflictAnalyzer
+from src.analysis.narrative_propagation import NarrativePropagationAnalyzer
+from src.analysis.narrative_role_extractor import NarrativeRoleExtractor
+from src.analysis.narrative_temporal_analyzer import NarrativeTemporalAnalyzer
+from src.analysis.propaganda_pattern_detector import PropagandaPatternDetector
+from src.analysis.rhetorical_device_detector import RhetoricalDeviceDetector
+from src.analysis.source_attribution_analyzer import SourceAttributionAnalyzer
 from src.features.bias.bias_lexicon import compute_bias_features
 from src.features.emotion.emotion_lexicon import EmotionLexiconAnalyzer
 from src.explainability.emotion_explainer import explain_emotion
@@ -35,7 +51,25 @@ MODEL_SUBPACKAGES = (
     "propaganda",
 )
 LIME_NUM_SAMPLES = 16
+
+# ── Singleton analyzers (initialised once at startup) ─────────────────────────
 EMOTION_ANALYZER = EmotionLexiconAnalyzer()
+ARGUMENT_ANALYZER = ArgumentMiningAnalyzer()
+BIAS_PROFILE_BUILDER = BiasProfileBuilder()
+CONTEXT_OMISSION_DETECTOR = ContextOmissionDetector()
+DISCOURSE_ANALYZER = DiscourseCoherenceAnalyzer()
+EMOTION_TARGET_ANALYZER = EmotionTargetAnalyzer()
+FRAMING_ANALYZER = FramingAnalyzer()
+IDEOLOGICAL_DETECTOR = IdeologicalLanguageDetector()
+INFO_DENSITY_ANALYZER = InformationDensityAnalyzer()
+INFO_OMISSION_DETECTOR = InformationOmissionDetector()
+NARRATIVE_CONFLICT_ANALYZER = NarrativeConflictAnalyzer()
+NARRATIVE_PROPAGATION_ANALYZER = NarrativePropagationAnalyzer()
+NARRATIVE_ROLE_EXTRACTOR = NarrativeRoleExtractor()
+NARRATIVE_TEMPORAL_ANALYZER = NarrativeTemporalAnalyzer()
+PROPAGANDA_PATTERN_DETECTOR = PropagandaPatternDetector()
+RHETORICAL_DETECTOR = RhetoricalDeviceDetector()
+SOURCE_ATTRIBUTION_ANALYZER = SourceAttributionAnalyzer()
 
 app = FastAPI(
     title=APP_TITLE,
@@ -43,6 +77,8 @@ app = FastAPI(
     version=APP_VERSION,
 )
 
+
+# ── Request / response models ──────────────────────────────────────────────────
 
 class NewsRequest(BaseModel):
     model_config = ConfigDict(
@@ -69,13 +105,33 @@ class AnalysisResponse(BaseModel):
     confidence: float = Field(..., ge=0, le=1)
     bias: dict[str, Any]
     emotion: dict[str, Any]
+    narrative: dict[str, Any]
+    framing: dict[str, Any]
+    rhetoric: dict[str, Any]
+    discourse: dict[str, Any]
+    propaganda_analysis: dict[str, Any]
+    credibility_profile: dict[str, Any]
     explainability: dict[str, Any]
 
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _preview_text(text: str) -> str:
     if len(text) <= TEXT_PREVIEW_CHARS:
         return text
     return text[:TEXT_PREVIEW_CHARS] + "..."
+
+
+def _safe_run(fn, *args, **kwargs) -> dict:
+    """Call an analysis function; return empty dict on any error so other
+    sections of the /analyze response are unaffected."""
+    try:
+        result = fn(*args, **kwargs)
+        return result if isinstance(result, dict) else {}
+    except Exception as exc:
+        name = getattr(fn, "__qualname__", type(fn).__name__)
+        logger.warning("Analysis step '%s' failed: %s", name, exc)
+        return {}
 
 
 def _build_project_view() -> dict[str, Any]:
@@ -114,6 +170,8 @@ def _build_project_view() -> dict[str, Any]:
     }
 
 
+# ── Routes ─────────────────────────────────────────────────────────────────────
+
 @app.get("/")
 def home():
     """Health check endpoint"""
@@ -140,20 +198,18 @@ def project_view():
 def predict_news(request: NewsRequest):
     """
     Predict whether news article is fake or real
-    
+
     Args:
         request: NewsRequest with text field
-    
+
     Returns:
         NewsResponse with prediction results
     """
     try:
         logger.info("Received prediction request for text of length: %d", len(request.text))
-        
-        # Get prediction
+
         prediction_result = predict(request.text)
 
-        # Backward-compatible handling if predict() returns float or dict
         if isinstance(prediction_result, dict):
             prob = float(prediction_result.get("fake_probability", 0.0))
             prediction = str(prediction_result.get("label", "Fake")).upper()
@@ -162,17 +218,17 @@ def predict_news(request: NewsRequest):
             prob = float(prediction_result)
             prediction = "FAKE" if prob > 0.5 else "REAL"
             confidence = prob if prob > 0.5 else (1 - prob)
-        
+
         response = NewsResponse(
             text=_preview_text(request.text),
             fake_probability=round(prob, 4),
             prediction=prediction,
             confidence=round(confidence, 4)
         )
-        
+
         logger.info("Prediction: %s with confidence: %.4f", prediction, confidence)
         return response
-        
+
     except FileNotFoundError as e:
         logger.error("Model not found: %s", e)
         raise HTTPException(
@@ -203,8 +259,7 @@ def health_check():
             if not vectorizer_required
             else (vectorizer_exists or vectorizer_fallback_enabled)
         )
-        
-        # Check for required model files
+
         required_files = ["config.json", "tokenizer.json"]
         weight_files = ["model.safetensors", "pytorch_model.bin"]
         has_weight_file = any((MODEL_PATH / f).exists() for f in weight_files) if model_exists else False
@@ -213,7 +268,7 @@ def health_check():
             if model_exists
             else False
         )
-        
+
         return {
             "status": (
                 "healthy"
@@ -242,28 +297,101 @@ def health_check():
 @app.post("/analyze", response_model=AnalysisResponse)
 def analyze_news(request: NewsRequest):
     """
-    Unified analysis endpoint.
+    Unified deep-analysis endpoint.
 
-    Returns model prediction + bias/emotion signals + lightweight explainability.
+    Returns model prediction plus the full suite of linguistic, narrative,
+    framing, rhetoric, discourse, propaganda-pattern, and credibility-profile
+    analyses.
     """
-
     try:
+        # ── 1. Model prediction ────────────────────────────────────────────────
         prediction_result = predict(request.text)
 
         if isinstance(prediction_result, dict):
             fake_probability = float(prediction_result.get("fake_probability", 0.0))
             prediction = str(prediction_result.get("label", "Fake")).upper()
-            confidence = float(prediction_result.get("confidence", max(fake_probability, 1 - fake_probability)))
+            confidence = float(
+                prediction_result.get("confidence", max(fake_probability, 1 - fake_probability))
+            )
         else:
             fake_probability = float(prediction_result)
             prediction = "FAKE" if fake_probability > 0.5 else "REAL"
             confidence = fake_probability if fake_probability > 0.5 else (1 - fake_probability)
 
+        # ── 2. Bias + emotion (lexicon-based) ─────────────────────────────────
         bias_result = compute_bias_features(request.text)
         emotion_result = EMOTION_ANALYZER.analyze(request.text)
-        emotion_explanation = explain_emotion(request.text)
+        emotion_scores: dict[str, float] = getattr(emotion_result, "emotion_scores", {})
 
-        # LIME can fail if model assets are unavailable; keep analysis resilient.
+        # ── 3. Narrative analysis ──────────────────────────────────────────────
+        narrative_roles: dict = _safe_run(NARRATIVE_ROLE_EXTRACTOR.analyze, request.text)
+        hero_entities: list = narrative_roles.get("hero_entities", [])
+        villain_entities: list = narrative_roles.get("villain_entities", [])
+        victim_entities: list = narrative_roles.get("victim_entities", [])
+
+        narrative_conflict: dict = _safe_run(
+            NARRATIVE_CONFLICT_ANALYZER.analyze,
+            request.text,
+            hero_entities=hero_entities,
+            villain_entities=villain_entities,
+            victim_entities=victim_entities,
+        )
+        narrative_propagation: dict = _safe_run(
+            NARRATIVE_PROPAGATION_ANALYZER.analyze,
+            request.text,
+            hero_entities=hero_entities,
+            villain_entities=villain_entities,
+            victim_entities=victim_entities,
+        )
+        narrative_temporal: dict = _safe_run(NARRATIVE_TEMPORAL_ANALYZER.analyze, request.text)
+
+        # ── 4. Framing ─────────────────────────────────────────────────────────
+        framing: dict = _safe_run(FRAMING_ANALYZER.analyze, request.text)
+
+        # ── 5. Rhetoric + argument structure ──────────────────────────────────
+        rhetorical: dict = _safe_run(RHETORICAL_DETECTOR.analyze, request.text)
+        argument: dict = _safe_run(ARGUMENT_ANALYZER.analyze, request.text)
+
+        # ── 6. Discourse-level analyses ────────────────────────────────────────
+        info_density: dict = _safe_run(INFO_DENSITY_ANALYZER.analyze, request.text)
+        info_omission: dict = _safe_run(INFO_OMISSION_DETECTOR.analyze, request.text)
+        context_omission: dict = _safe_run(CONTEXT_OMISSION_DETECTOR.analyze, request.text)
+        discourse_coherence: dict = _safe_run(DISCOURSE_ANALYZER.analyze, request.text)
+        ideological: dict = _safe_run(IDEOLOGICAL_DETECTOR.analyze, request.text)
+        emotion_target: dict = _safe_run(EMOTION_TARGET_ANALYZER.analyze, request.text)
+        source_attribution: dict = _safe_run(SOURCE_ATTRIBUTION_ANALYZER.analyze, request.text)
+
+        # ── 7. Propaganda pattern detection (aggregates prior results) ─────────
+        combined_narrative: dict = {**narrative_conflict, **narrative_propagation, **narrative_temporal}
+        combined_info: dict = {**info_density, **info_omission}
+        propaganda_patterns: dict = _safe_run(
+            PROPAGANDA_PATTERN_DETECTOR.analyze,
+            emotion_features=emotion_scores,
+            narrative_features=combined_narrative,
+            rhetorical_features=rhetorical,
+            argument_features=argument,
+            information_features=combined_info,
+        )
+
+        # ── 8. Credibility profile (aggregates all signals) ────────────────────
+        combined_discourse: dict = {
+            **discourse_coherence,
+            **context_omission,
+            **info_density,
+            **info_omission,
+            **source_attribution,
+        }
+        credibility_profile: dict = _safe_run(
+            BIAS_PROFILE_BUILDER.build_profile,
+            bias_features={"bias_score": float(bias_result.bias_score)},
+            emotion_features=emotion_scores,
+            narrative_features=combined_narrative,
+            discourse_features=combined_discourse,
+            ideology_predictions=ideological,
+        )
+
+        # ── 9. Explainability ──────────────────────────────────────────────────
+        emotion_explanation = _safe_run(explain_emotion, request.text)
         try:
             lime_result = explain_prediction(
                 predict_batch,
@@ -276,9 +404,10 @@ def analyze_news(request: NewsRequest):
             lime_result = {
                 "text": request.text,
                 "important_features": [],
-                "error": "lime_unavailable"
+                "error": "lime_unavailable",
             }
 
+        # ── 10. Build response ─────────────────────────────────────────────────
         return AnalysisResponse(
             text=_preview_text(request.text),
             prediction=prediction,
@@ -292,9 +421,31 @@ def analyze_news(request: NewsRequest):
             },
             emotion={
                 "dominant_emotion": emotion_result.dominant_emotion,
-                "emotion_scores": emotion_result.emotion_scores,
+                "emotion_scores": emotion_scores,
                 "emotion_distribution": emotion_result.emotion_distribution,
             },
+            narrative={
+                "roles": narrative_roles,
+                "conflict": narrative_conflict,
+                "propagation": narrative_propagation,
+                "temporal": narrative_temporal,
+            },
+            framing=framing,
+            rhetoric={
+                "rhetorical_devices": rhetorical,
+                "argument_structure": argument,
+            },
+            discourse={
+                "coherence": discourse_coherence,
+                "context_omission": context_omission,
+                "information_density": info_density,
+                "information_omission": info_omission,
+                "source_attribution": source_attribution,
+                "ideological_language": ideological,
+                "emotion_targets": emotion_target,
+            },
+            propaganda_analysis=propaganda_patterns,
+            credibility_profile=credibility_profile,
             explainability={
                 "emotion_explanation": emotion_explanation,
                 "lime": lime_result,
