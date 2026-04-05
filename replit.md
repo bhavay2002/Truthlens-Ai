@@ -46,7 +46,14 @@ tests/        - Pytest test suite
 - All `src/` subdirectories have `__init__.py` files for Python package imports
 
 ## Running
-The app runs via workflow: `python -m uvicorn api.app:app --host 0.0.0.0 --port 5000 --reload`
+The app runs via workflow: `python -m uvicorn api.app:app --host 0.0.0.0 --port 5000 --reload --reload-dir api --reload-dir src --reload-dir config --reload-dir models`
+(reload dirs are scoped to avoid re-triggering on `.pythonlibs` package installs)
 
 ## Configuration
 Main config: `config/config.yaml` — model paths, training params, API settings
+
+## Bug Fixes Applied
+- **`src/utils/config_loader.py`** — Fixed `load_app_config` to read from `data` (not `dataset`) key matching the actual config.yaml schema; fixed model name path to read from `model.encoder.name`; made `experiment` section optional with sensible defaults (it doesn't exist in config.yaml).
+- **`models/inference/predictor.py`** — Added module-level model caching so the model is only loaded once per process instead of on every request; added `model.eval()` after loading; added device-aware input handling so tokenizer tensors are moved to the same device as the model before inference; moved `.cpu()` call to results to ensure safe return.
+- **`src/features/emotion/emotion_lexicon.py`** — Fixed dominant emotion detection to correctly return `"neutral"` when all emotion scores are zero (previously returned the first emotion label arbitrarily).
+- **`src/features/bias/bias_lexicon.py`** — Removed unused `field` import from `dataclasses`.

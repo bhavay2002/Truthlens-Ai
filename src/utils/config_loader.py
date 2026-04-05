@@ -289,21 +289,25 @@ def load_app_config(config_path: str | Path | None = None) -> AppConfig:
 
     config = load_config(config_path)
 
-    _validate_required_keys(config, ["model", "dataset", "training", "experiment"])
+    _validate_required_keys(config, ["model", "data", "training"])
 
+    data_section = config["data"]
     dataset_cfg = DatasetConfig(
-        train_path=_resolve_path(config["dataset"]["train_path"]),
-        validation_path=_resolve_path(config["dataset"]["validation_path"]),
-        test_path=_resolve_path(config["dataset"]["test_path"]),
-        text_column=config["dataset"].get("text_column", "text"),
-        label_column=config["dataset"].get("label_column", "label"),
+        train_path=_resolve_path(data_section.get("train_path", "data/splits/train.csv")),
+        validation_path=_resolve_path(data_section.get("validation_path", "data/splits/validation.csv")),
+        test_path=_resolve_path(data_section.get("test_path", "data/splits/test.csv")),
+        text_column=data_section.get("text_column", "text"),
+        label_column=data_section.get("label_column", "label"),
     )
 
+    model_section = config["model"]
+    encoder_section = model_section.get("encoder", {})
+    model_name = encoder_section.get("name") or model_section.get("name", "roberta-base")
     model_cfg = ModelConfig(
-        name=config["model"]["name"],
-        pretrained_model=config["model"].get("pretrained_model"),
-        hidden_size=config["model"].get("hidden_size"),
-        num_labels=config["model"].get("num_labels"),
+        name=model_name,
+        pretrained_model=encoder_section.get("tokenizer_name") or model_section.get("pretrained_model"),
+        hidden_size=model_section.get("hidden_size"),
+        num_labels=model_section.get("num_labels"),
     )
 
     training_cfg = TrainingConfig(
@@ -316,10 +320,11 @@ def load_app_config(config_path: str | Path | None = None) -> AppConfig:
         device=config["training"].get("device", "auto"),
     )
 
+    experiment_section = config.get("experiment", {})
     experiment_cfg = ExperimentConfig(
-        seed=config["experiment"]["seed"],
-        output_dir=_resolve_path(config["experiment"]["output_dir"]),
-        experiment_name=config["experiment"]["experiment_name"],
+        seed=experiment_section.get("seed", config["training"].get("seed", 42)),
+        output_dir=_resolve_path(experiment_section.get("output_dir", "models")),
+        experiment_name=experiment_section.get("experiment_name", "truthlens"),
     )
 
     logger.info("Configuration successfully loaded and validated")

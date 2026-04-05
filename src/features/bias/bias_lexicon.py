@@ -4,7 +4,7 @@ Wrapper module providing the compute_bias_features interface expected by the API
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Any
 
 from src.features.base.base_feature import FeatureContext

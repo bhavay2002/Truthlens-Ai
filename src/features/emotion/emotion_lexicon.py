@@ -33,7 +33,7 @@ class EmotionLexiconAnalyzer:
             key = f"lexicon_emotion_{emotion}"
             emotion_scores[emotion] = round(features.get(key, 0.0), 4)
 
-        if emotion_scores:
+        if emotion_scores and max(emotion_scores.values()) > 0.0:
             dominant = max(emotion_scores, key=lambda k: emotion_scores[k])
         else:
             dominant = "neutral"
