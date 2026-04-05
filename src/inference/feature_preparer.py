@@ -81,6 +81,9 @@ from src.features.base.base_feature import FeatureContext
 from src.features.bias.bias_features import BiasFeatures
 from src.features.bias.framing_features import FramingFeatures
 from src.features.bias.ideological_features import IdeologicalFeatures
+from src.features.dataset_feature_generator import DatasetFeatureGenerator
+from src.features.feature_schema_validator import FeatureSchemaValidator
+from src.features.feature_statistics import FeatureStatistics
 from src.features.pipelines.feature_pipeline import (
     BIAS_FEATURE_NAMES,
     FRAMING_FEATURE_NAMES,
@@ -140,6 +143,12 @@ class FeaturePreparer:
             raise ValueError("Feature schema cannot be empty")
 
         self.feature_index = {name: idx for idx, name in enumerate(config.feature_schema)}
+        self.schema_validator = FeatureSchemaValidator(
+            expected_features=config.feature_schema,
+            strict=False,
+            allow_missing=True,
+            allow_extra=True,
+        )
         if self.config.derive_graph_features:
             try:
                 self.graph_pipeline = GraphPipeline()
@@ -317,9 +326,19 @@ class FeaturePreparer:
         The input dict may contain any mix of bias_*, frame_*, ideology_*,
         and other feature keys. Keys not present in the feature schema are
         silently ignored; missing schema keys default to 0.0.
+
+        FeatureSchemaValidator is applied to the flattened feature dict to
+        ensure all values are numeric and only expected keys are present.
+        Validation runs in permissive mode — missing or extra keys are allowed
+        and logged rather than raised as errors.
         """
         flat_features = self._prepare_flat_features(features)
         self._validate_feature_dict(flat_features)
+
+        try:
+            self.schema_validator.validate(flat_features)
+        except Exception as _schema_exc:
+            logger.debug("Schema validation note for single sample: %s", _schema_exc)
 
         vector = self._dict_to_vector(flat_features)
         matrix = vector.reshape(1, -1)
@@ -456,3 +475,97 @@ class FeaturePreparer:
         dummy = self._apply_feature_selection(dummy)
 
         return dummy.shape[1]
+
+    def generate_from_texts(
+        self,
+        texts: List[str],
+        batch_pipeline: Any,
+    ) -> "np.ndarray | torch.Tensor":
+        """
+        Generate model-ready feature matrix directly from raw texts.
+
+        Uses DatasetFeatureGenerator to extract a feature matrix from the
+        provided texts, then calls prepare_batch() to apply schema ordering,
+        scaling, and selection.
+
+        Parameters
+        ----------
+        texts : List[str]
+            Raw article texts.
+        batch_pipeline : BatchFeaturePipeline
+            An initialized or uninitialised BatchFeaturePipeline instance.
+            DatasetFeatureGenerator will call initialize() automatically if
+            needed.
+
+        Returns
+        -------
+        np.ndarray or torch.Tensor of shape (n_samples, n_features_selected).
+        """
+        if not texts:
+            raise ValueError("texts must not be empty")
+
+        generator = DatasetFeatureGenerator(pipeline=batch_pipeline)
+        _, feature_names = generator.generate(texts)
+
+        contexts = generator._build_contexts(texts)
+        feature_dicts = batch_pipeline._sequential_extract(contexts)
+
+        logger.info(
+            "generate_from_texts | samples=%d features=%d",
+            len(feature_dicts),
+            len(feature_names),
+        )
+
+        return self.prepare_batch(feature_dicts)
+
+    def compute_feature_statistics(
+        self,
+        feature_dicts: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """
+        Compute descriptive statistics for a batch of feature dictionaries.
+
+        Uses FeatureStatistics to produce a dataset-level summary and detect
+        constant (zero-variance) features. Also validates each dict against the
+        configured schema via FeatureSchemaValidator.
+
+        Parameters
+        ----------
+        feature_dicts : List[Dict[str, Any]]
+            Feature dictionaries as produced by the upstream feature pipeline.
+
+        Returns
+        -------
+        Dict[str, Any] with keys:
+            "summary"           — dataset-level statistics (mean_variance, etc.)
+            "constant_features" — list of zero-variance feature names
+            "schema_summary"    — feature schema metadata
+        """
+        if not feature_dicts:
+            raise ValueError("feature_dicts must not be empty")
+
+        flat_dicts = [self._prepare_flat_features(f) for f in feature_dicts]
+
+        stats = FeatureStatistics()
+        summary = stats.dataset_summary(flat_dicts)
+        constant = stats.detect_constant_features(flat_dicts)
+
+        logger.info(
+            "Feature statistics | samples=%d features=%d "
+            "mean_variance=%.6f constant=%d",
+            int(summary["num_samples"]),
+            int(summary["num_features"]),
+            summary["mean_variance"],
+            len(constant),
+        )
+
+        try:
+            self.schema_validator.validate_batch(flat_dicts)
+        except Exception as _val_exc:
+            logger.warning("Schema validation warning: %s", _val_exc)
+
+        return {
+            "summary": summary,
+            "constant_features": constant,
+            "schema_summary": self.schema_validator.schema_summary(),
+        }

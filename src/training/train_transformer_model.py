@@ -69,6 +69,9 @@ from transformers.trainer_utils import get_last_checkpoint as hf_get_last_checkp
 from src.utils.input_validation import ensure_dataframe, ensure_non_empty_text_column
 from src.utils.settings import load_settings
 from src.models.training.training_utils import TrainingMetrics, get_device
+from src.features.dataset_feature_generator import DatasetFeatureGenerator
+from src.features.feature_schema_validator import FeatureSchemaValidator
+from src.features.feature_statistics import FeatureStatistics
 from src.models.export import (
     ONNXExportConfig,
     ONNXExporter,
@@ -300,6 +303,11 @@ def train_model(
 
         torch.manual_seed(SEED)
         np.random.seed(SEED)
+
+        _log_feature_diagnostics(
+            train_df[text_column].dropna().tolist(),
+            label="training set",
+        )
 
         device = get_device()
         logger.info("Training device: %s", device)
@@ -557,6 +565,78 @@ def train_model(
     except Exception:
         logger.exception("Training pipeline failed")
         raise
+
+
+def _log_feature_diagnostics(texts: list[str], label: str = "") -> None:
+    """
+    Generate feature statistics and schema diagnostics for a text corpus.
+
+    Uses DatasetFeatureGenerator to extract a feature matrix, then
+    FeatureStatistics to report the dataset summary and detect any
+    constant (zero-variance) features. FeatureSchemaValidator confirms
+    that all extracted feature vectors conform to the inferred schema.
+
+    This is a non-blocking diagnostic step — any failure is logged as a
+    warning and does not interrupt the training pipeline.
+
+    Parameters
+    ----------
+    texts : list[str]
+        Raw article texts (e.g. the training split).
+    label : str
+        Descriptive label used in log messages (e.g. "training set").
+    """
+    try:
+        from src.features.pipelines.feature_pipeline import FeaturePipeline
+        from src.features.pipelines.batch_feature_pipeline import BatchFeaturePipeline
+
+        tag = f" [{label}]" if label else ""
+        logger.info("Running feature diagnostics%s | samples=%d", tag, len(texts))
+
+        batch_pipeline = BatchFeaturePipeline(pipeline=FeaturePipeline())
+        generator = DatasetFeatureGenerator(pipeline=batch_pipeline)
+        matrix, feature_names = generator.generate(texts)
+
+        stats = FeatureStatistics()
+
+        contexts = generator._build_contexts(texts)
+        feature_dicts = batch_pipeline._sequential_extract(contexts)
+
+        summary = stats.dataset_summary(feature_dicts)
+        logger.info(
+            "Feature dataset summary%s | samples=%d features=%d "
+            "mean_variance=%.6f",
+            tag,
+            int(summary["num_samples"]),
+            int(summary["num_features"]),
+            summary["mean_variance"],
+        )
+
+        constant = stats.detect_constant_features(feature_dicts)
+        if constant:
+            logger.warning(
+                "Detected %d constant (zero-variance) feature(s)%s: %s",
+                len(constant),
+                tag,
+                constant[:10],
+            )
+
+        validator = FeatureSchemaValidator(
+            expected_features=feature_names,
+            strict=False,
+            allow_missing=True,
+            allow_extra=True,
+        )
+        validator.validate_batch(feature_dicts[:min(5, len(feature_dicts))])
+        schema_info = validator.schema_summary()
+        logger.info(
+            "Feature schema validated%s | schema_features=%d",
+            tag,
+            schema_info["num_features"],
+        )
+
+    except Exception as _diag_exc:
+        logger.warning("Feature diagnostics skipped (non-fatal): %s", _diag_exc)
 
 
 def _build_export_example_input(train_dataset: Dataset) -> torch.Tensor | None:

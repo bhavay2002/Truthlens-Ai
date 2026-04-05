@@ -56,6 +56,8 @@ from src.explainability.attention_rollout import AttentionRollout
 from src.features.importance.feature_ablation import FeatureAblation
 from src.features.importance.permutation_importance import PermutationImportance
 from src.features.importance.shap_importance import ShapImportance
+from src.features.feature_schema_validator import FeatureSchemaValidator
+from src.features.feature_statistics import FeatureStatistics
 
 logger = logging.getLogger(__name__)
 

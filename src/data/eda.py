@@ -62,6 +62,9 @@ from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
 from nltk.corpus import stopwords
 from wordcloud import WordCloud
 
+from src.features.feature_schema_validator import FeatureSchemaValidator
+from src.features.feature_statistics import FeatureStatistics
+
 logger = logging.getLogger(__name__)
 
 sns.set_style("whitegrid")

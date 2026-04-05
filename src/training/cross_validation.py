@@ -47,6 +47,9 @@ from src.utils.input_validation import (
 )
 from src.utils.settings import load_settings
 from src.models.training.training_utils import TrainingMetrics
+from src.features.dataset_feature_generator import DatasetFeatureGenerator
+from src.features.feature_schema_validator import FeatureSchemaValidator
+from src.features.feature_statistics import FeatureStatistics
 
 logger = logging.getLogger(__name__)
 SETTINGS = load_settings()
@@ -137,6 +140,75 @@ def _resolve_metric(
     )
 
 
+def _run_feature_diagnostics(texts: list[str], label: str = "") -> None:
+    """
+    Compute feature statistics and validate schema for a text corpus.
+
+    Uses DatasetFeatureGenerator to extract a feature matrix from the
+    provided texts, FeatureStatistics to surface the dataset summary and
+    any constant (zero-variance) features, and FeatureSchemaValidator to
+    confirm that all feature vectors match the inferred schema.
+
+    Runs non-fatally — any error is captured as a warning so it does not
+    interrupt the cross-validation loop.
+
+    Parameters
+    ----------
+    texts : list[str]
+        Raw article texts from the working dataframe.
+    label : str
+        Descriptive tag used in log messages (e.g. "cross-validation dataset").
+    """
+    try:
+        from src.features.pipelines.feature_pipeline import FeaturePipeline
+        from src.features.pipelines.batch_feature_pipeline import BatchFeaturePipeline
+
+        tag = f" [{label}]" if label else ""
+        logger.info("Running feature diagnostics%s | samples=%d", tag, len(texts))
+
+        batch_pipeline = BatchFeaturePipeline(pipeline=FeaturePipeline())
+        generator = DatasetFeatureGenerator(pipeline=batch_pipeline)
+        _, feature_names = generator.generate(texts)
+
+        contexts = generator._build_contexts(texts)
+        feature_dicts = batch_pipeline._sequential_extract(contexts)
+
+        stats = FeatureStatistics()
+        summary = stats.dataset_summary(feature_dicts)
+        logger.info(
+            "Feature diagnostics%s | samples=%d features=%d mean_variance=%.6f",
+            tag,
+            int(summary["num_samples"]),
+            int(summary["num_features"]),
+            summary["mean_variance"],
+        )
+
+        constant = stats.detect_constant_features(feature_dicts)
+        if constant:
+            logger.warning(
+                "Detected %d constant feature(s)%s: %s",
+                len(constant),
+                tag,
+                constant[:10],
+            )
+
+        validator = FeatureSchemaValidator(
+            expected_features=feature_names,
+            strict=False,
+            allow_missing=True,
+            allow_extra=True,
+        )
+        validator.validate_batch(feature_dicts[:min(5, len(feature_dicts))])
+        logger.info(
+            "Feature schema validated%s | schema_features=%d",
+            tag,
+            validator.schema_summary()["num_features"],
+        )
+
+    except Exception as _diag_exc:
+        logger.warning("Feature diagnostics skipped (non-fatal): %s", _diag_exc)
+
+
 def cross_validate_model(
     df: pd.DataFrame,
     train_function: Callable[..., tuple[Any, Any]],
@@ -225,6 +297,11 @@ def cross_validate_model(
         n_splits=effective_splits,
         shuffle=True,
         random_state=effective_seed,
+    )
+
+    _run_feature_diagnostics(
+        working_df[text_column].tolist(),
+        label="cross-validation dataset",
     )
 
     train_sig = inspect.signature(train_function)

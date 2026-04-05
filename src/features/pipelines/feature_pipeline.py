@@ -173,6 +173,8 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import FeatureRegistry
 from src.features.feature_bootstrap import bootstrap_feature_registry
+from src.features.feature_schema_validator import FeatureSchemaValidator
+from src.features.feature_statistics import FeatureStatistics
 from src.features.fusion.feature_fusion import FeatureFusion
 from src.features.fusion.feature_scaling import FeatureScalingPipeline
 from src.features.fusion.feature_selection import FeatureSelectionPipeline
@@ -620,6 +622,8 @@ class FeaturePipeline:
     feature_names: Optional[List[str]] = None
     scaler: Optional[FeatureScalingPipeline] = None
     selector: Optional[FeatureSelectionPipeline] = None
+    validator: Optional[FeatureSchemaValidator] = None
+    stats_enabled: bool = False
 
     features: List[BaseFeature] = field(default_factory=list)
     fusion: Optional[FeatureFusion] = None
@@ -800,6 +804,35 @@ class FeaturePipeline:
         """
 
         features = self.batch_extract(contexts)
+
+        if self.validator is not None:
+            try:
+                features = self.validator.validate_batch(features)
+                logger.debug(
+                    "Feature schema validation passed | samples=%d",
+                    len(features),
+                )
+            except Exception as _val_exc:
+                logger.warning("Feature schema validation failed: %s", _val_exc)
+
+        if self.stats_enabled and features:
+            try:
+                _stats = FeatureStatistics()
+                _summary = _stats.dataset_summary(features)
+                logger.info(
+                    "Feature statistics | samples=%d features=%d mean_variance=%.6f",
+                    int(_summary["num_samples"]),
+                    int(_summary["num_features"]),
+                    _summary["mean_variance"],
+                )
+                _constant = _stats.detect_constant_features(features)
+                if _constant:
+                    logger.warning(
+                        "Constant (zero-variance) features detected: %s",
+                        _constant[:10],
+                    )
+            except Exception as _stats_exc:
+                logger.warning("Feature statistics computation failed: %s", _stats_exc)
 
         if self.scaler:
 
