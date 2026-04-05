@@ -13,7 +13,7 @@ Description:
         • FeatureScalingPipeline
         • FeatureSelectionPipeline
 
-    Explicit integration of bias, framing, and ideological feature extractors:
+    Explicit integration of all feature extractor modules:
 
         BiasFeatures (src.features.bias.bias_features)
             Output keys (prefix: bias_):
@@ -38,10 +38,113 @@ Description:
                 ideology_polarization_ratio, ideology_group_reference_ratio,
                 ideology_phrase_count, ideology_signal_strength
 
-    All three are registered via @register_feature and discovered automatically
-    through bootstrap_feature_registry(). Explicit imports here guarantee
-    registration even when bootstrap is not called, and expose their output
-    key constants for downstream schema building and section routing.
+        ArgumentStructureFeatures (src.features.discourse.argument_structure_features)
+            Output keys (prefix: argument_):
+                argument_claim_ratio, argument_premise_ratio,
+                argument_evidence_ratio, argument_counterargument_ratio,
+                argument_rhetorical_question_ratio,
+                argument_structure_density, argument_structure_diversity
+
+        DiscourseFeatures (src.features.discourse.discourse_features)
+            Output keys (prefix: discourse_):
+                discourse_causal_ratio, discourse_contrast_ratio,
+                discourse_additive_ratio, discourse_sequential_ratio,
+                discourse_evidential_ratio, discourse_marker_density,
+                discourse_diversity
+
+        EntityGraphFeatures (src.features.graph.entity_graph_features)
+            Output keys (prefix: entity_):
+                entity_count, entity_edge_count, entity_avg_degree,
+                entity_density, entity_centralization
+
+        InteractionGraphFeatures (src.features.graph.interaction_graph_features)
+            Output keys (prefix: interaction_):
+                interaction_node_count, interaction_edge_count,
+                interaction_avg_degree, interaction_density,
+                interaction_clustering, interaction_component_count
+
+        ConflictFeatures (src.features.narrative.conflict_features)
+            Output keys (prefix: conflict_):
+                conflict_confrontation_ratio, conflict_dispute_ratio,
+                conflict_accusation_ratio, conflict_aggression_ratio,
+                conflict_polarization_ratio, conflict_escalation_ratio,
+                conflict_intensity, conflict_diversity, conflict_rhetoric_score
+
+        NarrativeFeatures (src.features.narrative.narrative_features)
+            Output keys (prefix: narrative_):
+                narrative_hero_ratio, narrative_villain_ratio,
+                narrative_victim_ratio, narrative_conflict_ratio,
+                narrative_resolution_ratio, narrative_crisis_ratio,
+                narrative_polarization_ratio, narrative_role_diversity,
+                narrative_conflict_intensity, narrative_progression_score,
+                narrative_rhetoric_score
+
+        NarrativeFrameFeatures (src.features.narrative.narrative_frame_features)
+            Output keys (prefix: narrative_frame_):
+                narrative_frame_conflict_ratio, narrative_frame_economic_ratio,
+                narrative_frame_human_interest_ratio, narrative_frame_moral_ratio,
+                narrative_frame_responsibility_ratio, narrative_frame_diversity,
+                narrative_frame_dominance, narrative_frame_balance,
+                narrative_frame_rhetoric_score
+
+        NarrativeRoleFeatures (src.features.narrative.narrative_role_features)
+            Output keys (prefix: narrative_role_):
+                narrative_role_hero_ratio, narrative_role_villain_ratio,
+                narrative_role_victim_ratio, narrative_role_polarization_ratio,
+                narrative_role_balance, narrative_role_diversity,
+                narrative_entity_density
+
+        ManipulationPatterns (src.features.propaganda.manipulation_patterns)
+            Output keys (prefix: manipulation_):
+                manipulation_urgency_ratio, manipulation_fear_ratio,
+                manipulation_blame_ratio, manipulation_scapegoat_ratio,
+                manipulation_absolute_ratio, manipulation_conspiracy_ratio,
+                manipulation_false_dilemma_ratio, manipulation_exaggeration_ratio,
+                manipulation_intensifier_ratio, manipulation_exclamation_density,
+                manipulation_caps_emphasis, manipulation_intensity,
+                manipulation_diversity
+
+        PropagandaFeatures (src.features.propaganda.propaganda_features)
+            Output keys (prefix: propaganda_):
+                propaganda_name_calling_ratio, propaganda_fear_ratio,
+                propaganda_exaggeration_ratio, propaganda_glitter_ratio,
+                propaganda_us_vs_them_ratio, propaganda_authority_ratio,
+                propaganda_intensifier_ratio, propaganda_exclamation_density,
+                propaganda_caps_ratio, propaganda_intensity, propaganda_diversity
+
+        PropagandaLexiconFeatures (src.features.propaganda.propaganda_lexicon_features)
+            Output keys (prefix: propaganda_):
+                propaganda_name_calling_ratio, propaganda_fear_ratio,
+                propaganda_exaggeration_ratio, propaganda_bandwagon_ratio,
+                propaganda_slogan_ratio, propaganda_phrase_bandwagon,
+                propaganda_phrase_slogan, propaganda_exclamation_density,
+                propaganda_caps_ratio, propaganda_lexicon_density,
+                propaganda_lexicon_diversity
+
+        LexicalFeatures (src.features.text.lexical_features)
+            Output keys: vocabulary_size, hapax_legomena_ratio,
+                hapax_dislegomena_ratio, lexical_density, average_word_length
+
+        SemanticFeatures (src.features.text.semantic_features)
+            Output keys (prefix: embedding_):
+                embedding_norm, embedding_mean, embedding_std,
+                embedding_max, embedding_min
+
+        SyntacticFeatures (src.features.text.syntactic_features)
+            Output keys: sentence_count, avg_sentence_length,
+                noun_ratio, verb_ratio, adjective_ratio,
+                adverb_ratio, punctuation_ratio
+
+        TokenFeatures (src.features.text.token_features)
+            Output keys (prefix: token_):
+                token_count, unique_token_count, type_token_ratio,
+                avg_token_length, max_token_length, repetition_ratio
+
+    All extractors are registered via @register_feature and discovered
+    automatically through bootstrap_feature_registry(). Explicit imports
+    here guarantee registration even when bootstrap is not called, and
+    expose their output key constants for downstream schema building and
+    section routing.
 
     This module is responsible for producing deterministic, reproducible
     feature vectors from raw text inputs.
@@ -78,6 +181,26 @@ from src.graph.graph_pipeline import GraphPipeline
 from src.features.bias.bias_features import BiasFeatures
 from src.features.bias.framing_features import FramingFeatures
 from src.features.bias.ideological_features import IdeologicalFeatures
+
+from src.features.discourse.argument_structure_features import ArgumentStructureFeatures
+from src.features.discourse.discourse_features import DiscourseFeatures
+
+from src.features.graph.entity_graph_features import EntityGraphFeatures
+from src.features.graph.interaction_graph_features import InteractionGraphFeatures
+
+from src.features.narrative.conflict_features import ConflictFeatures
+from src.features.narrative.narrative_features import NarrativeFeatures
+from src.features.narrative.narrative_frame_features import NarrativeFrameFeatures
+from src.features.narrative.narrative_role_features import NarrativeRoleFeatures
+
+from src.features.propaganda.manipulation_patterns import ManipulationPatterns
+from src.features.propaganda.propaganda_features import PropagandaFeatures
+from src.features.propaganda.propaganda_lexicon_features import PropagandaLexiconFeatures
+
+from src.features.text.lexical_features import LexicalFeatures
+from src.features.text.semantic_features import SemanticFeatures
+from src.features.text.syntactic_features import SyntacticFeatures
+from src.features.text.token_features import TokenFeatures
 
 logger = logging.getLogger(__name__)
 
@@ -123,8 +246,225 @@ IDEOLOGICAL_FEATURE_NAMES: List[str] = [
     "ideology_signal_strength",
 ]
 
+ARGUMENT_STRUCTURE_FEATURE_NAMES: List[str] = [
+    "argument_claim_ratio",
+    "argument_premise_ratio",
+    "argument_evidence_ratio",
+    "argument_counterargument_ratio",
+    "argument_rhetorical_question_ratio",
+    "argument_structure_density",
+    "argument_structure_diversity",
+]
+
+DISCOURSE_FEATURE_NAMES: List[str] = [
+    "discourse_causal_ratio",
+    "discourse_contrast_ratio",
+    "discourse_additive_ratio",
+    "discourse_sequential_ratio",
+    "discourse_evidential_ratio",
+    "discourse_marker_density",
+    "discourse_diversity",
+]
+
+ENTITY_GRAPH_FEATURE_NAMES: List[str] = [
+    "entity_count",
+    "entity_edge_count",
+    "entity_avg_degree",
+    "entity_density",
+    "entity_centralization",
+]
+
+INTERACTION_GRAPH_FEATURE_NAMES: List[str] = [
+    "interaction_node_count",
+    "interaction_edge_count",
+    "interaction_avg_degree",
+    "interaction_density",
+    "interaction_clustering",
+    "interaction_component_count",
+]
+
+CONFLICT_FEATURE_NAMES: List[str] = [
+    "conflict_confrontation_ratio",
+    "conflict_dispute_ratio",
+    "conflict_accusation_ratio",
+    "conflict_aggression_ratio",
+    "conflict_polarization_ratio",
+    "conflict_escalation_ratio",
+    "conflict_intensity",
+    "conflict_diversity",
+    "conflict_rhetoric_score",
+]
+
+NARRATIVE_FEATURE_NAMES: List[str] = [
+    "narrative_hero_ratio",
+    "narrative_villain_ratio",
+    "narrative_victim_ratio",
+    "narrative_conflict_ratio",
+    "narrative_resolution_ratio",
+    "narrative_crisis_ratio",
+    "narrative_polarization_ratio",
+    "narrative_role_diversity",
+    "narrative_conflict_intensity",
+    "narrative_progression_score",
+    "narrative_rhetoric_score",
+]
+
+NARRATIVE_FRAME_FEATURE_NAMES: List[str] = [
+    "narrative_frame_conflict_ratio",
+    "narrative_frame_economic_ratio",
+    "narrative_frame_human_interest_ratio",
+    "narrative_frame_moral_ratio",
+    "narrative_frame_responsibility_ratio",
+    "narrative_frame_diversity",
+    "narrative_frame_dominance",
+    "narrative_frame_balance",
+    "narrative_frame_rhetoric_score",
+]
+
+NARRATIVE_ROLE_FEATURE_NAMES: List[str] = [
+    "narrative_role_hero_ratio",
+    "narrative_role_villain_ratio",
+    "narrative_role_victim_ratio",
+    "narrative_role_polarization_ratio",
+    "narrative_role_balance",
+    "narrative_role_diversity",
+    "narrative_entity_density",
+]
+
+MANIPULATION_FEATURE_NAMES: List[str] = [
+    "manipulation_urgency_ratio",
+    "manipulation_fear_ratio",
+    "manipulation_blame_ratio",
+    "manipulation_scapegoat_ratio",
+    "manipulation_absolute_ratio",
+    "manipulation_conspiracy_ratio",
+    "manipulation_false_dilemma_ratio",
+    "manipulation_exaggeration_ratio",
+    "manipulation_intensifier_ratio",
+    "manipulation_exclamation_density",
+    "manipulation_caps_emphasis",
+    "manipulation_intensity",
+    "manipulation_diversity",
+]
+
+PROPAGANDA_FEATURE_NAMES: List[str] = [
+    "propaganda_name_calling_ratio",
+    "propaganda_fear_ratio",
+    "propaganda_exaggeration_ratio",
+    "propaganda_glitter_ratio",
+    "propaganda_us_vs_them_ratio",
+    "propaganda_authority_ratio",
+    "propaganda_intensifier_ratio",
+    "propaganda_exclamation_density",
+    "propaganda_caps_ratio",
+    "propaganda_intensity",
+    "propaganda_diversity",
+]
+
+PROPAGANDA_LEXICON_FEATURE_NAMES: List[str] = [
+    "propaganda_name_calling_ratio",
+    "propaganda_fear_ratio",
+    "propaganda_exaggeration_ratio",
+    "propaganda_bandwagon_ratio",
+    "propaganda_slogan_ratio",
+    "propaganda_phrase_bandwagon",
+    "propaganda_phrase_slogan",
+    "propaganda_exclamation_density",
+    "propaganda_caps_ratio",
+    "propaganda_lexicon_density",
+    "propaganda_lexicon_diversity",
+]
+
+LEXICAL_FEATURE_NAMES: List[str] = [
+    "vocabulary_size",
+    "hapax_legomena_ratio",
+    "hapax_dislegomena_ratio",
+    "lexical_density",
+    "average_word_length",
+]
+
+SEMANTIC_FEATURE_NAMES: List[str] = [
+    "embedding_norm",
+    "embedding_mean",
+    "embedding_std",
+    "embedding_max",
+    "embedding_min",
+]
+
+SYNTACTIC_FEATURE_NAMES: List[str] = [
+    "sentence_count",
+    "avg_sentence_length",
+    "noun_ratio",
+    "verb_ratio",
+    "adjective_ratio",
+    "adverb_ratio",
+    "punctuation_ratio",
+]
+
+TOKEN_FEATURE_NAMES: List[str] = [
+    "token_count",
+    "unique_token_count",
+    "type_token_ratio",
+    "avg_token_length",
+    "max_token_length",
+    "repetition_ratio",
+]
+
 ALL_BIAS_MODULE_FEATURE_NAMES: List[str] = sorted(
     BIAS_FEATURE_NAMES + FRAMING_FEATURE_NAMES + IDEOLOGICAL_FEATURE_NAMES
+)
+
+ALL_DISCOURSE_FEATURE_NAMES: List[str] = sorted(
+    ARGUMENT_STRUCTURE_FEATURE_NAMES + DISCOURSE_FEATURE_NAMES
+)
+
+ALL_GRAPH_FEATURE_NAMES: List[str] = sorted(
+    ENTITY_GRAPH_FEATURE_NAMES + INTERACTION_GRAPH_FEATURE_NAMES
+)
+
+ALL_NARRATIVE_FEATURE_NAMES: List[str] = sorted(
+    CONFLICT_FEATURE_NAMES
+    + NARRATIVE_FEATURE_NAMES
+    + NARRATIVE_FRAME_FEATURE_NAMES
+    + NARRATIVE_ROLE_FEATURE_NAMES
+)
+
+ALL_PROPAGANDA_FEATURE_NAMES: List[str] = sorted(
+    MANIPULATION_FEATURE_NAMES
+    + PROPAGANDA_FEATURE_NAMES
+    + PROPAGANDA_LEXICON_FEATURE_NAMES
+)
+
+ALL_TEXT_FEATURE_NAMES: List[str] = sorted(
+    LEXICAL_FEATURE_NAMES
+    + SEMANTIC_FEATURE_NAMES
+    + SYNTACTIC_FEATURE_NAMES
+    + TOKEN_FEATURE_NAMES
+)
+
+# ---------------------------------------------------------------------------
+# Text feature key prefixes used by partition_feature_sections
+# ---------------------------------------------------------------------------
+
+_TEXT_KEY_PREFIXES = (
+    "embedding_",
+    "vocabulary_",
+    "hapax_",
+    "token_",
+    "unique_token_",
+    "type_token_",
+    "avg_token_",
+    "max_token_",
+    "repetition_",
+    "sentence_",
+    "avg_sentence_",
+    "noun_",
+    "verb_",
+    "adjective_",
+    "adverb_",
+    "punctuation_",
+    "lexical_",
+    "average_word_",
 )
 
 
@@ -138,15 +478,18 @@ def partition_feature_sections(
     """
     Partition a flat feature dict from the pipeline into named sections.
 
-    Routes features to one of five sections:
-        "bias"      — keys starting with ``bias_``
-        "framing"   — keys starting with ``frame_``
-        "ideology"  — keys starting with ``ideology_``
-        "emotion"   — keys starting with ``emotion_`` or ``lexicon_emotion_``
-        "narrative" — keys starting with ``narrative_``
-        "discourse" — keys starting with ``discourse_``
-        "graph"     — keys starting with ``graph_``
-        "other"     — everything else
+    Routes features to one of the following sections:
+        "bias"        — keys starting with ``bias_``
+        "framing"     — keys starting with ``frame_``
+        "ideology"    — keys starting with ``ideology_``
+        "emotion"     — keys starting with ``emotion_`` or ``lexicon_emotion_``
+        "discourse"   — keys starting with ``discourse_`` or ``argument_``
+        "graph"       — keys starting with ``graph_``, ``graph_pipeline_``,
+                        ``entity_``, or ``interaction_``
+        "narrative"   — keys starting with ``narrative_`` or ``conflict_``
+        "propaganda"  — keys starting with ``propaganda_`` or ``manipulation_``
+        "text"        — token, lexical, semantic, and syntactic feature keys
+        "other"       — everything else
 
     Parameters
     ----------
@@ -164,9 +507,11 @@ def partition_feature_sections(
         "framing": {},
         "ideology": {},
         "emotion": {},
-        "narrative": {},
         "discourse": {},
         "graph": {},
+        "narrative": {},
+        "propaganda": {},
+        "text": {},
         "other": {},
     }
 
@@ -179,12 +524,21 @@ def partition_feature_sections(
             sections["ideology"][key] = value
         elif key.startswith("emotion_") or key.startswith("lexicon_emotion_"):
             sections["emotion"][key] = value
-        elif key.startswith("narrative_"):
-            sections["narrative"][key] = value
-        elif key.startswith("discourse_"):
+        elif key.startswith("discourse_") or key.startswith("argument_"):
             sections["discourse"][key] = value
-        elif key.startswith("graph_") or key.startswith("graph_pipeline_"):
+        elif (
+            key.startswith("graph_")
+            or key.startswith("graph_pipeline_")
+            or key.startswith("entity_")
+            or key.startswith("interaction_")
+        ):
             sections["graph"][key] = value
+        elif key.startswith("narrative_") or key.startswith("conflict_"):
+            sections["narrative"][key] = value
+        elif key.startswith("propaganda_") or key.startswith("manipulation_"):
+            sections["propaganda"][key] = value
+        elif key.startswith(_TEXT_KEY_PREFIXES):
+            sections["text"][key] = value
         else:
             sections["other"][key] = value
 
@@ -195,6 +549,28 @@ def partition_feature_sections(
 # Pipeline
 # ---------------------------------------------------------------------------
 
+_ALL_FEATURE_MODULE_TYPES = (
+    BiasFeatures,
+    FramingFeatures,
+    IdeologicalFeatures,
+    ArgumentStructureFeatures,
+    DiscourseFeatures,
+    EntityGraphFeatures,
+    InteractionGraphFeatures,
+    ConflictFeatures,
+    NarrativeFeatures,
+    NarrativeFrameFeatures,
+    NarrativeRoleFeatures,
+    ManipulationPatterns,
+    PropagandaFeatures,
+    PropagandaLexiconFeatures,
+    LexicalFeatures,
+    SemanticFeatures,
+    SyntacticFeatures,
+    TokenFeatures,
+)
+
+
 @dataclass
 class FeaturePipeline:
     """
@@ -202,16 +578,40 @@ class FeaturePipeline:
 
     Responsibilities:
         • initialize feature extractors via FeatureRegistry
-        • execute feature extraction (including BiasFeatures,
-          FramingFeatures, and IdeologicalFeatures)
+        • execute feature extraction across all registered modules
         • fuse outputs
         • optionally scale features
         • optionally apply feature selection
 
-    The three bias-module extractors (BiasFeatures, FramingFeatures,
-    IdeologicalFeatures) contribute 28 features in total. Their output
-    keys are available via the module-level constants:
-        BIAS_FEATURE_NAMES, FRAMING_FEATURE_NAMES, IDEOLOGICAL_FEATURE_NAMES
+    Integrated feature modules and their output key counts:
+        BiasFeatures             (bias_*)            10 features
+        FramingFeatures          (frame_*)            10 features
+        IdeologicalFeatures      (ideology_*)          8 features
+        ArgumentStructureFeatures (argument_*)         7 features
+        DiscourseFeatures        (discourse_*)         7 features
+        EntityGraphFeatures      (entity_*)            5 features
+        InteractionGraphFeatures (interaction_*)       6 features
+        ConflictFeatures         (conflict_*)          9 features
+        NarrativeFeatures        (narrative_*)        11 features
+        NarrativeFrameFeatures   (narrative_frame_*)   9 features
+        NarrativeRoleFeatures    (narrative_role_*)    7 features
+        ManipulationPatterns     (manipulation_*)     13 features
+        PropagandaFeatures       (propaganda_*)       11 features
+        PropagandaLexiconFeatures (propaganda_*)      11 features
+        LexicalFeatures          (vocabulary_/hapax_)  5 features
+        SemanticFeatures         (embedding_*)         5 features
+        SyntacticFeatures        (sentence_/pos_*)     7 features
+        TokenFeatures            (token_*)             6 features
+
+    Output key constants are available as module-level lists:
+        BIAS_FEATURE_NAMES, FRAMING_FEATURE_NAMES, IDEOLOGICAL_FEATURE_NAMES,
+        ARGUMENT_STRUCTURE_FEATURE_NAMES, DISCOURSE_FEATURE_NAMES,
+        ENTITY_GRAPH_FEATURE_NAMES, INTERACTION_GRAPH_FEATURE_NAMES,
+        CONFLICT_FEATURE_NAMES, NARRATIVE_FEATURE_NAMES,
+        NARRATIVE_FRAME_FEATURE_NAMES, NARRATIVE_ROLE_FEATURE_NAMES,
+        MANIPULATION_FEATURE_NAMES, PROPAGANDA_FEATURE_NAMES,
+        PROPAGANDA_LEXICON_FEATURE_NAMES, LEXICAL_FEATURE_NAMES,
+        SEMANTIC_FEATURE_NAMES, SYNTACTIC_FEATURE_NAMES, TOKEN_FEATURE_NAMES
 
     To partition extracted features by module section, use:
         partition_feature_sections(features)
@@ -230,10 +630,8 @@ class FeaturePipeline:
         Initialize feature extractors using FeatureRegistry.
 
         Calls bootstrap_feature_registry() which imports all registered
-        feature modules, including:
-            • BiasFeatures      (bias_*)
-            • FramingFeatures   (frame_*)
-            • IdeologicalFeatures (ideology_*)
+        feature modules, including all discourse, graph, narrative,
+        propaganda, and text feature extractors.
         """
         bootstrap_feature_registry()
 
@@ -251,23 +649,25 @@ class FeaturePipeline:
             logger.warning("GraphPipeline unavailable in FeaturePipeline: %s", exc)
             self.graph_pipeline = None
 
-        bias_active = any(
-            isinstance(f, (BiasFeatures, FramingFeatures, IdeologicalFeatures))
+        active_modules = [
+            type(f).__name__
             for f in self.features
-        )
+            if isinstance(f, _ALL_FEATURE_MODULE_TYPES)
+        ]
         logger.info(
-            "FeaturePipeline initialized | feature_count=%d bias_modules_active=%s",
+            "FeaturePipeline initialized | feature_count=%d active_modules=%s",
             len(self.features),
-            bias_active,
+            active_modules,
         )
 
     def extract(self, context: FeatureContext) -> Dict[str, float]:
         """
         Extract features from a single FeatureContext.
 
-        Output includes contributions from BiasFeatures (bias_*),
-        FramingFeatures (frame_*), and IdeologicalFeatures (ideology_*).
-        Use partition_feature_sections() on the result to separate sections.
+        Output includes contributions from all registered feature modules.
+        Use partition_feature_sections() on the result to separate into
+        named sections: bias, framing, ideology, emotion, discourse, graph,
+        narrative, propaganda, text, other.
         """
 
         if self.fusion is None:
@@ -306,8 +706,8 @@ class FeaturePipeline:
         Extract features and return them partitioned by module section.
 
         Returns a dict of section -> feature dict via partition_feature_sections().
-        Sections include: bias, framing, ideology, emotion, narrative,
-        discourse, graph, other.
+        Sections: bias, framing, ideology, emotion, discourse, graph,
+        narrative, propaganda, text, other.
         """
         features = self.extract(context)
         return partition_feature_sections(features)
@@ -394,7 +794,7 @@ class FeaturePipeline:
         Full pipeline execution.
 
         Steps:
-            1. Feature extraction (bias_*, frame_*, ideology_*, ...)
+            1. Feature extraction (all registered modules)
             2. Optional scaling
             3. Optional feature selection
         """

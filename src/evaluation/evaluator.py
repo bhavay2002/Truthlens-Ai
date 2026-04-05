@@ -12,6 +12,11 @@ Description:
     sufficiency, deletion/insertion scoring, and cross-method correlation
     analysis as first-class evaluation capabilities.
 
+    Integrates feature importance evaluation via three complementary methods:
+        feature_importance_ablation()    — systematic feature removal
+        feature_importance_permutation() — random feature shuffling
+        feature_importance_shap()        — Shapley Additive Explanations
+
 Dependencies:
     logging
     typing
@@ -19,6 +24,9 @@ Dependencies:
     src.evaluation.metrics
     src.explainability.explanation_metrics
     src.explainability.explanation_consistency
+    src.features.importance.feature_ablation
+    src.features.importance.permutation_importance
+    src.features.importance.shap_importance
 
 Inputs:
     y_true: Ground truth labels
@@ -28,6 +36,7 @@ Inputs:
     tokens / scores / predict_fn: Explanation evaluation inputs
     shap_importance / integrated_gradients / attention_scores / lime_importance:
         Consistency evaluation inputs
+    model / X / y / feature_names: Feature importance evaluation inputs
 
 Outputs:
     Dictionary containing evaluation metrics and aggregated summaries
@@ -51,6 +60,10 @@ from .calibration import expected_calibration_error
 from src.explainability.explanation_metrics import ExplanationMetrics
 from src.explainability.explanation_consistency import ExplanationConsistency
 
+from src.features.importance.feature_ablation import FeatureAblation
+from src.features.importance.permutation_importance import PermutationImportance
+from src.features.importance.shap_importance import ShapImportance
+
 logger = logging.getLogger(__name__)
 
 
@@ -62,10 +75,13 @@ class Evaluator:
     In addition to standard classification / multi-label / multi-task
     evaluation, this class exposes:
 
-        explanation_metrics()   -- faithfulness, comprehensiveness,
-                                   sufficiency, deletion, insertion scores
-        explanation_consistency() -- pairwise correlation between SHAP,
-                                   Integrated Gradients, Attention, and LIME
+        explanation_metrics()            -- faithfulness, comprehensiveness,
+                                           sufficiency, deletion, insertion scores
+        explanation_consistency()        -- pairwise correlation between SHAP,
+                                           Integrated Gradients, Attention, and LIME
+        feature_importance_ablation()    -- contribution scores via feature removal
+        feature_importance_permutation() -- contribution scores via feature shuffling
+        feature_importance_shap()        -- contribution scores via SHAP values
     """
 
     @staticmethod
@@ -368,3 +384,244 @@ class Evaluator:
 
         logger.info("Explanation consistency evaluation completed")
         return results
+
+    # -----------------------------------------------------------------
+    # Feature Importance Evaluation
+    # -----------------------------------------------------------------
+
+    @staticmethod
+    def feature_importance_ablation(
+        model: object,
+        X: np.ndarray,
+        y: np.ndarray,
+        feature_names: List[str],
+        metric: Optional[Callable[[np.ndarray, np.ndarray], float]] = None,
+        top_k: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Evaluate feature importance by systematically removing each feature
+        and measuring the resulting drop in model performance.
+
+        Parameters
+        ----------
+        model : object
+            Any model that exposes a ``predict(X)`` method.
+        X : np.ndarray
+            Feature matrix of shape (n_samples, n_features).
+        y : np.ndarray
+            Ground-truth label array of shape (n_samples,).
+        feature_names : List[str]
+            Names aligned with columns of X.
+        metric : callable, optional
+            Evaluation function ``metric(y_true, y_pred) -> float``.
+            Defaults to accuracy if not provided.
+        top_k : int, optional
+            If given, include only the top-k features in ``"top_k"`` key.
+
+        Returns
+        -------
+        Dict[str, Any] with keys:
+            "scores"   — dict mapping feature name to importance score
+            "ranked"   — list of (feature_name, score) sorted descending
+            "top_k"    — list of top-k (feature_name, score) pairs
+                         (only present when top_k is specified)
+        """
+        if not isinstance(X, np.ndarray):
+            raise TypeError("X must be a numpy ndarray")
+        if not isinstance(y, np.ndarray):
+            raise TypeError("y must be a numpy ndarray")
+        if len(feature_names) != X.shape[1]:
+            raise ValueError(
+                f"feature_names length ({len(feature_names)}) must match "
+                f"X column count ({X.shape[1]})"
+            )
+
+        logger.info(
+            "Running feature importance ablation | features=%d samples=%d",
+            len(feature_names),
+            X.shape[0],
+        )
+
+        kwargs: Dict[str, Any] = {"model": model}
+        if metric is not None:
+            kwargs["metric"] = metric
+
+        ablator = FeatureAblation(**kwargs)
+        scores = ablator.single_feature_ablation(X=X, y=y, feature_names=feature_names)
+        ranked = ablator.rank_features(scores)
+
+        result: Dict[str, Any] = {
+            "scores": scores,
+            "ranked": ranked,
+        }
+
+        if top_k is not None:
+            result["top_k"] = ablator.top_k(scores, k=top_k)
+
+        logger.info(
+            "Feature importance ablation completed | features_scored=%d",
+            len(scores),
+        )
+        return result
+
+    @staticmethod
+    def feature_importance_permutation(
+        model: object,
+        X: np.ndarray,
+        y: np.ndarray,
+        feature_names: List[str],
+        metric: Optional[Callable[[np.ndarray, np.ndarray], float]] = None,
+        n_repeats: int = 5,
+        random_seed: int = 42,
+        top_k: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Evaluate feature importance by randomly permuting each feature's
+        values and measuring the resulting drop in model performance.
+
+        Parameters
+        ----------
+        model : object
+            Any model that exposes a ``predict(X)`` method.
+        X : np.ndarray
+            Feature matrix of shape (n_samples, n_features).
+        y : np.ndarray
+            Ground-truth label array of shape (n_samples,).
+        feature_names : List[str]
+            Names aligned with columns of X.
+        metric : callable, optional
+            Evaluation function ``metric(y_true, y_pred) -> float``.
+            Defaults to accuracy if not provided.
+        n_repeats : int
+            Number of shuffle repeats per feature. Default is 5.
+        random_seed : int
+            Random seed for reproducibility. Default is 42.
+        top_k : int, optional
+            If given, include only the top-k features in ``"top_k"`` key.
+
+        Returns
+        -------
+        Dict[str, Any] with keys:
+            "scores"   — dict mapping feature name to importance score
+            "ranked"   — list of (feature_name, score) sorted descending
+            "top_k"    — list of top-k (feature_name, score) pairs
+                         (only present when top_k is specified)
+        """
+        if not isinstance(X, np.ndarray):
+            raise TypeError("X must be a numpy ndarray")
+        if not isinstance(y, np.ndarray):
+            raise TypeError("y must be a numpy ndarray")
+        if len(feature_names) != X.shape[1]:
+            raise ValueError(
+                f"feature_names length ({len(feature_names)}) must match "
+                f"X column count ({X.shape[1]})"
+            )
+
+        logger.info(
+            "Running feature importance permutation | features=%d samples=%d repeats=%d",
+            len(feature_names),
+            X.shape[0],
+            n_repeats,
+        )
+
+        kwargs: Dict[str, Any] = {"model": model}
+        if metric is not None:
+            kwargs["metric"] = metric
+
+        perm = PermutationImportance(**kwargs)
+        scores = perm.compute(
+            X=X,
+            y=y,
+            feature_names=feature_names,
+            n_repeats=n_repeats,
+            random_seed=random_seed,
+        )
+        ranked = perm.rank_features(scores)
+
+        result: Dict[str, Any] = {
+            "scores": scores,
+            "ranked": ranked,
+        }
+
+        if top_k is not None:
+            result["top_k"] = perm.top_k(scores, k=top_k)
+
+        logger.info(
+            "Feature importance permutation completed | features_scored=%d",
+            len(scores),
+        )
+        return result
+
+    @staticmethod
+    def feature_importance_shap(
+        model: object,
+        X: np.ndarray,
+        feature_names: List[str],
+        max_samples: Optional[int] = 1000,
+        random_seed: int = 42,
+        top_k: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Evaluate feature importance using SHAP (Shapley Additive
+        Explanations). The explainer is selected automatically; a
+        KernelExplainer is used as fallback when model-specific
+        explainers are not applicable.
+
+        Parameters
+        ----------
+        model : object
+            Any model that exposes a ``predict(X)`` method.
+        X : np.ndarray
+            Feature matrix of shape (n_samples, n_features).
+        feature_names : List[str]
+            Names aligned with columns of X.
+        max_samples : int, optional
+            Maximum number of background samples. Default is 1000.
+        random_seed : int
+            Random seed for reproducibility. Default is 42.
+        top_k : int, optional
+            If given, include only the top-k features in ``"top_k"`` key.
+
+        Returns
+        -------
+        Dict[str, Any] with keys:
+            "scores"   — dict mapping feature name to mean |SHAP| value
+            "ranked"   — list of (feature_name, score) sorted descending
+            "top_k"    — list of top-k (feature_name, score) pairs
+                         (only present when top_k is specified)
+        """
+        if not isinstance(X, np.ndarray):
+            raise TypeError("X must be a numpy ndarray")
+        if len(feature_names) != X.shape[1]:
+            raise ValueError(
+                f"feature_names length ({len(feature_names)}) must match "
+                f"X column count ({X.shape[1]})"
+            )
+
+        logger.info(
+            "Running feature importance SHAP | features=%d samples=%d",
+            len(feature_names),
+            X.shape[0],
+        )
+
+        shap_calc = ShapImportance(
+            model=model,
+            max_samples=max_samples,
+            random_seed=random_seed,
+        )
+        scores = shap_calc.compute(X=X, feature_names=feature_names)
+        ranked = shap_calc.rank_features(scores)
+
+        result: Dict[str, Any] = {
+            "scores": scores,
+            "ranked": ranked,
+        }
+
+        if top_k is not None:
+            result["top_k"] = shap_calc.top_k(scores, k=top_k)
+
+        logger.info(
+            "Feature importance SHAP completed | features_scored=%d",
+            len(scores),
+        )
+        return result
