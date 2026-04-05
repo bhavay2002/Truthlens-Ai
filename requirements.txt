@@ -86,3 +86,7 @@ fastapi
 gunicorn
 pydantic
 uvicorn[standard]
+fastapi
+gunicorn
+pydantic
+uvicorn[standard]
