@@ -131,6 +131,7 @@ class ModelWrapper:
             checkpoint = torch.load(
                 checkpoint_path,
                 map_location=self.device,
+                weights_only=False,
             )
 
             if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:

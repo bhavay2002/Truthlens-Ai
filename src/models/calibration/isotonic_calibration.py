@@ -1,196 +1,188 @@
 """
-File Name: temperature_scaling.py
+File Name: isotonic_calibration.py
 Module: calibration
 Description:
-    Implements temperature scaling for post-hoc calibration of classification
-    models. Temperature scaling is a simple but effective method for improving
-    the calibration of predicted probabilities without modifying the underlying
-    model parameters.
+    Implements isotonic regression-based post-hoc calibration for classification
+    models. Isotonic regression is a non-parametric method that fits a
+    monotonically non-decreasing function to map model confidence scores to
+    calibrated probabilities.
 
-    The technique learns a single scalar temperature parameter that rescales
-    model logits before applying the softmax function. This module supports
-    PyTorch models and integrates with standard ML evaluation pipelines.
+    This module supports binary and multi-class classification models using
+    a one-vs-rest strategy. It integrates with sklearn's IsotonicRegression
+    and NumPy for efficient probability estimation.
 
     The implementation follows research-grade engineering standards used in
-    modern ML systems and supports GPU computation, reproducibility, and
-    structured logging.
+    modern ML systems and supports structured logging and reproducibility.
 
 Dependencies:
-    torch
-    torch.nn
-    torch.optim
+    numpy
+    sklearn
     logging
     typing
 Inputs:
-    Model logits and ground truth labels.
+    Model logits or probability scores and ground truth labels.
 Outputs:
-    Calibrated probability predictions and optimized temperature parameter.
+    Calibrated probability predictions.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Tuple
+from typing import List, Optional
 
-import torch
-import torch.nn as nn
-import torch.optim as optim
+import numpy as np
+from sklearn.isotonic import IsotonicRegression
 
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
-class TemperatureScalingConfig:
+class IsotonicCalibrationConfig:
     """
-    Configuration for temperature scaling optimization.
+    Configuration for isotonic regression calibration.
     """
 
-    lr: float = 0.01
-    max_iter: int = 50
-    tolerance: float = 1e-6
-    device: str = "cpu"
+    out_of_bounds: str = "clip"
+    increasing: bool = True
 
 
-class TemperatureScaler(nn.Module):
+class IsotonicCalibrator:
     """
-    Temperature scaling module for calibrating model logits.
+    Isotonic regression calibrator for post-hoc probability calibration.
+
+    Fits a separate IsotonicRegression model per class using a one-vs-rest
+    strategy. Supports binary and multi-class classification.
 
     References
     ----------
-    Guo et al. (2017)
-    "On Calibration of Modern Neural Networks"
+    Zadrozny & Elkan (2002)
+    "Transforming Classifier Scores into Accurate Multiclass Probability Estimates"
     """
 
-    def __init__(self, config: TemperatureScalingConfig) -> None:
-        super().__init__()
+    def __init__(
+        self,
+        config: Optional[IsotonicCalibrationConfig] = None,
+    ) -> None:
+        self.config = config or IsotonicCalibrationConfig()
+        self._calibrators: List[IsotonicRegression] = []
+        self._num_classes: int = 0
+        self._is_fitted: bool = False
 
-        if config.lr <= 0:
-            raise ValueError("Learning rate must be positive.")
-
-        if config.max_iter <= 0:
-            raise ValueError("max_iter must be positive.")
-
-        self.config = config
-        self.temperature = nn.Parameter(torch.ones(1))
-        self.device = torch.device(config.device)
-
-        self.to(self.device)
-
-    def forward(self, logits: torch.Tensor) -> torch.Tensor:
+    def fit(
+        self,
+        probabilities: np.ndarray,
+        labels: np.ndarray,
+    ) -> "IsotonicCalibrator":
         """
-        Apply temperature scaling to logits.
+        Fit isotonic regression calibrators on validation set probabilities.
 
         Parameters
         ----------
-        logits : torch.Tensor
-            Raw logits from the model.
+        probabilities : np.ndarray, shape (n_samples, n_classes) or (n_samples,)
+            Predicted probabilities from uncalibrated model.
+        labels : np.ndarray, shape (n_samples,)
+            Ground truth class indices.
 
         Returns
         -------
-        torch.Tensor
-            Scaled logits.
+        IsotonicCalibrator
+            Fitted calibrator instance.
         """
 
-        if logits.ndim < 2:
-            raise ValueError("Logits must have shape [batch_size, num_classes].")
+        probabilities = np.asarray(probabilities, dtype=np.float64)
+        labels = np.asarray(labels, dtype=np.int64)
 
-        temperature = self.temperature.expand_as(logits)
+        if probabilities.ndim == 1:
+            probabilities = probabilities.reshape(-1, 1)
 
-        return logits / temperature
+        if probabilities.shape[0] != labels.shape[0]:
+            raise ValueError(
+                "probabilities and labels must have the same number of samples."
+            )
 
-    def predict_proba(self, logits: torch.Tensor) -> torch.Tensor:
+        n_classes = probabilities.shape[1]
+        self._num_classes = n_classes
+        self._calibrators = []
+
+        for class_idx in range(n_classes):
+            binary_labels = (labels == class_idx).astype(np.float64)
+            class_scores = probabilities[:, class_idx]
+
+            calibrator = IsotonicRegression(
+                out_of_bounds=self.config.out_of_bounds,
+                increasing=self.config.increasing,
+            )
+            calibrator.fit(class_scores, binary_labels)
+            self._calibrators.append(calibrator)
+
+        self._is_fitted = True
+        logger.info("IsotonicCalibrator fitted for %d classes.", n_classes)
+
+        return self
+
+    def predict_proba(self, probabilities: np.ndarray) -> np.ndarray:
         """
-        Convert scaled logits to calibrated probabilities.
+        Produce calibrated probability estimates.
 
         Parameters
         ----------
-        logits : torch.Tensor
+        probabilities : np.ndarray, shape (n_samples, n_classes) or (n_samples,)
+            Raw probability scores from uncalibrated model.
 
         Returns
         -------
-        torch.Tensor
+        np.ndarray, shape (n_samples, n_classes)
+            Calibrated and row-normalized probability estimates.
         """
 
-        scaled_logits = self.forward(logits)
-        return torch.softmax(scaled_logits, dim=1)
+        if not self._is_fitted:
+            raise RuntimeError(
+                "IsotonicCalibrator must be fitted before calling predict_proba."
+            )
 
-    def fit(self, logits: torch.Tensor, labels: torch.Tensor) -> float:
+        probabilities = np.asarray(probabilities, dtype=np.float64)
+
+        if probabilities.ndim == 1:
+            probabilities = probabilities.reshape(-1, 1)
+
+        if probabilities.shape[1] != self._num_classes:
+            raise ValueError(
+                f"Expected {self._num_classes} classes but got {probabilities.shape[1]}."
+            )
+
+        calibrated = np.zeros_like(probabilities)
+
+        for class_idx, calibrator in enumerate(self._calibrators):
+            calibrated[:, class_idx] = calibrator.predict(probabilities[:, class_idx])
+
+        row_sums = calibrated.sum(axis=1, keepdims=True)
+        row_sums = np.where(row_sums == 0, 1.0, row_sums)
+        calibrated = calibrated / row_sums
+
+        return calibrated
+
+    def calibrate(
+        self,
+        probabilities: np.ndarray,
+        labels: np.ndarray,
+    ) -> np.ndarray:
         """
-        Optimize the temperature parameter using validation data.
+        Fit calibrator and return calibrated probabilities on the same set.
 
         Parameters
         ----------
-        logits : torch.Tensor
-            Model logits from validation set.
-
-        labels : torch.Tensor
+        probabilities : np.ndarray
+            Validation set probabilities from uncalibrated model.
+        labels : np.ndarray
             Ground truth labels.
 
         Returns
         -------
-        float
-            Optimized temperature value.
+        np.ndarray
+            Calibrated probability estimates.
         """
 
-        if logits.shape[0] != labels.shape[0]:
-            raise ValueError("Logits and labels must have matching batch size.")
-
-        logits = logits.to(self.device)
-        labels = labels.to(self.device)
-
-        nll_criterion = nn.CrossEntropyLoss()
-
-        optimizer = optim.LBFGS(
-            [self.temperature],
-            lr=self.config.lr,
-            max_iter=self.config.max_iter,
-        )
-
-        logger.info("Starting temperature scaling optimization.")
-
-        def _closure() -> torch.Tensor:
-            optimizer.zero_grad()
-
-            loss = nll_criterion(self.forward(logits), labels)
-
-            loss.backward()
-
-            return loss
-
-        optimizer.step(_closure)
-
-        temperature_value = float(self.temperature.detach().cpu().item())
-
-        if temperature_value <= 0:
-            raise RuntimeError("Optimized temperature must be positive.")
-
-        logger.info("Optimized temperature: %.6f", temperature_value)
-
-        return temperature_value
-
-    def calibrate(
-        self,
-        logits: torch.Tensor,
-        labels: torch.Tensor,
-    ) -> Tuple[torch.Tensor, float]:
-        """
-        Fit temperature and return calibrated probabilities.
-
-        Parameters
-        ----------
-        logits : torch.Tensor
-        labels : torch.Tensor
-
-        Returns
-        -------
-        Tuple[torch.Tensor, float]
-            Calibrated probabilities and learned temperature.
-        """
-
-        temperature = self.fit(logits, labels)
-
-        calibrated_probs = self.predict_proba(logits)
-
-        return calibrated_probs, temperature
+        self.fit(probabilities, labels)
+        return self.predict_proba(probabilities)

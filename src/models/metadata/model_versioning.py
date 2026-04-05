@@ -33,7 +33,7 @@ import json
 import logging
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -65,7 +65,7 @@ class ModelVersionInfo:
     model_name: str
     version: str
     version_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     description: Optional[str] = None
     metrics: Optional[Dict[str, float]] = None
     artifact_path: Optional[str] = None

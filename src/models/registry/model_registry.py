@@ -138,7 +138,7 @@ class ModelRegistry:
                 checkpoint_path = model_path / "model.pt"
 
                 if checkpoint_path.exists():
-                    state_dict = torch.load(checkpoint_path, map_location=device_obj)
+                    state_dict = torch.load(checkpoint_path, map_location=device_obj, weights_only=True)
                     model.load_state_dict(state_dict)
 
             if hasattr(model, "to"):

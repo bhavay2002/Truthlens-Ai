@@ -153,7 +153,7 @@ class ArtifactManager:
             raise FileNotFoundError(f"Model artifact not found: {path}")
 
         try:
-            model_state = torch.load(path, map_location=map_location)
+            model_state = torch.load(path, map_location=map_location, weights_only=True)
             logger.info("Model artifact loaded: %s", path)
             return model_state
         except Exception as exc:

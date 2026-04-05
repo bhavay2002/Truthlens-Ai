@@ -154,7 +154,7 @@ class ModelLoader:
             model = ModelFactory.create(model_type, model_params)
 
             if checkpoint_file.exists():
-                state_dict = torch.load(checkpoint_file, map_location=self.device)
+                state_dict = torch.load(checkpoint_file, map_location=self.device, weights_only=True)
                 model.load_state_dict(state_dict)
 
             return model

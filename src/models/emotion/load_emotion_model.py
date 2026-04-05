@@ -98,7 +98,7 @@ class EmotionModelLoader:
 
         logger.info("Loading emotion model checkpoint: %s", path_obj)
 
-        checkpoint = torch.load(path_obj, map_location=device_obj)
+        checkpoint = torch.load(path_obj, map_location=device_obj, weights_only=False)
 
         state_dict = EmotionModelLoader._extract_state_dict(checkpoint)
 

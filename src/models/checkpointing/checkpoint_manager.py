@@ -224,7 +224,7 @@ class CheckpointManager:
 
         try:
 
-            checkpoint = torch.load(checkpoint_file, map_location="cpu")
+            checkpoint = torch.load(checkpoint_file, map_location="cpu", weights_only=False)
 
             logger.info("Checkpoint loaded: %s", checkpoint_file)
 
