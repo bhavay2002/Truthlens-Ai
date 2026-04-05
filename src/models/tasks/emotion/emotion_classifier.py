@@ -43,6 +43,10 @@ import torch.nn as nn
 from ...base.base_model import BaseModel
 from ...encoder.transformer_encoder import TransformerEncoder
 from ...heads.multilabel_head import MultiLabelHead, MultiLabelHeadConfig
+from ...training.loss_functions import LossConfig, LossFactory
+from ...training.trainer import Trainer, TrainerConfig
+from ...training.training_step import TrainingStep, TrainingStepConfig
+from ...training.training_utils import TrainingMetrics, get_device, move_batch_to_device
 from src.features.emotion.emotion_schema import EMOTION_LABELS
 
 logger = logging.getLogger(__name__)

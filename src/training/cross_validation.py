@@ -46,6 +46,10 @@ from src.utils.input_validation import (
     ensure_positive_int,
 )
 from src.utils.settings import load_settings
+from src.models.training.trainer import Trainer as TruthLensTrainer, TrainerConfig
+from src.models.training.training_step import TrainingStep, TrainingStepConfig
+from src.models.training.training_utils import TrainingMetrics, get_device
+from src.models.training.loss_functions import LossConfig, LossFactory
 
 logger = logging.getLogger(__name__)
 SETTINGS = load_settings()
@@ -234,6 +238,7 @@ def cross_validate_model(
     supports_test_df = "test_df" in train_sig.parameters
 
     fold_scores: List[float] = []
+    fold_metrics = TrainingMetrics()
 
     X = working_df[text_column]
     y = working_df[resolved_label_column]
@@ -293,6 +298,8 @@ def cross_validate_model(
         )
 
         fold_scores.append(score)
+        fold_metrics.update(f"fold_{fold}", score)
+        fold_metrics.epoch = fold
 
         logger.info(
             "CV fold %s/%s - %s: %.4f",
@@ -308,6 +315,7 @@ def cross_validate_model(
     return {
         "metric_name": effective_metric,
         "fold_scores": fold_scores,
+        "fold_metrics": fold_metrics.to_dict(),
         "mean_score": mean_score,
         "std_score": std_score,
         "n_splits": effective_splits,

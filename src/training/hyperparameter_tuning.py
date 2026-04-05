@@ -49,6 +49,10 @@ from src.utils.input_validation import (
     ensure_positive_int,
 )
 from src.utils.settings import load_settings
+from src.models.training.trainer import Trainer as TruthLensTrainer, TrainerConfig
+from src.models.training.training_step import TrainingStep, TrainingStepConfig
+from src.models.training.training_utils import TrainingMetrics, get_device
+from src.models.training.loss_functions import LossConfig, LossFactory
 
 
 logger = logging.getLogger(__name__)
@@ -236,6 +240,7 @@ def _run_fallback_tuner(
 
     best_params: Dict[str, Any] | None = None
     best_value: float | None = None
+    trial_metrics = TrainingMetrics()
 
     for trial_idx in range(1, n_trials + 1):
 
@@ -250,6 +255,9 @@ def _run_fallback_tuner(
             label_column=label_column,
             metric_name=metric_name,
         )
+
+        trial_metrics.update(f"trial_{trial_idx}", value)
+        trial_metrics.step = trial_idx
 
         logger.info(
             "Fallback trial %s/%s | %s=%.4f | params=%s",
@@ -281,6 +289,7 @@ def _run_fallback_tuner(
         "metric_name": metric_name,
         "direction": direction,
         "trials": n_trials,
+        "trial_metrics": trial_metrics.to_dict(),
         "backend": "fallback",
         "label_column": label_column,
     }

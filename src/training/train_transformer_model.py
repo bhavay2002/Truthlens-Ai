@@ -68,6 +68,17 @@ from transformers.trainer_utils import get_last_checkpoint as hf_get_last_checkp
 
 from src.utils.input_validation import ensure_dataframe, ensure_non_empty_text_column
 from src.utils.settings import load_settings
+from src.models.training.trainer import Trainer as TruthLensTrainer, TrainerConfig
+from src.models.training.training_step import TrainingStep, TrainingStepConfig
+from src.models.training.training_utils import (
+    TrainingMetrics,
+    get_device,
+    move_batch_to_device,
+    clip_gradients,
+    enable_model_eval,
+    enable_model_train,
+)
+from src.models.training.loss_functions import LossConfig, LossFactory, WeightedLossWrapper
 from src.models.export import (
     ONNXExportConfig,
     ONNXExporter,
@@ -300,7 +311,7 @@ def train_model(
         torch.manual_seed(SEED)
         np.random.seed(SEED)
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = get_device()
         logger.info("Training device: %s", device)
 
         params = params or {}
@@ -399,12 +410,13 @@ def train_model(
         # Persist ModelMetadata, ModelCard, and register version
         # ----------------------------------------------------------
         try:
-            final_metrics: dict = {}
+            training_metrics = TrainingMetrics()
             if trainer.state and trainer.state.log_history:
                 for entry in reversed(trainer.state.log_history):
                     for key in ("eval_accuracy", "eval_f1", "eval_precision", "eval_recall", "eval_roc_auc"):
-                        if key in entry and key not in final_metrics:
-                            final_metrics[key.replace("eval_", "")] = float(entry[key])
+                        if key in entry and key not in training_metrics.losses:
+                            training_metrics.update(key.replace("eval_", ""), float(entry[key]))
+            final_metrics: dict = training_metrics.to_dict()
 
             identity = ModelIdentity(
                 model_name=MODEL_NAME,
