@@ -10,6 +10,31 @@ Description:
     scaling pipeline, and feature selection pipeline used during model
     training.
 
+    Explicit integration of bias, framing, and ideological feature extractors:
+
+        BiasFeatures (src.features.bias.bias_features)
+            10 features: bias_loaded_language_ratio, bias_subjective_ratio,
+            bias_uncertainty_ratio, bias_polarization_ratio,
+            bias_evaluative_ratio, bias_phrase_count, bias_exclamation_density,
+            bias_caps_ratio, bias_intensity, bias_diversity
+
+        FramingFeatures (src.features.bias.framing_features)
+            10 features: frame_economic_ratio, frame_moral_ratio,
+            frame_security_ratio, frame_human_interest_ratio,
+            frame_conflict_ratio, frame_phrase_count, frame_quote_density,
+            frame_diversity, frame_dominance, frame_entropy
+
+        IdeologicalFeatures (src.features.bias.ideological_features)
+            8 features: ideology_left_ratio, ideology_right_ratio,
+            ideology_balance, ideology_entropy, ideology_polarization_ratio,
+            ideology_group_reference_ratio, ideology_phrase_count,
+            ideology_signal_strength
+
+    Use build_bias_schema() to create a FeaturePreparationConfig whose
+    feature_schema contains all 28 bias-module features. Use
+    prepare_from_text() to run all three extractors on raw text and
+    return a model-ready tensor in one call.
+
     Processing pipeline:
 
         raw feature dict
@@ -33,8 +58,10 @@ Dependencies:
     dataclasses
     numpy
     torch
+
 Inputs:
     Feature dictionaries extracted from upstream feature pipelines.
+
 Outputs:
     Model-ready feature arrays or tensors.
 """
@@ -47,7 +74,19 @@ from typing import Dict, List, Optional, Any
 
 import numpy as np
 import torch
+
 from src.graph.graph_pipeline import GraphPipeline
+
+from src.features.base.base_feature import FeatureContext
+from src.features.bias.bias_features import BiasFeatures
+from src.features.bias.framing_features import FramingFeatures
+from src.features.bias.ideological_features import IdeologicalFeatures
+from src.features.pipelines.feature_pipeline import (
+    BIAS_FEATURE_NAMES,
+    FRAMING_FEATURE_NAMES,
+    IDEOLOGICAL_FEATURE_NAMES,
+    ALL_BIAS_MODULE_FEATURE_NAMES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +114,13 @@ class FeaturePreparer:
     - apply scaling transformation
     - apply feature selection
     - validate feature integrity
+
+    Bias module integration:
+        BiasFeatures, FramingFeatures, and IdeologicalFeatures are directly
+        imported. Their output keys are used by build_bias_schema() to
+        construct a 28-feature schema. prepare_from_text() runs all three
+        extractors on raw text and returns a model-ready tensor without
+        requiring an upstream feature pipeline.
     """
 
     def __init__(
@@ -106,6 +152,40 @@ class FeaturePreparer:
             len(self.config.feature_schema),
         )
 
+    # -----------------------------------------------------------------------
+    # Schema builders
+    # -----------------------------------------------------------------------
+
+    @classmethod
+    def build_bias_schema(cls) -> "FeaturePreparationConfig":
+        """
+        Build a FeaturePreparationConfig whose schema covers all 28 features
+        produced by the three bias module extractors:
+
+            BiasFeatures       → 10 features (bias_*)
+            FramingFeatures    → 10 features (frame_*)
+            IdeologicalFeatures → 8 features (ideology_*)
+
+        Returns a config instance ready for use in FeaturePreparer().
+
+        Example
+        -------
+        config = FeaturePreparer.build_bias_schema()
+        preparer = FeaturePreparer(config)
+        tensor = preparer.prepare_from_text("Breaking news: ...")
+        """
+        return FeaturePreparationConfig(
+            feature_schema=ALL_BIAS_MODULE_FEATURE_NAMES,
+            apply_scaling=False,
+            apply_feature_selection=False,
+            return_tensor=True,
+            derive_graph_features=False,
+        )
+
+    # -----------------------------------------------------------------------
+    # Core preparation helpers
+    # -----------------------------------------------------------------------
+
     def _validate_feature_dict(self, features: Dict[str, Any]) -> None:
         """
         Validate input feature dictionary.
@@ -136,6 +216,17 @@ class FeaturePreparer:
                 self._flatten_numeric(next_prefix, sub_value, output)
 
     def _prepare_flat_features(self, features: Dict[str, Any]) -> Dict[str, float]:
+        """
+        Flatten a raw feature dict into a schema-compatible float dict.
+
+        Handles bias_*, frame_*, and ideology_* keys natively — they are
+        already numeric floats produced by BiasFeatures, FramingFeatures,
+        and IdeologicalFeatures respectively. Non-numeric values are
+        flattened recursively; the 'text' key is skipped.
+
+        When derive_graph_features is enabled and a 'text' key is present,
+        graph features are also derived and merged under setdefault.
+        """
         flat: Dict[str, float] = {}
 
         for key, value in features.items():
@@ -215,9 +306,17 @@ class FeaturePreparer:
             logger.exception("Feature selection failed")
             raise RuntimeError("Feature selection transformation failed") from exc
 
+    # -----------------------------------------------------------------------
+    # Public API
+    # -----------------------------------------------------------------------
+
     def prepare_single(self, features: Dict[str, Any]) -> np.ndarray | torch.Tensor:
         """
         Prepare a single feature dictionary.
+
+        The input dict may contain any mix of bias_*, frame_*, ideology_*,
+        and other feature keys. Keys not present in the feature schema are
+        silently ignored; missing schema keys default to 0.0.
         """
         flat_features = self._prepare_flat_features(features)
         self._validate_feature_dict(flat_features)
@@ -238,12 +337,79 @@ class FeaturePreparer:
 
         return matrix
 
+    def prepare_from_text(
+        self,
+        text: str,
+        include_bias: bool = True,
+        include_framing: bool = True,
+        include_ideology: bool = True,
+    ) -> torch.Tensor | np.ndarray:
+        """
+        Run bias-module extractors on raw text and return a prepared tensor.
+
+        Instantiates BiasFeatures, FramingFeatures, and IdeologicalFeatures
+        directly, runs them on the provided text, merges their outputs, and
+        calls prepare_single() on the combined feature dict.
+
+        This is the most direct path from raw text to a model-ready tensor
+        when only bias-module features are needed — no FeaturePipeline or
+        BatchFeaturePipeline required.
+
+        Parameters
+        ----------
+        text : str
+            Raw article text.
+        include_bias : bool
+            Whether to run BiasFeatures (bias_*).
+        include_framing : bool
+            Whether to run FramingFeatures (frame_*).
+        include_ideology : bool
+            Whether to run IdeologicalFeatures (ideology_*).
+
+        Returns
+        -------
+        torch.Tensor of shape (1, n_features) when return_tensor=True,
+        numpy array otherwise.
+        """
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("text must be a non-empty string")
+
+        context = FeatureContext(text=text)
+        combined: Dict[str, float] = {"text": text}
+
+        if include_bias:
+            try:
+                bias_extractor = BiasFeatures()
+                combined.update(bias_extractor.extract(context))
+            except Exception as exc:
+                logger.warning("BiasFeatures extraction failed: %s", exc)
+
+        if include_framing:
+            try:
+                framing_extractor = FramingFeatures()
+                combined.update(framing_extractor.extract(context))
+            except Exception as exc:
+                logger.warning("FramingFeatures extraction failed: %s", exc)
+
+        if include_ideology:
+            try:
+                ideology_extractor = IdeologicalFeatures()
+                combined.update(ideology_extractor.extract(context))
+            except Exception as exc:
+                logger.warning("IdeologicalFeatures extraction failed: %s", exc)
+
+        return self.prepare_single(combined)
+
     def prepare_batch(
         self,
         feature_dicts: List[Dict[str, Any]],
     ) -> np.ndarray | torch.Tensor:
         """
         Prepare batch feature dictionaries.
+
+        Each dict in the list may contain any combination of bias_*, frame_*,
+        ideology_*, and other feature keys. Use prepare_from_text() for a
+        single raw-text entry point to the bias module features.
         """
         if not isinstance(feature_dicts, list):
             raise TypeError("feature_dicts must be a list")

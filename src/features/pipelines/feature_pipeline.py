@@ -13,6 +13,36 @@ Description:
         • FeatureScalingPipeline
         • FeatureSelectionPipeline
 
+    Explicit integration of bias, framing, and ideological feature extractors:
+
+        BiasFeatures (src.features.bias.bias_features)
+            Output keys (prefix: bias_):
+                bias_loaded_language_ratio, bias_subjective_ratio,
+                bias_uncertainty_ratio, bias_polarization_ratio,
+                bias_evaluative_ratio, bias_phrase_count,
+                bias_exclamation_density, bias_caps_ratio,
+                bias_intensity, bias_diversity
+
+        FramingFeatures (src.features.bias.framing_features)
+            Output keys (prefix: frame_):
+                frame_economic_ratio, frame_moral_ratio,
+                frame_security_ratio, frame_human_interest_ratio,
+                frame_conflict_ratio, frame_phrase_count,
+                frame_quote_density, frame_diversity,
+                frame_dominance, frame_entropy
+
+        IdeologicalFeatures (src.features.bias.ideological_features)
+            Output keys (prefix: ideology_):
+                ideology_left_ratio, ideology_right_ratio,
+                ideology_balance, ideology_entropy,
+                ideology_polarization_ratio, ideology_group_reference_ratio,
+                ideology_phrase_count, ideology_signal_strength
+
+    All three are registered via @register_feature and discovered automatically
+    through bootstrap_feature_registry(). Explicit imports here guarantee
+    registration even when bootstrap is not called, and expose their output
+    key constants for downstream schema building and section routing.
+
     This module is responsible for producing deterministic, reproducible
     feature vectors from raw text inputs.
 
@@ -45,8 +75,125 @@ from src.features.fusion.feature_scaling import FeatureScalingPipeline
 from src.features.fusion.feature_selection import FeatureSelectionPipeline
 from src.graph.graph_pipeline import GraphPipeline
 
+from src.features.bias.bias_features import BiasFeatures
+from src.features.bias.framing_features import FramingFeatures
+from src.features.bias.ideological_features import IdeologicalFeatures
+
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Output feature name constants
+# ---------------------------------------------------------------------------
+
+BIAS_FEATURE_NAMES: List[str] = [
+    "bias_loaded_language_ratio",
+    "bias_subjective_ratio",
+    "bias_uncertainty_ratio",
+    "bias_polarization_ratio",
+    "bias_evaluative_ratio",
+    "bias_phrase_count",
+    "bias_exclamation_density",
+    "bias_caps_ratio",
+    "bias_intensity",
+    "bias_diversity",
+]
+
+FRAMING_FEATURE_NAMES: List[str] = [
+    "frame_economic_ratio",
+    "frame_moral_ratio",
+    "frame_security_ratio",
+    "frame_human_interest_ratio",
+    "frame_conflict_ratio",
+    "frame_phrase_count",
+    "frame_quote_density",
+    "frame_diversity",
+    "frame_dominance",
+    "frame_entropy",
+]
+
+IDEOLOGICAL_FEATURE_NAMES: List[str] = [
+    "ideology_left_ratio",
+    "ideology_right_ratio",
+    "ideology_balance",
+    "ideology_entropy",
+    "ideology_polarization_ratio",
+    "ideology_group_reference_ratio",
+    "ideology_phrase_count",
+    "ideology_signal_strength",
+]
+
+ALL_BIAS_MODULE_FEATURE_NAMES: List[str] = sorted(
+    BIAS_FEATURE_NAMES + FRAMING_FEATURE_NAMES + IDEOLOGICAL_FEATURE_NAMES
+)
+
+
+# ---------------------------------------------------------------------------
+# Section partitioning helper
+# ---------------------------------------------------------------------------
+
+def partition_feature_sections(
+    features: Dict[str, float],
+) -> Dict[str, Dict[str, float]]:
+    """
+    Partition a flat feature dict from the pipeline into named sections.
+
+    Routes features to one of five sections:
+        "bias"      — keys starting with ``bias_``
+        "framing"   — keys starting with ``frame_``
+        "ideology"  — keys starting with ``ideology_``
+        "emotion"   — keys starting with ``emotion_`` or ``lexicon_emotion_``
+        "narrative" — keys starting with ``narrative_``
+        "discourse" — keys starting with ``discourse_``
+        "graph"     — keys starting with ``graph_``
+        "other"     — everything else
+
+    Parameters
+    ----------
+    features : Dict[str, float]
+        Flat feature dict produced by FeaturePipeline.extract().
+
+    Returns
+    -------
+    Dict[str, Dict[str, float]]
+        Nested dict keyed by section name.
+    """
+
+    sections: Dict[str, Dict[str, float]] = {
+        "bias": {},
+        "framing": {},
+        "ideology": {},
+        "emotion": {},
+        "narrative": {},
+        "discourse": {},
+        "graph": {},
+        "other": {},
+    }
+
+    for key, value in features.items():
+        if key.startswith("bias_"):
+            sections["bias"][key] = value
+        elif key.startswith("frame_"):
+            sections["framing"][key] = value
+        elif key.startswith("ideology_"):
+            sections["ideology"][key] = value
+        elif key.startswith("emotion_") or key.startswith("lexicon_emotion_"):
+            sections["emotion"][key] = value
+        elif key.startswith("narrative_"):
+            sections["narrative"][key] = value
+        elif key.startswith("discourse_"):
+            sections["discourse"][key] = value
+        elif key.startswith("graph_") or key.startswith("graph_pipeline_"):
+            sections["graph"][key] = value
+        else:
+            sections["other"][key] = value
+
+    return sections
+
+
+# ---------------------------------------------------------------------------
+# Pipeline
+# ---------------------------------------------------------------------------
 
 @dataclass
 class FeaturePipeline:
@@ -54,11 +201,20 @@ class FeaturePipeline:
     Main feature extraction pipeline.
 
     Responsibilities:
-        • initialize feature extractors
-        • execute feature extraction
+        • initialize feature extractors via FeatureRegistry
+        • execute feature extraction (including BiasFeatures,
+          FramingFeatures, and IdeologicalFeatures)
         • fuse outputs
         • optionally scale features
         • optionally apply feature selection
+
+    The three bias-module extractors (BiasFeatures, FramingFeatures,
+    IdeologicalFeatures) contribute 28 features in total. Their output
+    keys are available via the module-level constants:
+        BIAS_FEATURE_NAMES, FRAMING_FEATURE_NAMES, IDEOLOGICAL_FEATURE_NAMES
+
+    To partition extracted features by module section, use:
+        partition_feature_sections(features)
     """
 
     feature_names: Optional[List[str]] = None
@@ -72,6 +228,12 @@ class FeaturePipeline:
     def initialize(self) -> None:
         """
         Initialize feature extractors using FeatureRegistry.
+
+        Calls bootstrap_feature_registry() which imports all registered
+        feature modules, including:
+            • BiasFeatures      (bias_*)
+            • FramingFeatures   (frame_*)
+            • IdeologicalFeatures (ideology_*)
         """
         bootstrap_feature_registry()
 
@@ -89,14 +251,23 @@ class FeaturePipeline:
             logger.warning("GraphPipeline unavailable in FeaturePipeline: %s", exc)
             self.graph_pipeline = None
 
+        bias_active = any(
+            isinstance(f, (BiasFeatures, FramingFeatures, IdeologicalFeatures))
+            for f in self.features
+        )
         logger.info(
-            "FeaturePipeline initialized | feature_count=%d",
+            "FeaturePipeline initialized | feature_count=%d bias_modules_active=%s",
             len(self.features),
+            bias_active,
         )
 
     def extract(self, context: FeatureContext) -> Dict[str, float]:
         """
         Extract features from a single FeatureContext.
+
+        Output includes contributions from BiasFeatures (bias_*),
+        FramingFeatures (frame_*), and IdeologicalFeatures (ideology_*).
+        Use partition_feature_sections() on the result to separate sections.
         """
 
         if self.fusion is None:
@@ -127,6 +298,19 @@ class FeaturePipeline:
         logger.debug("Feature extraction completed | feature_count=%d", len(features))
 
         return features
+
+    def extract_with_sections(
+        self, context: FeatureContext
+    ) -> Dict[str, Dict[str, float]]:
+        """
+        Extract features and return them partitioned by module section.
+
+        Returns a dict of section -> feature dict via partition_feature_sections().
+        Sections include: bias, framing, ideology, emotion, narrative,
+        discourse, graph, other.
+        """
+        features = self.extract(context)
+        return partition_feature_sections(features)
 
     def batch_extract(self, contexts: List[FeatureContext]) -> List[Dict[str, float]]:
         """
@@ -210,7 +394,7 @@ class FeaturePipeline:
         Full pipeline execution.
 
         Steps:
-            1. Feature extraction
+            1. Feature extraction (bias_*, frame_*, ideology_*, ...)
             2. Optional scaling
             3. Optional feature selection
         """
