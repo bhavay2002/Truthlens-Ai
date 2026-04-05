@@ -6,16 +6,29 @@ Description:
     Supports binary, multi-class, multi-label, and multi-task evaluation.
     Provides consistent metric computation, structured logging, validation,
     and aggregation utilities for research and production pipelines.
+
+    Integrates explainability evaluation via ExplanationMetrics and
+    ExplanationConsistency, enabling faithfulness, comprehensiveness,
+    sufficiency, deletion/insertion scoring, and cross-method correlation
+    analysis as first-class evaluation capabilities.
+
 Dependencies:
     logging
     typing
     numpy
     src.evaluation.metrics
+    src.explainability.explanation_metrics
+    src.explainability.explanation_consistency
+
 Inputs:
     y_true: Ground truth labels
     y_pred: Predicted labels
     y_proba: Optional prediction probabilities
     results: Dictionary containing task-level metric outputs
+    tokens / scores / predict_fn: Explanation evaluation inputs
+    shap_importance / integrated_gradients / attention_scores / lime_importance:
+        Consistency evaluation inputs
+
 Outputs:
     Dictionary containing evaluation metrics and aggregated summaries
 """
@@ -23,7 +36,7 @@ Outputs:
 from __future__ import annotations
 
 import logging
-from typing import Dict, Any, Iterable, Optional
+from typing import Callable, Dict, Any, Iterable, List, Optional
 
 import numpy as np
 import torch
@@ -35,6 +48,9 @@ from .metrics import (
 from src.models.calibration import CalibrationMetricConfig, CalibrationMetrics
 from .calibration import expected_calibration_error
 
+from src.explainability.explanation_metrics import ExplanationMetrics
+from src.explainability.explanation_consistency import ExplanationConsistency
+
 logger = logging.getLogger(__name__)
 
 
@@ -42,6 +58,14 @@ class Evaluator:
     """
     Central evaluation engine responsible for computing metrics
     across different task types in the TruthLens system.
+
+    In addition to standard classification / multi-label / multi-task
+    evaluation, this class exposes:
+
+        explanation_metrics()   -- faithfulness, comprehensiveness,
+                                   sufficiency, deletion, insertion scores
+        explanation_consistency() -- pairwise correlation between SHAP,
+                                   Integrated Gradients, Attention, and LIME
     """
 
     @staticmethod
@@ -246,3 +270,101 @@ class Evaluator:
         logger.info("Multitask aggregation completed")
 
         return summary
+
+    # -----------------------------------------------------------------
+    # Explanation Evaluation
+    # -----------------------------------------------------------------
+
+    @staticmethod
+    def explanation_metrics(
+        tokens: List[str],
+        scores: List[float],
+        predict_fn: Callable[[str], Dict[str, float]],
+    ) -> Dict[str, float]:
+        """
+        Evaluate the quality of token-level explanation scores using
+        quantitative interpretability metrics.
+
+        Computes faithfulness, comprehensiveness, sufficiency, deletion,
+        and insertion scores for a single explanation signal. Each metric
+        measures how well the importance scores reflect true model behaviour.
+
+        Parameters
+        ----------
+        tokens : List[str]
+            Token list aligned with importance scores.
+        scores : List[float]
+            Token-level importance scores (e.g. from LIME, SHAP, or
+            attention rollout).
+        predict_fn : Callable[[str], Dict[str, float]]
+            Function that accepts raw text and returns a dict with at least
+            a 'fake_probability' key.
+
+        Returns
+        -------
+        Dict[str, float] with keys:
+            faithfulness, comprehensiveness, sufficiency,
+            deletion_score, insertion_score
+        """
+        if not tokens:
+            raise ValueError("tokens must not be empty")
+        if len(tokens) != len(scores):
+            raise ValueError("tokens and scores must have the same length")
+        if not callable(predict_fn):
+            raise TypeError("predict_fn must be callable")
+
+        logger.info("Running explanation quality evaluation")
+
+        evaluator = ExplanationMetrics()
+        results = evaluator.evaluate(
+            tokens=tokens,
+            scores=scores,
+            predict_fn=predict_fn,
+        )
+
+        logger.info("Explanation quality evaluation completed")
+        return results
+
+    @staticmethod
+    def explanation_consistency(
+        shap_importance: Optional[List[Dict]] = None,
+        integrated_gradients: Optional[List[Dict]] = None,
+        attention_scores: Optional[List[Dict]] = None,
+        lime_importance: Optional[List] = None,
+    ) -> Dict[str, float]:
+        """
+        Compute pairwise consistency (Pearson correlation) between
+        different explanation methods.
+
+        Each method's token importance scores are compared against all
+        other available methods. Higher correlation indicates greater
+        agreement between explanation signals.
+
+        Parameters
+        ----------
+        shap_importance : list of dicts, optional
+            SHAP explanations with 'token' and 'importance' keys.
+        integrated_gradients : list of dicts, optional
+            Integrated Gradients explanations with 'token' and 'importance'.
+        attention_scores : list of dicts, optional
+            Attention-rollout scores with 'token' and 'attention' keys.
+        lime_importance : list of (token, score) tuples, optional
+            LIME explanation output.
+
+        Returns
+        -------
+        Dict[str, float] with pairwise correlation keys, e.g.:
+            shap_vs_ig, shap_vs_attention, ig_vs_lime, ...
+        """
+        logger.info("Running explanation consistency evaluation")
+
+        consistency = ExplanationConsistency()
+        results = consistency.compute(
+            shap_importance=shap_importance,
+            integrated_gradients=integrated_gradients,
+            attention_scores=attention_scores,
+            lime_importance=lime_importance,
+        )
+
+        logger.info("Explanation consistency evaluation completed")
+        return results

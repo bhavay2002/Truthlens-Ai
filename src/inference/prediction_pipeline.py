@@ -10,19 +10,37 @@ Description:
     - propaganda detection
     - emotion analysis
     - credibility estimation
+
+    Integrates with the explainability subsystem to enrich predictions
+    with token-level attribution, attention rollout, explanation
+    aggregation, consistency metrics, and optional caching.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import torch
 
 from src.features.emotion.emotion_schema import EMOTION_LABELS
 from src.inference.feature_preparer import FeaturePreparer
+
+from src.explainability.attention_rollout import AttentionRollout
+from src.explainability.attention_visualizer import AttentionVisualizer
+from src.explainability.explanation_aggregator import (
+    ExplanationAggregator,
+    AggregationWeights,
+)
+from src.explainability.explanation_cache import ExplanationCache
+from src.explainability.explanation_consistency import ExplanationConsistency
+from src.explainability.explanation_metrics import ExplanationMetrics
+from src.explainability.explanation_visualizer import ExplanationVisualizer
+from src.explainability.model_explainer import explain_prediction_full, explain_fast
+from src.explainability.propaganda_explainer import PropagandaExplainer
+from src.explainability.token_alignment import TokenAlignment
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +60,251 @@ class PredictionPipelineConfig:
     credibility_weight_ideology: float = 0.25
 
 
+@dataclass
+class ExplainabilityConfig:
+    """
+    Configuration for the explainability layer attached to the
+    prediction pipeline.
+    """
+
+    enabled: bool = True
+    use_lime: bool = True
+    use_shap: bool = False
+    use_attention_rollout: bool = True
+    use_propaganda_explainer: bool = True
+    use_aggregation: bool = True
+    use_consistency: bool = True
+    use_explanation_metrics: bool = False
+    cache_enabled: bool = True
+    cache_max_size: int = 128
+    cache_dir: Optional[str] = None
+    aggregation_weights: AggregationWeights = field(
+        default_factory=AggregationWeights
+    )
+
+
+# ---------------------------------------------------------------------
+# Explainability Layer
+# ---------------------------------------------------------------------
+
+class ExplainabilityLayer:
+    """
+    Orchestrates all explainability components for the prediction pipeline.
+
+    Holds instances of:
+        - ExplanationCache      -- LRU cache for explanation results
+        - TokenAlignment        -- subword-to-word token merging
+        - AttentionRollout      -- cumulative attention-flow attribution
+        - ExplanationAggregator -- weighted combination of explanation signals
+        - ExplanationConsistency -- pairwise correlation between methods
+        - ExplanationMetrics    -- faithfulness / comprehensiveness metrics
+        - ExplanationVisualizer -- matplotlib visualizations (optional)
+        - AttentionVisualizer   -- attention heatmap (requires model)
+        - PropagandaExplainer   -- gradient-based token attribution (requires model)
+    """
+
+    def __init__(
+        self,
+        config: ExplainabilityConfig,
+        propaganda_model: Optional[torch.nn.Module] = None,
+        attention_model: Optional[torch.nn.Module] = None,
+    ) -> None:
+        self.config = config
+
+        self.cache = ExplanationCache(
+            max_size=config.cache_max_size,
+            cache_dir=config.cache_dir,
+        ) if config.cache_enabled else None
+
+        self.token_alignment = TokenAlignment()
+        self.attention_rollout = AttentionRollout()
+        self.aggregator = ExplanationAggregator(
+            weights=config.aggregation_weights
+        ) if config.use_aggregation else None
+        self.consistency = ExplanationConsistency() if config.use_consistency else None
+        self.metrics = ExplanationMetrics() if config.use_explanation_metrics else None
+        self.visualizer = ExplanationVisualizer()
+
+        self.propaganda_explainer: Optional[PropagandaExplainer] = None
+        if config.use_propaganda_explainer and propaganda_model is not None:
+            self.propaganda_explainer = PropagandaExplainer(propaganda_model)
+
+        self.attention_visualizer: Optional[AttentionVisualizer] = None
+        if attention_model is not None:
+            self.attention_visualizer = AttentionVisualizer(attention_model)
+
+        logger.info("ExplainabilityLayer initialized")
+
+    def explain(
+        self,
+        text: str,
+        predict_fn: Callable[[str], Dict[str, Any]],
+        tokens: Optional[List[str]] = None,
+        attentions: Optional[List[torch.Tensor]] = None,
+        input_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        model: Optional[Any] = None,
+        tokenizer: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """
+        Generate a complete explanation package for a prediction.
+
+        Parameters
+        ----------
+        text : str
+            Raw article text being explained.
+        predict_fn : Callable
+            Function that accepts text and returns a prediction dict.
+        tokens : list of str, optional
+            Pre-tokenized tokens aligned with the model input.
+        attentions : list of torch.Tensor, optional
+            Per-layer attention tensors for attention rollout.
+        input_ids : torch.Tensor, optional
+            Token id tensor for propaganda explainer.
+        attention_mask : torch.Tensor, optional
+            Attention mask tensor for propaganda explainer.
+        model : optional
+            Transformer model for bias/emotion explanation.
+        tokenizer : optional
+            Tokenizer for bias/emotion explanation.
+
+        Returns
+        -------
+        Dict containing explanation signals and aggregated result.
+        """
+
+        if self.cache is not None:
+            cached = self.cache.get(text)
+            if cached is not None:
+                logger.debug("Explanation cache hit")
+                return cached
+
+        explanation: Dict[str, Any] = {}
+
+        model_explanation = explain_prediction_full(
+            text=text,
+            predict_fn=predict_fn,
+            model=model,
+            tokenizer=tokenizer,
+            use_lime=self.config.use_lime,
+            use_shap=self.config.use_shap,
+        )
+        explanation["model_explanation"] = model_explanation
+
+        lime_explanation = model_explanation.get("lime_explanation")
+        shap_explanation = model_explanation.get("shap_explanation")
+
+        rollout_result: Optional[Dict[str, Any]] = None
+        if self.config.use_attention_rollout and attentions and tokens:
+            try:
+                rollout_result = self.attention_rollout.compute_rollout(
+                    attentions=attentions,
+                    tokens=tokens,
+                )
+                aligned_tokens, aligned_scores = self.token_alignment.align(
+                    tokens=rollout_result["tokens"],
+                    scores=rollout_result["rollout_scores"],
+                )
+                rollout_result["aligned_tokens"] = aligned_tokens
+                rollout_result["aligned_scores"] = aligned_scores
+                explanation["attention_rollout"] = rollout_result
+            except Exception as exc:
+                logger.warning("Attention rollout failed: %s", exc)
+
+        propaganda_token_scores: Optional[Dict[str, float]] = None
+        if (
+            self.propaganda_explainer is not None
+            and input_ids is not None
+            and attention_mask is not None
+            and tokens is not None
+        ):
+            try:
+                propaganda_token_scores = self.propaganda_explainer.explain(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    tokens=tokens,
+                )
+                explanation["propaganda_token_scores"] = propaganda_token_scores
+                explanation["propaganda_intensity"] = (
+                    self.propaganda_explainer.propaganda_intensity(
+                        propaganda_token_scores
+                    )
+                )
+            except Exception as exc:
+                logger.warning("Propaganda explainer failed: %s", exc)
+
+        if self.aggregator is not None:
+            try:
+                shap_items = (
+                    shap_explanation
+                    if isinstance(shap_explanation, list)
+                    else None
+                )
+                lime_items = (
+                    lime_explanation
+                    if isinstance(lime_explanation, list)
+                    else None
+                )
+                attention_items: Optional[List[Dict]] = None
+                if rollout_result and "aligned_tokens" in rollout_result:
+                    attention_items = [
+                        {"token": t, "attention": s}
+                        for t, s in zip(
+                            rollout_result["aligned_tokens"],
+                            rollout_result["aligned_scores"],
+                        )
+                    ]
+                aggregated = self.aggregator.aggregate(
+                    shap_importance=shap_items,
+                    attention_scores=attention_items,
+                    lime_importance=lime_items,
+                )
+                explanation["aggregated_explanation"] = aggregated
+            except Exception as exc:
+                logger.warning("Explanation aggregation failed: %s", exc)
+
+        if self.consistency is not None:
+            try:
+                shap_items_c = (
+                    shap_explanation
+                    if isinstance(shap_explanation, list)
+                    else None
+                )
+                lime_items_c = (
+                    lime_explanation
+                    if isinstance(lime_explanation, list)
+                    else None
+                )
+                attention_items_c: Optional[List[Dict]] = None
+                if rollout_result and "aligned_tokens" in rollout_result:
+                    attention_items_c = [
+                        {"token": t, "attention": s}
+                        for t, s in zip(
+                            rollout_result["aligned_tokens"],
+                            rollout_result["aligned_scores"],
+                        )
+                    ]
+                consistency_scores = self.consistency.compute(
+                    shap_importance=shap_items_c,
+                    attention_scores=attention_items_c,
+                    lime_importance=lime_items_c,
+                )
+                explanation["consistency_metrics"] = consistency_scores
+            except Exception as exc:
+                logger.warning("Explanation consistency failed: %s", exc)
+
+        if self.cache is not None:
+            self.cache.set(text, explanation)
+
+        return explanation
+
+    def clear_cache(self) -> None:
+        """Clear both in-memory and disk explanation caches."""
+        if self.cache is not None:
+            self.cache.clear_memory()
+            self.cache.clear_disk()
+
+
 # ---------------------------------------------------------------------
 # Prediction Pipeline
 # ---------------------------------------------------------------------
@@ -55,6 +318,7 @@ class PredictionPipeline:
         ideology_model: Optional[torch.nn.Module] = None,
         propaganda_model: Optional[torch.nn.Module] = None,
         emotion_model: Optional[torch.nn.Module] = None,
+        explainability_layer: Optional[ExplainabilityLayer] = None,
     ) -> None:
 
         self.config = config
@@ -64,8 +328,8 @@ class PredictionPipeline:
         self.ideology_model = ideology_model
         self.propaganda_model = propaganda_model
         self.emotion_model = emotion_model
+        self.explainability_layer = explainability_layer
 
-        # Move models to device
         for model in [
             self.bias_model,
             self.ideology_model,
@@ -102,32 +366,19 @@ class PredictionPipeline:
 
             return outputs
 
-    # -------------------------------------------------------------
-
     def _softmax(self, logits: torch.Tensor) -> torch.Tensor:
-
         return torch.softmax(logits, dim=-1)
 
-    # -------------------------------------------------------------
-
     def _sigmoid(self, logits: torch.Tensor) -> torch.Tensor:
-
         return torch.sigmoid(logits)
 
-    # -------------------------------------------------------------
-
     def _predict_class(self, probs: torch.Tensor) -> int:
-
         return int(torch.argmax(probs, dim=-1).item())
 
-    # -------------------------------------------------------------
-
     def _prediction_confidence(self, probs: torch.Tensor) -> float:
-
         max_prob = torch.max(probs)
         entropy = -torch.sum(probs * torch.log(probs + 1e-9))
         confidence = max_prob * torch.exp(-entropy)
-
         return float(confidence.item())
 
     # -----------------------------------------------------------------
@@ -141,14 +392,9 @@ class PredictionPipeline:
 
         logits = self._predict_logits(self.bias_model, features)
         probs = self._softmax(logits)
-
         label_idx = self._predict_class(probs)
 
-        bias_labels = {
-            0: "non_bias",
-            1: "bias",
-        }
-
+        bias_labels = {0: "non_bias", 1: "bias"}
         return bias_labels.get(label_idx, "unknown")
 
     # -----------------------------------------------------------------
@@ -162,15 +408,9 @@ class PredictionPipeline:
 
         logits = self._predict_logits(self.ideology_model, features)
         probs = self._softmax(logits)
-
         label_idx = self._predict_class(probs)
 
-        ideology_labels = {
-            0: "left",
-            1: "center",
-            2: "right",
-        }
-
+        ideology_labels = {0: "left", 1: "center", 2: "right"}
         return ideology_labels.get(label_idx, "unknown")
 
     # -----------------------------------------------------------------
@@ -184,7 +424,6 @@ class PredictionPipeline:
 
         logits = self._predict_logits(self.propaganda_model, features)
         probs = self._softmax(logits)
-
         return float(probs[:, 1].item())
 
     # -----------------------------------------------------------------
@@ -200,13 +439,10 @@ class PredictionPipeline:
             return None
 
         logits = self._predict_logits(self.emotion_model, features)
-
         probs = self._sigmoid(logits).cpu().numpy()[0]
 
         emotion_distribution: Dict[str, float] = {}
-
         for i, emotion in enumerate(EMOTION_LABELS):
-
             if i < len(probs):
                 emotion_distribution[emotion] = float(probs[i])
             else:
@@ -231,37 +467,28 @@ class PredictionPipeline:
         propaganda_score = 1.0
         emotion_score = 0.5
 
-        # Bias component
         if bias == "non_bias":
             bias_score = 1.0
         elif bias == "bias":
             bias_score = 0.5
 
-        # Ideology component
         if ideology == "center":
             ideology_score = 1.0
         elif ideology in {"left", "right"}:
             ideology_score = 0.6
 
-        # Propaganda component
         if propaganda_prob is not None:
             propaganda_score = 1.0 - propaganda_prob
 
-        # Emotion component
         if emotion:
-
             values = np.array(list(emotion.values()))
             max_intensity = float(np.max(values))
-
             eps = 1e-9
             entropy = -np.sum(values * np.log(values + eps))
-
             n = len(values)
             normalized_entropy = entropy / np.log(n) if n > 1 else 0.0
-
             emotion_score = (
-                0.5 * (1.0 - max_intensity)
-                + 0.5 * normalized_entropy
+                0.5 * (1.0 - max_intensity) + 0.5 * normalized_entropy
             )
 
         score = (
@@ -272,7 +499,6 @@ class PredictionPipeline:
         )
 
         credibility = float(np.clip(score, 0.0, 1.0))
-
         explanation = {
             "bias_component": bias_score,
             "propaganda_component": propaganda_score,
@@ -306,19 +532,94 @@ class PredictionPipeline:
         )
 
         result = {
-
             "bias": bias,
             "ideology": ideology,
             "propaganda_probability": propaganda_prob,
             "emotion": emotion,
-
             "credibility_score": credibility_score,
             "credibility_explanation": explanation,
         }
 
         logger.debug("Prediction result: %s", result)
-
         return result
+
+    # -----------------------------------------------------------------
+    # Prediction with Explanation
+    # -----------------------------------------------------------------
+
+    def predict_with_explanation(
+        self,
+        features: torch.Tensor,
+        text: str,
+        predict_fn: Callable[[str], Dict[str, Any]],
+        tokens: Optional[List[str]] = None,
+        attentions: Optional[List[torch.Tensor]] = None,
+        input_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        model: Optional[Any] = None,
+        tokenizer: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """
+        Run prediction and attach a full explainability report.
+
+        Combines the model's structured prediction output with token-level
+        attributions from LIME, SHAP, attention rollout, and propaganda
+        gradient attribution. Results are aggregated and consistency-checked
+        before being returned alongside the base prediction.
+
+        Parameters
+        ----------
+        features : torch.Tensor
+            Prepared feature tensor for the task models.
+        text : str
+            Raw article text (used by LIME, SHAP, and cache).
+        predict_fn : Callable
+            Text-in / prediction-dict-out function (used by explainers).
+        tokens : list of str, optional
+            Pre-tokenized token list aligned with model inputs.
+        attentions : list of torch.Tensor, optional
+            Per-layer attention tensors for attention rollout.
+        input_ids : torch.Tensor, optional
+            Token id tensor for propaganda explainer.
+        attention_mask : torch.Tensor, optional
+            Attention mask tensor for propaganda explainer.
+        model : optional
+            Transformer model for bias/emotion explanation.
+        tokenizer : optional
+            Tokenizer for bias/emotion explanation.
+
+        Returns
+        -------
+        Dict with prediction output merged with 'explainability' key.
+        """
+
+        prediction = self.predict(features)
+
+        if self.explainability_layer is None:
+            logger.debug("No ExplainabilityLayer configured; returning prediction only")
+            return prediction
+
+        try:
+            explanation = self.explainability_layer.explain(
+                text=text,
+                predict_fn=predict_fn,
+                tokens=tokens,
+                attentions=attentions,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                model=model,
+                tokenizer=tokenizer,
+            )
+            prediction["explainability"] = explanation
+        except Exception as exc:
+            logger.warning("Explainability layer failed: %s", exc)
+            prediction["explainability"] = {}
+
+        return prediction
+
+    # -----------------------------------------------------------------
+    # Feature-dict entry point
+    # -----------------------------------------------------------------
 
     def predict_from_feature_dict(
         self,

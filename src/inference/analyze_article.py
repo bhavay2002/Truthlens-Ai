@@ -8,6 +8,11 @@ Description:
     analysis, graph construction, and final scoring. It produces a comprehensive
     analysis report describing linguistic signals and credibility indicators.
 
+    Integrates the explainability subsystem via an optional ExplainabilityLayer
+    attached to the inference prediction pipeline, enriching the report with
+    token-level attribution, attention rollout, aggregated explanations, and
+    cross-method consistency metrics.
+
 Author: TruthLens Engineering Team
 Date: 2026-04-02
 Dependencies:
@@ -20,19 +25,22 @@ Dependencies:
     src.graph.graph_analysis
     src.analysis.bias_profile_builder
     src.aggregation.truthlens_score_calculator
+    src.inference.prediction_pipeline (ExplainabilityLayer)
+    src.explainability.explanation_report_generator
 
 Inputs:
     Raw article text
 
 Outputs:
-    Structured analysis report containing extracted features and TruthLens scores
+    Structured analysis report containing extracted features, TruthLens scores,
+    and explainability output.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Callable, List, Optional
 
 import numpy as np
 import torch
@@ -47,8 +55,12 @@ from src.analysis.bias_profile_builder import BiasProfileBuilder
 from src.analysis.integration_runner import AnalysisIntegrationRunner
 from src.aggregation.truthlens_score_calculator import TruthLensScoreCalculator
 from src.inference.feature_preparer import FeaturePreparer
-from src.inference.prediction_pipeline import PredictionPipeline as InferencePredictionPipeline
+from src.inference.prediction_pipeline import (
+    PredictionPipeline as InferencePredictionPipeline,
+    ExplainabilityLayer,
+)
 from src.inference.report_generator import ReportGenerator
+from src.explainability.explanation_report_generator import ExplanationReportGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +69,12 @@ logger = logging.getLogger(__name__)
 class ArticleAnalyzer:
     """
     Coordinates the full TruthLens analysis pipeline for an article.
+
+    When an ExplainabilityLayer is provided on the inference_prediction_pipeline,
+    the analyze() method automatically enriches predictions with token-level
+    attribution from LIME, attention rollout, propaganda gradient scores, and
+    cross-method consistency metrics. These appear under the
+    'explainability' key in the returned report.
     """
 
     feature_pipeline: FeaturePipeline
@@ -70,10 +88,12 @@ class ArticleAnalyzer:
     inference_prediction_pipeline: InferencePredictionPipeline | None = None
     inference_feature_preparer: FeaturePreparer | None = None
     report_generator: ReportGenerator | None = None
+    explanation_report_generator: ExplanationReportGenerator | None = None
+    predict_fn: Optional[Callable[[str], Dict[str, Any]]] = None
 
     def __post_init__(self) -> None:
         """
-        Initialize the feature pipeline.
+        Initialize the feature pipeline and any lazy defaults.
         """
         self.feature_pipeline.initialize()
         if self.narrative_graph_builder is None:
@@ -84,6 +104,8 @@ class ArticleAnalyzer:
             self.analysis_runner = AnalysisIntegrationRunner()
         if self.report_generator is None:
             self.report_generator = ReportGenerator()
+        if self.explanation_report_generator is None:
+            self.explanation_report_generator = ExplanationReportGenerator()
         logger.info("ArticleAnalyzer initialized")
 
     def _extract_feature_sections(
@@ -116,9 +138,62 @@ class ArticleAnalyzer:
 
         return sections
 
+    def _run_prediction(
+        self,
+        text: str,
+        fused_features: Dict[str, float],
+    ) -> Dict[str, Any]:
+        """
+        Run the inference prediction pipeline on prepared features.
+
+        When the pipeline has an attached ExplainabilityLayer, this calls
+        predict_with_explanation() so that token-level attributions,
+        attention rollout, and consistency metrics are included in the
+        returned dict under the 'explainability' key.
+        """
+
+        if (
+            self.inference_prediction_pipeline is None
+            or self.inference_feature_preparer is None
+        ):
+            return {}
+
+        try:
+            prepared = self.inference_feature_preparer.prepare_single(
+                {"text": text, **fused_features}
+            )
+            if isinstance(prepared, np.ndarray):
+                prepared_tensor = torch.tensor(prepared, dtype=torch.float32)
+            else:
+                prepared_tensor = prepared
+
+            has_explainability = (
+                self.inference_prediction_pipeline.explainability_layer is not None
+                and self.predict_fn is not None
+            )
+
+            if has_explainability:
+                return self.inference_prediction_pipeline.predict_with_explanation(
+                    features=prepared_tensor,
+                    text=text,
+                    predict_fn=self.predict_fn,
+                )
+
+            return self.inference_prediction_pipeline.predict(prepared_tensor)
+
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Inference prediction integration skipped: %s", exc)
+            return {}
+
     def analyze(self, text: str) -> Dict[str, Any]:
         """
         Run the full analysis pipeline on an article.
+
+        Returns a report dict containing feature sections, graph data,
+        analysis module outputs, credibility scores, ML predictions, and
+        — when an ExplainabilityLayer is configured — a full explainability
+        package with token attributions, aggregated importance scores, and
+        cross-method consistency metrics.
         """
 
         if not isinstance(text, str) or not text.strip():
@@ -127,18 +202,15 @@ class ArticleAnalyzer:
         context = FeatureContext(text=text)
 
         try:
-
             fused_features = self.feature_pipeline.extract(context)
-
             feature_sections = self._extract_feature_sections(fused_features)
 
             entity_graph = self.entity_graph_builder.build_graph(text)
-
             graph_features = self.entity_graph_builder.extract_graph_features(
                 entity_graph
             )
-
             graph_metrics = self.graph_analyzer.analyze(entity_graph)
+
             narrative_graph = (
                 self.narrative_graph_builder.build_graph(text)
                 if self.narrative_graph_builder is not None
@@ -200,27 +272,9 @@ class ArticleAnalyzer:
         )
 
         profile["graph"] = graph_section
-
         scores = self.score_calculator.compute_scores(profile)
 
-        prediction_output: Dict[str, Any] = {}
-        if (
-            self.inference_prediction_pipeline is not None
-            and self.inference_feature_preparer is not None
-        ):
-            try:
-                prepared = self.inference_feature_preparer.prepare_single(
-                    {"text": text, **fused_features}
-                )
-                if isinstance(prepared, np.ndarray):
-                    prepared_tensor = torch.tensor(prepared, dtype=torch.float32)
-                else:
-                    prepared_tensor = prepared
-                prediction_output = self.inference_prediction_pipeline.predict(
-                    prepared_tensor
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Inference prediction integration skipped: %s", exc)
+        prediction_output = self._run_prediction(text, fused_features)
 
         inference_report: Dict[str, Any] = {}
         if self.report_generator is not None:
@@ -252,6 +306,21 @@ class ArticleAnalyzer:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Report generation integration skipped: %s", exc)
 
+        explainability_output = prediction_output.pop("explainability", {})
+
+        if explainability_output and self.explanation_report_generator is not None:
+            try:
+                import hashlib
+                article_id = hashlib.sha256(text.encode()).hexdigest()[:16]
+                self.explanation_report_generator.generate(
+                    article_id=article_id,
+                    explanation=explainability_output,
+                    save_json=True,
+                    save_html=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Explanation report artifact generation skipped: %s", exc)
+
         report: Dict[str, Any] = {
             "bias_features": feature_sections["bias"],
             "emotion_features": feature_sections["emotion"],
@@ -266,8 +335,8 @@ class ArticleAnalyzer:
             "scores": scores,
             "predictions": prediction_output,
             "inference_report": inference_report,
+            "explainability": explainability_output,
         }
 
         logger.info("Article analysis completed")
-
         return report
