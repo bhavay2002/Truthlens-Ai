@@ -21,10 +21,6 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer
 
-# Mount Google Drive (for Colab)
-from google.colab import drive
-drive.mount('/content/drive')
-
 from src.features.emotion.emotion_schema import EMOTION_LABELS
 from src.models.multitask.multitask_truthlens_model import (
     MultiTaskTruthLensConfig,
@@ -100,7 +96,6 @@ EMOTION_COLUMNS = [f"emotion_{i}" for i in range(len(EMOTION_LABELS))]
 # -----------------------------------------------------
 # Dataset
 # -----------------------------------------------------
-
 class TruthLensMultiTaskDataset(Dataset):
 
     def __init__(self, df, tokenizer, max_length=256, text_column="text"):
@@ -111,6 +106,22 @@ class TruthLensMultiTaskDataset(Dataset):
 
     def __len__(self):
         return len(self.df)
+
+    def _safe_int(self, value, default=0):
+        try:
+            if pd.isna(value):
+                return default
+            return int(float(value))
+        except Exception:
+            return default
+
+    def _safe_float(self, value, default=0.0):
+        try:
+            if pd.isna(value):
+                return default
+            return float(value)
+        except Exception:
+            return default
 
     def __getitem__(self, idx):
 
@@ -131,19 +142,28 @@ class TruthLensMultiTaskDataset(Dataset):
         }
 
         labels = {
-            "bias": torch.tensor(int(row.get(BIAS_LABEL, 0)), dtype=torch.long),
-            "ideology": torch.tensor(int(row.get(IDEOLOGY_LABEL, 1)), dtype=torch.long),
-            "propaganda": torch.tensor(int(row.get(PROPAGANDA_LABEL, 0)), dtype=torch.long),
+            "bias": torch.tensor(
+                self._safe_int(row.get(BIAS_LABEL, 0)),
+                dtype=torch.long
+            ),
+            "ideology": torch.tensor(
+                self._safe_int(row.get(IDEOLOGY_LABEL, 1)),
+                dtype=torch.long
+            ),
+            "propaganda": torch.tensor(
+                self._safe_int(row.get(PROPAGANDA_LABEL, 0)),
+                dtype=torch.long
+            ),
             "narrative": torch.tensor(
-                [float(row.get(c, 0)) for c in NARRATIVE_COLUMNS],
+                [self._safe_float(row.get(c, 0)) for c in NARRATIVE_COLUMNS],
                 dtype=torch.float,
             ),
             "narrative_frame": torch.tensor(
-                [float(row.get(c, 0)) for c in FRAME_COLUMNS],
+                [self._safe_float(row.get(c, 0)) for c in FRAME_COLUMNS],
                 dtype=torch.float,
             ),
             "emotion": torch.tensor(
-                [float(row.get(c, 0)) for c in EMOTION_COLUMNS],
+                [self._safe_float(row.get(c, 0)) for c in EMOTION_COLUMNS],
                 dtype=torch.float,
             ),
         }
@@ -151,7 +171,6 @@ class TruthLensMultiTaskDataset(Dataset):
         item["labels"] = labels
 
         return item
-
 
 # -----------------------------------------------------
 # Load Data

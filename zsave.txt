@@ -1,24 +1,22 @@
-Core Emotion Analysis
-src/analysis/emotion_target_analysis.py
+from google.colab import drive
+drive.mount('/content/drive')
 
-Emotion Feature Engineering
-src/features/emotion/emotion_features.py
-src/features/emotion/emotion_lexicon_features.py
-src/features/emotion/emotion_target_features.py
-src/features/emotion/emotion_intensity_features.py
-src/features/emotion/emotion_trajectory_features.py
+!git clone https://github.com/bhavay2002/Truthlens-Ai
+%cd truthlens-ai
 
-Emotion Model
-src/models/emotion/train_emotion_model.py
-src/models/tasks/emotion/emotion_classifier.py
+# Install dependencies
+!pip install -q torch transformers datasets sentence-transformers scikit-learn scipy numpy pandas spacy nltk langdetect vaderSentiment contractions shap lime networkx matplotlib seaborn wordcloud joblib pyyaml tqdm tarsafe africanwhisper fastapi uvicorn[standard] pydantic gunicorn optuna
 
-Label Schema
-src/data/unified_label_schema.py
+# Download spacy model
+!python -m spacy download en_core_web_sm
 
-Pipeline Integration
-src/features/pipelines/feature_pipeline.py
-src/inference/prediction_pipeline.py
+# Download nltk resources
+import nltk
+nltk.download('punkt')
+nltk.download('stopwords')
+nltk.download('wordnet')
 
-src/models/multitask/multitask_truthlens_model.py
-src/models/heads/multitask_head.py
-src/models/multitask/multitask_output.py
+
+
+
+!ls /content/drive/MyDrive/truthlens-models

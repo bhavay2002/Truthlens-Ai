@@ -46,7 +46,6 @@ from __future__ import annotations
 
 import logging
 import math
-import shutil
 import sys
 from pathlib import Path
 from typing import Any, Tuple
@@ -61,7 +60,6 @@ from sklearn.model_selection import train_test_split
 from transformers import (
     AutoModelForSequenceClassification,
     AutoTokenizer,
-    DataCollatorWithPadding,
     EarlyStoppingCallback,
     Trainer,
     TrainingArguments,
@@ -123,13 +121,8 @@ DEFAULT_RESUME_FROM_CHECKPOINT = SETTINGS.training.resume_from_checkpoint
 DEFAULT_VALIDATION_SIZE = SETTINGS.training.validation_size
 DEFAULT_TEST_SIZE = SETTINGS.training.test_size
 
-MODELS_DIR = Path("/content/drive/MyDrive/truthlens-models")
-MODELS_DIR.mkdir(parents=True, exist_ok=True)
-checkpoint_save_steps = 500
-LOGS_DIR = Path("/content/drive/MyDrive/truthlens-logs")
-LOGS_DIR.mkdir(parents=True, exist_ok=True)
-GOOGLE_DRIVE_REPORTS_DIR = Path("/content/drive/MyDrive/truthlens-reports")
-GOOGLE_DRIVE_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+MODELS_DIR = Path(SETTINGS.paths.models_dir)
+LOGS_DIR = Path(SETTINGS.paths.logs_dir)
 MODEL_PATH = Path(SETTINGS.model.path)
 TEST_SET_PATH = Path(SETTINGS.data.test_set_path)
 
@@ -198,7 +191,7 @@ def tokenize_function(example: dict, tokenizer, text_column: str):
     return tokenizer(
         example[text_column],
         truncation=True,
-        padding=False,
+        padding="max_length",
         max_length=MAX_LENGTH,
     )
 
@@ -280,21 +273,6 @@ def _compute_checkpoint_save_steps(
     return max(1, math.ceil(total_optimizer_steps * 0.10))
 
 
-def _save_reports_to_google_drive(report_source_dir: Path, report_files: list[str]) -> None:
-    """
-    Copy generated report artifacts to the Google Drive reports directory.
-    """
-    for report_file in report_files:
-        source_path = report_source_dir / report_file
-        if not source_path.exists():
-            logger.warning("Expected report file not found for Drive sync: %s", source_path)
-            continue
-
-        destination_path = GOOGLE_DRIVE_REPORTS_DIR / report_file
-        destination_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source_path, destination_path)
-
-
 def train_model(
     df: pd.DataFrame,
     params: dict[str, Any] | None = None,
@@ -346,7 +324,6 @@ def train_model(
         gradient_accumulation_steps = 2
 
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-        data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
 
         if label_column != "label":
             train_df = train_df.rename(columns={label_column: "label"})
@@ -360,19 +337,16 @@ def train_model(
         train_dataset = train_dataset.map(
             lambda x: tokenize_function(x, tokenizer, text_column),
             batched=True,
-            load_from_cache_file=True,
         )
 
         val_dataset = val_dataset.map(
             lambda x: tokenize_function(x, tokenizer, text_column),
             batched=True,
-            load_from_cache_file=True,
         )
 
         test_dataset = test_dataset.map(
             lambda x: tokenize_function(x, tokenizer, text_column),
             batched=True,
-            load_from_cache_file=True,
         )
 
         train_dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "label"])
@@ -388,8 +362,14 @@ def train_model(
 
         model.to(device)
 
+        checkpoint_save_steps = _compute_checkpoint_save_steps(
+            train_examples=len(train_df),
+            batch_size=batch_size,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            epochs=epochs,
+        )
+
         training_args = TrainingArguments(
-            
             output_dir=str(MODELS_DIR),
 
             learning_rate=learning_rate,
@@ -403,7 +383,7 @@ def train_model(
             num_train_epochs=epochs,
 
             logging_dir=str(LOGS_DIR),
-            logging_steps=50,
+            logging_steps=max(1, min(100, checkpoint_save_steps)),
 
             save_strategy="steps",
             save_steps=checkpoint_save_steps,
@@ -421,7 +401,6 @@ def train_model(
 
             dataloader_num_workers=2,
             dataloader_pin_memory=True,
-            group_by_length=True,
 
             seed=SEED,
             report_to="none",
@@ -433,7 +412,6 @@ def train_model(
             train_dataset=train_dataset,
             eval_dataset=val_dataset,
             compute_metrics=compute_metrics,
-            data_collator=data_collator,
             callbacks=[EarlyStoppingCallback(early_stopping_patience=2)],
         )
 
@@ -537,11 +515,6 @@ def train_model(
             )
             model_card.save_json(MODEL_PATH / "model_card.json")
             model_card.save_markdown(MODEL_PATH / "model_card.md")
-
-            _save_reports_to_google_drive(
-                report_source_dir=MODEL_PATH,
-                report_files=["metadata.json", "model_card.json", "model_card.md"],
-            )
 
             version_registry = ModelVersionRegistry(MODELS_DIR)
             version_info = ModelVersionInfo(
