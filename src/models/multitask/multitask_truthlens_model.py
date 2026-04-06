@@ -50,6 +50,11 @@ from ..heads.multilabel_head import MultiLabelHead, MultiLabelHeadConfig
 from ..ensemble.ensemble_model import EnsembleConfig, EnsembleModel
 from ..ensemble.stacking_ensemble import StackingEnsembleConfig, StackingEnsembleModel
 from ..ensemble.weighted_ensemble import WeightedEnsembleConfig, WeightedEnsembleModel
+from ..config.model_config import (
+    EncoderConfig as ModelEncoderConfig,
+    ModelConfigLoader,
+    MultiTaskModelConfig,
+)
 from ..training.loss_functions import LossConfig, LossFactory
 from ..training.trainer import Trainer, TrainerConfig
 
@@ -405,6 +410,75 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
     # ------------------------------------------------------------
     # Trainer factory
     # ------------------------------------------------------------
+
+    @classmethod
+    def from_model_config(
+        cls,
+        model_config: MultiTaskModelConfig,
+    ) -> "MultiTaskTruthLensModel":
+        """
+        Build a ``MultiTaskTruthLensModel`` from a central
+        ``MultiTaskModelConfig``.
+
+        Task-level weight overrides are read from ``model_config.metadata``
+        using keys of the form ``"<task_name>_weight"`` (e.g.
+        ``{"bias_weight": 2.0}``).
+
+        Parameters
+        ----------
+        model_config:
+            Structured configuration loaded via
+            ``ModelConfigLoader.load_multitask_config()``.
+
+        Returns
+        -------
+        MultiTaskTruthLensModel
+        """
+        cfg = MultiTaskTruthLensConfig(
+            model_name=model_config.encoder.model_name,
+            pooling=model_config.encoder.pooling,
+            dropout=model_config.dropout,
+            device=model_config.encoder.device,
+        )
+        for weight_field in (
+            "bias_weight",
+            "ideology_weight",
+            "propaganda_weight",
+            "narrative_weight",
+            "narrative_frame_weight",
+            "emotion_weight",
+        ):
+            if weight_field in model_config.metadata:
+                setattr(cfg, weight_field, float(model_config.metadata[weight_field]))
+
+        logger.info(
+            "MultiTaskTruthLensModel.from_model_config | model=%s dropout=%.2f",
+            cfg.model_name,
+            cfg.dropout,
+        )
+        return cls(cfg)
+
+    @classmethod
+    def load_from_yaml(
+        cls,
+        yaml_path: "str | Path",
+    ) -> "MultiTaskTruthLensModel":
+        """
+        Load a ``MultiTaskModelConfig`` from a YAML file and instantiate the
+        model.
+
+        Parameters
+        ----------
+        yaml_path:
+            Path to the model YAML configuration file.
+
+        Returns
+        -------
+        MultiTaskTruthLensModel
+        """
+        model_config = ModelConfigLoader.load_multitask_config(yaml_path)
+        logger.info("MultiTaskTruthLensModel.load_from_yaml | path=%s", yaml_path)
+        return cls.from_model_config(model_config)
 
     def create_trainer(
         self,

@@ -42,6 +42,7 @@ import joblib
 import torch
 from transformers import AutoTokenizer
 
+from src.models.config.model_config import ModelConfigLoader, MultiTaskModelConfig
 from src.models.metadata.model_metadata import ModelMetadata
 from src.models.metadata.model_card import ModelCard
 from src.models.metadata.model_versioning import ModelVersionInfo
@@ -63,6 +64,7 @@ class ModelArtifacts:
     feature_schema: Optional[Dict[str, Any]] = None
     model_metadata: Optional[ModelMetadata] = None
     model_card: Optional[Dict[str, Any]] = None
+    model_config: Optional[MultiTaskModelConfig] = None
 
 
 class ModelLoader:
@@ -213,6 +215,7 @@ class ModelLoader:
 
         artifacts.model_metadata = self.load_model_metadata()
         artifacts.model_card = self.load_model_card()
+        artifacts.model_config = self.load_model_config()
 
         logger.info("All model artifacts loaded successfully")
 
@@ -249,6 +252,56 @@ class ModelLoader:
         Load feature schema.
         """
         return self._load_json(self.models_dir / "feature_schema.json")
+
+    def load_model_config(
+        self,
+        config_path: Optional[Path] = None,
+    ) -> Optional[MultiTaskModelConfig]:
+        """
+        Load a ``MultiTaskModelConfig`` from a YAML file in the models
+        directory.
+
+        The loader tries, in order:
+
+        1. The explicit ``config_path`` argument.
+        2. ``<models_dir>/config.yaml``
+        3. ``<models_dir>/model_config.yaml``
+
+        Returns ``None`` (with a debug log) when no config file is found.
+
+        Parameters
+        ----------
+        config_path:
+            Optional explicit path to the YAML configuration file.
+
+        Returns
+        -------
+        Optional[MultiTaskModelConfig]
+        """
+        candidates = [
+            config_path,
+            self.models_dir / "config.yaml",
+            self.models_dir / "model_config.yaml",
+        ]
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            candidate = Path(candidate)
+            if candidate.exists():
+                try:
+                    cfg = ModelConfigLoader.load_multitask_config(candidate)
+                    logger.info("MultiTaskModelConfig loaded from %s", candidate)
+                    return cfg
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to load MultiTaskModelConfig from %s: %s",
+                        candidate,
+                        exc,
+                    )
+                    return None
+
+        logger.debug("No MultiTaskModelConfig file found in %s", self.models_dir)
+        return None
 
     def load_model_metadata(self) -> Optional[ModelMetadata]:
         """

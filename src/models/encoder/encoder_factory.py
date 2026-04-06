@@ -29,12 +29,17 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import torch
 
 from .transformer_encoder import TransformerEncoder
-
+from ..config.model_config import (
+    EncoderConfig as ModelEncoderConfig,
+    ModelConfigLoader,
+    MultiTaskModelConfig,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +130,66 @@ class EncoderFactory:
             return EncoderFactory.create_transformer_encoder(config)
 
         raise RuntimeError("Encoder creation failed unexpectedly")
+
+    @staticmethod
+    def create_from_model_config(
+        model_config: MultiTaskModelConfig,
+        freeze_encoder: bool = False,
+    ) -> TransformerEncoder:
+        """
+        Build a TransformerEncoder from the encoder section of a
+        ``MultiTaskModelConfig``.
+
+        Parameters
+        ----------
+        model_config:
+            Centralised model configuration loaded via ``ModelConfigLoader``.
+        freeze_encoder:
+            If ``True`` all encoder parameters are frozen after loading.
+
+        Returns
+        -------
+        TransformerEncoder
+        """
+        cfg = EncoderConfig(
+            model_name=model_config.encoder.model_name,
+            pooling=model_config.encoder.pooling,
+            device=model_config.encoder.device,
+            freeze_encoder=freeze_encoder,
+        )
+        logger.info(
+            "EncoderFactory.create_from_model_config | model=%s pooling=%s freeze=%s",
+            cfg.model_name,
+            cfg.pooling,
+            freeze_encoder,
+        )
+        return EncoderFactory.create_transformer_encoder(cfg)
+
+    @staticmethod
+    def create_from_yaml(
+        yaml_path: str | Path,
+        freeze_encoder: bool = False,
+    ) -> TransformerEncoder:
+        """
+        Load a ``MultiTaskModelConfig`` from a YAML file and build a
+        ``TransformerEncoder``.
+
+        Parameters
+        ----------
+        yaml_path:
+            Path to the model YAML configuration file.
+        freeze_encoder:
+            If ``True`` all encoder parameters are frozen after loading.
+
+        Returns
+        -------
+        TransformerEncoder
+        """
+        model_config = ModelConfigLoader.load_multitask_config(yaml_path)
+        logger.info("EncoderFactory.create_from_yaml | path=%s", yaml_path)
+        return EncoderFactory.create_from_model_config(
+            model_config, freeze_encoder=freeze_encoder
+        )
 
     @staticmethod
     def detect_device(device: Optional[str] = None) -> torch.device:

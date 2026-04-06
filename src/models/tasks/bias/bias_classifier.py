@@ -39,6 +39,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ...base.base_model import BaseModel
+from ...config.model_config import HeadConfig, TaskConfig
 from ...encoder.transformer_encoder import TransformerEncoder
 from ...heads.classification_head import (
     ClassificationHead,
@@ -206,6 +207,52 @@ class BiasClassifier(BaseModel):
             0: "non_bias",
             1: "bias",
         }
+
+    @classmethod
+    def from_task_config(
+        cls,
+        task_config: TaskConfig,
+        head_config: HeadConfig,
+        model_name: str = "roberta-base",
+        pooling: str = "cls",
+        device: Optional[str] = None,
+        label_smoothing: float = 0.1,
+    ) -> "BiasClassifier":
+        """
+        Instantiate a ``BiasClassifier`` from central config dataclasses.
+
+        Parameters
+        ----------
+        task_config:
+            Task-level descriptor from ``MultiTaskModelConfig.tasks["bias"]``.
+        head_config:
+            Head-level dimensions/dropout from ``model_config.HeadConfig``.
+        model_name:
+            HuggingFace model identifier.
+        pooling:
+            Encoder pooling strategy (``"cls"`` or ``"mean"``).
+        device:
+            Target device string or ``None`` for auto-detection.
+        label_smoothing:
+            Label smoothing factor for CrossEntropyLoss.
+
+        Returns
+        -------
+        BiasClassifier
+        """
+        cfg = BiasClassifierConfig(
+            model_name=model_name,
+            pooling=pooling,
+            dropout=head_config.dropout,
+            label_smoothing=label_smoothing,
+            device=device,
+        )
+        logger.info(
+            "BiasClassifier.from_task_config | task=%s num_labels=%d",
+            task_config.name,
+            task_config.num_labels,
+        )
+        return cls(cfg)
 
     def create_trainer(
         self,

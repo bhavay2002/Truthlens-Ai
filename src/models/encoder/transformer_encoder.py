@@ -36,6 +36,7 @@ import torch.nn as nn
 from transformers import AutoConfig, AutoModel
 
 from ..base.base_model import BaseModel
+from ..config.model_config import EncoderConfig as ModelEncoderConfig
 
 logger = logging.getLogger(__name__)
 
@@ -225,3 +226,37 @@ class TransformerEncoder(BaseModel):
         """
 
         return self.hidden_size
+
+    @classmethod
+    def from_config(
+        cls,
+        config: ModelEncoderConfig,
+        freeze_encoder: bool = False,
+    ) -> "TransformerEncoder":
+        """
+        Instantiate a ``TransformerEncoder`` from a central
+        ``ModelEncoderConfig``.
+
+        Parameters
+        ----------
+        config:
+            Encoder configuration loaded from ``src.models.config.model_config``.
+        freeze_encoder:
+            If ``True`` all encoder parameters are frozen after loading.
+
+        Returns
+        -------
+        TransformerEncoder
+        """
+        logger.info(
+            "TransformerEncoder.from_config | model=%s pooling=%s freeze=%s",
+            config.model_name,
+            config.pooling,
+            freeze_encoder,
+        )
+        return cls(
+            model_name=config.model_name,
+            pooling=config.pooling,
+            device=config.device,
+            freeze_encoder=freeze_encoder,
+        )

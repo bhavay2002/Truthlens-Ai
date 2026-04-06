@@ -50,6 +50,7 @@ from ..metadata.model_card import (
     ModelDetails,
     TrainingConfig as CardTrainingConfig,
 )
+from ..config.model_config import ModelConfigLoader, MultiTaskModelConfig
 from ..metadata.model_metadata import (
     ArtifactPaths,
     ModelIdentity,
@@ -307,6 +308,108 @@ class Trainer:
                 moved_batch[key] = value
 
         return moved_batch
+
+    @classmethod
+    def from_model_config(
+        cls,
+        model: nn.Module,
+        optimizer: torch.optim.Optimizer,
+        model_config: MultiTaskModelConfig,
+        scheduler: Optional[Any] = None,
+        overrides: Optional["TrainerConfig"] = None,
+    ) -> "Trainer":
+        """
+        Build a ``Trainer`` pre-populated with settings derived from a
+        ``MultiTaskModelConfig``.
+
+        The ``model_name`` field of ``TrainerConfig`` is set to
+        ``model_config.encoder.model_name`` and ``architecture`` is set to the
+        class name of ``model``.  Any field in ``overrides`` that differs from
+        the default ``TrainerConfig`` takes precedence.
+
+        Parameters
+        ----------
+        model:
+            Instantiated PyTorch model.
+        optimizer:
+            Configured optimizer.
+        model_config:
+            Central model configuration loaded via
+            ``ModelConfigLoader.load_multitask_config()``.
+        scheduler:
+            Optional learning-rate scheduler.
+        overrides:
+            Optional ``TrainerConfig`` whose non-default fields override the
+            values derived from ``model_config``.
+
+        Returns
+        -------
+        Trainer
+        """
+        from dataclasses import replace as _replace
+
+        base = overrides if overrides is not None else TrainerConfig()
+        effective = _replace(
+            base,
+            model_name=model_config.encoder.model_name,
+            architecture=type(model).__name__,
+        )
+        logger.info(
+            "Trainer.from_model_config | model=%s architecture=%s",
+            effective.model_name,
+            effective.architecture,
+        )
+        return cls(model=model, optimizer=optimizer, scheduler=scheduler, config=effective)
+
+    def save_model_config(
+        self,
+        output_dir: str | Path,
+        model_config: MultiTaskModelConfig,
+    ) -> Path:
+        """
+        Serialise a ``MultiTaskModelConfig`` to ``config.yaml`` alongside
+        trained artifacts.
+
+        Parameters
+        ----------
+        output_dir:
+            Directory where ``config.yaml`` will be written.
+        model_config:
+            Structured model configuration to persist.
+
+        Returns
+        -------
+        Path
+            Path to the saved ``config.yaml`` file.
+        """
+        import yaml
+
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        out_dict: Dict[str, Any] = {
+            "encoder": {
+                "model_name": model_config.encoder.model_name,
+                "pooling": model_config.encoder.pooling,
+                "device": model_config.encoder.device,
+            },
+            "tasks": {
+                name: {
+                    "num_labels": tc.num_labels,
+                    "task_type": tc.task_type,
+                }
+                for name, tc in model_config.tasks.items()
+            },
+            "dropout": model_config.dropout,
+            "metadata": model_config.metadata,
+        }
+
+        out_path = output_path / "config.yaml"
+        with open(out_path, "w", encoding="utf-8") as _f:
+            yaml.safe_dump(out_dict, _f, default_flow_style=False, allow_unicode=True)
+
+        logger.info("MultiTaskModelConfig saved: %s", out_path)
+        return out_path
 
     def save_model_metadata(
         self,

@@ -52,6 +52,7 @@ import torch
 import torch.nn as nn
 
 from ...base.base_model import BaseModel
+from ...config.model_config import HeadConfig, TaskConfig
 from ...encoder.transformer_encoder import TransformerEncoder
 from ...heads.multilabel_head import MultiLabelHead, MultiLabelHeadConfig
 from ...training.trainer import Trainer, TrainerConfig
@@ -171,6 +172,53 @@ class NarrativeDetector(BaseModel):
     def get_label_list(self) -> List[str]:
 
         return self.LABELS
+
+    @classmethod
+    def from_task_config(
+        cls,
+        task_config: TaskConfig,
+        head_config: HeadConfig,
+        model_name: str = "roberta-base",
+        pooling: str = "cls",
+        device: Optional[str] = None,
+        threshold: float = 0.5,
+    ) -> "NarrativeDetector":
+        """
+        Instantiate a ``NarrativeDetector`` from central config dataclasses.
+
+        Parameters
+        ----------
+        task_config:
+            Task-level descriptor from
+            ``MultiTaskModelConfig.tasks["narrative"]``.
+        head_config:
+            Head-level dimensions/dropout from ``model_config.HeadConfig``.
+        model_name:
+            HuggingFace model identifier.
+        pooling:
+            Encoder pooling strategy (``"cls"`` or ``"mean"``).
+        device:
+            Target device string or ``None`` for auto-detection.
+        threshold:
+            Sigmoid threshold for multi-label prediction (default ``0.5``).
+
+        Returns
+        -------
+        NarrativeDetector
+        """
+        cfg = NarrativeDetectorConfig(
+            model_name=model_name,
+            pooling=pooling,
+            dropout=head_config.dropout,
+            threshold=threshold,
+            device=device,
+        )
+        logger.info(
+            "NarrativeDetector.from_task_config | task=%s num_labels=%d",
+            task_config.name,
+            task_config.num_labels,
+        )
+        return cls(cfg)
 
     def create_trainer(
         self,

@@ -43,6 +43,8 @@ from typing import Dict, Any
 
 import torch.nn as nn
 
+from ..config.model_config import ModelConfigLoader, MultiTaskModelConfig
+
 from ..tasks.bias.bias_classifier import BiasClassifier, BiasClassifierConfig
 from ..tasks.ideology.ideology_classifier import (
     IdeologyClassifier,
@@ -130,6 +132,62 @@ class ModelFactory:
             return MultiTaskTruthLensModel(cfg)
 
         raise RuntimeError("Model creation failed unexpectedly")
+
+    @staticmethod
+    def create_from_model_config(
+        model_config: MultiTaskModelConfig,
+    ) -> nn.Module:
+        """
+        Build a ``MultiTaskTruthLensModel`` directly from a
+        ``MultiTaskModelConfig``.
+
+        Parameters
+        ----------
+        model_config:
+            Structured configuration loaded via
+            ``ModelConfigLoader.load_multitask_config()``.
+
+        Returns
+        -------
+        nn.Module
+            Instantiated ``MultiTaskTruthLensModel``.
+        """
+        logger.info(
+            "ModelFactory.create_from_model_config | encoder=%s",
+            model_config.encoder.model_name,
+        )
+        return MultiTaskTruthLensModel.from_model_config(model_config)
+
+    @staticmethod
+    def create_from_yaml(yaml_path: "str | Path") -> nn.Module:
+        """
+        Load a ``MultiTaskModelConfig`` from a YAML file and instantiate the
+        corresponding model.
+
+        The loader expects a YAML file structured as::
+
+            encoder:
+              model_name: roberta-base
+              pooling: cls
+            tasks:
+              bias:
+                num_labels: 2
+                task_type: multi_class
+              ...
+            dropout: 0.1
+
+        Parameters
+        ----------
+        yaml_path:
+            Path to the model YAML configuration file.
+
+        Returns
+        -------
+        nn.Module
+        """
+        model_config = ModelConfigLoader.load_multitask_config(yaml_path)
+        logger.info("ModelFactory.create_from_yaml | path=%s", yaml_path)
+        return ModelFactory.create_from_model_config(model_config)
 
     @staticmethod
     def create_from_checkpoint(

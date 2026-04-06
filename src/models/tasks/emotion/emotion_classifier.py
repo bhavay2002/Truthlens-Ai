@@ -41,6 +41,7 @@ import torch
 import torch.nn as nn
 
 from ...base.base_model import BaseModel
+from ...config.model_config import HeadConfig, TaskConfig
 from ...encoder.transformer_encoder import TransformerEncoder
 from ...heads.multilabel_head import MultiLabelHead, MultiLabelHeadConfig
 from ...training.trainer import Trainer, TrainerConfig
@@ -192,6 +193,53 @@ class EmotionClassifier(BaseModel):
         """
 
         return {i: f"emotion{i}" for i in range(self.NUM_EMOTIONS)}
+
+    @classmethod
+    def from_task_config(
+        cls,
+        task_config: TaskConfig,
+        head_config: HeadConfig,
+        model_name: str = "roberta-base",
+        pooling: str = "cls",
+        device: Optional[str] = None,
+        threshold: float = 0.5,
+    ) -> "EmotionClassifier":
+        """
+        Instantiate an ``EmotionClassifier`` from central config dataclasses.
+
+        Parameters
+        ----------
+        task_config:
+            Task-level descriptor from
+            ``MultiTaskModelConfig.tasks["emotion"]``.
+        head_config:
+            Head-level dimensions/dropout from ``model_config.HeadConfig``.
+        model_name:
+            HuggingFace model identifier.
+        pooling:
+            Encoder pooling strategy (``"cls"`` or ``"mean"``).
+        device:
+            Target device string or ``None`` for auto-detection.
+        threshold:
+            Sigmoid threshold for multi-label prediction (default ``0.5``).
+
+        Returns
+        -------
+        EmotionClassifier
+        """
+        cfg = EmotionClassifierConfig(
+            model_name=model_name,
+            pooling=pooling,
+            dropout=head_config.dropout,
+            device=device,
+            threshold=threshold,
+        )
+        logger.info(
+            "EmotionClassifier.from_task_config | task=%s num_labels=%d",
+            task_config.name,
+            task_config.num_labels,
+        )
+        return cls(cfg)
 
     def create_trainer(
         self,
