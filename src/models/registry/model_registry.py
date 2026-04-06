@@ -53,7 +53,14 @@ MULTITASK_MODEL_TYPE = "multitask_truthlens"
 
 
 def _load_multitask_model(model_path: Path, device: torch.device):
-    """Load a saved MultiTaskTruthLensModel from pytorch_model.bin."""
+    """Load a saved MultiTaskTruthLensModel from pytorch_model.bin.
+
+    The encoder is initialised from its *config* only (no pretrained-weight
+    download), because the weights we care about are all in pytorch_model.bin.
+    This avoids a ~500 MB round-trip to HuggingFace Hub.
+    """
+    import transformers
+    from transformers import AutoConfig, AutoModel
     from src.models.multitask.multitask_truthlens_model import (
         MultiTaskTruthLensConfig,
         MultiTaskTruthLensModel,
@@ -63,13 +70,37 @@ def _load_multitask_model(model_path: Path, device: torch.device):
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = json.load(f)
 
+    base_model_name: str = cfg.get("model_name", "roberta-base")
+
     model_cfg = MultiTaskTruthLensConfig(
-        model_name=cfg.get("model_name", "roberta-base"),
+        model_name=base_model_name,
         dropout=cfg.get("dropout", 0.1),
         pooling=cfg.get("pooling", "cls"),
     )
-    model = MultiTaskTruthLensModel(config=model_cfg)
 
+    # ── Config-only initialisation ────────────────────────────────────────────
+    # Temporarily replace AutoModel.from_pretrained with a from_config stub so
+    # that the TransformerEncoder inside MultiTaskTruthLensModel builds the
+    # right architecture without downloading pretrained weights (they are
+    # immediately overwritten by our own state dict anyway).
+    _original_from_pretrained = AutoModel.from_pretrained
+
+    def _from_config_stub(name_or_path, *args, **kwargs):
+        hf_cfg = AutoConfig.from_pretrained(
+            name_or_path, local_files_only=False
+        )
+        logger.info(
+            "Initialising encoder architecture from config only: %s", name_or_path
+        )
+        return AutoModel.from_config(hf_cfg)
+
+    transformers.AutoModel.from_pretrained = _from_config_stub
+    try:
+        model = MultiTaskTruthLensModel(config=model_cfg)
+    finally:
+        transformers.AutoModel.from_pretrained = _original_from_pretrained
+
+    # ── Load trained weights ──────────────────────────────────────────────────
     weights_path = model_path / "pytorch_model.bin"
     if weights_path.exists():
         state_dict = torch.load(weights_path, map_location=device, weights_only=True)
@@ -143,22 +174,50 @@ class ModelRegistry:
             )
 
             # -------------------------------------------------
-            # Load Tokenizer
+            # Load config.json (if available) to resolve base model name
             # -------------------------------------------------
 
-            tokenizer = RobertaTokenizer.from_pretrained(model_path)
+            saved_config_path = model_path / "config.json"
+            saved_cfg: dict = {}
+            if saved_config_path.exists():
+                with open(saved_config_path, "r", encoding="utf-8") as f:
+                    saved_cfg = json.load(f)
+
+            saved_model_type = saved_cfg.get("model_type")
+
+            # Determine the base model name for tokenizer fallback:
+            # 1) model_name field in config.json (most specific)
+            # 2) encoder.name from settings
+            # 3) SETTINGS.model.name
+            _settings_encoder_name = getattr(
+                getattr(SETTINGS.model, "encoder", None), "name", None
+            )
+            _base_model_name = (
+                saved_cfg.get("model_name")
+                or _settings_encoder_name
+                or SETTINGS.model.name
+            )
+
+            # -------------------------------------------------
+            # Load Tokenizer (with graceful fallback to base model)
+            # -------------------------------------------------
+
+            try:
+                tokenizer = RobertaTokenizer.from_pretrained(str(model_path))
+                logger.info("Tokenizer loaded from model path: %s", model_path)
+            except Exception as tok_err:
+                logger.warning(
+                    "Failed to load tokenizer from %s (%s); falling back to '%s'",
+                    model_path,
+                    tok_err,
+                    _base_model_name,
+                )
+                tokenizer = RobertaTokenizer.from_pretrained(_base_model_name)
+                logger.info("Tokenizer loaded from base model: %s", _base_model_name)
 
             # -------------------------------------------------
             # Load Model
             # -------------------------------------------------
-
-            # Detect saved model type from config.json
-            saved_config_path = model_path / "config.json"
-            saved_model_type = None
-            if saved_config_path.exists():
-                with open(saved_config_path, "r", encoding="utf-8") as f:
-                    saved_cfg = json.load(f)
-                saved_model_type = saved_cfg.get("model_type")
 
             if model_type is None and saved_model_type == MULTITASK_MODEL_TYPE:
                 model = _load_multitask_model(model_path, device_obj)
