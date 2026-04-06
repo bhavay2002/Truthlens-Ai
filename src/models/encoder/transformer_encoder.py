@@ -36,7 +36,11 @@ import torch.nn as nn
 from transformers import AutoConfig, AutoModel
 
 from ..base.base_model import BaseModel
-from ..config.model_config import EncoderConfig as ModelEncoderConfig
+from ..config import (
+    EncoderConfig as ModelEncoderConfig,
+    MultiTaskModelConfig,
+)
+from .encoder_config import EncoderConfig as FactoryEncoderConfig
 
 logger = logging.getLogger(__name__)
 
@@ -230,7 +234,7 @@ class TransformerEncoder(BaseModel):
     @classmethod
     def from_config(
         cls,
-        config: ModelEncoderConfig,
+        config: ModelEncoderConfig | FactoryEncoderConfig,
         freeze_encoder: bool = False,
     ) -> "TransformerEncoder":
         """
@@ -260,3 +264,11 @@ class TransformerEncoder(BaseModel):
             device=config.device,
             freeze_encoder=freeze_encoder,
         )
+
+    @classmethod
+    def from_model_config(
+        cls,
+        model_config: MultiTaskModelConfig,
+        freeze_encoder: bool = False,
+    ) -> "TransformerEncoder":
+        return cls.from_config(model_config.encoder, freeze_encoder=freeze_encoder)

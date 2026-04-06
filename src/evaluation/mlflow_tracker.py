@@ -27,6 +27,8 @@ import logging
 from pathlib import Path
 from typing import Dict, Any, Optional
 
+from src.utils import ensure_file_exists
+
 try:
     import mlflow
 except ImportError:  # pragma: no cover - optional dependency
@@ -109,10 +111,7 @@ def log_artifact(path: str | Path) -> Path:
     Log artifact file to MLflow.
     """
 
-    artifact_path = Path(path)
-
-    if not artifact_path.exists():
-        raise FileNotFoundError(f"Artifact not found: {artifact_path}")
+    artifact_path = ensure_file_exists(path)
 
     _ensure_mlflow()
 

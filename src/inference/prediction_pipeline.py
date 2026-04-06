@@ -28,6 +28,7 @@ import torch
 from src.aggregation.aggregation_pipeline import AggregationPipeline
 from src.features.emotion.emotion_schema import EMOTION_LABELS
 from src.inference.feature_preparer import FeaturePreparer
+from src.models.inference.prediction_output import PredictionOutput
 
 from src.explainability.attention_rollout import AttentionRollout
 from src.explainability.attention_visualizer import AttentionVisualizer
@@ -515,6 +516,101 @@ class PredictionPipeline:
     # Main Prediction
     # -----------------------------------------------------------------
 
+    def _to_label_from_prediction_tensor(
+        self,
+        prediction_tensor: Optional[torch.Tensor],
+        label_map: Dict[int, str],
+    ) -> Optional[str]:
+        if not isinstance(prediction_tensor, torch.Tensor):
+            return None
+        if prediction_tensor.numel() == 0:
+            return None
+        idx = int(prediction_tensor.reshape(-1)[0].item())
+        return label_map.get(idx, "unknown")
+
+    def _to_probability_from_task(
+        self,
+        task: Any,
+        positive_index: int,
+    ) -> Optional[float]:
+        probs = getattr(task, "probabilities", None)
+        if not isinstance(probs, torch.Tensor):
+            return None
+        if probs.numel() == 0:
+            return None
+        if probs.dim() == 1:
+            if positive_index >= probs.size(0):
+                return None
+            return float(probs[positive_index].item())
+        if positive_index >= probs.size(-1):
+            return None
+        return float(probs.reshape(-1, probs.size(-1))[0, positive_index].item())
+
+    def _to_emotion_distribution_from_task(
+        self,
+        task: Any,
+    ) -> Optional[Dict[str, float]]:
+        probs = getattr(task, "probabilities", None)
+        if not isinstance(probs, torch.Tensor):
+            return None
+
+        probs_flat = probs.reshape(-1, probs.size(-1))[0] if probs.dim() > 1 else probs
+
+        emotions: Dict[str, float] = {}
+        for idx, label in enumerate(EMOTION_LABELS):
+            if idx < probs_flat.size(0):
+                emotions[label] = float(probs_flat[idx].item())
+            else:
+                emotions[label] = 0.0
+        return emotions
+
+    def _adapt_structured_output(
+        self,
+        structured_output: PredictionOutput,
+    ) -> Dict[str, Any]:
+        bias_task = structured_output.tasks.get("bias")
+        ideology_task = structured_output.tasks.get("ideology")
+        propaganda_task = structured_output.tasks.get("propaganda")
+        emotion_task = structured_output.tasks.get("emotion")
+
+        bias = self._to_label_from_prediction_tensor(
+            getattr(bias_task, "predictions", None),
+            {0: "non_bias", 1: "bias"},
+        )
+        ideology = self._to_label_from_prediction_tensor(
+            getattr(ideology_task, "predictions", None),
+            {0: "left", 1: "center", 2: "right"},
+        )
+
+        propaganda_prob = self._to_probability_from_task(
+            propaganda_task,
+            positive_index=1,
+        )
+        emotion = self._to_emotion_distribution_from_task(emotion_task)
+
+        credibility_score, explanation = self._compute_credibility_score(
+            bias=bias,
+            propaganda_prob=propaganda_prob,
+            emotion=emotion,
+            ideology=ideology,
+        )
+
+        return {
+            "bias": bias,
+            "ideology": ideology,
+            "propaganda_probability": propaganda_prob,
+            "emotion": emotion,
+            "credibility_score": credibility_score,
+            "credibility_explanation": explanation,
+            "structured_prediction": structured_output.to_dict(),
+        }
+
+    def _build_aggregation_profile(
+        self,
+        prediction: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return self.aggregation_pipeline.build_profile_from_prediction(prediction)
+
     def predict(self, features: torch.Tensor) -> Dict[str, Any]:
 
         if not isinstance(features, torch.Tensor):
@@ -555,6 +651,7 @@ class PredictionPipeline:
         features: torch.Tensor,
         text: str,
         predict_fn: Callable[[str], Dict[str, Any]],
+        analysis_modules: Optional[Dict[str, Any]] = None,
         tokens: Optional[List[str]] = None,
         attentions: Optional[List[torch.Tensor]] = None,
         input_ids: Optional[torch.Tensor] = None,
@@ -596,7 +693,11 @@ class PredictionPipeline:
         Dict with prediction output merged with 'explainability' key.
         """
 
-        prediction = self.predict(features)
+        prediction = self.predict_with_aggregation(
+            features,
+            text=text,
+            analysis_modules=analysis_modules,
+        )
 
         if self.explainability_layer is None:
             logger.debug("No ExplainabilityLayer configured; returning prediction only")
@@ -660,37 +761,7 @@ class PredictionPipeline:
         """
 
         prediction = self.predict(features)
-
-        profile: Dict[str, Any] = {
-            "bias": {
-                "bias_prediction": 1.0 if prediction.get("bias") == "bias" else 0.0,
-            },
-            "ideology": {
-                "ideology_left": 1.0 if prediction.get("ideology") == "left" else 0.0,
-                "ideology_center": 1.0 if prediction.get("ideology") == "center" else 0.0,
-                "ideology_right": 1.0 if prediction.get("ideology") == "right" else 0.0,
-            },
-            "propaganda": {
-                "propaganda_probability": float(
-                    prediction.get("propaganda_probability") or 0.0
-                ),
-            },
-            "credibility": {
-                "credibility_score": float(
-                    prediction.get("credibility_score") or 0.0
-                ),
-            },
-        }
-
-        emotion = prediction.get("emotion")
-        if isinstance(emotion, dict):
-            profile["emotion"] = {k: float(v) for k, v in emotion.items()}
-
-        credibility_explanation = prediction.get("credibility_explanation")
-        if isinstance(credibility_explanation, dict):
-            for comp_key, comp_val in credibility_explanation.items():
-                if isinstance(comp_val, (int, float)):
-                    profile["credibility"][comp_key] = float(comp_val)
+        profile = self._build_aggregation_profile(prediction)
 
         try:
             agg_result = self.aggregation_pipeline.run(
@@ -732,4 +803,55 @@ class PredictionPipeline:
         else:
             tensor = torch.tensor(prepared, dtype=torch.float32)
 
+        text = feature_dict.get("text") if isinstance(feature_dict, dict) else None
+        analysis_modules = (
+            feature_dict.get("analysis_modules")
+            if isinstance(feature_dict, dict)
+            else None
+        )
+
+        if isinstance(text, str) and text.strip():
+            return self.predict_with_aggregation(
+                tensor,
+                text=text,
+                analysis_modules=(
+                    analysis_modules
+                    if isinstance(analysis_modules, dict)
+                    else None
+                ),
+            )
+
         return self.predict(tensor)
+
+    def predict_from_structured_output(
+        self,
+        structured_output: PredictionOutput | Dict[str, Any],
+        *,
+        text: Optional[str] = None,
+        analysis_modules: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if isinstance(structured_output, dict):
+            structured = PredictionOutput.from_raw_outputs(structured_output)
+        elif isinstance(structured_output, PredictionOutput):
+            structured = structured_output
+        else:
+            raise TypeError(
+                "structured_output must be PredictionOutput or raw output dict"
+            )
+
+        prediction = self._adapt_structured_output(structured)
+        profile = self._build_aggregation_profile(prediction)
+
+        try:
+            aggregation = self.aggregation_pipeline.run(
+                profile,
+                text=text,
+                analysis_modules=analysis_modules,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("AggregationPipeline.run() failed for structured output: %s", exc)
+            aggregation = {}
+
+        result = dict(prediction)
+        result["aggregation"] = aggregation
+        return result

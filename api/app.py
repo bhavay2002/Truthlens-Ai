@@ -33,6 +33,7 @@ from src.features.bias.bias_lexicon import compute_bias_features
 from src.features.emotion.emotion_lexicon import EmotionLexiconAnalyzer
 from src.explainability.emotion_explainer import explain_emotion
 from src.explainability.lime_explainer import explain_prediction
+from src.utils import ensure_non_empty_text, ensure_non_empty_text_list
 from src.utils.logging_utils import configure_logging
 from src.utils.settings import load_settings
 
@@ -495,17 +496,18 @@ def predict_news(request: NewsRequest):
     identical text are served instantly without rerunning the model.
     """
     try:
-        logger.info("Received /predict request (text length: %d)", len(request.text))
+        text = ensure_non_empty_text(request.text, name="request.text")
+        logger.info("Received /predict request (text length: %d)", len(text))
         timer_start = INFERENCE_LOGGER.start_timer()
 
         # ── Cache lookup ───────────────────────────────────────────────────────
-        cached = INFERENCE_CACHE.get(request.text)
+        cached = INFERENCE_CACHE.get(text)
         if cached is not None:
             logger.debug("Cache hit for /predict")
             return NewsResponse(**cached)
 
         # ── Model inference ────────────────────────────────────────────────────
-        prediction_result = predict(request.text)
+        prediction_result = predict(text)
         prob, prediction, confidence = _decode_prediction_result(prediction_result)
 
         # ── Format via ResultFormatter ─────────────────────────────────────────
@@ -518,14 +520,14 @@ def predict_news(request: NewsRequest):
         RESULT_FORMATTER.format_api_response(raw_prediction)  # validates schema
 
         response_data = {
-            "text": _preview_text(request.text),
+            "text": _preview_text(text),
             "fake_probability": round(prob, 4),
             "prediction": prediction,
             "confidence": round(confidence, 4),
         }
 
         # ── Store in cache ─────────────────────────────────────────────────────
-        INFERENCE_CACHE.set(request.text, response_data)
+        INFERENCE_CACHE.set(text, response_data)
 
         # ── Structured inference log ───────────────────────────────────────────
         INFERENCE_LOGGER.log_prediction(
@@ -559,7 +561,8 @@ def batch_predict_news(request: BatchNewsRequest):
     model, so cached entries are served without additional inference cost.
     """
     try:
-        logger.info("Received /batch-predict request (%d texts)", len(request.texts))
+        normalized_texts = ensure_non_empty_text_list(request.texts, name="request.texts")
+        logger.info("Received /batch-predict request (%d texts)", len(normalized_texts))
 
         results: list[NewsResponse] = []
         cache_hits = 0
@@ -567,7 +570,7 @@ def batch_predict_news(request: BatchNewsRequest):
         uncached_indices: list[int] = []
 
         # ── Separate cache hits from texts that need inference ─────────────────
-        for i, text in enumerate(request.texts):
+        for i, text in enumerate(normalized_texts):
             cached = INFERENCE_CACHE.get(text)
             if cached is not None:
                 results.append(NewsResponse(**cached))
@@ -587,7 +590,7 @@ def batch_predict_news(request: BatchNewsRequest):
                 # Use InferenceEngine for batch inference
                 engine_results = engine.predict(uncached_texts)
                 for idx, engine_result in zip(uncached_indices, engine_results):
-                    text = request.texts[idx]
+                    text = normalized_texts[idx]
                     probs = engine_result.probabilities or [0.5, 0.5]
                     fake_index = 1
                     prob = round(float(probs[fake_index]), 4)
@@ -628,7 +631,7 @@ def batch_predict_news(request: BatchNewsRequest):
 
         return BatchNewsResponse(
             results=results,
-            total=len(request.texts),
+            total=len(normalized_texts),
             cache_hits=cache_hits,
         )
 
@@ -707,23 +710,24 @@ def analyze_news(request: NewsRequest):
     the same text are served without re-running all subsystems.
     """
     try:
-        logger.info("Received /analyze request (text length: %d)", len(request.text))
+        text = ensure_non_empty_text(request.text, name="request.text")
+        logger.info("Received /analyze request (text length: %d)", len(text))
         timer_start = INFERENCE_LOGGER.start_timer()
 
         # ── Cache lookup ───────────────────────────────────────────────────────
-        cache_key = f"analyze:{request.text}"
+        cache_key = f"analyze:{text}"
         cached = INFERENCE_CACHE.get(cache_key)
         if cached is not None:
             logger.debug("Cache hit for /analyze")
             return AnalysisResponse(**cached)
 
         # ── 1. Model prediction ────────────────────────────────────────────────
-        prediction_result = predict(request.text)
+        prediction_result = predict(text)
         fake_probability, prediction, confidence = _decode_prediction_result(prediction_result)
 
         # ── 2. Bias + emotion (lexicon-based) ─────────────────────────────────
-        bias_result = compute_bias_features(request.text)
-        emotion_result = EMOTION_ANALYZER.analyze(request.text)
+        bias_result = compute_bias_features(text)
+        emotion_result = EMOTION_ANALYZER.analyze(text)
         emotion_scores: dict[str, float] = getattr(emotion_result, "emotion_scores", {})
 
         # ── 3. Narrative analysis ──────────────────────────────────────────────
@@ -919,24 +923,25 @@ def generate_report(request: NewsRequest):
     no graph, LIME, or discourse sub-systems are invoked.
     """
     try:
-        logger.info("Received /report request (text length: %d)", len(request.text))
+        text = ensure_non_empty_text(request.text, name="request.text")
+        logger.info("Received /report request (text length: %d)", len(text))
 
         # ── Cache lookup ───────────────────────────────────────────────────────
-        cache_key = f"report:{request.text}"
+        cache_key = f"report:{text}"
         cached = INFERENCE_CACHE.get(cache_key)
         if cached is not None:
             logger.debug("Cache hit for /report")
             return ReportResponse(**cached)
 
         # ── Lightweight analysis ───────────────────────────────────────────────
-        bias_result = compute_bias_features(request.text)
-        emotion_result = EMOTION_ANALYZER.analyze(request.text)
+        bias_result = compute_bias_features(text)
+        emotion_result = EMOTION_ANALYZER.analyze(text)
         emotion_scores: dict[str, float] = getattr(emotion_result, "emotion_scores", {})
 
-        narrative_roles: dict = _safe_run(NARRATIVE_ROLE_EXTRACTOR.analyze, request.text)
-        combined_narrative: dict = {**_safe_run(NARRATIVE_CONFLICT_ANALYZER.analyze, request.text)}
+        narrative_roles: dict = _safe_run(NARRATIVE_ROLE_EXTRACTOR.analyze, text)
+        combined_narrative: dict = {**_safe_run(NARRATIVE_CONFLICT_ANALYZER.analyze, text)}
 
-        combined_discourse: dict = {**_safe_run(DISCOURSE_ANALYZER.analyze, request.text)}
+        combined_discourse: dict = {**_safe_run(DISCOURSE_ANALYZER.analyze, text)}
 
         credibility_profile: dict = _safe_run(
             BIAS_PROFILE_BUILDER.build_profile,
@@ -951,7 +956,7 @@ def generate_report(request: NewsRequest):
 
         # ── Generate report via ReportGenerator ────────────────────────────────
         report = REPORT_GENERATOR.generate_report(
-            article_text=request.text,
+            article_text=text,
             title=None,
             source=None,
             bias_analysis={

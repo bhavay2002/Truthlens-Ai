@@ -72,6 +72,78 @@ class MultiTaskOutput:
 
     metadata: Optional[Dict[str, Any]] = None
 
+    @classmethod
+    def from_model_outputs(
+        cls,
+        outputs: Dict[str, Any],
+    ) -> "MultiTaskOutput":
+        if not isinstance(outputs, dict):
+            raise TypeError("outputs must be a dictionary")
+
+        if isinstance(outputs.get("multitask_output"), MultiTaskOutput):
+            return outputs["multitask_output"]
+
+        multitask = cls()
+
+        for task_name, task_payload in outputs.items():
+            if not isinstance(task_payload, dict):
+                continue
+            logits = task_payload.get("logits")
+            if not isinstance(logits, torch.Tensor):
+                continue
+
+            multitask.add_task_output(
+                task_name=task_name,
+                logits=logits,
+                probabilities=(
+                    task_payload.get("probabilities")
+                    if isinstance(task_payload.get("probabilities"), torch.Tensor)
+                    else None
+                ),
+                predictions=(
+                    task_payload.get("predictions")
+                    if isinstance(task_payload.get("predictions"), torch.Tensor)
+                    else None
+                ),
+                loss=(
+                    task_payload.get("loss")
+                    if isinstance(task_payload.get("loss"), torch.Tensor)
+                    else None
+                ),
+            )
+
+        if isinstance(outputs.get("loss"), torch.Tensor):
+            multitask.loss = outputs.get("loss")
+
+        task_losses = outputs.get("task_losses") or outputs.get("loss_breakdown")
+        if isinstance(task_losses, dict):
+            multitask.task_losses = {
+                key: value for key, value in task_losses.items()
+                if isinstance(value, torch.Tensor)
+            }
+
+        return multitask
+
+    def to_flat_prediction_dict(self) -> Dict[str, Any]:
+        flattened: Dict[str, Any] = {}
+
+        for task_name, task_output in self.tasks.items():
+            flattened[f"{task_name}_logits"] = task_output.logits
+            if task_output.probabilities is not None:
+                flattened[f"{task_name}_probabilities"] = task_output.probabilities
+            if task_output.predictions is not None:
+                flattened[f"{task_name}_predictions"] = task_output.predictions
+
+        if self.loss is not None:
+            flattened["loss"] = self.loss
+        if self.task_losses is not None:
+            flattened["task_losses"] = self.task_losses
+
+        if self.metadata:
+            flattened["metadata"] = self.metadata
+
+        return flattened
+
     def add_task_output(
         self,
         task_name: str,

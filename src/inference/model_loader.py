@@ -42,10 +42,13 @@ import joblib
 import torch
 from transformers import AutoTokenizer
 
-from src.models.config.model_config import ModelConfigLoader, MultiTaskModelConfig
+from src.models.config import ModelConfigLoader, MultiTaskModelConfig
 from src.models.metadata.model_metadata import ModelMetadata
 from src.models.metadata.model_card import ModelCard
 from src.models.metadata.model_versioning import ModelVersionInfo
+from src.models.inference.model_wrapper import ModelWrapper
+from src.models.inference.predictor import Predictor
+from src.models.registry.model_factory import ModelFactory
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +68,15 @@ class ModelArtifacts:
     model_metadata: Optional[ModelMetadata] = None
     model_card: Optional[Dict[str, Any]] = None
     model_config: Optional[MultiTaskModelConfig] = None
+    bias_wrapper: Optional[ModelWrapper] = None
+    ideology_wrapper: Optional[ModelWrapper] = None
+    emotion_wrapper: Optional[ModelWrapper] = None
+    bias_predictor: Optional[Predictor] = None
+    ideology_predictor: Optional[Predictor] = None
+    emotion_predictor: Optional[Predictor] = None
+    multitask_model: Optional[torch.nn.Module] = None
+    multitask_wrapper: Optional[ModelWrapper] = None
+    multitask_predictor: Optional[Predictor] = None
 
 
 class ModelLoader:
@@ -217,9 +229,62 @@ class ModelLoader:
         artifacts.model_card = self.load_model_card()
         artifacts.model_config = self.load_model_config()
 
+        artifacts.bias_wrapper = self.build_model_wrapper(artifacts.bias_model)
+        artifacts.ideology_wrapper = self.build_model_wrapper(artifacts.ideology_model)
+        artifacts.emotion_wrapper = self.build_model_wrapper(artifacts.emotion_model)
+
+        artifacts.bias_predictor = self.build_predictor(artifacts.bias_model)
+        artifacts.ideology_predictor = self.build_predictor(artifacts.ideology_model)
+        artifacts.emotion_predictor = self.build_predictor(artifacts.emotion_model)
+
+        artifacts.multitask_model = self.load_multitask_model(artifacts.model_config)
+        artifacts.multitask_wrapper = self.build_model_wrapper(artifacts.multitask_model)
+        artifacts.multitask_predictor = self.build_predictor(artifacts.multitask_model)
+
         logger.info("All model artifacts loaded successfully")
 
         return artifacts
+
+    def load_multitask_model(
+        self,
+        model_config: Optional[MultiTaskModelConfig] = None,
+    ) -> Optional[torch.nn.Module]:
+        resolved_config = model_config or self.load_model_config()
+        if resolved_config is None:
+            return None
+
+        try:
+            model = ModelFactory.create_from_model_config(resolved_config)
+            model.to(self.device)
+            model.eval()
+            return model
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to build multitask model from config: %s", exc)
+            return None
+
+    def build_model_wrapper(
+        self,
+        model: Optional[torch.nn.Module],
+    ) -> Optional[ModelWrapper]:
+        if model is None:
+            return None
+
+        return ModelWrapper(
+            model=model,
+            device=str(self.device),
+        )
+
+    def build_predictor(
+        self,
+        model: Optional[torch.nn.Module],
+    ) -> Optional[Predictor]:
+        if model is None:
+            return None
+
+        return Predictor(
+            model=model,
+            device=str(self.device),
+        )
 
     def load_model(self, name: str) -> Optional[torch.nn.Module]:
         """

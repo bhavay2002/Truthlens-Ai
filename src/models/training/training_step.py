@@ -35,6 +35,7 @@ import torch
 import torch.nn as nn
 
 from ..checkpointing.checkpoint_manager import CheckpointManager
+from ..multitask.multitask_output import MultiTaskOutput
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +155,12 @@ class TrainingStep:
         """
 
         if isinstance(outputs, dict):
+
+            multitask_output = outputs.get("multitask_output")
+            if isinstance(multitask_output, MultiTaskOutput):
+                if multitask_output.loss is None:
+                    raise RuntimeError("MultiTaskOutput exists but loss is missing")
+                return multitask_output.loss
 
             if "loss" not in outputs:
                 raise RuntimeError("Model output dictionary must contain 'loss'")

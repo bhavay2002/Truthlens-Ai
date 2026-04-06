@@ -245,6 +245,46 @@ class AggregationPipeline:
 
         return normalized_profile
 
+    def build_profile_from_prediction(
+        self,
+        prediction: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if not isinstance(prediction, dict):
+            raise TypeError("prediction must be a dictionary")
+
+        profile: Dict[str, Any] = {
+            "bias": {
+                "bias_prediction": 1.0 if prediction.get("bias") == "bias" else 0.0,
+            },
+            "ideology": {
+                "ideology_left": 1.0 if prediction.get("ideology") == "left" else 0.0,
+                "ideology_center": 1.0 if prediction.get("ideology") == "center" else 0.0,
+                "ideology_right": 1.0 if prediction.get("ideology") == "right" else 0.0,
+            },
+            "propaganda": {
+                "propaganda_probability": float(
+                    prediction.get("propaganda_probability") or 0.0
+                ),
+            },
+            "credibility": {
+                "credibility_score": float(
+                    prediction.get("credibility_score") or 0.0
+                ),
+            },
+        }
+
+        emotion = prediction.get("emotion")
+        if isinstance(emotion, dict):
+            profile["emotion"] = {k: float(v) for k, v in emotion.items()}
+
+        credibility_explanation = prediction.get("credibility_explanation")
+        if isinstance(credibility_explanation, dict):
+            for comp_key, comp_val in credibility_explanation.items():
+                if isinstance(comp_val, (int, float)):
+                    profile["credibility"][comp_key] = float(comp_val)
+
+        return profile
+
     def apply_weights(
         self,
         scores: Dict[str, float],

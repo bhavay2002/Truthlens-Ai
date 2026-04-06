@@ -43,7 +43,9 @@ from typing import Dict, Any
 
 import torch.nn as nn
 
-from ..config.model_config import ModelConfigLoader, MultiTaskModelConfig
+from ..config import ModelConfigLoader, MultiTaskModelConfig
+from ..encoder.encoder_config import EncoderConfig
+from src.utils import ensure_non_empty_text
 
 from ..tasks.bias.bias_classifier import BiasClassifier, BiasClassifierConfig
 from ..tasks.ideology.ideology_classifier import (
@@ -85,6 +87,53 @@ class ModelFactory:
     }
 
     @staticmethod
+    def _resolve_encoder_fields(config: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(config, dict):
+            return {}
+
+        raw_encoder_cfg = config.get("encoder_config")
+        if isinstance(raw_encoder_cfg, EncoderConfig):
+            return {
+                "model_name": raw_encoder_cfg.model_name,
+                "pooling": raw_encoder_cfg.pooling,
+                "device": raw_encoder_cfg.device,
+            }
+
+        if isinstance(raw_encoder_cfg, dict):
+            encoder_cfg = EncoderConfig.from_dict(raw_encoder_cfg)
+            return {
+                "model_name": encoder_cfg.model_name,
+                "pooling": encoder_cfg.pooling,
+                "device": encoder_cfg.device,
+            }
+
+        return {}
+
+    @staticmethod
+    def _resolve_regression_fields(config: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(config, dict):
+            return {}
+
+        raw = config.get("regression_config")
+        if not isinstance(raw, dict):
+            return {}
+
+        resolved: Dict[str, Any] = {}
+
+        if "enabled" in raw:
+            resolved["use_regression_head"] = bool(raw["enabled"])
+        if "output_dim" in raw:
+            resolved["regression_output_dim"] = int(raw["output_dim"])
+        if "hidden_dim" in raw:
+            resolved["regression_hidden_dim"] = (
+                int(raw["hidden_dim"]) if raw["hidden_dim"] is not None else None
+            )
+        if "activation" in raw:
+            resolved["regression_activation"] = str(raw["activation"])
+
+        return resolved
+
+    @staticmethod
     def create(model_type: str, config: Dict[str, Any]) -> nn.Module:
         """
         Create model instance.
@@ -99,39 +148,69 @@ class ModelFactory:
             Instantiated PyTorch model.
         """
 
-        if model_type not in ModelFactory.SUPPORTED_MODELS:
+        normalized_model_type = ensure_non_empty_text(model_type, name="model_type")
+
+        if normalized_model_type not in ModelFactory.SUPPORTED_MODELS:
             raise ValueError(
-                f"Unsupported model_type '{model_type}'. "
+                f"Unsupported model_type '{normalized_model_type}'. "
                 f"Supported models: {ModelFactory.SUPPORTED_MODELS}"
             )
 
-        logger.info("Creating model: %s", model_type)
+        logger.info("Creating model: %s", normalized_model_type)
 
-        if model_type == "bias_classifier":
-            cfg = BiasClassifierConfig(**config)
+        merged_config = dict(config)
+        merged_config.update(ModelFactory._resolve_encoder_fields(config))
+        merged_config.update(ModelFactory._resolve_regression_fields(config))
+
+        if normalized_model_type == "bias_classifier":
+            cfg = BiasClassifierConfig(**merged_config)
             return BiasClassifier(cfg)
 
-        if model_type == "ideology_classifier":
-            cfg = IdeologyClassifierConfig(**config)
+        if normalized_model_type == "ideology_classifier":
+            cfg = IdeologyClassifierConfig(**merged_config)
             return IdeologyClassifier(cfg)
 
-        if model_type == "propaganda_detector":
-            cfg = PropagandaDetectorConfig(**config)
+        if normalized_model_type == "propaganda_detector":
+            cfg = PropagandaDetectorConfig(**merged_config)
             return PropagandaDetector(cfg)
 
-        if model_type == "narrative_detector":
-            cfg = NarrativeDetectorConfig(**config)
+        if normalized_model_type == "narrative_detector":
+            cfg = NarrativeDetectorConfig(**merged_config)
             return NarrativeDetector(cfg)
 
-        if model_type == "emotion_classifier":
-            cfg = EmotionClassifierConfig(**config)
+        if normalized_model_type == "emotion_classifier":
+            cfg = EmotionClassifierConfig(**merged_config)
             return EmotionClassifier(cfg)
 
-        if model_type == "multitask_truthlens":
-            cfg = MultiTaskTruthLensConfig(**config)
+        if normalized_model_type == "multitask_truthlens":
+            cfg = MultiTaskTruthLensConfig(**merged_config)
             return MultiTaskTruthLensModel(cfg)
 
         raise RuntimeError("Model creation failed unexpectedly")
+
+    @staticmethod
+    def create_wrapper(
+        model_type: str,
+        config: Dict[str, Any],
+        *,
+        device: str | None = None,
+    ):
+        from src.models.inference.model_wrapper import ModelWrapper
+
+        model = ModelFactory.create(model_type, config)
+        return ModelWrapper(model=model, device=device)
+
+    @staticmethod
+    def create_predictor(
+        model_type: str,
+        config: Dict[str, Any],
+        *,
+        device: str | None = None,
+    ):
+        from src.models.inference.predictor import Predictor
+
+        model = ModelFactory.create(model_type, config)
+        return Predictor(model=model, device=device)
 
     @staticmethod
     def create_from_model_config(
@@ -157,6 +236,24 @@ class ModelFactory:
             model_config.encoder.model_name,
         )
         return MultiTaskTruthLensModel.from_model_config(model_config)
+
+    @staticmethod
+    def create_task_from_model_config(
+        task_name: str,
+        model_config: MultiTaskModelConfig,
+    ) -> nn.Module:
+        if task_name == "bias":
+            return BiasClassifier.from_model_config(model_config)
+        if task_name == "ideology":
+            return IdeologyClassifier.from_model_config(model_config)
+        if task_name == "propaganda":
+            return PropagandaDetector.from_model_config(model_config)
+        if task_name == "narrative":
+            return NarrativeDetector.from_model_config(model_config)
+        if task_name == "emotion":
+            return EmotionClassifier.from_model_config(model_config)
+
+        raise ValueError(f"Unsupported task_name '{task_name}' for task model creation")
 
     @staticmethod
     def create_from_yaml(yaml_path: "str | Path") -> nn.Module:

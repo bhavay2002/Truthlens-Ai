@@ -63,6 +63,7 @@ from src.explainability.explanation_consistency import ExplanationConsistency
 from src.features.importance.feature_ablation import FeatureAblation
 from src.features.importance.permutation_importance import PermutationImportance
 from src.features.importance.shap_importance import ShapImportance
+from src.utils import ensure_non_empty_text_list, ensure_positive_int
 
 logger = logging.getLogger(__name__)
 
@@ -322,8 +323,7 @@ class Evaluator:
             faithfulness, comprehensiveness, sufficiency,
             deletion_score, insertion_score
         """
-        if not tokens:
-            raise ValueError("tokens must not be empty")
+        normalized_tokens = ensure_non_empty_text_list(tokens, name="tokens")
         if len(tokens) != len(scores):
             raise ValueError("tokens and scores must have the same length")
         if not callable(predict_fn):
@@ -333,7 +333,7 @@ class Evaluator:
 
         evaluator = ExplanationMetrics()
         results = evaluator.evaluate(
-            tokens=tokens,
+            tokens=normalized_tokens,
             scores=scores,
             predict_fn=predict_fn,
         )
@@ -430,6 +430,7 @@ class Evaluator:
             raise TypeError("X must be a numpy ndarray")
         if not isinstance(y, np.ndarray):
             raise TypeError("y must be a numpy ndarray")
+        ensure_positive_int(n_repeats, name="n_repeats", min_value=1)
         if len(feature_names) != X.shape[1]:
             raise ValueError(
                 f"feature_names length ({len(feature_names)}) must match "
@@ -592,6 +593,7 @@ class Evaluator:
         """
         if not isinstance(X, np.ndarray):
             raise TypeError("X must be a numpy ndarray")
+        ensure_positive_int(int(max_samples or 1), name="max_samples", min_value=1)
         if len(feature_names) != X.shape[1]:
             raise ValueError(
                 f"feature_names length ({len(feature_names)}) must match "

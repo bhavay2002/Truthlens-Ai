@@ -41,6 +41,12 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from ..checkpointing.checkpoint_manager import CheckpointManager
+from src.training.checkpointing import (
+    list_checkpoints as list_training_checkpoints,
+    resume_training as resume_training_checkpoint,
+    save_checkpoint as save_training_checkpoint,
+)
+from src.utils import create_folder, get_device, move_to_device
 from ..metadata.model_card import (
     DatasetInfo,
     EthicalConsiderations,
@@ -50,7 +56,7 @@ from ..metadata.model_card import (
     ModelDetails,
     TrainingConfig as CardTrainingConfig,
 )
-from ..config.model_config import ModelConfigLoader, MultiTaskModelConfig
+from ..config import ModelConfigLoader, MultiTaskModelConfig
 from ..metadata.model_metadata import (
     ArtifactPaths,
     ModelIdentity,
@@ -108,9 +114,7 @@ class Trainer:
         self.scheduler = scheduler
         self.config = config
 
-        self.device = torch.device(
-            config.device if config.device else ("cuda" if torch.cuda.is_available() else "cpu")
-        )
+        self.device = torch.device(config.device) if config.device else get_device(prefer_gpu=True)
 
         self.model.to(self.device)
         self.global_step = 0
@@ -118,8 +122,60 @@ class Trainer:
         self.checkpoint_manager: Optional[CheckpointManager] = None
         if config.checkpoint_dir:
             self.checkpoint_manager = CheckpointManager(Path(config.checkpoint_dir))
+            self._attempt_resume()
 
         logger.info("Trainer initialized on device %s", self.device)
+
+    def _attempt_resume(self) -> None:
+        if not self.config.checkpoint_dir:
+            return
+
+        checkpoint_root = Path(self.config.checkpoint_dir)
+        available = list_training_checkpoints(checkpoint_root)
+        if not available:
+            return
+
+        latest = available[-1]
+        try:
+            state = resume_training_checkpoint(
+                self.model,
+                checkpoint_dir=latest,
+                optimizer=self.optimizer,
+                scheduler=self.scheduler,
+                map_location=self.device,
+            )
+            self.global_step = int(state.get("start_step", 0) or 0)
+            logger.info(
+                "Resumed trainer state from %s | step=%s",
+                latest,
+                self.global_step,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Checkpoint resume skipped: %s", exc)
+
+    def _save_training_checkpoint(
+        self,
+        *,
+        epoch: Optional[int],
+        step: int,
+        metadata: Dict[str, Any],
+    ) -> None:
+        if not self.config.checkpoint_dir:
+            return
+
+        checkpoint_dir = Path(self.config.checkpoint_dir) / f"step_{step}"
+        try:
+            save_training_checkpoint(
+                self.model,
+                checkpoint_dir=checkpoint_dir,
+                optimizer=self.optimizer,
+                scheduler=self.scheduler,
+                epoch=epoch,
+                step=step,
+                metadata=metadata,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Unified checkpoint save skipped: %s", exc)
 
     def train(
         self,
@@ -160,6 +216,14 @@ class Trainer:
                 )
                 self.checkpoint_manager.cleanup_old_checkpoints(
                     max_checkpoints=self.config.max_checkpoints
+                )
+                self._save_training_checkpoint(
+                    epoch=epoch + 1,
+                    step=self.global_step,
+                    metadata={
+                        "epoch": epoch + 1,
+                        "train_loss": float(train_loss),
+                    },
                 )
 
             if val_loader is not None:
@@ -234,6 +298,14 @@ class Trainer:
                 self.checkpoint_manager.cleanup_old_checkpoints(
                     max_checkpoints=self.config.max_checkpoints
                 )
+                self._save_training_checkpoint(
+                    epoch=epoch + 1,
+                    step=self.global_step,
+                    metadata={
+                        "epoch": epoch + 1,
+                        "step_loss": float(loss.item()),
+                    },
+                )
 
             if (step + 1) % self.config.log_every_steps == 0:
                 logger.info(
@@ -298,16 +370,7 @@ class Trainer:
         if not isinstance(batch, dict):
             raise TypeError("Batch must be a dictionary")
 
-        moved_batch: Dict[str, torch.Tensor] = {}
-
-        for key, value in batch.items():
-
-            if isinstance(value, torch.Tensor):
-                moved_batch[key] = value.to(self.device)
-            else:
-                moved_batch[key] = value
-
-        return moved_batch
+        return move_to_device(batch, self.device)
 
     @classmethod
     def from_model_config(
@@ -361,6 +424,24 @@ class Trainer:
         )
         return cls(model=model, optimizer=optimizer, scheduler=scheduler, config=effective)
 
+    @classmethod
+    def from_yaml_config(
+        cls,
+        model: nn.Module,
+        optimizer: torch.optim.Optimizer,
+        yaml_path: str | Path,
+        scheduler: Optional[Any] = None,
+        overrides: Optional["TrainerConfig"] = None,
+    ) -> "Trainer":
+        model_config = ModelConfigLoader.load_multitask_config(yaml_path)
+        return cls.from_model_config(
+            model=model,
+            optimizer=optimizer,
+            model_config=model_config,
+            scheduler=scheduler,
+            overrides=overrides,
+        )
+
     def save_model_config(
         self,
         output_dir: str | Path,
@@ -385,7 +466,7 @@ class Trainer:
         import yaml
 
         output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
+        create_folder(output_path)
 
         out_dict: Dict[str, Any] = {
             "encoder": {
@@ -435,8 +516,7 @@ class Trainer:
             Path to the saved metadata.json file.
         """
 
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
+        output_path = create_folder(output_dir)
 
         identity = ModelIdentity(
             model_name=self.config.model_name,
@@ -505,8 +585,7 @@ class Trainer:
             Path to the saved model_card.json file.
         """
 
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
+        output_path = create_folder(output_dir)
 
         details = ModelDetails(
             name=self.config.model_name,

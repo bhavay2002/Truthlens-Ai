@@ -50,6 +50,7 @@ from src.models.training.training_utils import TrainingMetrics
 from src.features.dataset_feature_generator import DatasetFeatureGenerator
 from src.features.feature_schema_validator import FeatureSchemaValidator
 from src.features.feature_statistics import FeatureStatistics
+from src.training.checkpointing import list_checkpoints
 
 logger = logging.getLogger(__name__)
 SETTINGS = load_settings()
@@ -219,6 +220,7 @@ def cross_validate_model(
     params: Dict[str, Any] | None = None,
     metric_name: str | None = None,
     random_state: int | None = None,
+    checkpoint_root: str | None = None,
 ) -> Dict[str, Any]:
     """
     Run stratified cross-validation and return summary metrics.
@@ -386,6 +388,12 @@ def cross_validate_model(
     mean_score = float(np.mean(fold_scores))
     std_score = float(np.std(fold_scores))
 
+    available_checkpoints: list[str] = []
+    if isinstance(checkpoint_root, str) and checkpoint_root.strip():
+        available_checkpoints = [
+            str(p) for p in list_checkpoints(checkpoint_root)
+        ]
+
     return {
         "metric_name": effective_metric,
         "fold_scores": fold_scores,
@@ -394,4 +402,5 @@ def cross_validate_model(
         "std_score": std_score,
         "n_splits": effective_splits,
         "label_column": resolved_label_column,
+        "available_checkpoints": available_checkpoints,
     }

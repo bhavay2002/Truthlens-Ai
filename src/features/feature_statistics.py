@@ -33,9 +33,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
+from src.visualization.visualize import plot_feature_importance
 
 logger = logging.getLogger(__name__)
 
@@ -186,3 +188,28 @@ class FeatureStatistics:
         )
 
         return summary
+
+    def save_variance_plot(
+        self,
+        features: List[FeatureVector],
+        *,
+        output_path: str | Path,
+        top_k: int = 25,
+    ) -> Path:
+        """
+        Save a feature variance ranking plot using shared visualization utils.
+        """
+
+        variances = self.compute_variance(features)
+
+        if not variances:
+            raise ValueError("No features available for variance plot")
+
+        plot_feature_importance(
+            features=list(variances.keys()),
+            scores=list(variances.values()),
+            top_k=min(top_k, len(variances)),
+            save_path=output_path,
+        )
+
+        return Path(output_path)

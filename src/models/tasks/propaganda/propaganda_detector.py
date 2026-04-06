@@ -41,12 +41,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ...base.base_model import BaseModel
-from ...config.model_config import HeadConfig, TaskConfig
-from ...encoder.transformer_encoder import TransformerEncoder
+from ...config import HeadConfig, TaskConfig, MultiTaskModelConfig
+from ...encoder.encoder_config import EncoderConfig
+from ...encoder.encoder_factory import EncoderFactory
 from ...heads.classification_head import (
     ClassificationHead,
     ClassificationHeadConfig,
 )
+from ...heads.regression_head import RegressionHead, RegressionHeadConfig
 from ...training.loss_functions import LossConfig, LossFactory
 from ...training.trainer import Trainer, TrainerConfig
 
@@ -68,6 +70,10 @@ class PropagandaDetectorConfig:
     dropout: float = 0.1
     label_smoothing: float = 0.1
     device: Optional[str] = None
+    use_regression_head: bool = False
+    regression_output_dim: int = 1
+    regression_hidden_dim: Optional[int] = None
+    regression_activation: str = "gelu"
 
 
 # ---------------------------------------------------------
@@ -97,10 +103,12 @@ class PropagandaDetector(BaseModel):
         # Encoder
         # -------------------------------------------------
 
-        self.encoder = TransformerEncoder(
-            model_name=config.model_name,
-            pooling=config.pooling,
-            device=config.device,
+        self.encoder = EncoderFactory.create_transformer_encoder(
+            EncoderConfig(
+                model_name=config.model_name,
+                pooling=config.pooling,
+                device=config.device,
+            )
         )
 
         # -------------------------------------------------
@@ -114,6 +122,18 @@ class PropagandaDetector(BaseModel):
         )
 
         self.classifier_head = ClassificationHead(head_config)
+
+        self.regression_head: Optional[RegressionHead] = None
+        if config.use_regression_head:
+            self.regression_head = RegressionHead(
+                RegressionHeadConfig(
+                    input_dim=self.encoder.hidden_size,
+                    output_dim=config.regression_output_dim,
+                    hidden_dim=config.regression_hidden_dim,
+                    dropout=config.dropout,
+                    activation=config.regression_activation,
+                )
+            )
 
         # -------------------------------------------------
         # Loss Function
@@ -177,6 +197,9 @@ class PropagandaDetector(BaseModel):
             "confidence": confidence,
             "embeddings": pooled_output,
         }
+
+        if self.regression_head is not None:
+            outputs["regression"] = self.regression_head(pooled_output)
 
         # -------------------------------------------------
         # Loss (training)
@@ -267,6 +290,26 @@ class PropagandaDetector(BaseModel):
             dropout=head_config.dropout,
             label_smoothing=label_smoothing,
             device=device,
+            use_regression_head=(
+                task_config.regression.enabled
+                if task_config.regression is not None
+                else False
+            ),
+            regression_output_dim=(
+                task_config.regression.output_dim
+                if task_config.regression is not None
+                else 1
+            ),
+            regression_hidden_dim=(
+                task_config.regression.hidden_dim
+                if task_config.regression is not None
+                else None
+            ),
+            regression_activation=(
+                task_config.regression.activation
+                if task_config.regression is not None
+                else "gelu"
+            ),
         )
         logger.info(
             "PropagandaDetector.from_task_config | task=%s num_labels=%d",
@@ -274,6 +317,30 @@ class PropagandaDetector(BaseModel):
             task_config.num_labels,
         )
         return cls(cfg)
+
+    @classmethod
+    def from_model_config(
+        cls,
+        model_config: MultiTaskModelConfig,
+    ) -> "PropagandaDetector":
+        task_cfg = model_config.tasks.get("propaganda")
+        if task_cfg is None:
+            raise KeyError("Task 'propaganda' not found in MultiTaskModelConfig")
+
+        return cls.from_task_config(
+            task_config=task_cfg,
+            head_config=HeadConfig(
+                input_dim=0,
+                output_dim=task_cfg.num_labels,
+                dropout=model_config.dropout,
+            ),
+            model_name=model_config.encoder.model_name,
+            pooling=model_config.encoder.pooling,
+            device=model_config.encoder.device,
+            label_smoothing=float(
+                model_config.metadata.get("propaganda_label_smoothing", 0.1)
+            ),
+        )
 
     def create_trainer(
         self,

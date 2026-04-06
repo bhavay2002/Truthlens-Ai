@@ -67,6 +67,8 @@ from transformers import (
 from transformers.trainer_utils import get_last_checkpoint as hf_get_last_checkpoint
 
 from src.utils.input_validation import ensure_dataframe, ensure_non_empty_text_column
+from src.utils.helper_functions import create_folder
+from src.utils.seed_utils import set_seed
 from src.utils.settings import load_settings
 from src.models.training.training_utils import TrainingMetrics, get_device
 from src.features.dataset_feature_generator import DatasetFeatureGenerator
@@ -82,6 +84,9 @@ from src.models.export import (
 )
 from src.models.checkpointing.artifact_manager import ArtifactManager
 from src.models.checkpointing.checkpoint_manager import CheckpointManager
+from src.training.checkpointing import (
+    save_checkpoint as save_training_checkpoint,
+)
 from src.models.metadata.model_card import (
     DatasetInfo,
     EthicalConsiderations,
@@ -301,8 +306,7 @@ def train_model(
             val_df = validation_df
             resolved_test_df = test_df
 
-        torch.manual_seed(SEED)
-        np.random.seed(SEED)
+        set_seed(SEED)
 
         _log_feature_diagnostics(
             train_df[text_column].dropna().tolist(),
@@ -543,6 +547,19 @@ def train_model(
         artifact_manager.save_metadata(checkpoint_metadata)
 
         wrapped_export_model = _HFExportWrapper(trainer.model).cpu().eval()
+        save_training_checkpoint(
+            trainer.model,
+            checkpoint_dir=checkpoint_bundle_dir / "training",
+            optimizer=getattr(trainer, "optimizer", None),
+            scheduler=getattr(trainer, "lr_scheduler", None),
+            epoch=epochs,
+            step=int(getattr(trainer.state, "global_step", 0)),
+            metadata=checkpoint_metadata,
+            export_formats=[str(x) for x in export_formats],
+            export_model=wrapped_export_model,
+            export_example_input=example_input,
+        )
+
         if "torchscript" in {fmt.strip().lower() for fmt in export_formats} and example_input is not None:
             artifact_manager.export_torchscript(
                 model=wrapped_export_model,
@@ -659,7 +676,7 @@ def _export_trained_artifacts(
     export_formats: list[str],
     export_root: Path,
 ) -> None:
-    export_root.mkdir(parents=True, exist_ok=True)
+    create_folder(export_root)
     wrapped_model = _HFExportWrapper(model).cpu().eval()
     example_input = _build_export_example_input(train_dataset)
 

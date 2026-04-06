@@ -42,12 +42,12 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from src.aggregation.aggregation_pipeline import AggregationPipeline
 from src.explainability.explanation_report_generator import ExplanationReportGenerator
+from src.utils import create_folder, save_json, timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +104,7 @@ class ReportGenerator:
         """
         Generate ISO formatted timestamp.
         """
-        return datetime.now(timezone.utc).isoformat()
+        return timestamp().replace("_", "T") + "Z"
 
     def _validate_section(self, section: Optional[Dict[str, Any]], name: str) -> Dict[str, Any]:
         """
@@ -172,6 +172,7 @@ class ReportGenerator:
         narrative_structure: Optional[Dict[str, Any]] = None,
         entity_graph: Optional[Dict[str, Any]] = None,
         credibility_score: Optional[float] = None,
+        aggregation: Optional[Dict[str, Any]] = None,
         explainability: Optional[Dict[str, Any]] = None,
         article_id: Optional[str] = None,
     ) -> Dict[str, Any]:
@@ -202,6 +203,7 @@ class ReportGenerator:
             "narrative_structure": self._validate_section(narrative_structure, "narrative_structure"),
             "entity_graph": self._validate_section(entity_graph, "entity_graph"),
             "credibility_score": credibility_score,
+            "aggregation": self._validate_section(aggregation, "aggregation"),
             "explainability": self._validate_section(explainability, "explainability"),
         }
 
@@ -240,6 +242,35 @@ class ReportGenerator:
         analysis = analysis or {}
 
         explainability = prediction.get("explainability") or analysis.get("explainability")
+        analysis_modules = analysis.get("analysis_modules")
+
+        aggregation = prediction.get("aggregation") or analysis.get("aggregation")
+        if not isinstance(aggregation, dict) or not aggregation:
+            profile = analysis.get("profile")
+            if isinstance(profile, dict):
+                try:
+                    aggregation = self.aggregation_pipeline.run(
+                        profile,
+                        text=article_text,
+                        analysis_modules=(
+                            analysis_modules
+                            if isinstance(analysis_modules, dict)
+                            else None
+                        ),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Aggregation integration skipped: %s", exc)
+                    aggregation = {}
+
+        inferred_credibility_score = prediction.get("credibility_score")
+        if inferred_credibility_score is None and isinstance(aggregation, dict):
+            inferred_credibility_score = (
+                aggregation.get("scores", {}).get("truthlens_credibility_score")
+            )
+        if inferred_credibility_score is None:
+            inferred_credibility_score = (
+                analysis.get("scores", {}).get("truthlens_credibility_score")
+            )
 
         return self.generate_report(
             article_text=article_text,
@@ -261,10 +292,8 @@ class ReportGenerator:
                 "graph_features": analysis.get("graph_features", {}),
                 "graph_pipeline": analysis.get("graph_pipeline", {}),
             },
-            credibility_score=prediction.get(
-                "credibility_score",
-                analysis.get("scores", {}).get("truthlens_credibility_score"),
-            ),
+            credibility_score=inferred_credibility_score,
+            aggregation=aggregation if isinstance(aggregation, dict) else {},
             explainability=explainability,
             article_id=article_id,
         )
@@ -286,10 +315,9 @@ class ReportGenerator:
         Save report to JSON file.
         """
         try:
-            json_data = self.to_json(report)
-
-            with open(filepath, "w", encoding="utf-8") as f:
-                f.write(json_data)
+            path_obj = Path(filepath)
+            create_folder(path_obj.parent)
+            save_json(report, path_obj, indent=(4 if self.config.pretty_json else 2))
 
             logger.info("Report saved to %s", filepath)
 

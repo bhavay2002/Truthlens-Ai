@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.data.merge_datasets import merge_datasets
 from src.data.eda import FakeNewsEDA
 from src.utils.logging_utils import configure_logging
+from src.visualization.visualize import plot_feature_importance
 import logging
 
 configure_logging()
@@ -81,6 +82,16 @@ def main():
     logger.info("Starting EDA analysis...")
     eda = FakeNewsEDA(df)
     eda.run()
+
+    if "label" in eda.df.columns and len(eda.df):
+        label_counts = eda.df["label"].value_counts().to_dict()
+        plot_feature_importance(
+            features=[str(k) for k in label_counts.keys()],
+            scores=[float(v) for v in label_counts.values()],
+            top_k=len(label_counts),
+            save_path=Path("reports/figures/label_distribution_visualize.png"),
+        )
+
     report_path = save_eda_report(eda, data_sources)
     
     logger.info("\n" + "=" * 70)

@@ -27,7 +27,6 @@ Outputs:
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +39,13 @@ from src.inference.feature_preparer import FeaturePreparer
 from src.inference.prediction_pipeline import PredictionPipeline
 from src.inference.report_generator import ReportGenerator
 from src.models.calibration import IsotonicCalibrator, TemperatureScaler
+from src.utils import (
+    ensure_file_exists,
+    ensure_non_empty_text_list,
+    get_device,
+    load_json,
+    move_to_device,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +123,7 @@ class InferenceEngine:
         Resolve device configuration.
         """
         if device == "auto":
-            resolved = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            resolved = get_device(prefer_gpu=True)
         else:
             resolved = torch.device(device)
 
@@ -130,8 +136,7 @@ class InferenceEngine:
         """
         model_path = Path(self.config.model_path)
 
-        if not model_path.exists():
-            raise FileNotFoundError(f"Model path does not exist: {model_path}")
+        ensure_file_exists(model_path)
 
         tokenizer_path = (
             self.config.tokenizer_path
@@ -165,8 +170,7 @@ class InferenceEngine:
 
         if label_map_path.exists():
             try:
-                with open(label_map_path, "r", encoding="utf-8") as f:
-                    raw_map = json.load(f)
+                raw_map = load_json(label_map_path)
 
                 self.label_map = {int(k): v for k, v in raw_map.items()}
                 logger.info("Loaded label map")
@@ -179,19 +183,8 @@ class InferenceEngine:
         Validate input texts.
         """
         if isinstance(texts, str):
-            texts = [texts]
-
-        if not isinstance(texts, list):
-            raise TypeError("Input must be string or list of strings")
-
-        if not texts:
-            raise ValueError("Input text list is empty")
-
-        for text in texts:
-            if not isinstance(text, str):
-                raise TypeError("All inputs must be strings")
-
-        return texts
+            return ensure_non_empty_text_list([texts], name="texts")
+        return ensure_non_empty_text_list(texts, name="texts")
 
     def _batchify(self, items: List[Any], batch_size: int) -> List[List[Any]]:
         """
@@ -224,7 +217,7 @@ class InferenceEngine:
                     return_tensors="pt",
                 )
 
-                encoded = {k: v.to(self.device) for k, v in encoded.items()}
+                encoded = move_to_device(encoded, self.device)
 
                 logits = self._compute_logits(encoded)
                 probabilities = torch.softmax(logits, dim=-1)

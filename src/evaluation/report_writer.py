@@ -21,10 +21,12 @@ Outputs:
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import Dict, Any
+
+from src.utils import create_folder, save_json
+from src.visualization.visualize import plot_feature_importance
 
 
 logger = logging.getLogger(__name__)
@@ -58,17 +60,26 @@ def save_report(
     output_path = Path(path)
 
     try:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        with output_path.open("w", encoding="utf-8") as f:
-            json.dump(
-                report,
-                f,
-                indent=4,
-                ensure_ascii=False
-            )
+        create_folder(output_path.parent)
+        save_json(report, output_path, indent=4)
 
         logger.info("Evaluation report saved to %s", output_path)
+
+        summary = report.get("summary")
+        if isinstance(summary, dict):
+            numeric_summary = {
+                k: float(v)
+                for k, v in summary.items()
+                if isinstance(v, (int, float))
+            }
+            if numeric_summary:
+                figure_path = output_path.parent / "evaluation_summary_metrics.png"
+                plot_feature_importance(
+                    features=list(numeric_summary.keys()),
+                    scores=list(numeric_summary.values()),
+                    top_k=min(20, len(numeric_summary)),
+                    save_path=figure_path,
+                )
 
     except Exception as exc:
         logger.exception("Failed to save evaluation report")

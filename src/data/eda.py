@@ -65,6 +65,7 @@ from wordcloud import WordCloud
 from src.features.dataset_feature_generator import DatasetFeatureGenerator
 from src.features.feature_schema_validator import FeatureSchemaValidator
 from src.features.feature_statistics import FeatureStatistics
+from src.visualization.visualize import plot_feature_importance
 
 logger = logging.getLogger(__name__)
 
@@ -415,12 +416,13 @@ class FakeNewsEDA:
         words_plot = [w for w, _ in common]
         counts = [c for _, c in common]
 
-        sns.barplot(x=counts, y=words_plot)
-
-        plt.title("Top Words")
-
-        plt.savefig(self.output_dir / "word_frequency.png")
-        plt.close()
+        if words_plot and counts:
+            plot_feature_importance(
+                features=words_plot,
+                scores=counts,
+                top_k=min(top_n, len(words_plot)),
+                save_path=self.output_dir / "word_frequency.png",
+            )
 
     # --------------------------------------------------
     # NGRAM ANALYSIS
@@ -452,12 +454,13 @@ class FakeNewsEDA:
         words = [p[0] for p in pairs]
         values = [p[1] for p in pairs]
 
-        sns.barplot(x=values, y=words)
-
-        plt.title(f"Top {n}-grams")
-
-        plt.savefig(self.output_dir / f"{n}gram_frequency.png")
-        plt.close()
+        if words and values:
+            plot_feature_importance(
+                features=words,
+                scores=values,
+                top_k=min(15, len(words)),
+                save_path=self.output_dir / f"{n}gram_frequency.png",
+            )
 
     # --------------------------------------------------
     # TF-IDF KEYWORDS
@@ -488,6 +491,16 @@ class FakeNewsEDA:
         pairs.sort(key=lambda x: x[1], reverse=True)
 
         self.summary["top_tfidf_words"] = pairs[:20]
+
+        top_words = [w for w, _ in pairs[:20]]
+        top_scores = [float(s) for _, s in pairs[:20]]
+        if top_words and top_scores:
+            plot_feature_importance(
+                features=top_words,
+                scores=top_scores,
+                top_k=min(20, len(top_words)),
+                save_path=self.output_dir / "tfidf_keywords.png",
+            )
 
     # --------------------------------------------------
     # WORD CLOUDS

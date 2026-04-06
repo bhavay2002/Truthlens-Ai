@@ -218,7 +218,18 @@ class TruthLensPipeline:
         profile["graph"] = graph_features
         profile["linguistic"] = linguistic_features
 
-        scores = self.score_calculator.compute_scores(profile)
+        aggregation_output: Dict[str, Any] = {}
+        try:
+            aggregation_output = self.aggregation_pipeline.run(
+                profile,
+                text=normalized_text,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Aggregation integration skipped: %s", exc)
+
+        scores = aggregation_output.get("raw_scores")
+        if not isinstance(scores, dict) or not scores:
+            scores = self.score_calculator.compute_scores(profile)
 
         processing_time = time.time() - start_time
 
@@ -243,6 +254,7 @@ class TruthLensPipeline:
             "model_predictions": model_predictions,
             "profile": profile,
             "scores": scores,
+            "aggregation": aggregation_output,
         }
 
         return report

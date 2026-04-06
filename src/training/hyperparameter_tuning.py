@@ -48,8 +48,10 @@ from src.utils.input_validation import (
     ensure_non_empty_text_column,
     ensure_positive_int,
 )
+from src.utils.seed_utils import set_seed
 from src.utils.settings import load_settings
 from src.models.training.training_utils import TrainingMetrics
+from src.training.checkpointing import list_checkpoints
 
 
 logger = logging.getLogger(__name__)
@@ -231,6 +233,7 @@ def _run_fallback_tuner(
     metric_name: str,
     direction: str,
     seed: int,
+    checkpoint_root: str | None = None,
 ) -> Dict[str, Any]:
 
     rng = np.random.default_rng(seed)
@@ -280,6 +283,10 @@ def _run_fallback_tuner(
             "Fallback tuner failed to produce results."
         )
 
+    available_checkpoints: list[str] = []
+    if isinstance(checkpoint_root, str) and checkpoint_root.strip():
+        available_checkpoints = [str(p) for p in list_checkpoints(checkpoint_root)]
+
     return {
         "best_params": best_params,
         "best_value": float(best_value),
@@ -289,6 +296,7 @@ def _run_fallback_tuner(
         "trial_metrics": trial_metrics.to_dict(),
         "backend": "fallback",
         "label_column": label_column,
+        "available_checkpoints": available_checkpoints,
     }
 
 
@@ -303,7 +311,13 @@ def run_optuna(
     metric_name: str | None = None,
     direction: str | None = None,
     random_state: int | None = None,
+    checkpoint_root: str | None = None,
 ) -> Dict[str, Any]:
+
+    effective_seed = (
+        SETTINGS.training.seed if random_state is None else random_state
+    )
+    set_seed(int(effective_seed))
 
     resolved_label_column = _resolve_label_column(df, label_column)
 
@@ -353,10 +367,6 @@ def run_optuna(
         raise ValueError(
             "direction must be either 'minimize' or 'maximize'."
         )
-
-    effective_seed = (
-        SETTINGS.training.seed if random_state is None else random_state
-    )
 
     if validation_df is None:
 
@@ -417,6 +427,7 @@ def run_optuna(
             metric_name=effective_metric,
             direction=effective_direction,
             seed=effective_seed,
+            checkpoint_root=checkpoint_root,
         )
 
     sampler = optuna.samplers.TPESampler(seed=effective_seed)
@@ -476,6 +487,10 @@ def run_optuna(
         study.best_params,
     )
 
+    available_checkpoints: list[str] = []
+    if isinstance(checkpoint_root, str) and checkpoint_root.strip():
+        available_checkpoints = [str(p) for p in list_checkpoints(checkpoint_root)]
+
     return {
         "best_params": study.best_params,
         "best_value": float(study.best_value),
@@ -484,4 +499,5 @@ def run_optuna(
         "trials": effective_trials,
         "backend": "optuna",
         "label_column": resolved_label_column,
+        "available_checkpoints": available_checkpoints,
     }

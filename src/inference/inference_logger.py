@@ -41,6 +41,8 @@ import uuid
 from dataclasses import dataclass, asdict
 from typing import Dict, Optional
 
+from src.utils import current_datetime
+
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +122,7 @@ class InferenceLogger:
             model_versions=model_versions,
             feature_count=feature_count,
             prediction_confidence=prediction_confidence,
-            timestamp=time.time(),
+            timestamp=float(current_datetime().timestamp()),
         )
 
         return entry

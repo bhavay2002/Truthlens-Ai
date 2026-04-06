@@ -62,6 +62,7 @@ from src.inference.prediction_pipeline import (
 )
 from src.inference.report_generator import ReportGenerator
 from src.explainability.explanation_report_generator import ExplanationReportGenerator
+from src.utils import ensure_non_empty_text
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,8 @@ class ArticleAnalyzer:
             self.graph_pipeline = GraphPipeline()
         if self.analysis_runner is None:
             self.analysis_runner = AnalysisIntegrationRunner()
+        if self.aggregation_pipeline is None:
+            self.aggregation_pipeline = AggregationPipeline()
         if self.report_generator is None:
             self.report_generator = ReportGenerator()
         if self.explanation_report_generator is None:
@@ -198,8 +201,7 @@ class ArticleAnalyzer:
         cross-method consistency metrics.
         """
 
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError("text must be a non-empty string")
+        ensure_non_empty_text(text, name="text")
 
         context = FeatureContext(text=text)
 
@@ -274,7 +276,20 @@ class ArticleAnalyzer:
         )
 
         profile["graph"] = graph_section
-        scores = self.score_calculator.compute_scores(profile)
+        aggregation_output: Dict[str, Any] = {}
+        if self.aggregation_pipeline is not None:
+            try:
+                aggregation_output = self.aggregation_pipeline.run(
+                    profile,
+                    text=text,
+                    analysis_modules=analysis_modules,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Aggregation integration skipped: %s", exc)
+
+        scores = aggregation_output.get("raw_scores")
+        if not isinstance(scores, dict) or not scores:
+            scores = self.score_calculator.compute_scores(profile)
 
         prediction_output = self._run_prediction(text, fused_features)
 
@@ -300,9 +315,16 @@ class ArticleAnalyzer:
                         "narrative_graph": narrative_graph,
                         "graph_metrics": graph_section,
                     },
+                    aggregation=aggregation_output,
                     credibility_score=prediction_output.get(
                         "credibility_score",
-                        scores.get("truthlens_credibility_score"),
+                        aggregation_output.get(
+                            "scores",
+                            {},
+                        ).get(
+                            "truthlens_credibility_score",
+                            scores.get("truthlens_credibility_score"),
+                        ),
                     ),
                 )
             except Exception as exc:  # noqa: BLE001
@@ -335,6 +357,7 @@ class ArticleAnalyzer:
             "analysis_modules": analysis_modules,
             "profile": profile,
             "scores": scores,
+            "aggregation": aggregation_output,
             "predictions": prediction_output,
             "inference_report": inference_report,
             "explainability": explainability_output,

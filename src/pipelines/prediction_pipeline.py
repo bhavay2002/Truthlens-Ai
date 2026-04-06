@@ -46,6 +46,7 @@ from src.utils.input_validation import (
     ensure_non_empty_text_list,
 )
 from src.utils.settings import load_settings
+from src.utils import get_device, move_to_device
 
 
 logger = logging.getLogger(__name__)
@@ -74,7 +75,7 @@ class Predictor:
         self._graph_pipeline: GraphPipeline | None = None
         self._inference_engine = inference_engine
 
-        self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self._device = get_device(prefer_gpu=True)
         try:
             self._graph_extractor = GraphFeatureExtractor()
             self._graph_pipeline = GraphPipeline()
@@ -240,9 +241,7 @@ class Predictor:
                     return_tensors="pt",
                 )
 
-                model_inputs = {
-                    key: value.to(self._device) for key, value in inputs.items()
-                }
+                model_inputs = move_to_device(inputs, self._device)
 
                 with torch.no_grad():
                     outputs = model(**model_inputs)
@@ -330,7 +329,7 @@ class Predictor:
 _model: Any | None = None
 _tokenizer: Any | None = None
 _vectorizer: Any | None = None
-_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+_device = get_device(prefer_gpu=True)
 _graph_feature_extractor: GraphFeatureExtractor | None = None
 _graph_pipeline: GraphPipeline | None = None
 
@@ -424,7 +423,7 @@ def predict_text(text: str) -> Dict[str, Any]:
         return_tensors="pt",
     )
 
-    model_inputs = {key: value.to(_device) for key, value in inputs.items()}
+    model_inputs = move_to_device(inputs, _device)
 
     with torch.no_grad():
         outputs = model(**model_inputs)

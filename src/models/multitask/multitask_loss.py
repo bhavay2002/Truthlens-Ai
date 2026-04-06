@@ -199,3 +199,27 @@ class MultiTaskLoss(nn.Module):
         """
 
         return self.task_configs
+
+    @classmethod
+    def from_task_settings(
+        cls,
+        task_settings: Dict[str, Dict[str, str | float]],
+    ) -> "MultiTaskLoss":
+        if not isinstance(task_settings, dict) or not task_settings:
+            raise ValueError("task_settings must be a non-empty dictionary")
+
+        configs: Dict[str, TaskLossConfig] = {}
+        for task_name, settings in task_settings.items():
+            if not isinstance(settings, dict):
+                continue
+            task_type = settings.get("task_type")
+            if not isinstance(task_type, str):
+                continue
+            weight_raw = settings.get("weight", 1.0)
+            weight = float(weight_raw) if isinstance(weight_raw, (int, float)) else 1.0
+            configs[task_name] = TaskLossConfig(task_type=task_type, weight=weight)
+
+        if not configs:
+            raise ValueError("No valid task loss settings found")
+
+        return cls(configs)

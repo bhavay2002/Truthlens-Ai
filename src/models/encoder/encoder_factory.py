@@ -28,14 +28,14 @@ Outputs:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 import torch
 
 from .transformer_encoder import TransformerEncoder
-from ..config.model_config import (
+from .encoder_config import EncoderConfig as FactoryEncoderConfig
+from ..config import (
     EncoderConfig as ModelEncoderConfig,
     ModelConfigLoader,
     MultiTaskModelConfig,
@@ -44,16 +44,8 @@ from ..config.model_config import (
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class EncoderConfig:
-    """
-    Configuration object describing a transformer encoder.
-    """
-
-    model_name: str
-    pooling: str = "cls"
-    device: Optional[str] = None
-    freeze_encoder: bool = False
+# Backward-compatible alias.
+EncoderConfig = FactoryEncoderConfig
 
 
 class EncoderFactory:
@@ -81,6 +73,8 @@ class EncoderFactory:
 
         if not isinstance(config, EncoderConfig):
             raise TypeError("config must be an instance of EncoderConfig")
+
+        config.validate()
 
         logger.info(
             "Creating transformer encoder | model=%s | pooling=%s",
@@ -152,16 +146,37 @@ class EncoderFactory:
         TransformerEncoder
         """
         cfg = EncoderConfig(
+            model_type="transformer",
             model_name=model_config.encoder.model_name,
             pooling=model_config.encoder.pooling,
             device=model_config.encoder.device,
             freeze_encoder=freeze_encoder,
+            output_hidden_states=False,
+            gradient_checkpointing=False,
+            extra_kwargs={},
         )
         logger.info(
             "EncoderFactory.create_from_model_config | model=%s pooling=%s freeze=%s",
             cfg.model_name,
             cfg.pooling,
             freeze_encoder,
+        )
+        return EncoderFactory.create_transformer_encoder(cfg)
+
+    @staticmethod
+    def create_from_encoder_config(
+        encoder_config: ModelEncoderConfig,
+        freeze_encoder: bool = False,
+    ) -> TransformerEncoder:
+        cfg = EncoderConfig(
+            model_type="transformer",
+            model_name=encoder_config.model_name,
+            pooling=encoder_config.pooling,
+            device=encoder_config.device,
+            freeze_encoder=freeze_encoder,
+            output_hidden_states=False,
+            gradient_checkpointing=False,
+            extra_kwargs={},
         )
         return EncoderFactory.create_transformer_encoder(cfg)
 

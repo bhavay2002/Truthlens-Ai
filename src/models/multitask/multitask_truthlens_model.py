@@ -44,13 +44,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ..base.multitask_base_model import MultiTaskBaseModel
-from ..encoder.transformer_encoder import TransformerEncoder
+from ..encoder.encoder_config import EncoderConfig
+from ..encoder.encoder_factory import EncoderFactory
 from ..heads.classification_head import ClassificationHead, ClassificationHeadConfig
 from ..heads.multilabel_head import MultiLabelHead, MultiLabelHeadConfig
+from ..heads.regression_head import RegressionHead, RegressionHeadConfig
+from .multitask_loss import MultiTaskLoss
+from .multitask_output import MultiTaskOutput
 from ..ensemble.ensemble_model import EnsembleConfig, EnsembleModel
 from ..ensemble.stacking_ensemble import StackingEnsembleConfig, StackingEnsembleModel
 from ..ensemble.weighted_ensemble import WeightedEnsembleConfig, WeightedEnsembleModel
-from ..config.model_config import (
+from ..config import (
     EncoderConfig as ModelEncoderConfig,
     ModelConfigLoader,
     MultiTaskModelConfig,
@@ -79,6 +83,11 @@ class MultiTaskTruthLensConfig:
     narrative_weight: float = 1.0
     narrative_frame_weight: float = 1.0
     emotion_weight: float = 1.0
+
+    use_regression_head: bool = False
+    regression_output_dim: int = 1
+    regression_hidden_dim: Optional[int] = None
+    regression_activation: str = "gelu"
 
 
 # ------------------------------------------------------------
@@ -126,10 +135,12 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
         # Shared Encoder
         # ----------------------------------------------------
 
-        self.encoder = TransformerEncoder(
-            model_name=config.model_name,
-            pooling=config.pooling,
-            device=config.device,
+        self.encoder = EncoderFactory.create_transformer_encoder(
+            EncoderConfig(
+                model_name=config.model_name,
+                pooling=config.pooling,
+                device=config.device,
+            )
         )
 
         hidden = self.encoder.hidden_size
@@ -162,6 +173,24 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
             MultiLabelHeadConfig(hidden, self.NUM_EMOTIONS, dropout=config.dropout)
         )
 
+        self.bias_regression_head: Optional[RegressionHead] = None
+        self.ideology_regression_head: Optional[RegressionHead] = None
+        self.propaganda_regression_head: Optional[RegressionHead] = None
+        self.narrative_regression_head: Optional[RegressionHead] = None
+
+        if config.use_regression_head:
+            reg_cfg = RegressionHeadConfig(
+                input_dim=hidden,
+                output_dim=config.regression_output_dim,
+                hidden_dim=config.regression_hidden_dim,
+                dropout=config.dropout,
+                activation=config.regression_activation,
+            )
+            self.bias_regression_head = RegressionHead(reg_cfg)
+            self.ideology_regression_head = RegressionHead(reg_cfg)
+            self.propaganda_regression_head = RegressionHead(reg_cfg)
+            self.narrative_regression_head = RegressionHead(reg_cfg)
+
         # Optional ensemble wrappers for classification heads.
         self.bias_ensemble: Optional[nn.Module] = None
         self.ideology_ensemble: Optional[nn.Module] = None
@@ -176,6 +205,31 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
         )
         self.loss_bce = LossFactory.create(
             LossConfig(loss_type="multi_label")
+        )
+        self.multitask_loss = MultiTaskLoss.from_task_settings(
+            {
+                "bias": {"task_type": "multi_class", "weight": config.bias_weight},
+                "ideology": {
+                    "task_type": "multi_class",
+                    "weight": config.ideology_weight,
+                },
+                "propaganda": {
+                    "task_type": "multi_class",
+                    "weight": config.propaganda_weight,
+                },
+                "narrative": {
+                    "task_type": "multi_label",
+                    "weight": config.narrative_weight,
+                },
+                "narrative_frame": {
+                    "task_type": "multi_label",
+                    "weight": config.narrative_frame_weight,
+                },
+                "emotion": {
+                    "task_type": "multi_label",
+                    "weight": config.emotion_weight,
+                },
+            }
         )
 
         # temperature scaling
@@ -360,50 +414,82 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
             "emotion": emotion_outputs,
         }
 
+        if self.bias_regression_head is not None:
+            outputs["bias"]["regression"] = self.bias_regression_head(pooled)
+        if self.ideology_regression_head is not None:
+            outputs["ideology"]["regression"] = self.ideology_regression_head(pooled)
+        if self.propaganda_regression_head is not None:
+            outputs["propaganda"]["regression"] = self.propaganda_regression_head(pooled)
+        if self.narrative_regression_head is not None:
+            outputs["narrative"]["regression"] = self.narrative_regression_head(pooled)
+
+        multitask_output = MultiTaskOutput()
+        multitask_output.add_task_output(
+            task_name="bias",
+            logits=bias_logits,
+            probabilities=bias_probs,
+            predictions=torch.argmax(bias_probs, dim=-1),
+        )
+        multitask_output.add_task_output(
+            task_name="ideology",
+            logits=ideology_logits,
+            probabilities=ideology_probs,
+            predictions=torch.argmax(ideology_probs, dim=-1),
+        )
+        multitask_output.add_task_output(
+            task_name="propaganda",
+            logits=propaganda_logits,
+            probabilities=propaganda_probs,
+            predictions=torch.argmax(propaganda_probs, dim=-1),
+        )
+        multitask_output.add_task_output(
+            task_name="narrative",
+            logits=narrative_outputs["logits"],
+            probabilities=narrative_outputs.get("probabilities"),
+            predictions=narrative_outputs.get("predictions"),
+        )
+        multitask_output.add_task_output(
+            task_name="narrative_frame",
+            logits=narrative_frame_outputs["logits"],
+            probabilities=narrative_frame_outputs.get("probabilities"),
+            predictions=narrative_frame_outputs.get("predictions"),
+        )
+        multitask_output.add_task_output(
+            task_name="emotion",
+            logits=emotion_outputs["logits"],
+            probabilities=emotion_outputs.get("probabilities"),
+            predictions=emotion_outputs.get("predictions"),
+        )
+
         # ----------------------------------------------------
         # Loss
         # ----------------------------------------------------
 
         if labels is not None:
+            logits_for_loss: Dict[str, torch.Tensor] = {
+                "bias": bias_logits,
+                "ideology": ideology_logits,
+                "propaganda": propaganda_logits,
+                "narrative": narrative_outputs["logits"],
+                "narrative_frame": narrative_frame_outputs["logits"],
+                "emotion": emotion_outputs["logits"],
+            }
+            available_labels = {
+                key: value for key, value in labels.items() if key in logits_for_loss
+            }
 
-            loss_dict = {}
+            if available_labels:
+                total_loss, task_losses = self.multitask_loss(
+                    logits=logits_for_loss,
+                    labels=available_labels,
+                )
+                multitask_output.loss = total_loss
+                multitask_output.task_losses = task_losses
+                outputs["loss"] = total_loss
+                outputs["task_losses"] = task_losses
+                outputs["loss_breakdown"] = task_losses
 
-            if "bias" in labels:
-                loss_dict["bias"] = self.loss_ce(
-                    bias_logits, labels["bias"].long()
-                ) * self.config.bias_weight
-
-            if "ideology" in labels:
-                loss_dict["ideology"] = self.loss_ce(
-                    ideology_logits, labels["ideology"].long()
-                ) * self.config.ideology_weight
-
-            if "propaganda" in labels:
-                loss_dict["propaganda"] = self.loss_ce(
-                    propaganda_logits, labels["propaganda"].long()
-                ) * self.config.propaganda_weight
-
-            if "narrative" in labels:
-                loss_dict["narrative"] = self.loss_bce(
-                    narrative_outputs["logits"],
-                    labels["narrative"].float(),
-                ) * self.config.narrative_weight
-
-            if "narrative_frame" in labels:
-                loss_dict["frame"] = self.loss_bce(
-                    narrative_frame_outputs["logits"],
-                    labels["narrative_frame"].float(),
-                ) * self.config.narrative_frame_weight
-
-            if "emotion" in labels:
-                loss_dict["emotion"] = self.loss_bce(
-                    emotion_outputs["logits"],
-                    labels["emotion"].float(),
-                ) * self.config.emotion_weight
-
-            if loss_dict:
-                outputs["loss"] = torch.stack(list(loss_dict.values())).mean()
-                outputs["loss_breakdown"] = loss_dict
+        outputs["multitask_output"] = multitask_output
 
         return outputs
 
@@ -439,6 +525,20 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
             pooling=model_config.encoder.pooling,
             dropout=model_config.dropout,
             device=model_config.encoder.device,
+            use_regression_head=bool(
+                model_config.metadata.get("use_regression_head", False)
+            ),
+            regression_output_dim=int(
+                model_config.metadata.get("regression_output_dim", 1)
+            ),
+            regression_hidden_dim=(
+                int(model_config.metadata["regression_hidden_dim"])
+                if model_config.metadata.get("regression_hidden_dim") is not None
+                else None
+            ),
+            regression_activation=str(
+                model_config.metadata.get("regression_activation", "gelu")
+            ),
         )
         for weight_field in (
             "bias_weight",

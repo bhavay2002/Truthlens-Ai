@@ -41,8 +41,9 @@ import torch
 import torch.nn as nn
 
 from ...base.base_model import BaseModel
-from ...config.model_config import HeadConfig, TaskConfig
-from ...encoder.transformer_encoder import TransformerEncoder
+from ...config import HeadConfig, TaskConfig, MultiTaskModelConfig
+from ...encoder.encoder_config import EncoderConfig
+from ...encoder.encoder_factory import EncoderFactory
 from ...heads.multilabel_head import MultiLabelHead, MultiLabelHeadConfig
 from ...training.trainer import Trainer, TrainerConfig
 from src.features.emotion.emotion_schema import EMOTION_LABELS
@@ -95,10 +96,12 @@ class EmotionClassifier(BaseModel):
         # Encoder
         # ------------------------------------------------
 
-        self.encoder = TransformerEncoder(
-            model_name=config.model_name,
-            pooling=config.pooling,
-            device=config.device,
+        self.encoder = EncoderFactory.create_transformer_encoder(
+            EncoderConfig(
+                model_name=config.model_name,
+                pooling=config.pooling,
+                device=config.device,
+            )
         )
 
         # ------------------------------------------------
@@ -240,6 +243,28 @@ class EmotionClassifier(BaseModel):
             task_config.num_labels,
         )
         return cls(cfg)
+
+    @classmethod
+    def from_model_config(
+        cls,
+        model_config: MultiTaskModelConfig,
+    ) -> "EmotionClassifier":
+        task_cfg = model_config.tasks.get("emotion")
+        if task_cfg is None:
+            raise KeyError("Task 'emotion' not found in MultiTaskModelConfig")
+
+        return cls.from_task_config(
+            task_config=task_cfg,
+            head_config=HeadConfig(
+                input_dim=0,
+                output_dim=task_cfg.num_labels,
+                dropout=model_config.dropout,
+            ),
+            model_name=model_config.encoder.model_name,
+            pooling=model_config.encoder.pooling,
+            device=model_config.encoder.device,
+            threshold=float(model_config.metadata.get("emotion_threshold", 0.5)),
+        )
 
     def create_trainer(
         self,

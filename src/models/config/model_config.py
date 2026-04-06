@@ -62,6 +62,19 @@ class HeadConfig:
     dropout: float = 0.1
 
 
+@dataclass
+class RegressionConfig:
+    """
+    Optional configuration for attaching a regression head to a task.
+    """
+
+    enabled: bool = False
+    output_dim: int = 1
+    hidden_dim: Optional[int] = None
+    activation: str = "gelu"
+    dropout: float = 0.1
+
+
 # ---------------------------------------------------------
 # Task Configuration
 # ---------------------------------------------------------
@@ -76,6 +89,7 @@ class TaskConfig:
     name: str
     num_labels: int
     task_type: str = "multi_class"
+    regression: Optional[RegressionConfig] = None
 
 
 # ---------------------------------------------------------
@@ -130,7 +144,16 @@ class ModelConfigLoader:
         encoder_cfg = EncoderConfig(**raw_config["encoder"])
 
         tasks_cfg = {
-            name: TaskConfig(name=name, **task_data)
+            name: TaskConfig(
+                name=name,
+                num_labels=task_data["num_labels"],
+                task_type=task_data.get("task_type", "multi_class"),
+                regression=(
+                    RegressionConfig(**task_data["regression"])
+                    if isinstance(task_data.get("regression"), dict)
+                    else None
+                ),
+            )
             for name, task_data in raw_config["tasks"].items()
         }
 

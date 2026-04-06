@@ -31,6 +31,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 from src.models.calibration import IsotonicCalibrator, TemperatureScaler
+from src.models.inference.prediction_output import PredictionOutput
+from src.models.multitask.multitask_output import MultiTaskOutput
+from src.utils import get_device, move_to_device
 
 logger = logging.getLogger(__name__)
 
@@ -54,9 +57,7 @@ class Predictor:
 
         self.model = model
 
-        self.device = torch.device(
-            device if device else ("cuda" if torch.cuda.is_available() else "cpu")
-        )
+        self.device = torch.device(device) if device else get_device(prefer_gpu=True)
 
         self.model.to(self.device)
         self.model.eval()
@@ -84,6 +85,8 @@ class Predictor:
     def predict_batch(
         self,
         batch: Dict[str, torch.Tensor],
+        *,
+        return_structured: bool = False,
     ) -> Dict[str, Any]:
         """
         Run prediction for a batch of inputs.
@@ -96,13 +99,18 @@ class Predictor:
         else:
             outputs = self.model(**batch)
 
-        return self._format_outputs(outputs)
+        formatted = self._format_outputs(outputs)
+        if return_structured:
+            return PredictionOutput.from_raw_outputs(formatted).to_dict()
+        return formatted
 
     @torch.no_grad()
     def predict(
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
+        *,
+        return_structured: bool = False,
     ) -> Dict[str, Any]:
         """
         Run prediction for a single input example.
@@ -113,9 +121,17 @@ class Predictor:
             "attention_mask": attention_mask.unsqueeze(0),
         }
 
-        results = self.predict_batch(batch)
+        results = self.predict_batch(batch, return_structured=return_structured)
 
         return self._squeeze_batch(results)
+
+    @torch.no_grad()
+    def predict_batch_structured(
+        self,
+        batch: Dict[str, torch.Tensor],
+    ) -> PredictionOutput:
+        outputs = self.predict_batch(batch)
+        return PredictionOutput.from_raw_outputs(outputs)
 
     def _format_outputs(
         self,
@@ -125,7 +141,21 @@ class Predictor:
         Convert raw model outputs into prediction dictionary.
         """
 
+        if isinstance(outputs, MultiTaskOutput):
+            return outputs.to_flat_prediction_dict()
+
         if isinstance(outputs, dict):
+
+            multitask_output = outputs.get("multitask_output")
+            if isinstance(multitask_output, MultiTaskOutput):
+                return multitask_output.to_flat_prediction_dict()
+
+            has_nested_task_dicts = any(
+                isinstance(value, dict) and isinstance(value.get("logits"), torch.Tensor)
+                for value in outputs.values()
+            )
+            if has_nested_task_dicts:
+                return MultiTaskOutput.from_model_outputs(outputs).to_flat_prediction_dict()
 
             formatted: Dict[str, Any] = {}
 
@@ -162,16 +192,7 @@ class Predictor:
         batch: Dict[str, torch.Tensor],
     ) -> Dict[str, torch.Tensor]:
 
-        moved: Dict[str, torch.Tensor] = {}
-
-        for k, v in batch.items():
-
-            if isinstance(v, torch.Tensor):
-                moved[k] = v.to(self.device)
-            else:
-                moved[k] = v
-
-        return moved
+        return move_to_device(batch, self.device)
 
     def _squeeze_batch(
         self,

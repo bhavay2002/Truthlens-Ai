@@ -31,6 +31,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from src.models.calibration import IsotonicCalibrator, TemperatureScaler
+from src.models.inference.prediction_output import PredictionOutput
 
 
 logger = logging.getLogger(__name__)
@@ -121,6 +122,8 @@ class ModelWrapper:
     def predict(
         self,
         batch: Dict[str, torch.Tensor],
+        *,
+        return_structured: bool = False,
     ) -> Dict[str, Any]:
         """
         Run inference and return predictions.
@@ -134,8 +137,20 @@ class ModelWrapper:
         """
 
         outputs = self.forward(batch)
+        extracted = self._extract_predictions(outputs)
 
-        return self._extract_predictions(outputs)
+        if return_structured:
+            return PredictionOutput.from_raw_outputs(extracted).to_dict()
+
+        return extracted
+
+    def predict_structured(
+        self,
+        batch: Dict[str, torch.Tensor],
+    ) -> PredictionOutput:
+        outputs = self.forward(batch)
+        extracted = self._extract_predictions(outputs)
+        return PredictionOutput.from_raw_outputs(extracted)
 
     def load_checkpoint(
         self,

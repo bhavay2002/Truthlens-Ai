@@ -39,6 +39,7 @@ except ImportError:  # pragma: no cover - optional dependency
     st = None
 
 from src.explainability.explanation_report_generator import ExplanationReportGenerator
+from src.visualization.visualize import plot_feature_importance
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,19 @@ def _render_task_metrics(tasks: Dict[str, Dict[str, Any]]) -> None:
 
         st.dataframe(df, use_container_width=True)
 
+        numeric_metrics = {
+            k: float(v) for k, v in metrics.items()
+            if isinstance(v, (int, float))
+        }
+        if numeric_metrics:
+            fig, _ = plot_feature_importance(
+                features=list(numeric_metrics.keys()),
+                scores=list(numeric_metrics.values()),
+                top_k=min(10, len(numeric_metrics)),
+                save_path=None,
+            )
+            st.pyplot(fig, use_container_width=True)
+
 
 def _render_summary(summary: Dict[str, Any]) -> None:
     """
@@ -116,6 +130,19 @@ def _render_summary(summary: Dict[str, Any]) -> None:
 
     except Exception:
         st.json(summary)
+
+    numeric_summary = {
+        k: float(v) for k, v in summary.items()
+        if isinstance(v, (int, float))
+    }
+    if numeric_summary:
+        fig, _ = plot_feature_importance(
+            features=list(numeric_summary.keys()),
+            scores=list(numeric_summary.values()),
+            top_k=min(15, len(numeric_summary)),
+            save_path=None,
+        )
+        st.pyplot(fig, use_container_width=True)
 
 
 def _render_explanation_report(
