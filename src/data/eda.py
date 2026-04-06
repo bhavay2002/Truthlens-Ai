@@ -62,6 +62,7 @@ from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
 from nltk.corpus import stopwords
 from wordcloud import WordCloud
 
+from src.features.dataset_feature_generator import DatasetFeatureGenerator
 from src.features.feature_schema_validator import FeatureSchemaValidator
 from src.features.feature_statistics import FeatureStatistics
 
@@ -298,6 +299,75 @@ class FakeNewsEDA:
         )
 
     # --------------------------------------------------
+    # FEATURE PIPELINE DIAGNOSTICS
+    # --------------------------------------------------
+
+    def feature_analysis(self) -> None:
+        """
+        Extract features via DatasetFeatureGenerator and log dataset-level
+        statistics (FeatureStatistics) and schema validation (FeatureSchemaValidator).
+
+        Results are stored in ``self.summary["feature_analysis"]``.  The step
+        is skipped silently if the text column is missing or if any dependency
+        (e.g. spaCy model) is unavailable.
+        """
+        if "text" not in self.df.columns or len(self.df) == 0:
+            logger.warning("Skipping feature_analysis: text column missing or empty")
+            return
+
+        try:
+            from src.features.pipelines.batch_feature_pipeline import BatchFeaturePipeline
+            from src.features.pipelines.feature_pipeline import FeaturePipeline
+
+            texts: list[str] = (
+                self.df["text"].dropna().astype(str).tolist()
+            )
+            if not texts:
+                return
+
+            pipeline = FeaturePipeline()
+            pipeline.initialize()
+            batch_pipeline = BatchFeaturePipeline(pipeline=pipeline)
+            generator = DatasetFeatureGenerator(pipeline=batch_pipeline)
+
+            feature_matrix, feature_names = generator.generate(texts)
+
+            feature_dicts: list[dict[str, float]] = [
+                dict(zip(feature_names, row)) for row in feature_matrix.tolist()
+            ]
+
+            stats = FeatureStatistics()
+            summary_stats = stats.dataset_summary(feature_dicts)
+            constant_feats = stats.detect_constant_features(feature_dicts)
+
+            validator = FeatureSchemaValidator(
+                expected_features=feature_names,
+                strict=False,
+                allow_missing=True,
+                allow_extra=True,
+            )
+            validator.validate_batch(feature_dicts)
+
+            self.summary["feature_analysis"] = {
+                "num_features": len(feature_names),
+                "feature_names_sample": feature_names[:20],
+                "num_samples": int(summary_stats["num_samples"]),
+                "mean_variance": float(summary_stats["mean_variance"]),
+                "constant_features": constant_feats,
+                "schema_validated": True,
+            }
+
+            logger.info(
+                "Feature analysis complete | features=%d samples=%d constant=%d",
+                len(feature_names),
+                int(summary_stats["num_samples"]),
+                len(constant_feats),
+            )
+
+        except Exception as exc:
+            logger.warning("Feature analysis skipped (non-fatal): %s", exc)
+
+    # --------------------------------------------------
     # VOCABULARY ANALYSIS
     # --------------------------------------------------
 
@@ -495,6 +565,7 @@ class FakeNewsEDA:
         self.detect_outliers()
 
         self.feature_engineering()
+        self.feature_analysis()
 
         self.vocabulary_analysis()
         self.word_frequency()

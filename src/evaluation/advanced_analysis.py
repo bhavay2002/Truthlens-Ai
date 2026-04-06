@@ -56,6 +56,7 @@ from src.explainability.attention_rollout import AttentionRollout
 from src.features.importance.feature_ablation import FeatureAblation
 from src.features.importance.permutation_importance import PermutationImportance
 from src.features.importance.shap_importance import ShapImportance
+from src.features.dataset_feature_generator import DatasetFeatureGenerator
 from src.features.feature_schema_validator import FeatureSchemaValidator
 from src.features.feature_statistics import FeatureStatistics
 
@@ -502,3 +503,89 @@ def shap_importance(
 
     logger.info("SHAP importance complete | features_scored=%d", len(scores))
     return result
+
+
+def feature_diagnostics(
+    texts: List[str],
+    feature_names: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """
+    Extract TruthLens pipeline features from raw texts and return dataset-level
+    diagnostics.
+
+    Uses ``DatasetFeatureGenerator`` to run the full feature pipeline on each
+    text, ``FeatureStatistics`` to compute aggregate statistics, and
+    ``FeatureSchemaValidator`` to verify that the extracted feature set
+    matches the expected schema.
+
+    Parameters
+    ----------
+    texts:
+        Raw article texts to process.
+    feature_names:
+        Optional list of expected feature names for schema validation.
+        When ``None`` the schema is inferred from the extracted feature names.
+
+    Returns
+    -------
+    Dict with keys:
+
+    * ``summary``           — dataset-level stats (num_samples, num_features,
+                              mean / std / min / max variance).
+    * ``constant_features`` — names of zero-variance features.
+    * ``basic_statistics``  — per-feature mean, std, min, max.
+    * ``variance``          — per-feature variance values.
+    * ``schema_validated``  — ``True`` when ``FeatureSchemaValidator`` passed.
+    """
+    if not texts:
+        raise ValueError("texts must not be empty")
+
+    from src.features.pipelines.batch_feature_pipeline import BatchFeaturePipeline
+    from src.features.pipelines.feature_pipeline import FeaturePipeline
+
+    logger.info(
+        "Running feature_diagnostics | samples=%d",
+        len(texts),
+    )
+
+    fp = FeaturePipeline()
+    fp.initialize()
+    batch_pipeline = BatchFeaturePipeline(pipeline=fp)
+    generator = DatasetFeatureGenerator(pipeline=batch_pipeline)
+
+    feature_matrix, inferred_names = generator.generate(texts)
+
+    feature_dicts: List[Dict[str, float]] = [
+        dict(zip(inferred_names, row)) for row in feature_matrix.tolist()
+    ]
+
+    schema: List[str] = feature_names if feature_names is not None else inferred_names
+
+    stats = FeatureStatistics()
+    summary = stats.dataset_summary(feature_dicts)
+    basic = stats.compute_basic_statistics(feature_dicts)
+    variance = stats.compute_variance(feature_dicts)
+    constant = stats.detect_constant_features(feature_dicts)
+
+    validator = FeatureSchemaValidator(
+        expected_features=schema,
+        strict=False,
+        allow_missing=True,
+        allow_extra=True,
+    )
+    validator.validate_batch(feature_dicts)
+
+    logger.info(
+        "feature_diagnostics complete | features=%d samples=%d constant=%d",
+        int(summary["num_features"]),
+        int(summary["num_samples"]),
+        len(constant),
+    )
+
+    return {
+        "summary": summary,
+        "constant_features": constant,
+        "basic_statistics": basic,
+        "variance": variance,
+        "schema_validated": True,
+    }
