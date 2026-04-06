@@ -33,8 +33,12 @@ from src.models.training.trainer import Trainer, TrainerConfig
 from src.training.optimizer_factory import create_optimizer
 from src.training.scheduler_factory import create_scheduler
 from src.utils.config_loader import get_config_value, load_config
+from src.utils.helper_functions import create_folder
+from src.utils.json_utils import save_json
 from src.utils.logging_utils import configure_logging
+from src.utils.seed_utils import set_seed
 from src.utils.settings import load_settings
+from src.utils.device_utils import get_device
 
 
 # -----------------------------------------------------
@@ -52,12 +56,20 @@ logger = logging.getLogger(__name__)
 
 _cfg = load_config()
 
-SPLITS_DIR = Path(
-    get_config_value(_cfg, "data", "splits_dir", default="data/splits")
+TRAIN_PATH = Path(
+    get_config_value(_cfg, "data", "train_path", default="data/splits/train.csv")
 )
-TRAIN_PATH = SPLITS_DIR / "train.csv"
-VAL_PATH = SPLITS_DIR / "validation.csv"
-TEST_PATH = SPLITS_DIR / "test.csv"
+VAL_PATH = Path(
+    get_config_value(
+        _cfg,
+        "data",
+        "validation_path",
+        default="data/splits/validation.csv",
+    )
+)
+TEST_PATH = Path(
+    get_config_value(_cfg, "data", "test_path", default="data/splits/test.csv")
+)
 
 MODEL_SAVE_PATH = Path(SETTINGS.model.path)
 
@@ -116,6 +128,24 @@ class TruthLensMultiTaskDataset(Dataset):
     def __len__(self) -> int:
         return len(self.df)
 
+    @staticmethod
+    def _safe_int_label(value: object, default: int = 0) -> int:
+        try:
+            if pd.isna(value):
+                return default
+            return int(float(value))
+        except Exception:
+            return default
+
+    @staticmethod
+    def _safe_float_label(value: object, default: float = 0.0) -> float:
+        try:
+            if pd.isna(value):
+                return default
+            return float(value)
+        except Exception:
+            return default
+
     def __getitem__(self, idx: int) -> dict:
         row = self.df.iloc[idx]
         text = str(row[self.text_column])
@@ -133,40 +163,43 @@ class TruthLensMultiTaskDataset(Dataset):
             "attention_mask": encoding["attention_mask"].squeeze(0),
         }
 
-        labels: dict = {}
-
-        if BIAS_LABEL in self.df.columns:
-            labels["bias"] = torch.tensor(int(row[BIAS_LABEL]), dtype=torch.long)
-
-        if IDEOLOGY_LABEL in self.df.columns:
-            labels["ideology"] = torch.tensor(int(row[IDEOLOGY_LABEL]), dtype=torch.long)
-
-        if PROPAGANDA_LABEL in self.df.columns:
-            labels["propaganda"] = torch.tensor(int(row[PROPAGANDA_LABEL]), dtype=torch.long)
-
-        narrative_cols_present = [c for c in NARRATIVE_COLUMNS if c in self.df.columns]
-        if narrative_cols_present:
-            labels["narrative"] = torch.tensor(
-                [float(row[c]) for c in narrative_cols_present],
+        labels: dict = {
+            "bias": torch.tensor(
+                self._safe_int_label(row.get(BIAS_LABEL, 0), default=0),
+                dtype=torch.long,
+            ),
+            "ideology": torch.tensor(
+                self._safe_int_label(row.get(IDEOLOGY_LABEL, 1), default=1),
+                dtype=torch.long,
+            ),
+            "propaganda": torch.tensor(
+                self._safe_int_label(row.get(PROPAGANDA_LABEL, 0), default=0),
+                dtype=torch.long,
+            ),
+            "narrative": torch.tensor(
+                [
+                    self._safe_float_label(row.get(c, 0.0), default=0.0)
+                    for c in NARRATIVE_COLUMNS
+                ],
                 dtype=torch.float,
-            )
-
-        frame_cols_present = [c for c in FRAME_COLUMNS if c in self.df.columns]
-        if frame_cols_present:
-            labels["narrative_frame"] = torch.tensor(
-                [float(row[c]) for c in frame_cols_present],
+            ),
+            "narrative_frame": torch.tensor(
+                [
+                    self._safe_float_label(row.get(c, 0.0), default=0.0)
+                    for c in FRAME_COLUMNS
+                ],
                 dtype=torch.float,
-            )
-
-        emotion_cols_present = [c for c in EMOTION_COLUMNS if c in self.df.columns]
-        if emotion_cols_present:
-            labels["emotion"] = torch.tensor(
-                [float(row[c]) for c in emotion_cols_present],
+            ),
+            "emotion": torch.tensor(
+                [
+                    self._safe_float_label(row.get(c, 0.0), default=0.0)
+                    for c in EMOTION_COLUMNS
+                ],
                 dtype=torch.float,
-            )
+            ),
+        }
 
-        if labels:
-            item["labels"] = labels
+        item["labels"] = labels
 
         return item
 
@@ -183,17 +216,27 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     Falls back to a demo dataset if split files do not exist yet.
     """
 
-    for path in (TRAIN_PATH, VAL_PATH, TEST_PATH):
-        if not path.exists():
-            raise FileNotFoundError(
-                f"Split file not found: {path}\n"
-                "Run the data pipeline first to generate splits:\n"
-                "  Place raw data in data/raw/ then re-run python main.py"
-            )
+    def _resolve_split_path(primary: Path, fallback_name: str) -> Path:
+        candidates = [
+            primary,
+            Path("data") / fallback_name,
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        raise FileNotFoundError(
+            "Split file not found. Looked in: "
+            + ", ".join(str(x) for x in candidates)
+            + "\nRun the data pipeline first to generate compatible splits."
+        )
 
-    train_df = pd.read_csv(TRAIN_PATH)
-    val_df = pd.read_csv(VAL_PATH)
-    test_df = pd.read_csv(TEST_PATH)
+    resolved_train_path = _resolve_split_path(TRAIN_PATH, "unified_dataset_train.csv")
+    resolved_val_path = _resolve_split_path(VAL_PATH, "unified_dataset_validation.csv")
+    resolved_test_path = _resolve_split_path(TEST_PATH, "unified_dataset_test.csv")
+
+    train_df = pd.read_csv(resolved_train_path)
+    val_df = pd.read_csv(resolved_val_path)
+    test_df = pd.read_csv(resolved_test_path)
 
     for df in (train_df, val_df, test_df):
         if "title" in df.columns and TEXT_COLUMN in df.columns:
@@ -202,8 +245,13 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
             df[TEXT_COLUMN] = df["title"].fillna("")
 
     logger.info(
-        "Dataset loaded — train: %d  val: %d  test: %d",
-        len(train_df), len(val_df), len(test_df),
+        "Dataset loaded — train: %d  val: %d  test: %d | paths: %s | %s | %s",
+        len(train_df),
+        len(val_df),
+        len(test_df),
+        resolved_train_path,
+        resolved_val_path,
+        resolved_test_path,
     )
     return train_df, val_df, test_df
 
@@ -214,11 +262,10 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
 
 def save_model(model: MultiTaskTruthLensModel, tokenizer) -> None:
     """Save model weights and tokenizer to MODEL_SAVE_PATH."""
-    MODEL_SAVE_PATH.mkdir(parents=True, exist_ok=True)
+    create_folder(MODEL_SAVE_PATH)
     tokenizer.save_pretrained(str(MODEL_SAVE_PATH))
     torch.save(model.state_dict(), MODEL_SAVE_PATH / "pytorch_model.bin")
 
-    import json
     config_data = {
         "model_type": "multitask_truthlens",
         "model_name": model.config.model_name,
@@ -228,7 +275,7 @@ def save_model(model: MultiTaskTruthLensModel, tokenizer) -> None:
         "label2id": {"REAL": 0, "FAKE": 1},
         "id2label": {"0": "REAL", "1": "FAKE"},
     }
-    (MODEL_SAVE_PATH / "config.json").write_text(json.dumps(config_data, indent=2))
+    save_json(config_data, MODEL_SAVE_PATH / "config.json", indent=2)
     logger.info("Model saved to %s", MODEL_SAVE_PATH)
 
 
@@ -263,12 +310,11 @@ def main() -> None:
             get_config_value(_cfg, "training", "gradient_accumulation_steps", default=2)
         )
 
-        torch.manual_seed(seed)
-        np.random.seed(seed)
+        set_seed(seed)
 
         device_str = SETTINGS.inference.device
         if device_str == "auto":
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            device = get_device(prefer_gpu=True)
         else:
             device = torch.device(device_str)
 
@@ -280,7 +326,7 @@ def main() -> None:
         # Load data
         # --------------------------------------------------
 
-        logger.info("Loading datasets from %s", SPLITS_DIR)
+        logger.info("Loading datasets from configured split paths")
         train_df, val_df, _ = load_data()
 
         # --------------------------------------------------
