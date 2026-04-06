@@ -1,8 +1,3 @@
-from google.colab import drive
-drive.mount('/content/drive')
-
-!git clone https://github.com/bhavay2002/Truthlens-Ai
-%cd truthlens-ai
 
 # Install dependencies
 !pip install -q torch transformers datasets sentence-transformers scikit-learn scipy numpy pandas spacy nltk langdetect vaderSentiment contractions shap lime networkx matplotlib seaborn wordcloud joblib pyyaml tqdm tarsafe africanwhisper fastapi uvicorn[standard] pydantic gunicorn optuna
@@ -16,7 +11,17 @@ nltk.download('punkt')
 nltk.download('stopwords')
 nltk.download('wordnet')
 
+import os
+os.kill(os.getpid(), 9)
 
+from google.colab import drive
+drive.mount('/content/drive')
+
+!git clone https://github.com/bhavay2002/Truthlens-Ai
+%cd truthlens-ai
+
+
+!python main.py
 
 
 !ls /content/drive/MyDrive/truthlens-models

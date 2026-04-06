@@ -81,7 +81,7 @@ from src.models.export import (
     ONNXExporter,
     QuantizationConfig,
     QuantizationEngine,
-    TorchScriptExportConfig,
+    TorchScriptExportConfig, 
     TorchScriptExporter,
 )
 from src.models.checkpointing.artifact_manager import ArtifactManager
@@ -360,18 +360,21 @@ def train_model(
         train_dataset = train_dataset.map(
             lambda x: tokenize_function(x, tokenizer, text_column),
             batched=True,
+            num_proc=2,
             load_from_cache_file=True,
         )
 
         val_dataset = val_dataset.map(
             lambda x: tokenize_function(x, tokenizer, text_column),
             batched=True,
+            num_proc=2,
             load_from_cache_file=True,
         )
 
         test_dataset = test_dataset.map(
             lambda x: tokenize_function(x, tokenizer, text_column),
             batched=True,
+            num_proc=2,
             load_from_cache_file=True,
         )
 
@@ -388,6 +391,16 @@ def train_model(
 
         model.to(device)
 
+        if torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+
+        if torch.__version__.startswith("2"):
+            try:
+                model = torch.compile(model)
+            except Exception:
+                pass
+
         training_args = TrainingArguments(
             
             output_dir=str(MODELS_DIR),
@@ -403,7 +416,7 @@ def train_model(
             num_train_epochs=epochs,
 
             logging_dir=str(LOGS_DIR),
-            logging_steps=50,
+            logging_steps=200,
 
             save_strategy="steps",
             save_steps=checkpoint_save_steps,

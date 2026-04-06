@@ -86,7 +86,7 @@ training:
   early_stopping:
     enabled: true
     patience: 2
-    metric: eval_loss
+    metric: eval_f1
 
 # ==========================================================
 # DATA
