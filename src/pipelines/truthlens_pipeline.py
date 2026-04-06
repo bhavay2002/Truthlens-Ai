@@ -47,6 +47,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+from src.aggregation.aggregation_pipeline import AggregationPipeline
 from src.aggregation.truthlens_score_calculator import TruthLensScoreCalculator
 from src.analysis.bias_profile_builder import BiasProfileBuilder
 from src.pipelines.prediction_pipeline import Predictor
@@ -130,6 +131,7 @@ class TruthLensPipeline:
         predictor: Optional[Predictor] = None,
         profile_builder: Optional[BiasProfileBuilder] = None,
         score_calculator: Optional[TruthLensScoreCalculator] = None,
+        aggregation_pipeline: Optional[AggregationPipeline] = None,
     ) -> None:
         """
         Initialize pipeline components with dependency injection.
@@ -142,6 +144,9 @@ class TruthLensPipeline:
             self.predictor = predictor or Predictor()
             self.profile_builder = profile_builder or BiasProfileBuilder()
             self.score_calculator = score_calculator or TruthLensScoreCalculator()
+            self.aggregation_pipeline = (
+                aggregation_pipeline or AggregationPipeline()
+            )
 
         except Exception as exc:
             logger.exception("TruthLensPipeline initialization failed")

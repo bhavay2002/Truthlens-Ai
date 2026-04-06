@@ -25,6 +25,7 @@ from typing import Any, Callable, Dict, List, Optional
 import numpy as np
 import torch
 
+from src.aggregation.aggregation_pipeline import AggregationPipeline
 from src.features.emotion.emotion_schema import EMOTION_LABELS
 from src.inference.feature_preparer import FeaturePreparer
 
@@ -319,6 +320,7 @@ class PredictionPipeline:
         propaganda_model: Optional[torch.nn.Module] = None,
         emotion_model: Optional[torch.nn.Module] = None,
         explainability_layer: Optional[ExplainabilityLayer] = None,
+        aggregation_pipeline: Optional[AggregationPipeline] = None,
     ) -> None:
 
         self.config = config
@@ -329,6 +331,7 @@ class PredictionPipeline:
         self.propaganda_model = propaganda_model
         self.emotion_model = emotion_model
         self.explainability_layer = explainability_layer
+        self.aggregation_pipeline = aggregation_pipeline or AggregationPipeline()
 
         for model in [
             self.bias_model,
@@ -616,6 +619,97 @@ class PredictionPipeline:
             prediction["explainability"] = {}
 
         return prediction
+
+    # -----------------------------------------------------------------
+    # Prediction with Aggregation
+    # -----------------------------------------------------------------
+
+    def predict_with_aggregation(
+        self,
+        features: torch.Tensor,
+        *,
+        text: Optional[str] = None,
+        analysis_modules: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Run prediction and enrich with full aggregation pipeline output.
+
+        Calls ``predict()`` to obtain raw task outputs, assembles a minimal
+        feature profile, then runs ``AggregationPipeline.run()`` to produce
+        weighted scores, categorical risk levels, and score explanations.
+        The result merges the base prediction with an ``aggregation`` key
+        containing the full pipeline output.
+
+        Parameters
+        ----------
+        features : torch.Tensor
+            Prepared feature tensor for the task models.
+        text : str, optional
+            Raw article text forwarded to ``AggregationPipeline.run()``
+            so that analysis modules can be resolved when *analysis_modules*
+            is not provided.
+        analysis_modules : dict, optional
+            Pre-computed analysis-module outputs to inject into the profile
+            before aggregation.
+
+        Returns
+        -------
+        Dict merging prediction output with an ``aggregation`` key containing
+        ``scores``, ``raw_scores``, ``risks``, ``explanations``, and
+        ``analysis_modules``.
+        """
+
+        prediction = self.predict(features)
+
+        profile: Dict[str, Any] = {
+            "bias": {
+                "bias_prediction": 1.0 if prediction.get("bias") == "bias" else 0.0,
+            },
+            "ideology": {
+                "ideology_left": 1.0 if prediction.get("ideology") == "left" else 0.0,
+                "ideology_center": 1.0 if prediction.get("ideology") == "center" else 0.0,
+                "ideology_right": 1.0 if prediction.get("ideology") == "right" else 0.0,
+            },
+            "propaganda": {
+                "propaganda_probability": float(
+                    prediction.get("propaganda_probability") or 0.0
+                ),
+            },
+            "credibility": {
+                "credibility_score": float(
+                    prediction.get("credibility_score") or 0.0
+                ),
+            },
+        }
+
+        emotion = prediction.get("emotion")
+        if isinstance(emotion, dict):
+            profile["emotion"] = {k: float(v) for k, v in emotion.items()}
+
+        credibility_explanation = prediction.get("credibility_explanation")
+        if isinstance(credibility_explanation, dict):
+            for comp_key, comp_val in credibility_explanation.items():
+                if isinstance(comp_val, (int, float)):
+                    profile["credibility"][comp_key] = float(comp_val)
+
+        try:
+            agg_result = self.aggregation_pipeline.run(
+                profile,
+                text=text,
+                analysis_modules=analysis_modules,
+            )
+        except Exception as exc:
+            logger.warning("AggregationPipeline.run() failed: %s", exc)
+            agg_result = {}
+
+        result = dict(prediction)
+        result["aggregation"] = agg_result
+
+        logger.debug(
+            "predict_with_aggregation completed | scores=%s",
+            list(agg_result.get("scores", {}).keys()),
+        )
+        return result
 
     # -----------------------------------------------------------------
     # Feature-dict entry point

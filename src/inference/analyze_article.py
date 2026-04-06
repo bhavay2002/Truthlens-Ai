@@ -51,6 +51,7 @@ from src.graph.entity_graph import EntityGraphBuilder
 from src.graph.graph_analysis import GraphAnalyzer
 from src.graph.narrative_graph_builder import NarrativeGraphBuilder
 from src.graph.graph_pipeline import GraphPipeline
+from src.aggregation.aggregation_pipeline import AggregationPipeline
 from src.analysis.bias_profile_builder import BiasProfileBuilder
 from src.analysis.integration_runner import AnalysisIntegrationRunner
 from src.aggregation.truthlens_score_calculator import TruthLensScoreCalculator
@@ -85,6 +86,7 @@ class ArticleAnalyzer:
     narrative_graph_builder: Optional[NarrativeGraphBuilder] = None
     graph_pipeline: Optional[GraphPipeline] = None
     analysis_runner: AnalysisIntegrationRunner | None = None
+    aggregation_pipeline: AggregationPipeline | None = None
     inference_prediction_pipeline: InferencePredictionPipeline | None = None
     inference_feature_preparer: FeaturePreparer | None = None
     report_generator: ReportGenerator | None = None

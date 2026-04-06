@@ -46,6 +46,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from src.aggregation.aggregation_pipeline import AggregationPipeline
 from src.explainability.explanation_report_generator import ExplanationReportGenerator
 
 logger = logging.getLogger(__name__)
@@ -87,11 +88,16 @@ class ReportGenerator:
         • Persist HTML + JSON explanation artifacts via ExplanationReportGenerator
     """
 
-    def __init__(self, config: Optional[ReportConfig] = None) -> None:
+    def __init__(
+        self,
+        config: Optional[ReportConfig] = None,
+        aggregation_pipeline: Optional[AggregationPipeline] = None,
+    ) -> None:
         self.config = config or ReportConfig()
         self._explanation_reporter = ExplanationReportGenerator(
             output_dir=self.config.explanation_output_dir
         )
+        self.aggregation_pipeline = aggregation_pipeline or AggregationPipeline()
         logger.info("ReportGenerator initialized")
 
     def _current_timestamp(self) -> str:
