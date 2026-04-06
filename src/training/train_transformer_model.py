@@ -371,23 +371,39 @@ def train_model(
 
         training_args = TrainingArguments(
             output_dir=str(MODELS_DIR),
+
             learning_rate=learning_rate,
             weight_decay=0.01,
+            warmup_ratio=0.1,
+
             per_device_train_batch_size=batch_size,
             per_device_eval_batch_size=batch_size,
             gradient_accumulation_steps=gradient_accumulation_steps,
+
             num_train_epochs=epochs,
+
             logging_dir=str(LOGS_DIR),
             logging_steps=max(1, min(100, checkpoint_save_steps)),
+
             save_strategy="steps",
             save_steps=checkpoint_save_steps,
+            save_total_limit=3,
+
             evaluation_strategy="steps",
             eval_steps=checkpoint_save_steps,
+
             load_best_model_at_end=True,
             metric_for_best_model="f1",
-            save_total_limit=3,
+            greater_is_better=True,
+
             fp16=torch.cuda.is_available(),
+            gradient_checkpointing=True,
+
+            dataloader_num_workers=2,
+            dataloader_pin_memory=True,
+
             seed=SEED,
+            report_to="none",
         )
 
         trainer = Trainer(
