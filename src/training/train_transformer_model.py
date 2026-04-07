@@ -125,7 +125,7 @@ DEFAULT_TEST_SIZE = SETTINGS.training.test_size
 
 MODELS_DIR = Path("/content/drive/MyDrive/truthlens-models")
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
-checkpoint_save_steps = 1000
+checkpoint_save_steps = 200
 FREE_COLAB_NUM_PROC = 2
 TOKENIZED_DATASET_CACHE_DIR = Path("/content/tokenized_dataset")
 LOGS_DIR = Path("/content/drive/MyDrive/truthlens-logs")
@@ -644,6 +644,7 @@ def train_model(
             train_dataset=train_dataset,
             eval_dataset=val_dataset,
             data_collator=multitask_data_collator,
+            compute_metrics=compute_metrics,
             callbacks=[EarlyStoppingCallback(early_stopping_patience=2)],
         )
 
