@@ -125,7 +125,7 @@ DEFAULT_TEST_SIZE = SETTINGS.training.test_size
 
 MODELS_DIR = Path("/content/drive/MyDrive/truthlens-models")
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
-checkpoint_save_steps = 500
+checkpoint_save_steps = 1000
 LOGS_DIR = Path("/content/drive/MyDrive/truthlens-logs")
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 GOOGLE_DRIVE_REPORTS_DIR = Path("/content/drive/MyDrive/truthlens-reports")
@@ -358,6 +358,18 @@ def train_model(
         test_dataset = _to_hf_dataset(resolved_test_df)
 
         train_dataset = train_dataset.map(
+            lambda x: {"length": len(x[text_column].split())}
+        )
+
+        val_dataset = val_dataset.map(
+            lambda x: {"length": len(x[text_column].split())}
+        )
+
+        test_dataset = test_dataset.map(
+            lambda x: {"length": len(x[text_column].split())}
+        )
+
+        train_dataset = train_dataset.map(
             lambda x: tokenize_function(x, tokenizer, text_column),
             batched=True,
             num_proc=2,
@@ -435,6 +447,7 @@ def train_model(
             dataloader_num_workers=2,
             dataloader_pin_memory=True,
             group_by_length=True,
+            length_column_name="length",
 
             seed=SEED,
             report_to="none",

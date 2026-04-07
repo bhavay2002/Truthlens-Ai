@@ -194,7 +194,7 @@ def load_settings() -> AppSettings:
                     ("model", "encoder", "max_length"),
                     ("model", "max_length"),
                 ),
-                256,
+                512,
             )
         ),
         path=get_path(
