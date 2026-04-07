@@ -55,7 +55,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from datasets import Dataset
+from datasets import Dataset, load_from_disk
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score
 from sklearn.model_selection import train_test_split
 from transformers import (
@@ -126,6 +126,8 @@ DEFAULT_TEST_SIZE = SETTINGS.training.test_size
 MODELS_DIR = Path("/content/drive/MyDrive/truthlens-models")
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 checkpoint_save_steps = 1000
+FREE_COLAB_NUM_PROC = 2
+TOKENIZED_DATASET_CACHE_DIR = Path("/content/tokenized_dataset")
 LOGS_DIR = Path("/content/drive/MyDrive/truthlens-logs")
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 GOOGLE_DRIVE_REPORTS_DIR = Path("/content/drive/MyDrive/truthlens-reports")
@@ -370,10 +372,6 @@ def train_model(
             example["input_text"] = title + " " + text
             return example
 
-        train_dataset = train_dataset.map(combine_text)
-        val_dataset = val_dataset.map(combine_text)
-        test_dataset = test_dataset.map(combine_text)
-
         def build_multitask_labels(example):
             hero_entity = _entity_to_binary(example.get("hero_entities"))
             villain_entity = _entity_to_binary(example.get("villain_entities"))
@@ -410,34 +408,50 @@ def train_model(
 
             return example
 
-        train_dataset = train_dataset.map(build_multitask_labels)
-        val_dataset = val_dataset.map(build_multitask_labels)
-        test_dataset = test_dataset.map(build_multitask_labels)
-
         def tokenize(example):
             return tokenizer(
                 example["input_text"],
                 truncation=True,
                 max_length=512,
+                padding=False,
             )
 
-        train_dataset = train_dataset.map(
-            lambda x: {"length": len(x["input_text"].split())}
-        )
+        def compute_length(example):
+            return {"length": len(example["input_ids"])}
 
-        val_dataset = val_dataset.map(
-            lambda x: {"length": len(x["input_text"].split())}
-        )
+        cache_train_dir = TOKENIZED_DATASET_CACHE_DIR / "train"
+        cache_val_dir = TOKENIZED_DATASET_CACHE_DIR / "validation"
+        cache_test_dir = TOKENIZED_DATASET_CACHE_DIR / "test"
 
-        test_dataset = test_dataset.map(
-            lambda x: {"length": len(x["input_text"].split())}
-        )
+        if cache_train_dir.exists() and cache_val_dir.exists() and cache_test_dir.exists():
+            logger.info("Loading tokenized datasets from cache at %s", TOKENIZED_DATASET_CACHE_DIR)
+            train_dataset = load_from_disk(str(cache_train_dir))
+            val_dataset = load_from_disk(str(cache_val_dir))
+            test_dataset = load_from_disk(str(cache_test_dir))
+        else:
+            logger.info("Tokenized cache not found. Building tokenized datasets with num_proc=%s", FREE_COLAB_NUM_PROC)
 
-        train_dataset = train_dataset.map(tokenize, batched=True)
+            train_dataset = train_dataset.map(combine_text, num_proc=FREE_COLAB_NUM_PROC)
+            val_dataset = val_dataset.map(combine_text, num_proc=FREE_COLAB_NUM_PROC)
+            test_dataset = test_dataset.map(combine_text, num_proc=FREE_COLAB_NUM_PROC)
 
-        val_dataset = val_dataset.map(tokenize, batched=True)
+            train_dataset = train_dataset.map(build_multitask_labels, num_proc=FREE_COLAB_NUM_PROC)
+            val_dataset = val_dataset.map(build_multitask_labels, num_proc=FREE_COLAB_NUM_PROC)
+            test_dataset = test_dataset.map(build_multitask_labels, num_proc=FREE_COLAB_NUM_PROC)
 
-        test_dataset = test_dataset.map(tokenize, batched=True)
+            train_dataset = train_dataset.map(tokenize, batched=True, num_proc=FREE_COLAB_NUM_PROC)
+            val_dataset = val_dataset.map(tokenize, batched=True, num_proc=FREE_COLAB_NUM_PROC)
+            test_dataset = test_dataset.map(tokenize, batched=True, num_proc=FREE_COLAB_NUM_PROC)
+
+            train_dataset = train_dataset.map(compute_length, num_proc=FREE_COLAB_NUM_PROC)
+            val_dataset = val_dataset.map(compute_length, num_proc=FREE_COLAB_NUM_PROC)
+            test_dataset = test_dataset.map(compute_length, num_proc=FREE_COLAB_NUM_PROC)
+
+            cache_train_dir.parent.mkdir(parents=True, exist_ok=True)
+            train_dataset.save_to_disk(str(cache_train_dir))
+            val_dataset.save_to_disk(str(cache_val_dir))
+            test_dataset.save_to_disk(str(cache_test_dir))
+            logger.info("Saved tokenized datasets to cache at %s", TOKENIZED_DATASET_CACHE_DIR)
 
         train_dataset.set_format(
             type="torch",

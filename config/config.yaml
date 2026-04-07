@@ -39,9 +39,16 @@ model:
       label_prefix: emotion_
 
     narrative_roles:
-      hero: hero
-      villain: villain
-      victim: victim
+      labels:
+        hero: hero
+        villain: villain
+        victim: victim
+      entity_columns:
+        hero: hero_entities
+        villain: villain_entities
+        victim: victim_entities
+      derive_binary_from_entities: true
+      combine_binary_and_entities: true
       loss: binary_cross_entropy
 
     frame_detection:
@@ -54,6 +61,7 @@ model:
       loss: binary_cross_entropy
 
   path: models/truthlens_model
+
 
 # ==========================================================
 # TRAINING
@@ -88,6 +96,7 @@ training:
     patience: 2
     metric: eval_f1
 
+
 # ==========================================================
 # DATA
 # ==========================================================
@@ -104,6 +113,7 @@ data:
 
   augmentation_multiplier: 1.5
 
+
 # ==========================================================
 # FEATURES
 # ==========================================================
@@ -113,10 +123,10 @@ features:
   engineered_text_column: engineered_text
 
   tfidf:
-
     enabled: true
     max_features: 5000
     top_terms_per_doc: 4
+
 
 # ==========================================================
 # CROSS VALIDATION
@@ -127,6 +137,7 @@ cross_validation:
   enabled: false
   splits: 5
   metric: eval_loss
+
 
 # ==========================================================
 # HYPERPARAMETER TUNING
@@ -154,6 +165,7 @@ hyperparameter_tuning:
       - 3
       - 4
 
+
 # ==========================================================
 # EVALUATION
 # ==========================================================
@@ -173,6 +185,7 @@ evaluation:
       - macro_f1
       - roc_auc
 
+
 # ==========================================================
 # LOGGING
 # ==========================================================
@@ -187,6 +200,7 @@ logging:
   eval_steps: 500
 
   save_total_limit: 3
+
 
 # ==========================================================
 # PATHS
@@ -204,6 +218,7 @@ paths:
   confusion_matrix_path: reports/confusion_matrix.png
   cleaning_report_path: reports/data_cleaning_report.json
 
+
 # ==========================================================
 # API CONFIGURATION
 # ==========================================================
@@ -216,6 +231,7 @@ api:
   version: 2.0.0
 
   text_preview_chars: 100
+
 
 # ==========================================================
 # INFERENCE
