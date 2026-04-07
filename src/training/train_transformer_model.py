@@ -59,7 +59,6 @@ from datasets import Dataset
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score
 from sklearn.model_selection import train_test_split
 from transformers import (
-    AutoModelForSequenceClassification,
     AutoTokenizer,
     DataCollatorWithPadding,
     EarlyStoppingCallback,
@@ -67,6 +66,7 @@ from transformers import (
     TrainingArguments,
 )
 from transformers.trainer_utils import get_last_checkpoint as hf_get_last_checkpoint
+from src.models.multitask.multitask_model import TruthLensMultiTaskModel
 
 from src.utils.input_validation import ensure_dataframe, ensure_non_empty_text_column
 from src.utils.helper_functions import create_folder
@@ -146,6 +146,10 @@ class _HFExportWrapper(nn.Module):
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         outputs = self.model(input_ids=input_ids)
         logits = getattr(outputs, "logits", None)
+        if logits is None and isinstance(outputs, dict):
+            bias_outputs = outputs.get("bias")
+            if isinstance(bias_outputs, dict):
+                logits = bias_outputs.get("logits")
         if logits is None:
             raise RuntimeError("Expected HuggingFace model output to include logits.")
         return logits
@@ -346,60 +350,157 @@ def train_model(
         gradient_accumulation_steps = 2
 
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-        data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
-
-        if label_column != "label":
-            train_df = train_df.rename(columns={label_column: "label"})
-            val_df = val_df.rename(columns={label_column: "label"})
-            resolved_test_df = resolved_test_df.rename(columns={label_column: "label"})
+        base_data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
 
         train_dataset = _to_hf_dataset(train_df)
         val_dataset = _to_hf_dataset(val_df)
         test_dataset = _to_hf_dataset(resolved_test_df)
 
+        def combine_text(example):
+            title = example["title"] if example["title"] else ""
+            text = example["text"] if example["text"] else ""
+            example["input_text"] = title + " " + text
+            return example
+
+        train_dataset = train_dataset.map(combine_text)
+        val_dataset = val_dataset.map(combine_text)
+        test_dataset = test_dataset.map(combine_text)
+
+        def build_multitask_labels(example):
+            hero = 1 if example["hero_entities"] not in ["", None, "nan"] else 0
+            villain = 1 if example["villain_entities"] not in ["", None, "nan"] else 0
+            victim = 1 if example["victim_entities"] not in ["", None, "nan"] else 0
+
+            example["emotion_labels"] = [
+                example[f"emotion_{i}"] for i in range(20)
+            ]
+
+            example["frame_labels"] = [
+                example["CO"],
+                example["EC"],
+                example["HI"],
+                example["MO"],
+                example["RE"],
+            ]
+
+            example["hero"] = hero
+            example["villain"] = villain
+            example["victim"] = victim
+
+            return example
+
+        train_dataset = train_dataset.map(build_multitask_labels)
+        val_dataset = val_dataset.map(build_multitask_labels)
+        test_dataset = test_dataset.map(build_multitask_labels)
+
+        def tokenize(example):
+            return tokenizer(
+                example["input_text"],
+                truncation=True,
+                max_length=512,
+            )
+
         train_dataset = train_dataset.map(
-            lambda x: {"length": len(x[text_column].split())}
+            lambda x: {"length": len(x["input_text"].split())}
         )
 
         val_dataset = val_dataset.map(
-            lambda x: {"length": len(x[text_column].split())}
+            lambda x: {"length": len(x["input_text"].split())}
         )
 
         test_dataset = test_dataset.map(
-            lambda x: {"length": len(x[text_column].split())}
+            lambda x: {"length": len(x["input_text"].split())}
         )
 
-        train_dataset = train_dataset.map(
-            lambda x: tokenize_function(x, tokenizer, text_column),
-            batched=True,
-            num_proc=2,
-            load_from_cache_file=True,
+        train_dataset = train_dataset.map(tokenize, batched=True)
+
+        val_dataset = val_dataset.map(tokenize, batched=True)
+
+        test_dataset = test_dataset.map(tokenize, batched=True)
+
+        train_dataset.set_format(
+            type="torch",
+            columns=[
+                "input_ids",
+                "attention_mask",
+                "bias_label",
+                "ideology_label",
+                "propaganda_label",
+                "emotion_labels",
+                "frame_labels",
+                "hero",
+                "villain",
+                "victim",
+            ],
         )
 
-        val_dataset = val_dataset.map(
-            lambda x: tokenize_function(x, tokenizer, text_column),
-            batched=True,
-            num_proc=2,
-            load_from_cache_file=True,
+        val_dataset.set_format(
+            type="torch",
+            columns=[
+                "input_ids",
+                "attention_mask",
+                "bias_label",
+                "ideology_label",
+                "propaganda_label",
+                "emotion_labels",
+                "frame_labels",
+                "hero",
+                "villain",
+                "victim",
+            ],
         )
 
-        test_dataset = test_dataset.map(
-            lambda x: tokenize_function(x, tokenizer, text_column),
-            batched=True,
-            num_proc=2,
-            load_from_cache_file=True,
+        test_dataset.set_format(
+            type="torch",
+            columns=[
+                "input_ids",
+                "attention_mask",
+                "bias_label",
+                "ideology_label",
+                "propaganda_label",
+                "emotion_labels",
+                "frame_labels",
+                "hero",
+                "villain",
+                "victim",
+            ],
         )
 
-        train_dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "label"])
-        val_dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "label"])
-        test_dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "label"])
+        def multitask_data_collator(features):
+            batch = base_data_collator(
+                [
+                    {
+                        "input_ids": feature["input_ids"],
+                        "attention_mask": feature["attention_mask"],
+                    }
+                    for feature in features
+                ]
+            )
 
-        num_labels = df[label_column].dropna().nunique()
+            batch["labels"] = {
+                "bias": torch.stack([feature["bias_label"].long() for feature in features]),
+                "ideology": torch.stack([feature["ideology_label"].long() for feature in features]),
+                "propaganda": torch.stack([feature["propaganda_label"].long() for feature in features]),
+                "narrative": torch.stack(
+                    [
+                        torch.tensor(
+                            [feature["hero"], feature["villain"], feature["victim"]],
+                            dtype=torch.float,
+                        )
+                        for feature in features
+                    ]
+                ),
+                "narrative_frame": torch.stack(
+                    [feature["frame_labels"].float() for feature in features]
+                ),
+                "emotion": torch.stack(
+                    [feature["emotion_labels"].float() for feature in features]
+                ),
+            }
 
-        model = AutoModelForSequenceClassification.from_pretrained(
-            MODEL_NAME,
-            num_labels=num_labels,
-        )
+            return batch
+
+        model = TruthLensMultiTaskModel("roberta-base")
 
         model.to(device)
 
@@ -438,11 +539,11 @@ def train_model(
             eval_steps=checkpoint_save_steps,
 
             load_best_model_at_end=True,
-            metric_for_best_model="f1",
-            greater_is_better=True,
+            metric_for_best_model="eval_loss",
+            greater_is_better=False,
 
             fp16=torch.cuda.is_available(),
-            gradient_checkpointing=True,
+            gradient_checkpointing=False,
 
             dataloader_num_workers=2,
             dataloader_pin_memory=True,
@@ -458,8 +559,7 @@ def train_model(
             args=training_args,
             train_dataset=train_dataset,
             eval_dataset=val_dataset,
-            compute_metrics=compute_metrics,
-            data_collator=data_collator,
+            data_collator=multitask_data_collator,
             callbacks=[EarlyStoppingCallback(early_stopping_patience=2)],
         )
 
@@ -603,7 +703,15 @@ def train_model(
 
         checkpoint_metadata = {
             "model_name": MODEL_NAME,
-            "num_labels": int(num_labels),
+            "num_labels": int(TruthLensMultiTaskModel.NUM_BIAS),
+            "task_label_dims": {
+                "bias": int(TruthLensMultiTaskModel.NUM_BIAS),
+                "ideology": int(TruthLensMultiTaskModel.NUM_IDEOLOGY),
+                "propaganda": int(TruthLensMultiTaskModel.NUM_PROPAGANDA),
+                "narrative": int(TruthLensMultiTaskModel.NUM_NARRATIVE),
+                "frame": int(TruthLensMultiTaskModel.NUM_NARRATIVE_FRAMES),
+                "emotion": int(TruthLensMultiTaskModel.NUM_EMOTIONS),
+            },
             "export_formats": export_formats,
             "epoch": epochs,
         }
