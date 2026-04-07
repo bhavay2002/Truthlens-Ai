@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -81,6 +82,7 @@ class TrainerConfig:
     device: Optional[str] = None
     log_every_steps: int = 50
     checkpoint_dir: Optional[str] = None
+    drive_checkpoint_dir: Optional[str] = None
     checkpoint_every_steps: int = 0
     max_checkpoints: int = 3
     model_name: str = "truthlens_model"
@@ -177,6 +179,53 @@ class Trainer:
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Unified checkpoint save skipped: %s", exc)
+            return
+
+        self._sync_checkpoint_to_drive(checkpoint_dir)
+
+    def _sync_checkpoint_to_drive(self, source_dir: Path) -> None:
+        """
+        Mirror a local checkpoint directory into Google Drive.
+
+        If ``config.drive_checkpoint_dir`` is not set, or if Drive is not
+        mounted, this is a no-op and a warning is logged rather than raising.
+
+        Parameters
+        ----------
+        source_dir : Path
+            Local directory that was just written by the checkpoint manager or
+            ``save_training_checkpoint``.
+        """
+
+        if not self.config.drive_checkpoint_dir:
+            return
+
+        drive_root = Path(self.config.drive_checkpoint_dir)
+
+        if not drive_root.exists():
+            try:
+                drive_root.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                logger.warning(
+                    "Google Drive checkpoint sync skipped — could not create "
+                    "drive directory %s: %s",
+                    drive_root,
+                    exc,
+                )
+                return
+
+        dest = drive_root / source_dir.name
+        try:
+            if dest.exists():
+                shutil.rmtree(dest)
+            shutil.copytree(source_dir, dest)
+            logger.info(
+                "Checkpoint synced to Google Drive: %s → %s", source_dir, dest
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Google Drive checkpoint sync failed for %s: %s", source_dir, exc
+            )
 
     def train(
         self,
@@ -214,6 +263,9 @@ class Trainer:
                         "epoch": epoch + 1,
                         "train_loss": float(train_loss),
                     },
+                )
+                self._sync_checkpoint_to_drive(
+                    Path(self.config.checkpoint_dir) / f"checkpoint-{self.global_step}"
                 )
                 self.checkpoint_manager.cleanup_old_checkpoints(
                     max_checkpoints=self.config.max_checkpoints
@@ -295,6 +347,9 @@ class Trainer:
                         "epoch": epoch + 1,
                         "step_loss": float(loss.item()),
                     },
+                )
+                self._sync_checkpoint_to_drive(
+                    Path(self.config.checkpoint_dir) / f"checkpoint-{self.global_step}"
                 )
                 self.checkpoint_manager.cleanup_old_checkpoints(
                     max_checkpoints=self.config.max_checkpoints

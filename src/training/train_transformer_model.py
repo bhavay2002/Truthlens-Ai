@@ -132,6 +132,8 @@ LOGS_DIR = Path("/content/drive/MyDrive/truthlens-logs")
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 GOOGLE_DRIVE_REPORTS_DIR = Path("/content/drive/MyDrive/truthlens-reports")
 GOOGLE_DRIVE_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+GOOGLE_DRIVE_CHECKPOINTS_DIR = Path("/content/drive/MyDrive/truthlens-checkpoints")
+GOOGLE_DRIVE_CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
 MODEL_PATH = Path(SETTINGS.model.path)
 TEST_SET_PATH = Path(SETTINGS.data.test_set_path)
 
@@ -307,6 +309,53 @@ def _save_reports_to_google_drive(report_source_dir: Path, report_files: list[st
         destination_path = GOOGLE_DRIVE_REPORTS_DIR / report_file
         destination_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source_path, destination_path)
+
+
+def _save_checkpoints_to_google_drive(source_dir: Path, label: str = "") -> None:
+    """
+    Mirror a local checkpoint directory tree to Google Drive.
+
+    The function copies ``source_dir`` into ``GOOGLE_DRIVE_CHECKPOINTS_DIR``
+    preserving the sub-directory name so resuming from Drive works identically
+    to resuming from local storage.
+
+    Parameters
+    ----------
+    source_dir : Path
+        Local directory produced by the checkpoint manager or
+        ``save_training_checkpoint`` (e.g. ``MODEL_PATH/checkpoint_bundle``).
+    label : str
+        Optional tag used in log messages for easier debugging.
+    """
+
+    if not source_dir.exists():
+        logger.warning(
+            "Checkpoint Drive sync skipped — source not found%s: %s",
+            f" [{label}]" if label else "",
+            source_dir,
+        )
+        return
+
+    GOOGLE_DRIVE_CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
+    dest = GOOGLE_DRIVE_CHECKPOINTS_DIR / source_dir.name
+
+    try:
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(source_dir, dest)
+        logger.info(
+            "Checkpoint synced to Google Drive%s: %s → %s",
+            f" [{label}]" if label else "",
+            source_dir,
+            dest,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Google Drive checkpoint sync failed%s for %s: %s",
+            f" [{label}]" if label else "",
+            source_dir,
+            exc,
+        )
 
 
 def train_model(
@@ -784,6 +833,11 @@ def train_model(
             )
         if "quantized" in {fmt.strip().lower() for fmt in export_formats}:
             artifact_manager.export_quantized_model(model=wrapped_export_model)
+
+        _save_checkpoints_to_google_drive(checkpoint_bundle_dir, label="final_bundle")
+        _save_checkpoints_to_google_drive(
+            checkpoint_bundle_dir / "training", label="training_checkpoint"
+        )
 
         resolved_test_df.to_csv(TEST_SET_PATH, index=False)
 
