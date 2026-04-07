@@ -94,3 +94,15 @@ def test_compute_checkpoint_save_steps_has_minimum_of_one() -> None:
     )
 
     assert save_steps == 1
+
+
+def test_training_paths_follow_settings_configuration() -> None:
+    settings = train_transformer_model.SETTINGS
+
+    assert train_transformer_model.MODELS_DIR == settings.paths.models_dir
+    assert train_transformer_model.LOGS_DIR == settings.paths.logs_dir
+    assert train_transformer_model.GOOGLE_DRIVE_REPORTS_DIR == settings.paths.reports_dir
+    assert (
+        train_transformer_model.GOOGLE_DRIVE_CHECKPOINTS_DIR
+        == settings.paths.models_dir / "checkpoints"
+    )

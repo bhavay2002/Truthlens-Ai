@@ -141,9 +141,17 @@ def load_checkpoint(
     checkpoint_path = checkpoint_dir / CHECKPOINT_FILE
 
     if not checkpoint_path.exists():
+        candidate_dirs = list_checkpoints(checkpoint_dir)
+        if candidate_dirs:
+            checkpoint_path = candidate_dirs[-1] / CHECKPOINT_FILE
+
+    if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
     checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=False)
+
+    if "model_state_dict" not in checkpoint:
+        raise KeyError(f"Checkpoint missing required key 'model_state_dict': {checkpoint_path}")
 
     model.load_state_dict(checkpoint["model_state_dict"])
 
@@ -214,7 +222,15 @@ def list_checkpoints(checkpoint_root: str | Path) -> list[Path]:
         if p.is_dir() and (p / CHECKPOINT_FILE).exists()
     ]
 
-    return sorted(checkpoints)
+    def _sort_key(path: Path) -> tuple[int, str]:
+        # Prefer numeric ordering for HuggingFace-style checkpoint-<step> dirs.
+        if path.name.startswith("checkpoint-"):
+            suffix = path.name.split("-", 1)[-1]
+            if suffix.isdigit():
+                return (int(suffix), path.name)
+        return (10**18, path.name)
+
+    return sorted(checkpoints, key=_sort_key)
 
 
 def _export_artifacts(

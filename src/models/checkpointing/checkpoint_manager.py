@@ -164,7 +164,7 @@ class CheckpointManager:
 
             step = self._checkpoint_step(checkpoint)
 
-            if step is not None:
+            if step is not None and (checkpoint / "checkpoint.pt").exists():
                 checkpoint_pairs.append((step, checkpoint))
 
         checkpoint_pairs.sort(key=lambda item: item[0])

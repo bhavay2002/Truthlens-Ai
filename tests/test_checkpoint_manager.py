@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import torch
 
 from models.checkpointing.checkpoint_manager import CheckpointManager, get_last_checkpoint
 
@@ -11,10 +12,15 @@ def _mkdir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
+def _mkdir_checkpoint(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    torch.save({"step": 1, "model_state_dict": {}}, path / "checkpoint.pt")
+
+
 def test_list_checkpoints_sorts_and_filters_valid_names(tmp_path: Path) -> None:
     checkpoint_dir = tmp_path / "checkpoints"
-    _mkdir(checkpoint_dir / "checkpoint-20")
-    _mkdir(checkpoint_dir / "checkpoint-5")
+    _mkdir_checkpoint(checkpoint_dir / "checkpoint-20")
+    _mkdir_checkpoint(checkpoint_dir / "checkpoint-5")
     _mkdir(checkpoint_dir / "checkpoint-invalid")
     _mkdir(checkpoint_dir / "something-else")
 
@@ -26,8 +32,8 @@ def test_list_checkpoints_sorts_and_filters_valid_names(tmp_path: Path) -> None:
 
 def test_get_latest_checkpoint_returns_highest_step(tmp_path: Path) -> None:
     checkpoint_dir = tmp_path / "checkpoints"
-    _mkdir(checkpoint_dir / "checkpoint-100")
-    _mkdir(checkpoint_dir / "checkpoint-250")
+    _mkdir_checkpoint(checkpoint_dir / "checkpoint-100")
+    _mkdir_checkpoint(checkpoint_dir / "checkpoint-250")
 
     manager = CheckpointManager(checkpoint_dir)
     latest = manager.get_latest_checkpoint()
@@ -39,9 +45,9 @@ def test_get_latest_checkpoint_returns_highest_step(tmp_path: Path) -> None:
 
 def test_cleanup_old_checkpoints_keeps_latest_n(tmp_path: Path) -> None:
     checkpoint_dir = tmp_path / "checkpoints"
-    _mkdir(checkpoint_dir / "checkpoint-10")
-    _mkdir(checkpoint_dir / "checkpoint-20")
-    _mkdir(checkpoint_dir / "checkpoint-30")
+    _mkdir_checkpoint(checkpoint_dir / "checkpoint-10")
+    _mkdir_checkpoint(checkpoint_dir / "checkpoint-20")
+    _mkdir_checkpoint(checkpoint_dir / "checkpoint-30")
 
     manager = CheckpointManager(checkpoint_dir)
     manager.cleanup_old_checkpoints(max_checkpoints=2)
