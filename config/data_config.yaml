@@ -138,7 +138,7 @@ balancing:
 augmentation:
 
   enabled: true
-  multiplier: 2
+  multiplier: 1.5
 
   techniques:
     synonym_replacement: true

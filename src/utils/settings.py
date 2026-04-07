@@ -52,7 +52,7 @@ class FeaturesSettings:
 class DataSettings:
     raw_dir: Path
     interim_dir: Path
-    augmentation_multiplier: int
+    augmentation_multiplier: float
     cleaned_dataset_path: Path
     merged_dataset_path: Path
     test_set_path: Path
@@ -236,7 +236,7 @@ def load_settings() -> AppSettings:
             "interim_dir",
             default="data/interim",
         ),
-        augmentation_multiplier=int(
+        augmentation_multiplier=float(
             get_config_value(
                 config,
                 "data",

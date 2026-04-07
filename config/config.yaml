@@ -102,7 +102,7 @@ data:
   interim_dir: data/interim
   processed_dir: data/processed
 
-  augmentation_multiplier: 2
+  augmentation_multiplier: 1.5
 
 # ==========================================================
 # FEATURES
