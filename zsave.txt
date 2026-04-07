@@ -18,7 +18,7 @@ from google.colab import drive
 drive.mount('/content/drive')
 
 !git clone https://github.com/bhavay2002/Truthlens-Ai
-%cd truthlens-ai
+%cd Truthlens-Ai
 
 
 !python main.py

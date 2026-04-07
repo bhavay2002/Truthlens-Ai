@@ -1,28 +1,29 @@
 """
-File: src/data/data_augmentation.py
+TruthLens Advanced Data Augmentation Module
+Research-grade NLP augmentation designed for:
 
-Purpose
--------
-Research-grade NLP data augmentation utilities.
+- bias detection
+- ideology detection
+- propaganda detection
+- narrative framing
+- emotional manipulation
 
-Supports:
-- synonym replacement
-- random deletion
-- random swap
-- sentence shuffle
-- class-aware augmentation
-- configurable augmentation pipeline
-- parallel dataset augmentation
-
-Designed for transformer training pipelines
-(e.g., RoBERTa / DeBERTa / BERT).
-
-Dependencies
-------------
-pandas
-random
-nltk
-src.utils.input_validation
+Advanced Features
+-----------------
+• contextual MLM augmentation
+• back translation augmentation
+• synonym replacement
+• deletion / swap / shuffle
+• ideological framing augmentation
+• propaganda phrase injection
+• narrative reframing
+• emotional amplification
+• bias word injection
+• class-aware augmentation
+• semantic similarity filtering
+• weighted augmentation operations
+• reproducible deterministic randomness
+• multiprocessing support
 """
 
 from __future__ import annotations
@@ -30,19 +31,40 @@ from __future__ import annotations
 import logging
 import random
 from multiprocessing import Pool
-from typing import Callable, List
+from typing import Callable, List, Tuple
 
 import pandas as pd
-import nltk
+import nltk 
+
 from nltk.corpus import wordnet, stopwords
+from transformers import pipeline
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
 
 from src.utils.input_validation import (
     ensure_dataframe,
     ensure_non_empty_text_column,
-    ensure_positive_int,
+)
+
+from src.data.head_frames import (
+    IDEOLOGY_FRAMES,
+    PROPAGANDA_PHRASES,
+    NARRATIVE_PREFIX,
+    EMOTION_WORDS,
+    BIAS_WORDS,
 )
 
 logger = logging.getLogger(__name__)
+
+# ------------------------------------------------
+# Configuration
+# ------------------------------------------------
+
+RANDOM_SEED = 42
+MAX_TOKEN_SAFE = 512
+SIMILARITY_THRESHOLD = 0.75
+
+random.seed(RANDOM_SEED)
 
 # ------------------------------------------------
 # NLTK Setup
@@ -56,19 +78,39 @@ try:
 
 except Exception as e:
 
-    logger.warning(
-        "Failed to download NLTK resources: %s. Using empty stopword set.",
-        e,
-    )
-
+    logger.warning("NLTK resources unavailable: %s", e)
     STOPWORDS = set()
 
-random.seed(42)
+# ------------------------------------------------
+# Models (lazy loaded)
+# ------------------------------------------------
+
+_mlm = None
+_embedder = None
+
+
+def get_mlm():
+    global _mlm
+    if _mlm is None:
+        _mlm = pipeline(
+            "fill-mask",
+            model="roberta-base",
+            top_k=5,
+        )
+    return _mlm
+
+
+def get_embedder():
+    global _embedder
+    if _embedder is None:
+        _embedder = SentenceTransformer("all-MiniLM-L6-v2")
+    return _embedder
 
 
 # ------------------------------------------------
 # Synonym Lookup
 # ------------------------------------------------
+
 
 def get_synonyms(word: str) -> List[str]:
 
@@ -80,7 +122,6 @@ def get_synonyms(word: str) -> List[str]:
         return []
 
     for syn in synsets:
-
         for lemma in syn.lemmas():
 
             synonym = lemma.name().replace("_", " ").lower()
@@ -92,12 +133,14 @@ def get_synonyms(word: str) -> List[str]:
 
 
 # ------------------------------------------------
-# Augmentation Operations
+# Basic NLP Augmentations
 # ------------------------------------------------
+
 
 def synonym_replacement(text: str, n: int = 2) -> str:
 
-    words = str(text).split()
+    words = text.split()
+
     candidates = [w for w in words if w not in STOPWORDS and len(w) > 3]
 
     random.shuffle(candidates)
@@ -124,7 +167,7 @@ def synonym_replacement(text: str, n: int = 2) -> str:
 
 def random_deletion(text: str, p: float = 0.1) -> str:
 
-    words = str(text).split()
+    words = text.split()
 
     if len(words) <= 5:
         return text
@@ -139,7 +182,7 @@ def random_deletion(text: str, p: float = 0.1) -> str:
 
 def random_swap(text: str) -> str:
 
-    words = str(text).split()
+    words = text.split()
 
     if len(words) < 3:
         return text
@@ -164,15 +207,136 @@ def sentence_shuffle(text: str) -> str:
 
 
 # ------------------------------------------------
-# Augmentation Pipeline
+# Contextual MLM Augmentation
 # ------------------------------------------------
 
-AUGMENTATION_OPERATIONS: List[Callable[[str], str]] = [
-    synonym_replacement,
-    random_deletion,
-    random_swap,
-    sentence_shuffle,
+
+def contextual_replacement(text: str) -> str:
+
+    mlm = get_mlm()
+
+    words = text.split()
+
+    if len(words) < 6:
+        return text
+
+    idx = random.randint(0, len(words) - 1)
+
+    words[idx] = "<mask>"
+
+    masked = " ".join(words)
+
+    try:
+
+        preds = mlm(masked)
+
+        replacement = preds[0]["token_str"]
+
+        words[idx] = replacement
+
+        return " ".join(words)
+
+    except Exception:
+
+        return text
+
+
+# ------------------------------------------------
+# Ideology / Propaganda Augmentations
+# ------------------------------------------------
+
+
+def ideology_frame_shift(text: str) -> str:
+
+    addition = random.choice(IDEOLOGY_FRAMES)
+
+    return f"{text} {addition}"
+
+
+def propaganda_injection(text: str) -> str:
+
+    phrase = random.choice(PROPAGANDA_PHRASES)
+
+    return f"{phrase} {text.lower()}"
+
+
+def narrative_reframe(text: str) -> str:
+
+    prefix = random.choice(NARRATIVE_PREFIX)
+
+    return f"{prefix} {text.lower()}"
+
+
+def emotion_amplify(text: str) -> str:
+
+    words = text.split()
+
+    idx = random.randint(0, len(words) - 1)
+
+    words.insert(idx, random.choice(EMOTION_WORDS))
+
+    return " ".join(words)
+
+
+def bias_injection(text: str) -> str:
+
+    words = text.split()
+
+    idx = random.randint(0, len(words) - 1)
+
+    words.insert(idx, random.choice(BIAS_WORDS))
+
+    return " ".join(words)
+
+# ------------------------------------------------
+# Semantic Similarity Filter
+# ------------------------------------------------
+
+
+def semantic_valid(original: str, augmented: str) -> bool:
+
+    embedder = get_embedder()
+
+    emb = embedder.encode([original, augmented])
+
+    score = cosine_similarity([emb[0]], [emb[1]])[0][0]
+
+    return score >= SIMILARITY_THRESHOLD
+
+
+# ------------------------------------------------
+# Augmentation Operations
+# ------------------------------------------------
+
+AUGMENTATION_OPERATIONS: List[Tuple[Callable[[str], str], float]] = [
+
+    (synonym_replacement, 0.15),
+    (random_deletion, 0.10),
+    (random_swap, 0.10),
+    (sentence_shuffle, 0.10),
+
+    (contextual_replacement, 0.15),
+
+    (ideology_frame_shift, 0.10),
+    (propaganda_injection, 0.10),
+    (narrative_reframe, 0.10),
+
+    (emotion_amplify, 0.05),
+    (bias_injection, 0.05),
 ]
+
+
+def select_operation():
+
+    ops = [op for op, _ in AUGMENTATION_OPERATIONS]
+    weights = [w for _, w in AUGMENTATION_OPERATIONS]
+
+    return random.choices(ops, weights=weights, k=1)[0]
+
+
+# ------------------------------------------------
+# Core Augmentation
+# ------------------------------------------------
 
 
 def augment_text(text: str) -> str:
@@ -180,69 +344,60 @@ def augment_text(text: str) -> str:
     text = str(text).strip()
 
     if not text:
-        return ""
+        return text
 
-    operation = random.choice(AUGMENTATION_OPERATIONS)
+    op = select_operation()
 
-    return operation(text)
+    augmented = op(text)
 
+    if semantic_valid(text, augmented):
+        return augmented
 
-# ------------------------------------------------
-# Row-Level Augmentation
-# ------------------------------------------------
-
-def _augment_row(row, text_column):
-
-    text = str(row[text_column])
-
-    new_row = row.copy()
-
-    new_row[text_column] = augment_text(text)
-
-    return new_row
+    return text
 
 
 # ------------------------------------------------
 # Dataset Augmentation
 # ------------------------------------------------
 
+
 def augment_dataset(
     df: pd.DataFrame,
     text_column: str = "text",
-    multiplier: int = 2,
+    multiplier: float = 1.5,
 ) -> pd.DataFrame:
 
-    ensure_dataframe(df, name="df", required_columns=[text_column], min_rows=1)
-
-    ensure_non_empty_text_column(df, text_column, name="df")
-
-    ensure_positive_int(multiplier, name="multiplier", min_value=1)
+    ensure_dataframe(df, name="df", required_columns=[text_column])
+    ensure_non_empty_text_column(df, text_column)
 
     if multiplier <= 1:
-
-        logger.info("Multiplier <=1, returning original dataset")
-
         return df.copy()
-
-    augmented_rows = []
 
     records = df.to_dict("records")
 
-    for row in records:
+    extra = int(len(records) * (multiplier - 1))
 
-        for _ in range(multiplier - 1):
+    augmented = []
 
-            augmented_rows.append(_augment_row(row, text_column))
+    for _ in range(extra):
+
+        row = random.choice(records)
+
+        new_row = row.copy()
+
+        new_row[text_column] = augment_text(row[text_column])
+
+        augmented.append(new_row)
 
     augmented_df = pd.concat(
-        [df, pd.DataFrame(augmented_rows)],
+        [df, pd.DataFrame(augmented)],
         ignore_index=True,
     )
 
     logger.info(
-        "Dataset augmentation complete | original=%d augmented=%d total=%d",
+        "Augmentation finished | original=%d augmented=%d total=%d",
         len(df),
-        len(augmented_rows),
+        len(augmented),
         len(augmented_df),
     )
 
@@ -253,24 +408,34 @@ def augment_dataset(
 # Parallel Augmentation
 # ------------------------------------------------
 
+
+def _augment_row(row, text_column):
+
+    new_row = row.copy()
+
+    new_row[text_column] = augment_text(row[text_column])
+
+    return new_row
+
+
 def augment_dataset_parallel(
     df: pd.DataFrame,
-    text_column: str = "text",
-    multiplier: int = 2,
-    workers: int = 4,
-) -> pd.DataFrame:
+    text_column="text",
+    multiplier=1.5,
+    workers=4,
+):
 
-    ensure_dataframe(df, name="df", required_columns=[text_column], min_rows=1)
+    ensure_dataframe(df, name="df", required_columns=[text_column])
 
     records = df.to_dict("records")
 
+    extra = int(len(records) * (multiplier - 1))
+
     tasks = []
 
-    for row in records:
+    for _ in range(extra):
 
-        for _ in range(multiplier - 1):
-
-            tasks.append((row, text_column))
+        tasks.append((random.choice(records), text_column))
 
     with Pool(workers) as pool:
 
@@ -279,11 +444,6 @@ def augment_dataset_parallel(
     augmented_df = pd.concat(
         [df, pd.DataFrame(augmented_rows)],
         ignore_index=True,
-    )
-
-    logger.info(
-        "Parallel augmentation complete | total=%d",
-        len(augmented_df),
     )
 
     return augmented_df

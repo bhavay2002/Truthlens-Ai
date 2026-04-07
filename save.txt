@@ -38,6 +38,23 @@ emotion_18
 emotion_19
 dataset
 
+Token Statistics
+-----------------------
+Max tokens: 864
+Min tokens: 4
+Average tokens: 213.86
+Median tokens: 151.0
+
+Token Length Distribution
+-----------------------
+0-64       :  14886 samples (45.30%)
+65-128     :   1347 samples (4.10%)
+129-256    :    876 samples (2.67%)
+257-384    :   3932 samples (11.97%)
+385-512    :  11773 samples (35.83%)
+513-768    :     45 samples (0.14%)
+769-1024   :      1 samples (0.00%)
+
 Emotion	ID removed
 desire	8
 fear	14
