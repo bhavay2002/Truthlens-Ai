@@ -34,10 +34,6 @@ from typing import Dict, Any, Optional
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
-from src.models.registry.model_factory import ModelFactory
-from src.models.checkpointing.checkpoint_manager import CheckpointManager
-from src.models.checkpointing.artifact_manager import ArtifactManager
-
 logger = logging.getLogger(__name__)
 
 
@@ -145,6 +141,8 @@ class ModelLoader:
         # -------------------------------------------------
 
         try:
+            from src.models.registry.model_factory import ModelFactory
+            from src.models.checkpointing.checkpoint_manager import CheckpointManager
 
             with open(config_file, "r", encoding="utf-8") as f:
                 config_data = json.load(f)
@@ -185,6 +183,7 @@ class ModelLoader:
             return {}
 
         try:
+            from src.models.checkpointing.artifact_manager import ArtifactManager
             artifact_manager = ArtifactManager(checkpoint_bundle_dir)
             return artifact_manager.load_metadata()
         except FileNotFoundError:
