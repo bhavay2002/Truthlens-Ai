@@ -155,6 +155,14 @@ class _HFExportWrapper(nn.Module):
         return logits
 
 
+def _entity_to_binary(entity_field) -> int:
+    if entity_field is None:
+        return 0
+    if isinstance(entity_field, str) and entity_field.strip() == "":
+        return 0
+    return 1
+
+
 def _quant_backend() -> str:
     supported = list(torch.backends.quantized.supported_engines)
     if "fbgemm" in supported:
@@ -367,9 +375,26 @@ def train_model(
         test_dataset = test_dataset.map(combine_text)
 
         def build_multitask_labels(example):
-            hero = 1 if example["hero_entities"] not in ["", None, "nan"] else 0
-            villain = 1 if example["villain_entities"] not in ["", None, "nan"] else 0
-            victim = 1 if example["victim_entities"] not in ["", None, "nan"] else 0
+            hero_entity = _entity_to_binary(example.get("hero_entities"))
+            villain_entity = _entity_to_binary(example.get("villain_entities"))
+            victim_entity = _entity_to_binary(example.get("victim_entities"))
+
+            try:
+                hero_original = int(example.get("hero", 0) or 0)
+            except (TypeError, ValueError):
+                hero_original = 0
+            try:
+                villain_original = int(example.get("villain", 0) or 0)
+            except (TypeError, ValueError):
+                villain_original = 0
+            try:
+                victim_original = int(example.get("victim", 0) or 0)
+            except (TypeError, ValueError):
+                victim_original = 0
+
+            example["hero"] = max(hero_original, hero_entity)
+            example["villain"] = max(villain_original, villain_entity)
+            example["victim"] = max(victim_original, victim_entity)
 
             example["emotion_labels"] = [
                 example[f"emotion_{i}"] for i in range(20)
@@ -382,10 +407,6 @@ def train_model(
                 example["MO"],
                 example["RE"],
             ]
-
-            example["hero"] = hero
-            example["villain"] = villain
-            example["victim"] = victim
 
             return example
 

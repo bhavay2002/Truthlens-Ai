@@ -123,6 +123,18 @@ class TruthLensMultiTaskDataset(Dataset):
         except Exception:
             return default
 
+    def _entity_to_binary(self, entity_field) -> int:
+        if entity_field is None:
+            return 0
+        if isinstance(entity_field, str) and entity_field.strip() == "":
+            return 0
+        try:
+            if pd.isna(entity_field):
+                return 0
+        except Exception:
+            pass
+        return 1
+
     def __getitem__(self, idx):
 
         row = self.df.iloc[idx]
@@ -155,7 +167,20 @@ class TruthLensMultiTaskDataset(Dataset):
                 dtype=torch.long
             ),
             "narrative": torch.tensor(
-                [self._safe_float(row.get(c, 0)) for c in NARRATIVE_COLUMNS],
+                [
+                    float(max(
+                        self._safe_int(row.get("hero", 0)),
+                        self._entity_to_binary(row.get("hero_entities")),
+                    )),
+                    float(max(
+                        self._safe_int(row.get("villain", 0)),
+                        self._entity_to_binary(row.get("villain_entities")),
+                    )),
+                    float(max(
+                        self._safe_int(row.get("victim", 0)),
+                        self._entity_to_binary(row.get("victim_entities")),
+                    )),
+                ],
                 dtype=torch.float,
             ),
             "narrative_frame": torch.tensor(
@@ -169,6 +194,10 @@ class TruthLensMultiTaskDataset(Dataset):
         }
 
         item["labels"] = labels
+
+        item["hero_entities"] = str(row.get("hero_entities") or "")
+        item["villain_entities"] = str(row.get("villain_entities") or "")
+        item["victim_entities"] = str(row.get("victim_entities") or "")
 
         return item
 
