@@ -26,6 +26,7 @@ Outputs:
 
 from __future__ import annotations
 
+import inspect
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -104,7 +105,7 @@ class TrainingStep:
 
         with torch.cuda.amp.autocast(enabled=self.config.use_mixed_precision):
 
-            outputs = self.model(**batch)
+            outputs = self.model(**self._prepare_model_inputs(batch))
 
             loss = self._extract_loss(outputs)
 
@@ -190,3 +191,45 @@ class TrainingStep:
                 moved_batch[key] = value
 
         return moved_batch
+
+    def _prepare_model_inputs(self, batch: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Adapt a flat batch dict to the model's ``forward()`` signature.
+
+        Keys that appear in the ``forward()`` signature are passed directly.
+        All remaining keys (e.g. task-specific label fields such as
+        ``hero_entities`` or ``bias_label``) are collected into a ``labels``
+        dictionary forwarded under the ``labels`` kwarg when the model accepts
+        it.  Models that declare ``**kwargs`` receive the batch unchanged.
+        """
+
+        try:
+            sig = inspect.signature(self.model.forward)
+            accepted = set(sig.parameters.keys()) - {"self"}
+            has_var_keyword = any(
+                p.kind == inspect.Parameter.VAR_KEYWORD
+                for p in sig.parameters.values()
+            )
+        except (ValueError, TypeError):
+            return batch
+
+        if has_var_keyword:
+            return batch
+
+        forward_kwargs: Dict[str, Any] = {}
+        label_dict: Dict[str, Any] = {}
+
+        for key, value in batch.items():
+            if key in accepted:
+                forward_kwargs[key] = value
+            else:
+                label_dict[key] = value
+
+        if label_dict and "labels" in accepted:
+            existing = forward_kwargs.get("labels")
+            if isinstance(existing, dict):
+                existing.update(label_dict)
+            else:
+                forward_kwargs["labels"] = label_dict
+
+        return forward_kwargs
