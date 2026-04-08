@@ -25,15 +25,16 @@ Outputs:
     saved checkpoint files
     restored model/optimizer/scheduler states
 """
-
 from __future__ import annotations
 
 import json
 import logging
+import shutil
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import torch
+
 from src.models.export import (
     ONNXExportConfig,
     ONNXExporter,
@@ -43,27 +44,75 @@ from src.models.export import (
     TorchScriptExporter,
 )
 
-
 logger = logging.getLogger(__name__)
-
 
 CHECKPOINT_FILE = "checkpoint.pt"
 METADATA_FILE = "metadata.json"
 
+# GPU performance boost
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+
+
+# ---------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------
+
+def _ensure_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+
 
 def _quant_backend() -> str:
+
     supported = list(torch.backends.quantized.supported_engines)
+
     if "fbgemm" in supported:
         return "fbgemm"
+
     if "qnnpack" in supported:
         return "qnnpack"
+
     return supported[0] if supported else "qnnpack"
 
 
-def _ensure_dir(path: Path) -> None:
-    """Ensure directory exists."""
-    path.mkdir(parents=True, exist_ok=True)
+def _atomic_save(data: dict, path: Path) -> None:
+    """
+    Prevent corrupted checkpoints by using temp files.
+    """
+    tmp_path = path.with_suffix(".tmp")
 
+    torch.save(data, tmp_path)
+
+    tmp_path.replace(path)
+
+
+def _copy_to_drive(local_dir: Path, drive_dir: Optional[str | Path]) -> None:
+
+    if drive_dir is None:
+        return
+
+    drive_dir = Path(drive_dir)
+
+    try:
+
+        drive_dir.mkdir(parents=True, exist_ok=True)
+
+        dest = drive_dir / local_dir.name
+
+        if dest.exists():
+            shutil.rmtree(dest)
+
+        shutil.copytree(local_dir, dest)
+
+        logger.info("Checkpoint copied to Drive: %s", dest)
+
+    except Exception as exc:
+        logger.warning("Drive sync failed: %s", exc)
+
+
+# ---------------------------------------------------------
+# Save Checkpoint
+# ---------------------------------------------------------
 
 def save_checkpoint(
     model: torch.nn.Module,
@@ -77,12 +126,11 @@ def save_checkpoint(
     export_formats: Optional[list[str]] = None,
     export_model: Optional[torch.nn.Module] = None,
     export_example_input: Optional[torch.Tensor] = None,
+    drive_checkpoint_dir: Optional[str | Path] = None,
 ) -> Path:
-    """
-    Save model checkpoint.
-    """
 
     checkpoint_dir = Path(checkpoint_dir)
+
     _ensure_dir(checkpoint_dir)
 
     checkpoint_path = checkpoint_dir / CHECKPOINT_FILE
@@ -100,21 +148,26 @@ def save_checkpoint(
         try:
             checkpoint_data["scheduler_state_dict"] = scheduler.state_dict()
         except AttributeError:
-            logger.warning("Scheduler does not support state_dict().")
+            logger.warning("Scheduler has no state_dict()")
 
-    torch.save(checkpoint_data, checkpoint_path)
+    # atomic save
+    _atomic_save(checkpoint_data, checkpoint_path)
 
-    logger.info("Checkpoint saved: %s", checkpoint_path)
+    logger.info("Checkpoint saved locally: %s", checkpoint_path)
 
-    if metadata is not None:
+    # save metadata
+    if metadata:
+
         metadata_path = checkpoint_dir / METADATA_FILE
+
         with metadata_path.open("w", encoding="utf-8") as f:
-            json.dump(metadata, f, indent=4)
+            json.dump(metadata, f, indent=2)
 
-        logger.info("Checkpoint metadata saved: %s", metadata_path)
-
+    # export model formats
     if export_formats:
-        target_model = export_model if export_model is not None else model
+
+        target_model = export_model if export_model else model
+
         _export_artifacts(
             model=target_model,
             checkpoint_dir=checkpoint_dir,
@@ -122,8 +175,15 @@ def save_checkpoint(
             example_input=export_example_input,
         )
 
+    # copy to Google Drive
+    _copy_to_drive(checkpoint_dir, drive_checkpoint_dir)
+
     return checkpoint_path
 
+
+# ---------------------------------------------------------
+# Load Checkpoint
+# ---------------------------------------------------------
 
 def load_checkpoint(
     model: torch.nn.Module,
@@ -131,38 +191,39 @@ def load_checkpoint(
     checkpoint_dir: str | Path,
     optimizer: Optional[torch.optim.Optimizer] = None,
     scheduler: Optional[Any] = None,
-    map_location: str | torch.device | None = None,
+    map_location: Optional[str | torch.device] = None,
 ) -> Dict[str, Any]:
-    """
-    Load checkpoint and restore model state.
-    """
 
     checkpoint_dir = Path(checkpoint_dir)
+
     checkpoint_path = checkpoint_dir / CHECKPOINT_FILE
 
     if not checkpoint_path.exists():
-        candidate_dirs = list_checkpoints(checkpoint_dir)
-        if candidate_dirs:
-            checkpoint_path = candidate_dirs[-1] / CHECKPOINT_FILE
+
+        candidates = list_checkpoints(checkpoint_dir)
+
+        if candidates:
+            checkpoint_path = candidates[-1] / CHECKPOINT_FILE
 
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
-    checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=False)
+    checkpoint = torch.load(checkpoint_path, map_location=map_location)
 
     if "model_state_dict" not in checkpoint:
-        raise KeyError(f"Checkpoint missing required key 'model_state_dict': {checkpoint_path}")
+        raise KeyError("Checkpoint missing model_state_dict")
 
     model.load_state_dict(checkpoint["model_state_dict"])
 
-    if optimizer is not None and "optimizer_state_dict" in checkpoint:
+    if optimizer and "optimizer_state_dict" in checkpoint:
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
-    if scheduler is not None and "scheduler_state_dict" in checkpoint:
+    if scheduler and "scheduler_state_dict" in checkpoint:
+
         try:
             scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         except Exception:
-            logger.warning("Failed to restore scheduler state.")
+            logger.warning("Scheduler restore failed")
 
     logger.info("Checkpoint loaded: %s", checkpoint_path)
 
@@ -172,17 +233,18 @@ def load_checkpoint(
     }
 
 
+# ---------------------------------------------------------
+# Resume Training
+# ---------------------------------------------------------
+
 def resume_training(
     model: torch.nn.Module,
     *,
     checkpoint_dir: str | Path,
     optimizer: Optional[torch.optim.Optimizer] = None,
     scheduler: Optional[Any] = None,
-    map_location: str | torch.device | None = None,
+    map_location: Optional[str | torch.device] = None,
 ) -> Dict[str, Any]:
-    """
-    Resume training from checkpoint.
-    """
 
     state = load_checkpoint(
         model,
@@ -195,11 +257,7 @@ def resume_training(
     epoch = state.get("epoch") or 0
     step = state.get("step") or 0
 
-    logger.info(
-        "Resuming training from epoch=%s step=%s",
-        epoch,
-        step,
-    )
+    logger.info("Resuming training from epoch=%s step=%s", epoch, step)
 
     return {
         "start_epoch": epoch,
@@ -207,10 +265,11 @@ def resume_training(
     }
 
 
+# ---------------------------------------------------------
+# List Checkpoints
+# ---------------------------------------------------------
+
 def list_checkpoints(checkpoint_root: str | Path) -> list[Path]:
-    """
-    List available checkpoint directories.
-    """
 
     checkpoint_root = Path(checkpoint_root)
 
@@ -222,16 +281,23 @@ def list_checkpoints(checkpoint_root: str | Path) -> list[Path]:
         if p.is_dir() and (p / CHECKPOINT_FILE).exists()
     ]
 
-    def _sort_key(path: Path) -> tuple[int, str]:
-        # Prefer numeric ordering for HuggingFace-style checkpoint-<step> dirs.
-        if path.name.startswith("checkpoint-"):
-            suffix = path.name.split("-", 1)[-1]
+    def sort_key(p: Path):
+
+        if p.name.startswith("checkpoint-"):
+
+            suffix = p.name.split("-", 1)[-1]
+
             if suffix.isdigit():
-                return (int(suffix), path.name)
-        return (10**18, path.name)
+                return int(suffix)
 
-    return sorted(checkpoints, key=_sort_key)
+        return float("inf")
 
+    return sorted(checkpoints, key=sort_key)
+
+
+# ---------------------------------------------------------
+# Export Artifacts
+# ---------------------------------------------------------
 
 def _export_artifacts(
     *,
@@ -240,55 +306,63 @@ def _export_artifacts(
     export_formats: list[str],
     example_input: Optional[torch.Tensor],
 ) -> None:
+
     export_dir = checkpoint_dir / "exports"
+
     _ensure_dir(export_dir)
 
-    requested = {fmt.strip().lower() for fmt in export_formats}
+    requested = {fmt.lower() for fmt in export_formats}
 
-    if "torchscript" in requested:
-        if example_input is None:
-            logger.warning("Skipping TorchScript export: example_input not provided.")
-        else:
+    model.eval()
+
+    if "torchscript" in requested and example_input is not None:
+
+        try:
+
             exporter = TorchScriptExporter(
                 TorchScriptExportConfig(device="cpu", verify_export=False)
             )
-            try:
-                exporter.export(
-                    model=model,
-                    example_input=example_input.detach().cpu(),
-                    output_path=export_dir / "model.ts.pt",
-                )
-                logger.info("TorchScript export saved at %s", export_dir / "model.ts.pt")
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("TorchScript export failed: %s", exc)
 
-    if "onnx" in requested:
-        if example_input is None:
-            logger.warning("Skipping ONNX export: example_input not provided.")
-        else:
+            exporter.export(
+                model=model,
+                example_input=example_input.detach().cpu(),
+                output_path=export_dir / "model.ts.pt",
+            )
+
+        except Exception as exc:
+            logger.warning("TorchScript export failed: %s", exc)
+
+    if "onnx" in requested and example_input is not None:
+
+        try:
+
             exporter = ONNXExporter(
                 ONNXExportConfig(device="cpu", verify_export=False)
             )
-            try:
-                exporter.export(
-                    model=model,
-                    example_input=example_input.detach().cpu(),
-                    output_path=export_dir / "model.onnx",
-                )
-                logger.info("ONNX export saved at %s", export_dir / "model.onnx")
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("ONNX export failed: %s", exc)
+
+            exporter.export(
+                model=model,
+                example_input=example_input.detach().cpu(),
+                output_path=export_dir / "model.onnx",
+            )
+
+        except Exception as exc:
+            logger.warning("ONNX export failed: %s", exc)
 
     if "quantized" in requested:
-        engine = QuantizationEngine(
-            QuantizationConfig(method="dynamic", device="cpu", backend=_quant_backend())
-        )
+
         try:
-            quantized_model = engine.apply(model)
+
+            engine = QuantizationEngine(
+                QuantizationConfig(method="dynamic", device="cpu", backend=_quant_backend())
+            )
+
+            quant_model = engine.apply(model)
+
             torch.save(
-                quantized_model.state_dict(),
+                quant_model.state_dict(),
                 export_dir / "model.quantized.pt",
             )
-            logger.info("Quantized export saved at %s", export_dir / "model.quantized.pt")
-        except Exception as exc:  # noqa: BLE001
+
+        except Exception as exc:
             logger.warning("Quantized export failed: %s", exc)

@@ -78,9 +78,6 @@ class CheckpointManager:
         scheduler_state_dict: Optional[Dict[str, Any]] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Path:
-        """
-        Save model checkpoint.
-        """
 
         if step < 0:
             raise ValueError("step must be non-negative")
@@ -89,8 +86,9 @@ class CheckpointManager:
         checkpoint_path.mkdir(parents=True, exist_ok=True)
 
         checkpoint_file = checkpoint_path / "checkpoint.pt"
+        tmp_file = checkpoint_path / "checkpoint.tmp"
 
-        checkpoint_data = {
+        checkpoint_data: Dict[str, Any] = {
             "step": step,
             "model_state_dict": model_state_dict,
         }
@@ -106,13 +104,19 @@ class CheckpointManager:
 
         try:
 
-            torch.save(checkpoint_data, checkpoint_file)
+            # Atomic checkpoint write
+            torch.save(checkpoint_data, tmp_file)
+
+            tmp_file.replace(checkpoint_file)
 
             logger.info("Checkpoint saved: %s", checkpoint_file)
 
         except Exception as exc:
 
-            logger.exception("Failed to save checkpoint")
+            logger.exception("Failed to save checkpoint: %s", checkpoint_file)
+
+            if tmp_file.exists():
+                tmp_file.unlink(missing_ok=True)
 
             raise RuntimeError("Checkpoint saving failed") from exc
 
@@ -123,18 +127,13 @@ class CheckpointManager:
     # -------------------------------------------------
 
     def get_latest_checkpoint(self) -> Optional[Path]:
-        """
-        Return the most recent checkpoint directory.
-        """
 
         try:
 
             checkpoints = self.list_checkpoints()
 
             if not checkpoints:
-
                 logger.info("No checkpoints found")
-
                 return None
 
             latest = checkpoints[-1]
@@ -154,33 +153,33 @@ class CheckpointManager:
     # -------------------------------------------------
 
     def list_checkpoints(self) -> List[Path]:
-        """
-        Return all checkpoint directories sorted by step.
-        """
 
         checkpoint_pairs: List[tuple[int, Path]] = []
 
-        for checkpoint in self.checkpoint_dir.glob("checkpoint-*"):
+        for checkpoint in self.checkpoint_dir.iterdir():
+
+            if not checkpoint.is_dir():
+                continue
 
             step = self._checkpoint_step(checkpoint)
 
-            if step is not None and (checkpoint / "checkpoint.pt").exists():
+            if step is None:
+                continue
+
+            checkpoint_file = checkpoint / "checkpoint.pt"
+
+            if checkpoint_file.exists():
                 checkpoint_pairs.append((step, checkpoint))
 
         checkpoint_pairs.sort(key=lambda item: item[0])
 
-        checkpoints = [checkpoint for _, checkpoint in checkpoint_pairs]
-
-        return checkpoints
+        return [p for _, p in checkpoint_pairs]
 
     # -------------------------------------------------
     # Cleanup Old Checkpoints
     # -------------------------------------------------
 
     def cleanup_old_checkpoints(self, max_checkpoints: int = 3) -> None:
-        """
-        Remove old checkpoints beyond max_checkpoints limit.
-        """
 
         if max_checkpoints < 1:
             raise ValueError("max_checkpoints must be >= 1")
@@ -196,9 +195,13 @@ class CheckpointManager:
 
             for checkpoint in to_delete:
 
+                if checkpoint.parent != self.checkpoint_dir:
+                    logger.warning("Skipping unsafe checkpoint deletion: %s", checkpoint)
+                    continue
+
                 logger.info("Removing old checkpoint: %s", checkpoint)
 
-                shutil.rmtree(checkpoint, ignore_errors=False)
+                shutil.rmtree(checkpoint)
 
         except Exception as exc:
 
@@ -211,9 +214,6 @@ class CheckpointManager:
     # -------------------------------------------------
 
     def load_checkpoint(self, checkpoint_path: str | Path) -> Dict[str, Any]:
-        """
-        Load checkpoint file.
-        """
 
         checkpoint_path = Path(checkpoint_path)
 
@@ -224,7 +224,7 @@ class CheckpointManager:
 
         try:
 
-            checkpoint = torch.load(checkpoint_file, map_location="cpu", weights_only=False)
+            checkpoint = torch.load(checkpoint_file, map_location="cpu")
 
             logger.info("Checkpoint loaded: %s", checkpoint_file)
 
@@ -232,7 +232,7 @@ class CheckpointManager:
 
         except Exception as exc:
 
-            logger.exception("Failed to load checkpoint")
+            logger.exception("Failed to load checkpoint: %s", checkpoint_file)
 
             raise RuntimeError("Checkpoint loading failed") from exc
 
@@ -241,11 +241,7 @@ class CheckpointManager:
 # Convenience Helper
 # ---------------------------------------------------------
 
-
 def get_last_checkpoint(checkpoint_dir: str | Path) -> Optional[Path]:
-    """
-    Retrieve latest checkpoint path.
-    """
 
     manager = CheckpointManager(checkpoint_dir)
 

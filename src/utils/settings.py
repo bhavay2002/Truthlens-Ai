@@ -8,7 +8,6 @@ Central settings system for TruthLens AI.
 This module loads configuration from config.yaml and converts
 it into structured dataclasses used across the project.
 """
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -22,9 +21,8 @@ from src.utils.config_loader import (
     load_config,
 )
 
-
 # ---------------------------------------------------------
-# Model Settings
+# Dataclasses
 # ---------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -34,19 +32,11 @@ class ModelSettings:
     path: Path
 
 
-# ---------------------------------------------------------
-# Feature Settings
-# ---------------------------------------------------------
-
 @dataclass(frozen=True)
 class FeaturesSettings:
     tfidf_max_features: int
     tfidf_top_terms_per_doc: int
 
-
-# ---------------------------------------------------------
-# Data Settings
-# ---------------------------------------------------------
 
 @dataclass(frozen=True)
 class DataSettings:
@@ -57,10 +47,6 @@ class DataSettings:
     merged_dataset_path: Path
     test_set_path: Path
 
-
-# ---------------------------------------------------------
-# Paths Settings
-# ---------------------------------------------------------
 
 @dataclass(frozen=True)
 class PathsSettings:
@@ -74,10 +60,6 @@ class PathsSettings:
     tfidf_vectorizer_path: Path
 
 
-# ---------------------------------------------------------
-# API Settings
-# ---------------------------------------------------------
-
 @dataclass(frozen=True)
 class ApiSettings:
     title: str
@@ -86,20 +68,12 @@ class ApiSettings:
     text_preview_chars: int
 
 
-# ---------------------------------------------------------
-# Inference Settings
-# ---------------------------------------------------------
-
 @dataclass(frozen=True)
 class InferenceSettings:
     batch_size: int
     device: str
     allow_raw_text_fallback: bool
 
-
-# ---------------------------------------------------------
-# Training Settings
-# ---------------------------------------------------------
 
 @dataclass(frozen=True)
 class TrainingSettings:
@@ -125,10 +99,6 @@ class TrainingSettings:
     optuna_validation_split: float
 
 
-# ---------------------------------------------------------
-# Root Settings Object
-# ---------------------------------------------------------
-
 @dataclass(frozen=True)
 class AppSettings:
     model: ModelSettings
@@ -141,8 +111,13 @@ class AppSettings:
 
 
 # ---------------------------------------------------------
-# Helper
+# Helpers
 # ---------------------------------------------------------
+
+def _ensure_dir(path: Path):
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
 
 def _as_int_tuple(value: Any, fallback: tuple[int, ...]) -> tuple[int, ...]:
     if not isinstance(value, list) or not value:
@@ -150,12 +125,7 @@ def _as_int_tuple(value: Any, fallback: tuple[int, ...]) -> tuple[int, ...]:
     return tuple(int(v) for v in value)
 
 
-def _first_defined(
-    config: dict[str, Any],
-    key_paths: tuple[tuple[str, ...], ...],
-    default: Any,
-) -> Any:
-    """Return the first configured value across multiple key paths."""
+def _first_defined(config, key_paths, default):
     sentinel = object()
     for key_path in key_paths:
         value = get_config_value(config, *key_path, default=sentinel)
@@ -170,11 +140,10 @@ def _first_defined(
 
 @lru_cache(maxsize=1)
 def load_settings() -> AppSettings:
-    """
-    Load application settings from config.yaml.
-    """
 
     config = load_config()
+
+    # ---------------- MODEL ----------------
 
     model = ModelSettings(
         name=str(
@@ -197,13 +166,10 @@ def load_settings() -> AppSettings:
                 512,
             )
         ),
-        path=get_path(
-            config,
-            "model",
-            "path",
-            default="models/roberta_model",
-        ),
+        path=get_path(config, "model", "path", default="models/roberta_model"),
     )
+
+    # ---------------- FEATURES ----------------
 
     features = FeaturesSettings(
         tfidf_max_features=int(
@@ -228,21 +194,15 @@ def load_settings() -> AppSettings:
         ),
     )
 
+    # ---------------- DATA ----------------
+
     data = DataSettings(
-        raw_dir=get_path(config, "data", "raw_dir", default="data/raw"),
-        interim_dir=get_path(
-            config,
-            "data",
-            "interim_dir",
-            default="data/interim",
+        raw_dir=_ensure_dir(get_path(config, "data", "raw_dir", default="data/raw")),
+        interim_dir=_ensure_dir(
+            get_path(config, "data", "interim_dir", default="data/interim")
         ),
         augmentation_multiplier=float(
-            get_config_value(
-                config,
-                "data",
-                "augmentation_multiplier",
-                default=2,
-            )
+            get_config_value(config, "data", "augmentation_multiplier", default=2)
         ),
         cleaned_dataset_path=get_path(
             config,
@@ -264,292 +224,79 @@ def load_settings() -> AppSettings:
         ),
     )
 
+    # ---------------- PATHS ----------------
+
+    models_dir = _ensure_dir(get_path(config, "paths", "models_dir", default="models"))
+    logs_dir = _ensure_dir(get_path(config, "paths", "logs_dir", default="logs"))
+    reports_dir = _ensure_dir(get_path(config, "paths", "reports_dir", default="reports"))
+
     paths = PathsSettings(
-        models_dir=get_path(config, "paths", "models_dir", default="models"),
-        logs_dir=get_path(config, "paths", "logs_dir", default="logs"),
-        reports_dir=get_path(
-            config,
-            "paths",
-            "reports_dir",
-            default="reports",
-        ),
-        training_log_path=get_path(
-            config,
-            "paths",
-            "training_log_path",
-            default="logs/training.log",
-        ),
-        evaluation_results_path=get_path(
-            config,
-            "paths",
-            "evaluation_results_path",
-            default="reports/evaluation_results.json",
-        ),
-        confusion_matrix_path=get_path(
-            config,
-            "paths",
-            "confusion_matrix_path",
-            default="reports/confusion_matrix.png",
-        ),
-        cleaning_report_path=get_path(
-            config,
-            "paths",
-            "cleaning_report_path",
-            default="reports/data_cleaning_report.json",
-        ),
-        tfidf_vectorizer_path=get_path(
-            config,
-            "paths",
-            "tfidf_vectorizer_path",
-            default="models/tfidf_vectorizer.joblib",
-        ),
+        models_dir=models_dir,
+        logs_dir=logs_dir,
+        reports_dir=reports_dir,
+        training_log_path=logs_dir / "training.log",
+        evaluation_results_path=reports_dir / "evaluation_results.json",
+        confusion_matrix_path=reports_dir / "confusion_matrix.png",
+        cleaning_report_path=reports_dir / "data_cleaning_report.json",
+        tfidf_vectorizer_path=models_dir / "tfidf_vectorizer.joblib",
     )
 
-    run_cross_validation = bool(
-        _first_defined(
-            config,
-            (
-                ("training", "run_cross_validation"),
-                ("cross_validation", "enabled"),
-            ),
-            False,
-        )
-    )
-    cross_validation_splits = int(
-        _first_defined(
-            config,
-            (
-                ("training", "cross_validation_splits"),
-                ("cross_validation", "splits"),
-            ),
-            5,
-        )
-    )
-    cross_validation_metric = str(
-        _first_defined(
-            config,
-            (
-                ("training", "cross_validation_metric"),
-                ("cross_validation", "metric"),
-            ),
-            "eval_loss",
-        )
-    )
+    # ---------------- TRAINING ----------------
 
-    run_hyperparameter_tuning = bool(
-        _first_defined(
-            config,
-            (
-                ("training", "run_hyperparameter_tuning"),
-                ("hyperparameter_tuning", "enabled"),
-            ),
-            False,
-        )
-    )
-    optuna_trials = int(
-        _first_defined(
-            config,
-            (
-                ("training", "optuna_trials"),
-                ("hyperparameter_tuning", "trials"),
-            ),
-            10,
-        )
-    )
-    optuna_direction = str(
-        _first_defined(
-            config,
-            (
-                ("training", "optuna_direction"),
-                ("hyperparameter_tuning", "direction"),
-            ),
-            "minimize",
-        )
-    )
-    optuna_metric = str(
-        _first_defined(
-            config,
-            (
-                ("training", "optuna_metric"),
-                ("hyperparameter_tuning", "metric"),
-            ),
-            "eval_loss",
-        )
-    )
-    optuna_batch_sizes = _as_int_tuple(
-        _first_defined(
-            config,
-            (
-                ("training", "optuna_batch_sizes"),
-                ("hyperparameter_tuning", "batch_sizes"),
-            ),
-            [8, 16],
-        ),
-        (8, 16),
-    )
-    optuna_epoch_choices = _as_int_tuple(
-        _first_defined(
-            config,
-            (
-                ("training", "optuna_epoch_choices"),
-                ("hyperparameter_tuning", "epoch_choices"),
-            ),
-            [2, 3],
-        ),
-        (2, 3),
-    )
-    optuna_validation_split = float(
-        _first_defined(
-            config,
-            (
-                ("training", "optuna_validation_split"),
-                ("hyperparameter_tuning", "validation_split"),
-            ),
-            0.2,
-        )
-    )
+    validation_size = float(get_config_value(config, "training", "validation_size", default=0.15))
+    test_size = float(get_config_value(config, "training", "test_size", default=0.15))
 
-    sentinel = object()
-    optuna_lr_min = get_config_value(
-        config,
-        "training",
-        "optuna_learning_rate_min",
-        default=sentinel,
-    )
-    optuna_lr_max = get_config_value(
-        config,
-        "training",
-        "optuna_learning_rate_max",
-        default=sentinel,
-    )
-    if optuna_lr_min is sentinel or optuna_lr_max is sentinel:
-        optuna_lr_range = _first_defined(
-            config,
-            (
-                ("training", "optuna_learning_rate_range"),
-                ("hyperparameter_tuning", "learning_rate_range"),
-            ),
-            [1e-6, 5e-5],
-        )
-        if (
-            not isinstance(optuna_lr_range, list)
-            or len(optuna_lr_range) < 2
-        ):
-            optuna_lr_range = [1e-6, 5e-5]
-        if optuna_lr_min is sentinel:
-            optuna_lr_min = optuna_lr_range[0]
-        if optuna_lr_max is sentinel:
-            optuna_lr_max = optuna_lr_range[1]
+    if validation_size + test_size >= 1:
+        raise ValueError("validation_size + test_size must be < 1")
 
     training = TrainingSettings(
         seed=int(get_config_value(config, "training", "seed", default=42)),
         epochs=int(get_config_value(config, "training", "epochs", default=3)),
-        batch_size=int(
-            get_config_value(config, "training", "batch_size", default=8)
-        ),
-        learning_rate=float(
-            get_config_value(config, "training", "learning_rate", default=2e-5)
-        ),
+        batch_size=max(1, int(get_config_value(config, "training", "batch_size", default=8))),
+        learning_rate=float(get_config_value(config, "training", "learning_rate", default=2e-5)),
         resume_from_checkpoint=bool(
-            get_config_value(
-                config,
-                "training",
-                "resume_from_checkpoint",
-                default=False,
-            )
+            get_config_value(config, "training", "resume_from_checkpoint", default=False)
         ),
-        validation_size=float(
-            get_config_value(
-                config,
-                "training",
-                "validation_size",
-                default=0.15,
-            )
-        ),
-        test_size=float(
-            get_config_value(config, "training", "test_size", default=0.15)
-        ),
-        text_column=str(
-            get_config_value(
-                config,
-                "training",
-                "text_column",
-                default="engineered_text",
-            )
-        ),
-        run_cross_validation=run_cross_validation,
-        cross_validation_splits=cross_validation_splits,
-        cross_validation_metric=cross_validation_metric,
-        run_hyperparameter_tuning=run_hyperparameter_tuning,
-        optuna_trials=optuna_trials,
-        optuna_direction=optuna_direction,
-        optuna_metric=optuna_metric,
-        optuna_learning_rate_min=float(optuna_lr_min),
-        optuna_learning_rate_max=float(optuna_lr_max),
-        optuna_batch_sizes=optuna_batch_sizes,
-        optuna_epoch_choices=optuna_epoch_choices,
-        optuna_validation_split=optuna_validation_split,
+        validation_size=validation_size,
+        test_size=test_size,
+        text_column=str(get_config_value(config, "training", "text_column", default="text")),
+        run_cross_validation=False,
+        cross_validation_splits=5,
+        cross_validation_metric="eval_loss",
+        run_hyperparameter_tuning=False,
+        optuna_trials=10,
+        optuna_direction="minimize",
+        optuna_metric="eval_loss",
+        optuna_learning_rate_min=1e-6,
+        optuna_learning_rate_max=5e-5,
+        optuna_batch_sizes=(8, 16),
+        optuna_epoch_choices=(2, 3),
+        optuna_validation_split=0.2,
     )
 
+    # ---------------- API ----------------
+
     api = ApiSettings(
-        title=str(
-            get_config_value(
-                config,
-                "api",
-                "title",
-                default="TruthLens AI - Fake News Detection API",
-            )
-        ),
+        title=str(get_config_value(config, "api", "title", default="TruthLens API")),
         description=str(
             get_config_value(
                 config,
                 "api",
                 "description",
-                default="Detect fake news using RoBERTa-based NLP model",
+                default="Fake news detection using transformers",
             )
         ),
-        version=str(
-            get_config_value(
-                config,
-                "api",
-                "version",
-                default="1.0.0",
-            )
-        ),
-        text_preview_chars=int(
-            get_config_value(
-                config,
-                "api",
-                "text_preview_chars",
-                default=100,
-            )
-        ),
+        version=str(get_config_value(config, "api", "version", default="1.0")),
+        text_preview_chars=int(get_config_value(config, "api", "text_preview_chars", default=100)),
     )
 
+    # ---------------- INFERENCE ----------------
+
     inference = InferenceSettings(
-        batch_size=int(
-            get_config_value(
-                config,
-                "inference",
-                "batch_size",
-                default=16,
-            )
-        ),
-        device=str(
-            get_config_value(
-                config,
-                "inference",
-                "device",
-                default="auto",
-            )
-        ),
+        batch_size=max(1, int(get_config_value(config, "inference", "batch_size", default=16))),
+        device=str(get_config_value(config, "inference", "device", default="auto")),
         allow_raw_text_fallback=bool(
-            get_config_value(
-                config,
-                "inference",
-                "allow_raw_text_fallback",
-                default=True,
-            )
+            get_config_value(config, "inference", "allow_raw_text_fallback", default=True)
         ),
     )
 

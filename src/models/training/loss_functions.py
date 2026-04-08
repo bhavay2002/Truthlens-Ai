@@ -28,14 +28,15 @@ Inputs:
 Outputs:
     Computed loss tensor
 """
-
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
@@ -46,10 +47,16 @@ class LossConfig:
     Configuration describing a loss function.
     """
 
-    loss_type: str
+    loss_type: Literal[
+        "binary",
+        "multi_class",
+        "multi_label",
+        "regression",
+    ]
+
     weight: float = 1.0
     label_smoothing: float = 0.0
-    reduction: str = "mean"
+    reduction: Literal["mean", "sum", "none"] = "mean"
 
 
 class LossFactory:
@@ -66,9 +73,6 @@ class LossFactory:
 
     @staticmethod
     def create(config: LossConfig) -> nn.Module:
-        """
-        Create a PyTorch loss module from configuration.
-        """
 
         if config.loss_type not in LossFactory.SUPPORTED_LOSSES:
             raise ValueError(
@@ -76,36 +80,50 @@ class LossFactory:
                 f"Supported: {LossFactory.SUPPORTED_LOSSES}"
             )
 
-        if config.loss_type == "binary":
-            return nn.BCEWithLogitsLoss(reduction=config.reduction)
+        if config.reduction not in {"mean", "sum", "none"}:
+            raise ValueError("Invalid reduction value")
 
-        if config.loss_type == "multi_class":
-            return nn.CrossEntropyLoss(
+        if not 0.0 <= config.label_smoothing < 1.0:
+            raise ValueError("label_smoothing must be in [0,1)")
+
+        if config.loss_type == "binary":
+
+            base = nn.BCEWithLogitsLoss(reduction=config.reduction)
+
+        elif config.loss_type == "multi_class":
+
+            base = nn.CrossEntropyLoss(
                 label_smoothing=config.label_smoothing,
                 reduction=config.reduction,
             )
 
-        if config.loss_type == "multi_label":
-            return nn.BCEWithLogitsLoss(reduction=config.reduction)
+        elif config.loss_type == "multi_label":
 
-        if config.loss_type == "regression":
-            return nn.MSELoss(reduction=config.reduction)
+            base = nn.BCEWithLogitsLoss(reduction=config.reduction)
 
-        raise RuntimeError("Loss creation failed unexpectedly")
+        elif config.loss_type == "regression":
+
+            base = nn.MSELoss(reduction=config.reduction)
+
+        else:
+            raise RuntimeError("Unexpected loss type")
+
+        if config.weight != 1.0:
+            base = WeightedLossWrapper(base, config.weight)
+
+        return base
 
 
 class WeightedLossWrapper(nn.Module):
     """
-    Applies a scalar weight to an existing loss function.
-
-    Useful for balancing multi-task training objectives.
+    Applies scalar weight to a base loss function.
     """
 
     def __init__(self, base_loss: nn.Module, weight: float = 1.0) -> None:
         super().__init__()
 
         if not isinstance(base_loss, nn.Module):
-            raise TypeError("base_loss must be torch.nn.Module")
+            raise TypeError("base_loss must be nn.Module")
 
         if weight <= 0:
             raise ValueError("weight must be positive")
@@ -113,73 +131,74 @@ class WeightedLossWrapper(nn.Module):
         self.base_loss = base_loss
         self.weight = weight
 
-    def forward(
-        self,
-        logits: torch.Tensor,
-        targets: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Compute weighted loss.
-        """
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
 
         loss = self.base_loss(logits, targets)
 
         return loss * self.weight
 
 
+# ---------------------------------------------------------
+# Functional Helper Losses
+# ---------------------------------------------------------
+
 def binary_classification_loss(
     logits: torch.Tensor,
     targets: torch.Tensor,
 ) -> torch.Tensor:
-    """
-    Binary classification loss helper.
-    """
+
+    targets = targets.float()
 
     if targets.dim() == 1:
         targets = targets.unsqueeze(1)
 
-    loss_fn = nn.BCEWithLogitsLoss()
+    if logits.shape != targets.shape:
+        raise RuntimeError(
+            f"Binary loss shape mismatch: logits {logits.shape} vs targets {targets.shape}"
+        )
 
-    return loss_fn(logits, targets.float())
+    return F.binary_cross_entropy_with_logits(logits, targets)
 
 
 def multiclass_classification_loss(
     logits: torch.Tensor,
     targets: torch.Tensor,
 ) -> torch.Tensor:
-    """
-    Multi-class classification loss helper.
-    """
 
     if targets.dim() == 2:
         targets = targets.argmax(dim=1)
 
-    loss_fn = nn.CrossEntropyLoss()
+    if logits.dim() != 2:
+        raise RuntimeError("Multi-class logits must be 2D")
 
-    return loss_fn(logits, targets.long())
+    return F.cross_entropy(logits, targets.long())
 
 
 def multilabel_classification_loss(
     logits: torch.Tensor,
     targets: torch.Tensor,
 ) -> torch.Tensor:
-    """
-    Multi-label classification loss helper.
-    """
 
-    loss_fn = nn.BCEWithLogitsLoss()
+    targets = targets.float()
 
-    return loss_fn(logits, targets.float())
+    if logits.shape != targets.shape:
+        raise RuntimeError(
+            f"Multi-label shape mismatch: logits {logits.shape} vs targets {targets.shape}"
+        )
+
+    return F.binary_cross_entropy_with_logits(logits, targets)
 
 
 def regression_loss(
     predictions: torch.Tensor,
     targets: torch.Tensor,
 ) -> torch.Tensor:
-    """
-    Regression loss helper.
-    """
 
-    loss_fn = nn.MSELoss()
+    targets = targets.float()
 
-    return loss_fn(predictions, targets.float())
+    if predictions.shape != targets.shape:
+        raise RuntimeError(
+            f"Regression shape mismatch: predictions {predictions.shape} vs targets {targets.shape}"
+        )
+
+    return F.mse_loss(predictions, targets)

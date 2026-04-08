@@ -24,7 +24,6 @@ Inputs:
 Outputs:
     Persisted artifact files and loaded artifact objects
 """
-
 from __future__ import annotations
 
 import json
@@ -35,6 +34,7 @@ from typing import Any, Dict, Optional
 
 import torch
 import joblib
+
 from src.models.export import (
     ONNXExportConfig,
     ONNXExporter,
@@ -43,26 +43,42 @@ from src.models.export import (
     TorchScriptExportConfig,
     TorchScriptExporter,
 )
+
 from src.models.metadata.model_card import ModelCard
 from src.models.metadata.model_metadata import ModelMetadata
 from src.models.metadata.model_versioning import ModelVersionInfo, ModelVersionRegistry
 
+
 logger = logging.getLogger(__name__)
 
 
+# -------------------------------------------------
+# Quantization Backend Helper
+# -------------------------------------------------
+
 def _quant_backend() -> str:
     supported = list(torch.backends.quantized.supported_engines)
+
+    if not supported:
+        raise RuntimeError("No quantization backend available in this PyTorch build")
+
     if "fbgemm" in supported:
         return "fbgemm"
+
     if "qnnpack" in supported:
         return "qnnpack"
-    return supported[0] if supported else "qnnpack"
 
+    return supported[0]
+
+
+# -------------------------------------------------
+# Artifact Manager
+# -------------------------------------------------
 
 class ArtifactManager:
     """
-    Manages model artifacts including model weights, tokenizers,
-    vectorizers, and metadata.
+    Manages model artifacts including model weights,
+    tokenizers, vectorizers, and metadata.
     """
 
     def __init__(self, artifact_dir: str | Path) -> None:
@@ -78,9 +94,6 @@ class ArtifactManager:
         model_state_dict: Dict[str, Any],
         model_name: str = "model.pt",
     ) -> Path:
-        """
-        Save PyTorch model state dictionary.
-        """
 
         path = self.artifact_dir / model_name
 
@@ -88,7 +101,7 @@ class ArtifactManager:
             torch.save(model_state_dict, path)
             logger.info("Model artifact saved: %s", path)
         except Exception as exc:
-            logger.exception("Failed to save model artifact")
+            logger.exception("Failed to save model artifact: %s", path)
             raise RuntimeError("Model saving failed") from exc
 
         return path
@@ -98,17 +111,15 @@ class ArtifactManager:
         tokenizer: Any,
         directory_name: str = "tokenizer",
     ) -> Path:
-        """
-        Save HuggingFace tokenizer.
-        """
 
         path = self.artifact_dir / directory_name
+        path.mkdir(parents=True, exist_ok=True)
 
         try:
             tokenizer.save_pretrained(path)
             logger.info("Tokenizer saved: %s", path)
         except Exception as exc:
-            logger.exception("Failed to save tokenizer")
+            logger.exception("Failed to save tokenizer: %s", path)
             raise RuntimeError("Tokenizer saving failed") from exc
 
         return path
@@ -118,9 +129,6 @@ class ArtifactManager:
         vectorizer: Any,
         file_name: str = "vectorizer.joblib",
     ) -> Path:
-        """
-        Save vectorizer object using joblib.
-        """
 
         path = self.artifact_dir / file_name
 
@@ -128,7 +136,7 @@ class ArtifactManager:
             joblib.dump(vectorizer, path)
             logger.info("Vectorizer saved: %s", path)
         except Exception as exc:
-            logger.exception("Failed to save vectorizer")
+            logger.exception("Failed to save vectorizer: %s", path)
             raise RuntimeError("Vectorizer saving failed") from exc
 
         return path
@@ -136,23 +144,26 @@ class ArtifactManager:
     def save_metadata(
         self,
         metadata: Dict[str, Any],
-        file_name: str = "metadata.json",
+        file_name: str = "generic_metadata.json",
     ) -> Path:
-        """
-        Save artifact metadata.
-        """
 
         path = self.artifact_dir / file_name
 
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(metadata, f, indent=2)
+
             logger.info("Metadata saved: %s", path)
+
         except Exception as exc:
-            logger.exception("Failed to save metadata")
+            logger.exception("Failed to save metadata: %s", path)
             raise RuntimeError("Metadata saving failed") from exc
 
         return path
+
+    # -------------------------------------------------
+    # Export Methods
+    # -------------------------------------------------
 
     def export_onnx(
         self,
@@ -161,18 +172,22 @@ class ArtifactManager:
         file_name: str = "model.onnx",
         config: ONNXExportConfig | None = None,
     ) -> Path:
-        """
-        Export model artifact to ONNX format.
-        """
 
         path = self.artifact_dir / file_name
         exporter = ONNXExporter(config=config)
 
         try:
-            exporter.export(model=model, example_input=example_input, output_path=path)
+            model.eval()
+            exporter.export(
+                model=model,
+                example_input=example_input,
+                output_path=path
+            )
+
             logger.info("ONNX artifact exported: %s", path)
+
         except Exception as exc:
-            logger.exception("Failed to export ONNX artifact")
+            logger.exception("Failed to export ONNX artifact: %s", path)
             raise RuntimeError("ONNX export failed") from exc
 
         return path
@@ -184,18 +199,22 @@ class ArtifactManager:
         file_name: str = "model.ts.pt",
         config: TorchScriptExportConfig | None = None,
     ) -> Path:
-        """
-        Export model artifact to TorchScript format.
-        """
 
         path = self.artifact_dir / file_name
         exporter = TorchScriptExporter(config=config)
 
         try:
-            exporter.export(model=model, example_input=example_input, output_path=path)
+            model.eval()
+            exporter.export(
+                model=model,
+                example_input=example_input,
+                output_path=path
+            )
+
             logger.info("TorchScript artifact exported: %s", path)
+
         except Exception as exc:
-            logger.exception("Failed to export TorchScript artifact")
+            logger.exception("Failed to export TorchScript artifact: %s", path)
             raise RuntimeError("TorchScript export failed") from exc
 
         return path
@@ -206,25 +225,27 @@ class ArtifactManager:
         file_name: str = "model.quantized.pt",
         config: QuantizationConfig | None = None,
     ) -> Path:
-        """
-        Quantize model and save quantized state dict.
-        """
 
         path = self.artifact_dir / file_name
+
         if config is None:
             config = QuantizationConfig(
                 method="dynamic",
                 device="cpu",
                 backend=_quant_backend(),
             )
+
         engine = QuantizationEngine(config=config)
 
         try:
             quantized_model = engine.apply(model)
-            torch.save(quantized_model.state_dict(), path)
+
+            torch.save(quantized_model, path)
+
             logger.info("Quantized model artifact saved: %s", path)
+
         except Exception as exc:
-            logger.exception("Failed to export quantized model artifact")
+            logger.exception("Failed to export quantized model: %s", path)
             raise RuntimeError("Quantized export failed") from exc
 
         return path
@@ -238,9 +259,6 @@ class ArtifactManager:
         file_name: str = "model.pt",
         map_location: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """
-        Load PyTorch model state dictionary.
-        """
 
         path = self.artifact_dir / file_name
 
@@ -248,20 +266,20 @@ class ArtifactManager:
             raise FileNotFoundError(f"Model artifact not found: {path}")
 
         try:
-            model_state = torch.load(path, map_location=map_location, weights_only=True)
+            model_state = torch.load(path, map_location=map_location)
+
             logger.info("Model artifact loaded: %s", path)
+
             return model_state
+
         except Exception as exc:
-            logger.exception("Failed to load model artifact")
+            logger.exception("Failed to load model artifact: %s", path)
             raise RuntimeError("Model loading failed") from exc
 
     def load_vectorizer(
         self,
         file_name: str = "vectorizer.joblib",
     ) -> Any:
-        """
-        Load vectorizer artifact.
-        """
 
         path = self.artifact_dir / file_name
 
@@ -270,19 +288,19 @@ class ArtifactManager:
 
         try:
             vectorizer = joblib.load(path)
+
             logger.info("Vectorizer loaded: %s", path)
+
             return vectorizer
+
         except Exception as exc:
-            logger.exception("Failed to load vectorizer")
+            logger.exception("Failed to load vectorizer: %s", path)
             raise RuntimeError("Vectorizer loading failed") from exc
 
     def load_metadata(
         self,
-        file_name: str = "metadata.json",
+        file_name: str = "generic_metadata.json",
     ) -> Dict[str, Any]:
-        """
-        Load metadata artifact.
-        """
 
         path = self.artifact_dir / file_name
 
@@ -298,7 +316,7 @@ class ArtifactManager:
             return metadata
 
         except Exception as exc:
-            logger.exception("Failed to load metadata")
+            logger.exception("Failed to load metadata: %s", path)
             raise RuntimeError("Metadata loading failed") from exc
 
     # -------------------------------------------------
@@ -306,9 +324,6 @@ class ArtifactManager:
     # -------------------------------------------------
 
     def delete_artifact(self, name: str) -> None:
-        """
-        Delete a specific artifact.
-        """
 
         path = self.artifact_dir / name
 
@@ -316,6 +331,7 @@ class ArtifactManager:
             raise FileNotFoundError(f"Artifact not found: {path}")
 
         try:
+
             if path.is_dir():
                 shutil.rmtree(path)
             else:
@@ -324,23 +340,15 @@ class ArtifactManager:
             logger.info("Artifact deleted: %s", path)
 
         except Exception as exc:
-            logger.exception("Failed to delete artifact")
+            logger.exception("Failed to delete artifact: %s", path)
             raise RuntimeError("Artifact deletion failed") from exc
 
     def list_artifacts(self) -> Dict[str, Path]:
-        """
-        List all artifacts in the directory.
-        """
 
-        artifacts: Dict[str, Path] = {}
-
-        for item in self.artifact_dir.iterdir():
-            artifacts[item.name] = item
-
-        return artifacts
+        return {p.name: p for p in self.artifact_dir.iterdir()}
 
     # -------------------------------------------------
-    # ModelCard Methods
+    # Model Card
     # -------------------------------------------------
 
     def save_model_card(
@@ -349,30 +357,17 @@ class ArtifactManager:
         file_name: str = "model_card.json",
         markdown_file_name: str = "model_card.md",
     ) -> Path:
-        """
-        Serialize a ModelCard to JSON (and optionally Markdown) in the artifact directory.
-
-        Parameters
-        ----------
-        card : ModelCard
-        file_name : str
-            JSON output file name.
-        markdown_file_name : str
-            Markdown output file name.
-
-        Returns
-        -------
-        Path
-            Path to the saved JSON model card.
-        """
 
         json_path = self.artifact_dir / file_name
         md_path = self.artifact_dir / markdown_file_name
 
         try:
+
             card.save_json(json_path)
             card.save_markdown(md_path)
-            logger.info("ModelCard saved: %s, %s", json_path, md_path)
+
+            logger.info("ModelCard saved: %s , %s", json_path, md_path)
+
         except Exception as exc:
             logger.exception("Failed to save ModelCard")
             raise RuntimeError("ModelCard saving failed") from exc
@@ -380,20 +375,6 @@ class ArtifactManager:
         return json_path
 
     def load_model_card(self, file_name: str = "model_card.json") -> Dict[str, Any]:
-        """
-        Load a ModelCard from a JSON file in the artifact directory.
-
-        Parameters
-        ----------
-        file_name : str
-
-        Returns
-        -------
-        Dict[str, Any]
-            Raw model card dictionary.
-        """
-
-        import json as _json
 
         path = self.artifact_dir / file_name
 
@@ -401,58 +382,46 @@ class ArtifactManager:
             raise FileNotFoundError(f"ModelCard file not found: {path}")
 
         try:
+
             with open(path, "r", encoding="utf-8") as f:
-                card_dict = _json.load(f)
+                card_dict = json.load(f)
+
             logger.info("ModelCard loaded: %s", path)
+
             return card_dict
+
         except Exception as exc:
             logger.exception("Failed to load ModelCard")
             raise RuntimeError("ModelCard loading failed") from exc
 
     # -------------------------------------------------
-    # ModelMetadata Methods
+    # Model Metadata
     # -------------------------------------------------
 
     def save_model_metadata(
         self,
         metadata: ModelMetadata,
-        file_name: str = "metadata.json",
+        file_name: str = "model_metadata.json",
     ) -> Path:
-        """
-        Serialize a ModelMetadata object to JSON in the artifact directory.
-
-        Parameters
-        ----------
-        metadata : ModelMetadata
-        file_name : str
-
-        Returns
-        -------
-        Path
-        """
 
         path = self.artifact_dir / file_name
 
         try:
+
             saved = metadata.save_json(path)
+
             logger.info("ModelMetadata saved: %s", saved)
+
             return saved
+
         except Exception as exc:
             logger.exception("Failed to save ModelMetadata")
             raise RuntimeError("ModelMetadata saving failed") from exc
 
-    def load_model_metadata(self, file_name: str = "metadata.json") -> ModelMetadata:
-        """
-        Load a ModelMetadata object from a JSON file in the artifact directory.
-
-        Parameters
-        ----------
-        file_name : str
-
-        Returns
-        -------
-        ModelMetadata
-        """
+    def load_model_metadata(
+        self,
+        file_name: str = "model_metadata.json",
+    ) -> ModelMetadata:
 
         path = self.artifact_dir / file_name
 
@@ -460,15 +429,19 @@ class ArtifactManager:
             raise FileNotFoundError(f"ModelMetadata file not found: {path}")
 
         try:
+
             metadata = ModelMetadata.load_json(path)
+
             logger.info("ModelMetadata loaded: %s", path)
+
             return metadata
+
         except Exception as exc:
             logger.exception("Failed to load ModelMetadata")
             raise RuntimeError("ModelMetadata loading failed") from exc
 
     # -------------------------------------------------
-    # ModelVersionRegistry Methods
+    # Version Registry
     # -------------------------------------------------
 
     def register_model_version(
@@ -476,28 +449,23 @@ class ArtifactManager:
         version_info: ModelVersionInfo,
         registry_dir: Optional[str | Path] = None,
     ) -> Path:
-        """
-        Register a model version in the version registry.
-
-        Parameters
-        ----------
-        version_info : ModelVersionInfo
-        registry_dir : str | Path, optional
-            Directory for the version registry. Defaults to artifact_dir.
-
-        Returns
-        -------
-        Path
-            Path to the registered version directory.
-        """
 
         target_dir = Path(registry_dir) if registry_dir else self.artifact_dir
 
         try:
+
             registry = ModelVersionRegistry(target_dir)
+
             version_path = registry.register_version(version_info)
-            logger.info("Model version registered: %s -> %s", version_info.version, version_path)
+
+            logger.info(
+                "Model version registered: %s -> %s",
+                version_info.version,
+                version_path,
+            )
+
             return version_path
+
         except Exception as exc:
             logger.exception("Failed to register model version")
             raise RuntimeError("Model version registration failed") from exc
