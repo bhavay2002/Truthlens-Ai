@@ -156,7 +156,7 @@ def save_checkpoint(
     logger.info("Checkpoint saved locally: %s", checkpoint_path)
 
     # save metadata
-    if metadata:
+    if metadata is not None:
 
         metadata_path = checkpoint_dir / METADATA_FILE
 
@@ -215,10 +215,10 @@ def load_checkpoint(
 
     model.load_state_dict(checkpoint["model_state_dict"])
 
-    if optimizer and "optimizer_state_dict" in checkpoint:
+    if optimizer is not None and "optimizer_state_dict" in checkpoint:
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
-    if scheduler and "scheduler_state_dict" in checkpoint:
+    if scheduler is not None and "scheduler_state_dict" in checkpoint:
 
         try:
             scheduler.load_state_dict(checkpoint["scheduler_state_dict"])

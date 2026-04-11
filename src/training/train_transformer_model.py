@@ -46,6 +46,7 @@ Outputs:
 from __future__ import annotations
 
 import logging
+import math
 import shutil
 from pathlib import Path
 from typing import Any, Tuple
@@ -82,9 +83,12 @@ torch.backends.cudnn.allow_tf32 = True
 torch.set_float32_matmul_precision("high")
 
 if torch.cuda.is_available():
-    torch.backends.cuda.enable_flash_sdp(True)
-    torch.backends.cuda.enable_mem_efficient_sdp(True)
-    torch.backends.cuda.enable_math_sdp(True)
+    if hasattr(torch.backends.cuda, "enable_flash_sdp"):
+        torch.backends.cuda.enable_flash_sdp(True)
+    if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+    if hasattr(torch.backends.cuda, "enable_math_sdp"):
+        torch.backends.cuda.enable_math_sdp(True)
 
 # -------------------------------------------------------
 # SETTINGS
@@ -107,20 +111,18 @@ DEFAULT_TEST_SIZE = SETTINGS.training.test_size
 # PATHS
 # -------------------------------------------------------
 
-LOCAL_MODELS_DIR = Path("/content/models_local")
-LOCAL_MODELS_DIR.mkdir(parents=True, exist_ok=True)
+MODELS_DIR = SETTINGS.paths.models_dir
+LOGS_DIR = SETTINGS.paths.logs_dir
+GOOGLE_DRIVE_REPORTS_DIR = SETTINGS.paths.reports_dir
+GOOGLE_DRIVE_CHECKPOINTS_DIR = MODELS_DIR / "checkpoints"
+MODEL_PATH = SETTINGS.model.path
+TOKENIZED_DATASET_CACHE_DIR = MODELS_DIR / "tokenized_dataset"
 
-DRIVE_MODELS_DIR = Path("/content/drive/MyDrive/truthlens-models")
-DRIVE_MODELS_DIR.mkdir(parents=True, exist_ok=True)
-
-MODELS_DIR = LOCAL_MODELS_DIR
-
-TOKENIZED_DATASET_CACHE_DIR = Path("/content/tokenized_dataset")
-
-LOGS_DIR = Path("/content/drive/MyDrive/truthlens-logs")
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
-
-MODEL_PATH = LOCAL_MODELS_DIR / "final_model"
+GOOGLE_DRIVE_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+GOOGLE_DRIVE_CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
+MODEL_PATH.mkdir(parents=True, exist_ok=True)
 
 # -------------------------------------------------------
 # HELPERS
@@ -130,10 +132,11 @@ def _sync_models_to_drive():
 
     try:
 
-        if DRIVE_MODELS_DIR.exists():
-            shutil.rmtree(DRIVE_MODELS_DIR)
+        if GOOGLE_DRIVE_CHECKPOINTS_DIR.exists() and GOOGLE_DRIVE_CHECKPOINTS_DIR != MODELS_DIR:
+            shutil.rmtree(GOOGLE_DRIVE_CHECKPOINTS_DIR)
 
-        shutil.copytree(LOCAL_MODELS_DIR, DRIVE_MODELS_DIR)
+        if GOOGLE_DRIVE_CHECKPOINTS_DIR != MODELS_DIR:
+            shutil.copytree(MODELS_DIR, GOOGLE_DRIVE_CHECKPOINTS_DIR)
 
         logger.info("Models synced to Google Drive")
 
@@ -191,27 +194,102 @@ def _to_hf_dataset(df: pd.DataFrame) -> Dataset:
     return dataset
 
 
-def _split_train_val_test(df, label_column="label"):
+def _validate_split_df(
+    df: pd.DataFrame,
+    df_name: str,
+    text_column: str,
+    label_column: str = "label",
+) -> None:
+
+    ensure_dataframe(
+        df,
+        name=df_name,
+        required_columns=[text_column, label_column],
+        min_rows=2,
+    )
+    ensure_non_empty_text_column(df, text_column)
+
+
+def _should_stratify(df: pd.DataFrame, label_column: str) -> bool:
+
+    label_counts = df[label_column].value_counts(dropna=False)
+
+    return len(label_counts) > 1 and bool((label_counts >= 2).all())
+
+
+def _split_train_val_test(df: pd.DataFrame, label_column: str = "label"):
+
+    _validate_split_df(df, "df", text_column="text", label_column=label_column)
 
     holdout_size = DEFAULT_VALIDATION_SIZE + DEFAULT_TEST_SIZE
+    if not 0 < holdout_size < 1:
+        raise ValueError("validation_size + test_size must be in (0, 1)")
+
+    stratify_values = df[label_column] if _should_stratify(df, label_column) else None
 
     train_df, holdout_df = train_test_split(
         df,
         test_size=holdout_size,
         random_state=SEED,
-        stratify=df[label_column],
+        stratify=stratify_values,
     )
 
     val_fraction = DEFAULT_VALIDATION_SIZE / holdout_size
+
+    holdout_stratify = (
+        holdout_df[label_column]
+        if _should_stratify(holdout_df, label_column)
+        else None
+    )
 
     val_df, test_df = train_test_split(
         holdout_df,
         test_size=(1.0 - val_fraction),
         random_state=SEED,
-        stratify=holdout_df[label_column],
+        stratify=holdout_stratify,
     )
 
     return train_df.reset_index(drop=True), val_df.reset_index(drop=True), test_df.reset_index(drop=True)
+
+
+def tokenize_function(
+    example: dict[str, Any],
+    tokenizer: AutoTokenizer,
+    text_column: str = "text",
+    max_length: int = MAX_LENGTH,
+) -> dict[str, Any]:
+
+    return tokenizer(
+        example[text_column],
+        truncation=True,
+        padding=False,
+        max_length=max_length,
+    )
+
+
+def _compute_checkpoint_save_steps(
+    train_examples: int,
+    batch_size: int,
+    gradient_accumulation_steps: int,
+    epochs: int,
+) -> int:
+
+    if train_examples <= 0:
+        raise ValueError("train_examples must be > 0")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be > 0")
+    if gradient_accumulation_steps <= 0:
+        raise ValueError("gradient_accumulation_steps must be > 0")
+    if epochs <= 0:
+        raise ValueError("epochs must be > 0")
+
+    forward_steps_per_epoch = math.ceil(train_examples / batch_size)
+    optimizer_steps_per_epoch = math.ceil(
+        forward_steps_per_epoch / gradient_accumulation_steps
+    )
+    total_optimizer_steps = optimizer_steps_per_epoch * epochs
+
+    return max(1, math.ceil(total_optimizer_steps * 0.1))
 
 
 def get_last_checkpoint(directory: Path):
@@ -238,10 +316,9 @@ def train_model(
 
     logger.info("Starting TruthLens training")
 
-    ensure_dataframe(df, name="df", required_columns=[text_column, label_column], min_rows=2)
-    ensure_non_empty_text_column(df, text_column)
+    _validate_split_df(df, "df", text_column=text_column, label_column=label_column)
 
-    train_df, val_df, test_df = _split_train_val_test(df)
+    train_df, val_df, test_df = _split_train_val_test(df, label_column=label_column)
 
     set_seed(SEED)
 
@@ -257,15 +334,6 @@ def train_model(
     train_dataset = _to_hf_dataset(train_df)
     val_dataset = _to_hf_dataset(val_df)
     test_dataset = _to_hf_dataset(test_df)
-
-    def tokenize(example):
-
-        return tokenizer(
-            example[text_column],
-            truncation=True,
-            padding=False,
-            max_length=MAX_LENGTH,
-        )
 
     def compute_length(example):
         return {"length": len(example["input_ids"])}
@@ -284,11 +352,31 @@ def train_model(
 
     else:
 
-        train_dataset = train_dataset.map(tokenize, batched=True, num_proc=2)
-        val_dataset = val_dataset.map(tokenize, batched=True, num_proc=2)
+        map_num_proc = 1
 
-        train_dataset = train_dataset.map(compute_length, num_proc=2)
-        val_dataset = val_dataset.map(compute_length, num_proc=2)
+        train_dataset = train_dataset.map(
+            lambda ex: tokenize_function(
+                ex,
+                tokenizer=tokenizer,
+                text_column=text_column,
+                max_length=MAX_LENGTH,
+            ),
+            batched=True,
+            num_proc=map_num_proc,
+        )
+        val_dataset = val_dataset.map(
+            lambda ex: tokenize_function(
+                ex,
+                tokenizer=tokenizer,
+                text_column=text_column,
+                max_length=MAX_LENGTH,
+            ),
+            batched=True,
+            num_proc=map_num_proc,
+        )
+
+        train_dataset = train_dataset.map(compute_length, num_proc=map_num_proc)
+        val_dataset = val_dataset.map(compute_length, num_proc=map_num_proc)
 
         cache_train_dir.parent.mkdir(parents=True, exist_ok=True)
 
@@ -308,6 +396,13 @@ def train_model(
         except Exception as exc:
             logger.warning("torch.compile skipped: %s", exc)
 
+    save_steps = _compute_checkpoint_save_steps(
+        train_examples=len(train_df),
+        batch_size=batch_size,
+        gradient_accumulation_steps=1,
+        epochs=epochs,
+    )
+
     training_args = TrainingArguments(
 
         output_dir=str(MODELS_DIR),
@@ -323,11 +418,11 @@ def train_model(
         logging_steps=200,
 
         save_strategy="steps",
-        save_steps=200,
+        save_steps=save_steps,
         save_total_limit=3,
 
         evaluation_strategy="steps",
-        eval_steps=200,
+        eval_steps=save_steps,
 
         load_best_model_at_end=True,
 

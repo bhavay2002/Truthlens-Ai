@@ -158,10 +158,18 @@ class ModelLoader:
 
             if checkpoint_file.exists():
 
-                state_dict = torch.load(
+                checkpoint_payload = torch.load(
                     checkpoint_file,
                     map_location=self.device,
                 )
+
+                if (
+                    isinstance(checkpoint_payload, dict)
+                    and "model_state_dict" in checkpoint_payload
+                ):
+                    state_dict = checkpoint_payload["model_state_dict"]
+                else:
+                    state_dict = checkpoint_payload
 
                 model.load_state_dict(state_dict)
 
@@ -213,7 +221,7 @@ class ModelLoader:
 
         try:
 
-            from src.models.artifacts.artifact_manager import ArtifactManager
+            from src.models.checkpointing.artifact_manager import ArtifactManager
 
             artifact_manager = ArtifactManager(checkpoint_bundle_dir)
 
