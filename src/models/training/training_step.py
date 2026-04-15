@@ -39,22 +39,46 @@ from ..multitask.multitask_output import MultiTaskOutput
 
 logger = logging.getLogger(__name__)
 
-# GPU performance optimization
+# ---------------------------------------------------------
+# GPU PERFORMANCE SETTINGS
+# ---------------------------------------------------------
+
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
+torch.set_float32_matmul_precision("high")
 
+
+# ---------------------------------------------------------
+# UTIL
+# ---------------------------------------------------------
+
+def _get_autocast_dtype():
+    if torch.cuda.is_available():
+        if torch.cuda.is_bf16_supported():
+            return torch.bfloat16
+        return torch.float16
+    return torch.float32
+
+
+# ---------------------------------------------------------
+# CONFIG
+# ---------------------------------------------------------
 
 @dataclass
 class TrainingStepConfig:
 
     gradient_accumulation_steps: int = 1
     max_grad_norm: float = 1.0
-    use_mixed_precision: bool = False
+    use_mixed_precision: bool = True
     device: Optional[str] = None
     checkpoint_dir: Optional[str] = None
     checkpoint_every_steps: int = 0
     max_checkpoints: int = 3
 
+
+# ---------------------------------------------------------
+# STEP
+# ---------------------------------------------------------
 
 class TrainingStep:
 
@@ -80,12 +104,22 @@ class TrainingStep:
 
         self.model.to(self.device)
 
-        # Mixed precision safety
+        if hasattr(torch, "compile"):
+            try:
+                self.model = torch.compile(self.model)
+                logger.info("torch.compile enabled (TrainingStep)")
+            except Exception as e:
+                logger.warning(f"torch.compile failed: {e}")
+
+        # AMP setup
         self.use_amp = config.use_mixed_precision and torch.cuda.is_available()
+        self.autocast_dtype = _get_autocast_dtype()
 
-        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
+        self.scaler = torch.cuda.amp.GradScaler(
+            enabled=self.use_amp and self.autocast_dtype == torch.float16
+        )
 
-        # Cache forward signature
+        # Forward signature cache
         try:
             sig = inspect.signature(self.model.forward)
             self._forward_params = set(sig.parameters.keys()) - {"self"}
@@ -104,7 +138,6 @@ class TrainingStep:
 
         logger.info("TrainingStep initialized on device %s", self.device)
 
-    # ---------------------------------------------------------
 
     def __call__(
         self,
@@ -114,10 +147,13 @@ class TrainingStep:
 
         batch = self._move_batch_to_device(batch)
 
-        with torch.cuda.amp.autocast(enabled=self.use_amp):
+        with torch.autocast(
+            device_type="cuda",
+            dtype=self.autocast_dtype,
+            enabled=self.use_amp,
+        ):
 
             outputs = self.model(**self._prepare_model_inputs(batch))
-
             raw_loss = self._extract_loss(outputs)
 
             loss = raw_loss / self.config.gradient_accumulation_steps
@@ -126,10 +162,10 @@ class TrainingStep:
 
         if (step + 1) % self.config.gradient_accumulation_steps == 0:
 
+            # unscale before clipping (correct)
+            self.scaler.unscale_(self.optimizer)
+
             if self.config.max_grad_norm is not None:
-
-                self.scaler.unscale_(self.optimizer)
-
                 torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(),
                     self.config.max_grad_norm,
@@ -139,14 +175,15 @@ class TrainingStep:
             self.scaler.update()
 
             if self.scheduler is not None:
-
                 try:
                     self.scheduler.step()
                 except TypeError:
                     self.scheduler.step(raw_loss)
 
-            self.optimizer.zero_grad()
+            #  faster zero_grad
+            self.optimizer.zero_grad(set_to_none=True)
 
+            # checkpointing
             if (
                 self.checkpoint_manager
                 and self.config.checkpoint_every_steps > 0
@@ -169,7 +206,6 @@ class TrainingStep:
 
         return raw_loss.detach()
 
-    # ---------------------------------------------------------
 
     def _extract_loss(self, outputs: Any) -> torch.Tensor:
 
@@ -194,7 +230,6 @@ class TrainingStep:
 
         raise RuntimeError("Unable to extract loss from model output")
 
-    # ---------------------------------------------------------
 
     def _move_batch_to_device(self, batch):
 
@@ -206,13 +241,12 @@ class TrainingStep:
         for key, value in batch.items():
 
             if isinstance(value, torch.Tensor):
-                moved_batch[key] = value.to(self.device)
+                moved_batch[key] = value.to(self.device, non_blocking=True)
             else:
                 moved_batch[key] = value
 
         return moved_batch
 
-    # ---------------------------------------------------------
 
     def _prepare_model_inputs(self, batch: Dict[str, Any]):
 

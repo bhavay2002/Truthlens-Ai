@@ -42,11 +42,11 @@ Outputs:
     transformers.Trainer
     datasets.Dataset (test)
 """
-
 from __future__ import annotations
 
 import logging
 import math
+import os
 import shutil
 from pathlib import Path
 from typing import Any, Tuple
@@ -87,8 +87,6 @@ if torch.cuda.is_available():
         torch.backends.cuda.enable_flash_sdp(True)
     if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
         torch.backends.cuda.enable_mem_efficient_sdp(True)
-    if hasattr(torch.backends.cuda, "enable_math_sdp"):
-        torch.backends.cuda.enable_math_sdp(True)
 
 # -------------------------------------------------------
 # SETTINGS
@@ -113,66 +111,32 @@ DEFAULT_TEST_SIZE = SETTINGS.training.test_size
 
 MODELS_DIR = SETTINGS.paths.models_dir
 LOGS_DIR = SETTINGS.paths.logs_dir
-GOOGLE_DRIVE_REPORTS_DIR = SETTINGS.paths.reports_dir
-GOOGLE_DRIVE_CHECKPOINTS_DIR = MODELS_DIR / "checkpoints"
 MODEL_PATH = SETTINGS.model.path
 TOKENIZED_DATASET_CACHE_DIR = MODELS_DIR / "tokenized_dataset"
 
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
-GOOGLE_DRIVE_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-GOOGLE_DRIVE_CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
 MODEL_PATH.mkdir(parents=True, exist_ok=True)
 
 # -------------------------------------------------------
 # HELPERS
 # -------------------------------------------------------
 
-def _sync_models_to_drive():
-
-    try:
-
-        if GOOGLE_DRIVE_CHECKPOINTS_DIR.exists() and GOOGLE_DRIVE_CHECKPOINTS_DIR != MODELS_DIR:
-            shutil.rmtree(GOOGLE_DRIVE_CHECKPOINTS_DIR)
-
-        if GOOGLE_DRIVE_CHECKPOINTS_DIR != MODELS_DIR:
-            shutil.copytree(MODELS_DIR, GOOGLE_DRIVE_CHECKPOINTS_DIR)
-
-        logger.info("Models synced to Google Drive")
-
-    except Exception as exc:
-
-        logger.warning("Drive sync failed: %s", exc)
-
-
 def compute_metrics(eval_pred: Tuple[np.ndarray, np.ndarray]):
 
     logits, labels = eval_pred
     preds = np.argmax(logits, axis=1)
 
-    unique_labels = np.unique(labels)
-    average = "binary" if len(unique_labels) <= 2 else "macro"
-
     precision, recall, f1, _ = precision_recall_fscore_support(
-        labels,
-        preds,
-        average=average,
-        zero_division=0,
+        labels, preds, average="binary", zero_division=0
     )
 
     acc = accuracy_score(labels, preds)
 
     try:
-
         probs = torch.softmax(torch.tensor(logits), dim=1).numpy()
-
-        if probs.shape[1] == 2:
-            roc_auc = roc_auc_score(labels, probs[:, 1])
-        else:
-            roc_auc = roc_auc_score(labels, probs, multi_class="ovr")
-
+        roc_auc = roc_auc_score(labels, probs[:, 1])
     except Exception:
-
         roc_auc = 0.0
 
     return {
@@ -185,118 +149,24 @@ def compute_metrics(eval_pred: Tuple[np.ndarray, np.ndarray]):
 
 
 def _to_hf_dataset(df: pd.DataFrame) -> Dataset:
-
     dataset = Dataset.from_pandas(df.reset_index(drop=True))
-
     if "__index_level_0__" in dataset.column_names:
         dataset = dataset.remove_columns(["__index_level_0__"])
-
     return dataset
 
 
-def _validate_split_df(
-    df: pd.DataFrame,
-    df_name: str,
-    text_column: str,
-    label_column: str = "label",
-) -> None:
-
-    ensure_dataframe(
-        df,
-        name=df_name,
-        required_columns=[text_column, label_column],
-        min_rows=2,
-    )
-    ensure_non_empty_text_column(df, text_column)
-
-
-def _should_stratify(df: pd.DataFrame, label_column: str) -> bool:
-
-    label_counts = df[label_column].value_counts(dropna=False)
-
-    return len(label_counts) > 1 and bool((label_counts >= 2).all())
-
-
-def _split_train_val_test(df: pd.DataFrame, label_column: str = "label"):
-
-    _validate_split_df(df, "df", text_column="text", label_column=label_column)
-
-    holdout_size = DEFAULT_VALIDATION_SIZE + DEFAULT_TEST_SIZE
-    if not 0 < holdout_size < 1:
-        raise ValueError("validation_size + test_size must be in (0, 1)")
-
-    stratify_values = df[label_column] if _should_stratify(df, label_column) else None
-
-    train_df, holdout_df = train_test_split(
-        df,
-        test_size=holdout_size,
-        random_state=SEED,
-        stratify=stratify_values,
-    )
-
-    val_fraction = DEFAULT_VALIDATION_SIZE / holdout_size
-
-    holdout_stratify = (
-        holdout_df[label_column]
-        if _should_stratify(holdout_df, label_column)
-        else None
-    )
-
-    val_df, test_df = train_test_split(
-        holdout_df,
-        test_size=(1.0 - val_fraction),
-        random_state=SEED,
-        stratify=holdout_stratify,
-    )
-
-    return train_df.reset_index(drop=True), val_df.reset_index(drop=True), test_df.reset_index(drop=True)
-
-
-def tokenize_function(
-    example: dict[str, Any],
-    tokenizer: AutoTokenizer,
-    text_column: str = "text",
-    max_length: int = MAX_LENGTH,
-) -> dict[str, Any]:
-
+def tokenize_function(example, tokenizer):
     return tokenizer(
-        example[text_column],
+        example["text"],
         truncation=True,
         padding=False,
-        max_length=max_length,
+        max_length=MAX_LENGTH,
     )
-
-
-def _compute_checkpoint_save_steps(
-    train_examples: int,
-    batch_size: int,
-    gradient_accumulation_steps: int,
-    epochs: int,
-) -> int:
-
-    if train_examples <= 0:
-        raise ValueError("train_examples must be > 0")
-    if batch_size <= 0:
-        raise ValueError("batch_size must be > 0")
-    if gradient_accumulation_steps <= 0:
-        raise ValueError("gradient_accumulation_steps must be > 0")
-    if epochs <= 0:
-        raise ValueError("epochs must be > 0")
-
-    forward_steps_per_epoch = math.ceil(train_examples / batch_size)
-    optimizer_steps_per_epoch = math.ceil(
-        forward_steps_per_epoch / gradient_accumulation_steps
-    )
-    total_optimizer_steps = optimizer_steps_per_epoch * epochs
-
-    return max(1, math.ceil(total_optimizer_steps * 0.1))
 
 
 def get_last_checkpoint(directory: Path):
-
     if not directory.exists():
         return None
-
     try:
         return hf_get_last_checkpoint(str(directory))
     except Exception:
@@ -307,101 +177,55 @@ def get_last_checkpoint(directory: Path):
 # TRAINING
 # -------------------------------------------------------
 
-def train_model(
-    df: pd.DataFrame,
-    params: dict[str, Any] | None = None,
-    text_column="text",
-    label_column="label",
-):
-
-    logger.info("Starting TruthLens training")
-
-    _validate_split_df(df, "df", text_column=text_column, label_column=label_column)
-
-    train_df, val_df, test_df = _split_train_val_test(df, label_column=label_column)
+def train_model(df: pd.DataFrame, params: dict[str, Any] | None = None):
 
     set_seed(SEED)
-
     params = params or {}
 
     learning_rate = float(params.get("learning_rate", DEFAULT_LEARNING_RATE))
     batch_size = int(params.get("batch_size", DEFAULT_BATCH_SIZE))
     epochs = int(params.get("epochs", DEFAULT_EPOCHS))
 
+    train_df, val_df, test_df = train_test_split(df, test_size=0.2, random_state=SEED)
+
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
+
+    data_collator = DataCollatorWithPadding(
+        tokenizer=tokenizer,
+        pad_to_multiple_of=8
+    )
 
     train_dataset = _to_hf_dataset(train_df)
     val_dataset = _to_hf_dataset(val_df)
-    test_dataset = _to_hf_dataset(test_df)
 
-    def compute_length(example):
-        return {"length": len(example["input_ids"])}
+    map_num_proc = min(4, os.cpu_count() or 1)
 
-    cache_train_dir = TOKENIZED_DATASET_CACHE_DIR / "train"
-    cache_val_dir = TOKENIZED_DATASET_CACHE_DIR / "val"
+    train_dataset = train_dataset.map(
+        lambda x: tokenize_function(x, tokenizer),
+        batched=True,
+        num_proc=map_num_proc,
+    )
+    val_dataset = val_dataset.map(
+        lambda x: tokenize_function(x, tokenizer),
+        batched=True,
+        num_proc=map_num_proc,
+    )
 
-    if (
-        cache_train_dir.exists()
-        and cache_val_dir.exists()
-        and (cache_train_dir / "dataset_info.json").exists()
-    ):
-
-        train_dataset = load_from_disk(str(cache_train_dir))
-        val_dataset = load_from_disk(str(cache_val_dir))
-
-    else:
-
-        map_num_proc = 1
-
-        train_dataset = train_dataset.map(
-            lambda ex: tokenize_function(
-                ex,
-                tokenizer=tokenizer,
-                text_column=text_column,
-                max_length=MAX_LENGTH,
-            ),
-            batched=True,
-            num_proc=map_num_proc,
-        )
-        val_dataset = val_dataset.map(
-            lambda ex: tokenize_function(
-                ex,
-                tokenizer=tokenizer,
-                text_column=text_column,
-                max_length=MAX_LENGTH,
-            ),
-            batched=True,
-            num_proc=map_num_proc,
-        )
-
-        train_dataset = train_dataset.map(compute_length, num_proc=map_num_proc)
-        val_dataset = val_dataset.map(compute_length, num_proc=map_num_proc)
-
-        cache_train_dir.parent.mkdir(parents=True, exist_ok=True)
-
-        train_dataset.save_to_disk(str(cache_train_dir))
-        val_dataset.save_to_disk(str(cache_val_dir))
+    train_dataset = train_dataset.map(lambda x: {"length": len(x["input_ids"])})
+    val_dataset = val_dataset.map(lambda x: {"length": len(x["input_ids"])})
 
     model = TruthLensMultiTaskModel(MODEL_NAME)
 
-    device = get_device()
+    model.gradient_checkpointing_enable()
 
+    device = get_device()
     model.to(device)
 
-    if torch.cuda.is_available() and torch.__version__.startswith("2"):
-
+    if torch.cuda.is_available():
         try:
-            model = torch.compile(model, mode="reduce-overhead")
-        except Exception as exc:
-            logger.warning("torch.compile skipped: %s", exc)
-
-    save_steps = _compute_checkpoint_save_steps(
-        train_examples=len(train_df),
-        batch_size=batch_size,
-        gradient_accumulation_steps=1,
-        epochs=epochs,
-    )
+            model = torch.compile(model, mode="max-autotune")
+        except Exception as e:
+            logger.warning(f"compile failed: {e}")
 
     training_args = TrainingArguments(
 
@@ -412,24 +236,27 @@ def train_model(
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=batch_size,
 
+        gradient_accumulation_steps=2,
+
         num_train_epochs=epochs,
 
         logging_dir=str(LOGS_DIR),
         logging_steps=200,
 
-        save_strategy="steps",
-        save_steps=save_steps,
-        save_total_limit=3,
-
-        evaluation_strategy="steps",
-        eval_steps=save_steps,
+        save_strategy="epoch",
+        evaluation_strategy="epoch",
 
         load_best_model_at_end=True,
 
-        fp16=torch.cuda.is_available(),
+        bf16=torch.cuda.is_available() and torch.cuda.is_bf16_supported(),
+        fp16=not torch.cuda.is_bf16_supported(),
 
-        dataloader_num_workers=2,
+        optim="adamw_torch_fused",
+
+        dataloader_num_workers=4,
         dataloader_pin_memory=True,
+        dataloader_prefetch_factor=2,
+        dataloader_persistent_workers=True,
 
         group_by_length=True,
         length_column_name="length",
@@ -439,32 +266,18 @@ def train_model(
     )
 
     trainer = Trainer(
-
         model=model,
-
         args=training_args,
-
         train_dataset=train_dataset,
-
         eval_dataset=val_dataset,
-
         data_collator=data_collator,
-
         compute_metrics=compute_metrics,
-
         callbacks=[EarlyStoppingCallback(early_stopping_patience=2)],
     )
 
-    last_checkpoint = get_last_checkpoint(MODELS_DIR)
-
-    trainer.train(resume_from_checkpoint=last_checkpoint)
+    trainer.train(resume_from_checkpoint=get_last_checkpoint(MODELS_DIR))
 
     trainer.save_model(str(MODEL_PATH))
-
     tokenizer.save_pretrained(str(MODEL_PATH))
 
-    _sync_models_to_drive()
-
-    logger.info("Training completed")
-
-    return trainer, test_dataset
+    return trainer, test_df

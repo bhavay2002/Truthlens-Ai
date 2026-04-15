@@ -33,35 +33,33 @@ import torch.nn as nn
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------
-# GPU PERFORMANCE OPTIMIZATION
+# GPU PERFORMANCE SETTINGS
 # ---------------------------------------------------------
 
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
+torch.set_float32_matmul_precision("high")
 
+
+# ---------------------------------------------------------
+# METRICS
+# ---------------------------------------------------------
 
 @dataclass
 class TrainingMetrics:
-    """
-    Container for tracking training metrics.
-    """
-
     losses: Dict[str, float] = field(default_factory=dict)
     step: int = 0
     epoch: int = 0
 
     def update(self, name: str, value: float) -> None:
-
         if not isinstance(name, str):
             raise TypeError("Metric name must be a string")
-
         if not isinstance(value, (float, int)):
             raise TypeError("Metric value must be numeric")
 
         self.losses[name] = float(value)
 
     def to_dict(self) -> Dict[str, float]:
-
         return dict(self.losses)
 
 
@@ -70,33 +68,37 @@ class TrainingMetrics:
 # ---------------------------------------------------------
 
 def get_device(device: Optional[str] = None) -> torch.device:
-
     if device:
         return torch.device(device)
 
     resolved = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
     logger.debug("Resolved training device: %s", resolved)
-
     return resolved
 
 
 def move_batch_to_device(
     batch: Any,
     device: torch.device,
+    non_blocking: bool = True,
 ) -> Any:
     """
-    Move tensors to device recursively.
+    Move tensors to device recursively (optimized for pinned memory).
     """
 
     if isinstance(batch, torch.Tensor):
-        return batch.to(device)
+        return batch.to(device, non_blocking=non_blocking)
 
     if isinstance(batch, dict):
-        return {k: move_batch_to_device(v, device) for k, v in batch.items()}
+        return {
+            k: move_batch_to_device(v, device, non_blocking)
+            for k, v in batch.items()
+        }
 
     if isinstance(batch, (list, tuple)):
-        return type(batch)(move_batch_to_device(v, device) for v in batch)
+        return type(batch)(
+            move_batch_to_device(v, device, non_blocking)
+            for v in batch
+        )
 
     return batch
 
@@ -109,9 +111,6 @@ def clip_gradients(
     parameters: Iterable[nn.Parameter],
     max_norm: Optional[float],
 ) -> float:
-    """
-    Clip gradients to stabilize training.
-    """
 
     if max_norm is None:
         return 0.0
@@ -120,16 +119,14 @@ def clip_gradients(
         raise ValueError("max_norm must be positive")
 
     total_norm = torch.nn.utils.clip_grad_norm_(parameters, max_norm)
-
     return float(total_norm)
 
 
-def zero_gradients(model: nn.Module) -> None:
+def zero_gradients(optimizer: torch.optim.Optimizer) -> None:
     """
-    Efficiently zero gradients.
+    Faster zero grad (preferred over model.zero_grad)
     """
-
-    model.zero_grad(set_to_none=True)
+    optimizer.zero_grad(set_to_none=True)
 
 
 # ---------------------------------------------------------
@@ -137,32 +134,19 @@ def zero_gradients(model: nn.Module) -> None:
 # ---------------------------------------------------------
 
 def compute_batch_size(batch: Any) -> int:
-    """
-    Infer batch size from batch structure.
-    """
 
     if isinstance(batch, torch.Tensor):
-
-        if batch.ndim == 0:
-            return 1
-
-        return batch.size(0)
+        return 1 if batch.ndim == 0 else batch.size(0)
 
     if isinstance(batch, dict):
-
         for value in batch.values():
-
             size = compute_batch_size(value)
-
             if size > 0:
                 return size
 
     if isinstance(batch, (list, tuple)):
-
         for value in batch:
-
             size = compute_batch_size(value)
-
             if size > 0:
                 return size
 
@@ -173,12 +157,7 @@ def compute_batch_size(batch: Any) -> int:
 # TENSOR UTILITIES
 # ---------------------------------------------------------
 
-def detach_tensor_dict(
-    tensor_dict: Any,
-) -> Any:
-    """
-    Detach tensors recursively for logging.
-    """
+def detach_tensor_dict(tensor_dict: Any) -> Any:
 
     if isinstance(tensor_dict, torch.Tensor):
         return tensor_dict.detach().cpu()
@@ -197,10 +176,8 @@ def detach_tensor_dict(
 # ---------------------------------------------------------
 
 def enable_model_eval(model: nn.Module) -> None:
-
     model.eval()
 
 
 def enable_model_train(model: nn.Module) -> None:
-
     model.train()

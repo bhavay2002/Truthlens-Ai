@@ -41,29 +41,28 @@ import torch.nn.functional as F
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------
+# Config
+# ---------------------------------------------------------
+
 @dataclass
 class LossConfig:
-    """
-    Configuration describing a loss function.
-    """
-
     loss_type: Literal[
         "binary",
         "multi_class",
         "multi_label",
         "regression",
     ]
-
     weight: float = 1.0
     label_smoothing: float = 0.0
     reduction: Literal["mean", "sum", "none"] = "mean"
 
 
-class LossFactory:
-    """
-    Factory responsible for creating loss functions.
-    """
+# ---------------------------------------------------------
+# Factory
+# ---------------------------------------------------------
 
+class LossFactory:
     SUPPORTED_LOSSES = {
         "binary",
         "multi_class",
@@ -87,22 +86,18 @@ class LossFactory:
             raise ValueError("label_smoothing must be in [0,1)")
 
         if config.loss_type == "binary":
-
             base = nn.BCEWithLogitsLoss(reduction=config.reduction)
 
         elif config.loss_type == "multi_class":
-
             base = nn.CrossEntropyLoss(
                 label_smoothing=config.label_smoothing,
                 reduction=config.reduction,
             )
 
         elif config.loss_type == "multi_label":
-
             base = nn.BCEWithLogitsLoss(reduction=config.reduction)
 
         elif config.loss_type == "regression":
-
             base = nn.MSELoss(reduction=config.reduction)
 
         else:
@@ -114,11 +109,11 @@ class LossFactory:
         return base
 
 
-class WeightedLossWrapper(nn.Module):
-    """
-    Applies scalar weight to a base loss function.
-    """
+# ---------------------------------------------------------
+# Wrapper
+# ---------------------------------------------------------
 
+class WeightedLossWrapper(nn.Module):
     def __init__(self, base_loss: nn.Module, weight: float = 1.0) -> None:
         super().__init__()
 
@@ -132,14 +127,12 @@ class WeightedLossWrapper(nn.Module):
         self.weight = weight
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-
-        loss = self.base_loss(logits, targets)
-
-        return loss * self.weight
+        # compile-friendly + avoids extra ops
+        return self.base_loss(logits, targets).mul(self.weight)
 
 
 # ---------------------------------------------------------
-# Functional Helper Losses
+# Functional Helper Losses (AMP-safe)
 # ---------------------------------------------------------
 
 def binary_classification_loss(
@@ -152,12 +145,16 @@ def binary_classification_loss(
     if targets.dim() == 1:
         targets = targets.unsqueeze(1)
 
-    if logits.shape != targets.shape:
-        raise RuntimeError(
-            f"Binary loss shape mismatch: logits {logits.shape} vs targets {targets.shape}"
-        )
+    if __debug__:
+        if logits.shape != targets.shape:
+            raise RuntimeError(
+                f"Binary loss shape mismatch: logits {logits.shape} vs targets {targets.shape}"
+            )
 
-    return F.binary_cross_entropy_with_logits(logits, targets)
+    return F.binary_cross_entropy_with_logits(
+        logits.float(),  # AMP safety
+        targets
+    )
 
 
 def multiclass_classification_loss(
@@ -168,10 +165,14 @@ def multiclass_classification_loss(
     if targets.dim() == 2:
         targets = targets.argmax(dim=1)
 
-    if logits.dim() != 2:
-        raise RuntimeError("Multi-class logits must be 2D")
+    if __debug__:
+        if logits.dim() != 2:
+            raise RuntimeError("Multi-class logits must be 2D")
 
-    return F.cross_entropy(logits, targets.long())
+    return F.cross_entropy(
+        logits.float(),  # AMP safety
+        targets.long()
+    )
 
 
 def multilabel_classification_loss(
@@ -181,12 +182,16 @@ def multilabel_classification_loss(
 
     targets = targets.float()
 
-    if logits.shape != targets.shape:
-        raise RuntimeError(
-            f"Multi-label shape mismatch: logits {logits.shape} vs targets {targets.shape}"
-        )
+    if __debug__:
+        if logits.shape != targets.shape:
+            raise RuntimeError(
+                f"Multi-label shape mismatch: logits {logits.shape} vs targets {targets.shape}"
+            )
 
-    return F.binary_cross_entropy_with_logits(logits, targets)
+    return F.binary_cross_entropy_with_logits(
+        logits.float(),  # AMP safety
+        targets
+    )
 
 
 def regression_loss(
@@ -196,9 +201,13 @@ def regression_loss(
 
     targets = targets.float()
 
-    if predictions.shape != targets.shape:
-        raise RuntimeError(
-            f"Regression shape mismatch: predictions {predictions.shape} vs targets {targets.shape}"
-        )
+    if __debug__:
+        if predictions.shape != targets.shape:
+            raise RuntimeError(
+                f"Regression shape mismatch: predictions {predictions.shape} vs targets {targets.shape}"
+            )
 
-    return F.mse_loss(predictions, targets)
+    return F.mse_loss(
+        predictions.float(),  # AMP safety
+        targets
+    )

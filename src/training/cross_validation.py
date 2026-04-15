@@ -32,6 +32,11 @@ Outputs:
 
 from __future__ import annotations
 
+import torch
+import gc
+import os
+from concurrent.futures import ThreadPoolExecutor
+
 import inspect
 import logging
 from typing import Any, Callable, Dict, List
@@ -54,6 +59,8 @@ from src.training.checkpointing import list_checkpoints
 
 logger = logging.getLogger(__name__)
 SETTINGS = load_settings()
+
+
 
 
 _UNIFIED_LABEL_CANDIDATES = (
@@ -209,7 +216,6 @@ def _run_feature_diagnostics(texts: list[str], label: str = "") -> None:
     except Exception as _diag_exc:
         logger.warning("Feature diagnostics skipped (non-fatal): %s", _diag_exc)
 
-
 def cross_validate_model(
     df: pd.DataFrame,
     train_function: Callable[..., tuple[Any, Any]],
@@ -221,10 +227,8 @@ def cross_validate_model(
     metric_name: str | None = None,
     random_state: int | None = None,
     checkpoint_root: str | None = None,
+    use_parallel: bool = False,  # 🔥 NEW
 ) -> Dict[str, Any]:
-    """
-    Run stratified cross-validation and return summary metrics.
-    """
 
     resolved_label_column = _resolve_label_column(df, label_column)
 
@@ -237,23 +241,7 @@ def cross_validate_model(
 
     working_df = df[df[resolved_label_column].notna()].reset_index(drop=True)
 
-    if working_df.empty:
-        raise ValueError(
-            f"No valid labels found in column '{resolved_label_column}'."
-        )
-
-    ensure_dataframe(
-        working_df,
-        name="working_df",
-        required_columns=[text_column, resolved_label_column],
-        min_rows=3,
-    )
-
-    ensure_non_empty_text_column(
-        working_df,
-        text_column,
-        name="working_df",
-    )
+    ensure_non_empty_text_column(working_df, text_column, name="working_df")
 
     effective_splits = (
         n_splits
@@ -261,35 +249,7 @@ def cross_validate_model(
         else SETTINGS.training.cross_validation_splits
     )
 
-    ensure_positive_int(
-        effective_splits,
-        name="n_splits",
-        min_value=2,
-    )
-
-    if working_df[resolved_label_column].nunique() < 2:
-        raise ValueError(
-            "Cross-validation requires at least two classes."
-        )
-
-    if len(working_df) < effective_splits:
-        raise ValueError(
-            "n_splits cannot exceed number of rows."
-        )
-
-    minimum_class_size = int(
-        working_df[resolved_label_column].value_counts().min()
-    )
-
-    if minimum_class_size < effective_splits:
-        raise ValueError(
-            "Each class must contain at least n_splits samples for "
-            "stratified cross-validation."
-        )
-
-    effective_metric = (
-        metric_name or SETTINGS.training.cross_validation_metric
-    )
+    effective_metric = metric_name or SETTINGS.training.cross_validation_metric
 
     effective_seed = (
         SETTINGS.training.seed if random_state is None else random_state
@@ -316,13 +276,9 @@ def cross_validate_model(
     fold_scores: List[float] = []
     fold_metrics = TrainingMetrics()
 
-    X = working_df[text_column]
-    y = working_df[resolved_label_column]
+    cache: Dict[Any, float] = {}
 
-    for fold, (train_idx, val_idx) in enumerate(
-        skf.split(X, y),
-        start=1,
-    ):
+    def run_fold(fold, train_idx, val_idx):
 
         fold_train_df = working_df.iloc[train_idx].reset_index(drop=True)
         fold_val_df = working_df.iloc[val_idx].reset_index(drop=True)
@@ -351,39 +307,53 @@ def cross_validate_model(
         if supports_test_df:
             train_kwargs["test_df"] = fold_val_df
 
-        train_result = train_function(
+        cache_key = (fold, tuple(sorted((params or {}).items())))
+        if cache_key in cache:
+            return cache[cache_key]
+
+        trainer, eval_dataset = train_function(
             fold_train_df,
             **train_kwargs,
         )
 
-        if (
-            not isinstance(train_result, tuple)
-            or len(train_result) != 2
-        ):
-            raise TypeError(
-                "train_function must return (trainer, eval_dataset)."
-            )
+        with torch.no_grad():  
+            metrics = trainer.evaluate(eval_dataset)
 
-        trainer, eval_dataset = train_result
+        score = _resolve_metric(metrics, effective_metric)
 
-        metrics = trainer.evaluate(eval_dataset)
-
-        score = _resolve_metric(
-            metrics,
-            effective_metric,
-        )
-
-        fold_scores.append(score)
-        fold_metrics.update(f"fold_{fold}", score)
-        fold_metrics.epoch = fold
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
 
         logger.info(
-            "CV fold %s/%s - %s: %.4f",
+            "[Fold %d/%d] %s=%.4f",
             fold,
             effective_splits,
             effective_metric,
             score,
         )
+
+        cache[cache_key] = score
+        return score
+
+    splits = list(skf.split(working_df[text_column], working_df[resolved_label_column]))
+
+    if use_parallel:
+        with ThreadPoolExecutor(max_workers=min(2, os.cpu_count() or 1)) as executor:
+            results = list(
+                executor.map(
+                    lambda x: run_fold(x[0] + 1, x[1][0], x[1][1]),
+                    enumerate(splits),
+                )
+            )
+        fold_scores.extend(results)
+    else:
+        for fold, (train_idx, val_idx) in enumerate(splits, start=1):
+            score = run_fold(fold, train_idx, val_idx)
+            fold_scores.append(score)
+
+    for i, score in enumerate(fold_scores, start=1):
+        fold_metrics.update(f"fold_{i}", score)
 
     mean_score = float(np.mean(fold_scores))
     std_score = float(np.std(fold_scores))
