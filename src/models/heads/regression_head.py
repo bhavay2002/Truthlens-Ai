@@ -91,31 +91,20 @@ class RegressionHead(nn.Module):
             )
 
         self.config = config
+        self.has_hidden_layer = config.hidden_dim is not None
         activation_cls = self.SUPPORTED_ACTIVATIONS[config.activation]
 
-        layers: list[nn.Module] = []
-
-        if config.hidden_dim is not None:
+        if self.has_hidden_layer:
             if config.hidden_dim <= 0:
                 raise ValueError("hidden_dim must be positive if provided")
 
-            layers.extend(
-                [
-                    nn.Linear(config.input_dim, config.hidden_dim),
-                    activation_cls(),
-                    nn.Dropout(config.dropout),
-                    nn.Linear(config.hidden_dim, config.output_dim),
-                ]
-            )
+            self.fc1 = nn.Linear(config.input_dim, config.hidden_dim)
+            self.activation = activation_cls()
+            self.dropout = nn.Dropout(config.dropout)
+            self.fc2 = nn.Linear(config.hidden_dim, config.output_dim)
         else:
-            layers.extend(
-                [
-                    nn.Dropout(config.dropout),
-                    nn.Linear(config.input_dim, config.output_dim),
-                ]
-            )
-
-        self.regressor = nn.Sequential(*layers)
+            self.dropout = nn.Dropout(config.dropout)
+            self.fc = nn.Linear(config.input_dim, config.output_dim)
 
         logger.info(
             "RegressionHead initialized | input_dim=%d | output_dim=%d",
@@ -143,7 +132,16 @@ class RegressionHead(nn.Module):
                 f"Expected features shape (batch_size, input_dim), got {features.shape}"
             )
 
-        outputs = self.regressor(features)
+        if not features.is_contiguous():
+            features = features.contiguous()
+
+        if self.has_hidden_layer:
+            x = self.activation(self.fc1(features))
+            x = self.dropout(x)
+            outputs = self.fc2(x)
+        else:
+            x = self.dropout(features)
+            outputs = self.fc(x)
 
         return outputs
 

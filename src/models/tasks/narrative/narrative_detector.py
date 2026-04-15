@@ -110,6 +110,9 @@ class NarrativeDetector(BaseModel):
             )
         )
 
+        if hasattr(self.encoder, "gradient_checkpointing_enable"):
+            self.encoder.gradient_checkpointing_enable()
+
         head_config = MultiLabelHeadConfig(
             input_dim=self.encoder.hidden_size,
             num_labels=self.NUM_LABELS,
@@ -151,6 +154,9 @@ class NarrativeDetector(BaseModel):
 
         pooled_output = encoder_outputs["pooled_output"]
 
+        if not pooled_output.is_contiguous():
+            pooled_output = pooled_output.contiguous()
+
         outputs = self.classifier_head(
             pooled_output,
             labels=labels,
@@ -169,6 +175,7 @@ class NarrativeDetector(BaseModel):
         threshold: Optional[float] = None,
     ) -> Dict[str, torch.Tensor]:
 
+        was_training = self.training
         self.eval()
 
         outputs = self.forward(
@@ -176,15 +183,12 @@ class NarrativeDetector(BaseModel):
             attention_mask=attention_mask,
         )
 
-        probabilities = outputs["probabilities"]
-
-        thresh = threshold if threshold else self.config.threshold
-
-        predictions = (probabilities >= thresh).int()
+        if was_training:
+            self.train()
 
         return {
-            "predictions": predictions,
-            "probabilities": probabilities,
+            "predictions": outputs["predictions"],
+            "probabilities": outputs["probabilities"],
             "labels": self.LABEL_MAPPING,
         }
 

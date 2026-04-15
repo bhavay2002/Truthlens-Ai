@@ -72,6 +72,7 @@ class TransformerEncoder(BaseModel):
         pooling: str = "cls",
         device: Optional[str] = None,
         freeze_encoder: bool = False,
+        gradient_checkpointing: bool = False,
     ) -> None:
         """
         Initialize pretrained transformer encoder.
@@ -85,6 +86,8 @@ class TransformerEncoder(BaseModel):
                 Target device ("cpu" or "cuda").
             freeze_encoder:
                 If True, encoder parameters are frozen.
+            gradient_checkpointing:
+                If True, enable gradient checkpointing when supported.
         """
 
         super().__init__()
@@ -112,6 +115,10 @@ class TransformerEncoder(BaseModel):
             ) from exc
 
         self.hidden_size: int = self.config.hidden_size
+        self.gradient_checkpointing_enabled: bool = False
+
+        if gradient_checkpointing:
+            self.gradient_checkpointing_enable()
 
         if freeze_encoder:
             self.freeze()
@@ -152,15 +159,30 @@ class TransformerEncoder(BaseModel):
         if attention_mask.shape != input_ids.shape:
             raise ValueError("attention_mask must match input_ids shape")
 
-        input_ids = input_ids.to(self.device)
-        attention_mask = attention_mask.to(self.device)
+        if input_ids.device != self.device:
+            input_ids = input_ids.to(self.device, non_blocking=True)
+
+        if attention_mask.device != self.device:
+            attention_mask = attention_mask.to(self.device, non_blocking=True)
 
         try:
-            outputs = self.encoder(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                return_dict=True,
+            encoder_is_frozen = not any(
+                parameter.requires_grad for parameter in self.encoder.parameters()
             )
+
+            if encoder_is_frozen:
+                with torch.no_grad():
+                    outputs = self.encoder(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        return_dict=True,
+                    )
+            else:
+                outputs = self.encoder(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    return_dict=True,
+                )
         except Exception as exc:
             logger.exception("Transformer forward pass failed")
             raise RuntimeError("Encoder forward pass failed") from exc
@@ -173,6 +195,22 @@ class TransformerEncoder(BaseModel):
             "sequence_output": sequence_output,
             "pooled_output": pooled_output,
         }
+
+    def gradient_checkpointing_enable(self) -> None:
+        """Enable gradient checkpointing on the underlying HF encoder."""
+        if hasattr(self.encoder, "gradient_checkpointing_enable"):
+            self.encoder.gradient_checkpointing_enable()
+            self.gradient_checkpointing_enabled = True
+            logger.info("Transformer gradient checkpointing enabled")
+        else:
+            logger.warning("Gradient checkpointing is not supported by this encoder")
+
+    def gradient_checkpointing_disable(self) -> None:
+        """Disable gradient checkpointing on the underlying HF encoder."""
+        if hasattr(self.encoder, "gradient_checkpointing_disable"):
+            self.encoder.gradient_checkpointing_disable()
+            self.gradient_checkpointing_enabled = False
+            logger.info("Transformer gradient checkpointing disabled")
 
     def _pool(
         self,
@@ -196,9 +234,8 @@ class TransformerEncoder(BaseModel):
             return hidden_states[:, 0]
 
         if self.pooling == "mean":
-            mask = attention_mask.unsqueeze(-1).expand(hidden_states.size()).float()
-            masked_embeddings = hidden_states * mask
-            summed = torch.sum(masked_embeddings, dim=1)
+            mask = attention_mask.unsqueeze(-1).to(hidden_states.dtype)
+            summed = torch.sum(hidden_states * mask, dim=1)
             counts = torch.clamp(mask.sum(dim=1), min=1e-9)
             return summed / counts
 

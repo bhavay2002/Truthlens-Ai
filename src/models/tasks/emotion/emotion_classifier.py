@@ -104,6 +104,9 @@ class EmotionClassifier(BaseModel):
             )
         )
 
+        if hasattr(self.encoder, "gradient_checkpointing_enable"):
+            self.encoder.gradient_checkpointing_enable()
+
         # ------------------------------------------------
         # Classification head
         # ------------------------------------------------
@@ -149,6 +152,9 @@ class EmotionClassifier(BaseModel):
 
         pooled_output = encoder_outputs["pooled_output"]
 
+        if not pooled_output.is_contiguous():
+            pooled_output = pooled_output.contiguous()
+
         outputs = self.classifier_head(
             pooled_output,
             labels=labels,
@@ -167,12 +173,16 @@ class EmotionClassifier(BaseModel):
         attention_mask: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
 
+        was_training = self.training
         self.eval()
 
         outputs = self.forward(
             input_ids=input_ids,
             attention_mask=attention_mask,
         )
+
+        if was_training:
+            self.train()
 
         return {
             "predictions": outputs["predictions"],

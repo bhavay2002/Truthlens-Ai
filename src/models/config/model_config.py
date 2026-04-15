@@ -44,6 +44,7 @@ class EncoderConfig:
     model_name: str = "roberta-base"
     pooling: str = "cls"
     device: Optional[str] = None
+    gradient_checkpointing: bool = False
 
 
 # ---------------------------------------------------------

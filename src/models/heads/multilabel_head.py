@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -95,32 +95,21 @@ class MultiLabelHead(nn.Module):
             raise ValueError("threshold must be between 0 and 1")
 
         self.config = config
+        self.has_hidden_layer = bool(config.hidden_dim)
 
         activation_cls = self.SUPPORTED_ACTIVATIONS[config.activation]
 
-        layers: list[nn.Module] = []
-
-        if config.hidden_dim:
+        if self.has_hidden_layer:
             if config.hidden_dim <= 0:
                 raise ValueError("hidden_dim must be positive")
 
-            layers.extend(
-                [
-                    nn.Linear(config.input_dim, config.hidden_dim),
-                    activation_cls(),
-                    nn.Dropout(config.dropout),
-                    nn.Linear(config.hidden_dim, config.num_labels),
-                ]
-            )
+            self.fc1 = nn.Linear(config.input_dim, config.hidden_dim)
+            self.activation = activation_cls()
+            self.dropout = nn.Dropout(config.dropout)
+            self.fc2 = nn.Linear(config.hidden_dim, config.num_labels)
         else:
-            layers.extend(
-                [
-                    nn.Dropout(config.dropout),
-                    nn.Linear(config.input_dim, config.num_labels),
-                ]
-            )
-
-        self.classifier = nn.Sequential(*layers)
+            self.dropout = nn.Dropout(config.dropout)
+            self.fc = nn.Linear(config.input_dim, config.num_labels)
 
         self.loss_fn = nn.BCEWithLogitsLoss()
 
@@ -134,7 +123,7 @@ class MultiLabelHead(nn.Module):
         self,
         features: torch.Tensor,
         labels: Optional[torch.Tensor] = None,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> Dict[str, Any]:
         """
         Forward pass for multi-label classification.
 
@@ -157,13 +146,25 @@ class MultiLabelHead(nn.Module):
                 f"Expected features shape (batch_size, input_dim), got {features.shape}"
             )
 
-        logits = self.classifier(features)
+        if not features.is_contiguous():
+            features = features.contiguous()
 
-        probabilities = torch.sigmoid(logits)
+        if self.has_hidden_layer:
+            x = self.activation(self.fc1(features))
+            x = self.dropout(x)
+            logits = self.fc2(x)
+        else:
+            x = self.dropout(features)
+            logits = self.fc(x)
 
-        predictions = (probabilities >= self.config.threshold).long()
+        if not self.training:
+            probabilities = torch.sigmoid(logits)
+            predictions = probabilities >= self.config.threshold
+        else:
+            probabilities = None
+            predictions = None
 
-        outputs: Dict[str, torch.Tensor] = {
+        outputs: Dict[str, Any] = {
             "logits": logits,
             "probabilities": probabilities,
             "predictions": predictions,

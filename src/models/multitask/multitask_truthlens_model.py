@@ -64,6 +64,10 @@ from ..training.trainer import Trainer, TrainerConfig
 
 logger = logging.getLogger(__name__)
 
+if torch.cuda.is_available():
+    torch.backends.cuda.enable_flash_sdp(True)
+    torch.backends.cuda.enable_mem_efficient_sdp(True)
+    torch.backends.cuda.enable_math_sdp(False)
 
 # ------------------------------------------------------------
 # Configuration
@@ -76,6 +80,7 @@ class MultiTaskTruthLensConfig:
     pooling: str = "cls"
     dropout: float = 0.1
     device: Optional[str] = None
+    gradient_checkpointing: bool = False
 
     bias_weight: float = 1.0
     ideology_weight: float = 1.0
@@ -140,8 +145,14 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
                 model_name=config.model_name,
                 pooling=config.pooling,
                 device=config.device,
+                gradient_checkpointing=config.gradient_checkpointing,
             )
         )
+
+        if config.gradient_checkpointing and hasattr(
+            self.encoder, "gradient_checkpointing_enable"
+        ):
+            self.encoder.gradient_checkpointing_enable()
 
         hidden = self.encoder.hidden_size
 
@@ -381,30 +392,40 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
         narrative_frame_outputs = self.narrative_frame_head(pooled)
         emotion_outputs = self.emotion_head(pooled)
 
-        bias_probs = F.softmax(bias_logits, dim=-1)
-        ideology_probs = F.softmax(ideology_logits, dim=-1)
-        propaganda_probs = F.softmax(propaganda_logits, dim=-1)
+        if not self.training:
+            bias_probs = F.softmax(bias_logits, dim=-1)
+            ideology_probs = F.softmax(ideology_logits, dim=-1)
+            propaganda_probs = F.softmax(propaganda_logits, dim=-1)
+        
+            bias_preds = bias_probs.argmax(dim=-1)
+            ideology_preds = ideology_probs.argmax(dim=-1)
+            propaganda_preds = propaganda_probs.argmax(dim=-1)
+        else:
+            bias_probs = ideology_probs = propaganda_probs = None
+            bias_preds = ideology_preds = propaganda_preds = None
+        
+
 
         outputs: Dict[str, Any] = {
 
             "embeddings": pooled,
-
+            
             "bias": {
                 "logits": bias_logits,
                 "probabilities": bias_probs,
-                "predictions": torch.argmax(bias_probs, dim=-1),
+                "predictions": bias_preds,
             },
-
+            
             "ideology": {
                 "logits": ideology_logits,
                 "probabilities": ideology_probs,
-                "predictions": torch.argmax(ideology_probs, dim=-1),
+                "predictions": ideology_preds,
             },
 
             "propaganda": {
                 "logits": propaganda_logits,
                 "probabilities": propaganda_probs,
-                "predictions": torch.argmax(propaganda_probs, dim=-1),
+                "predictions": propaganda_preds,
             },
 
             "narrative": narrative_outputs,
@@ -428,19 +449,19 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
             task_name="bias",
             logits=bias_logits,
             probabilities=bias_probs,
-            predictions=torch.argmax(bias_probs, dim=-1),
+            predictions=bias_preds,
         )
         multitask_output.add_task_output(
             task_name="ideology",
             logits=ideology_logits,
             probabilities=ideology_probs,
-            predictions=torch.argmax(ideology_probs, dim=-1),
+            predictions=ideology_preds,
         )
         multitask_output.add_task_output(
             task_name="propaganda",
             logits=propaganda_logits,
             probabilities=propaganda_probs,
-            predictions=torch.argmax(propaganda_probs, dim=-1),
+            predictions=propaganda_preds,
         )
         multitask_output.add_task_output(
             task_name="narrative",
@@ -525,6 +546,9 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
             pooling=model_config.encoder.pooling,
             dropout=model_config.dropout,
             device=model_config.encoder.device,
+            gradient_checkpointing=getattr(
+                model_config.encoder, "gradient_checkpointing", False
+            ),
             use_regression_head=bool(
                 model_config.metadata.get("use_regression_head", False)
             ),

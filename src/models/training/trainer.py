@@ -124,8 +124,9 @@ class Trainer:
                 logger.warning(f"torch.compile failed: {e}")
 
         # AMP Setup
-        self.use_amp = torch.cuda.is_available()
+        self.use_amp = self.device.type == "cuda"
         self.autocast_dtype = _get_autocast_dtype()
+        self.autocast_device_type = "cuda" if self.use_amp else "cpu"
 
         self.scaler = torch.cuda.amp.GradScaler(
             enabled=self.use_amp and self.autocast_dtype == torch.float16
@@ -219,7 +220,7 @@ class Trainer:
             batch = self._move_batch_to_device(batch)
 
             with torch.autocast(
-                device_type="cuda",
+                device_type=self.autocast_device_type,
                 dtype=self.autocast_dtype,
                 enabled=self.use_amp,
             ):
@@ -227,7 +228,10 @@ class Trainer:
                 raw_loss = self._extract_loss(outputs)
                 loss = raw_loss / self.config.gradient_accumulation_steps
 
-            self.scaler.scale(loss).backward()
+            if self.scaler.is_enabled():
+                self.scaler.scale(loss).backward()
+            else:
+                loss.backward()
 
             total_loss += raw_loss.item()
             step_count += 1
@@ -240,8 +244,11 @@ class Trainer:
                     self.config.max_grad_norm,
                 )
 
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
+                if self.scaler.is_enabled():
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    self.optimizer.step()
 
                 if self.scheduler:
                     try:
@@ -262,8 +269,11 @@ class Trainer:
                 self.config.max_grad_norm,
             )
 
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
+            if self.scaler.is_enabled():
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                self.optimizer.step()
 
             if self.scheduler:
                 self.scheduler.step()

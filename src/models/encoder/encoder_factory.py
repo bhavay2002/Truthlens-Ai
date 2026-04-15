@@ -87,6 +87,7 @@ class EncoderFactory:
             pooling=config.pooling,
             device=config.device,
             freeze_encoder=config.freeze_encoder,
+            gradient_checkpointing=config.gradient_checkpointing,
         )
 
         return encoder
@@ -152,7 +153,9 @@ class EncoderFactory:
             device=model_config.encoder.device,
             freeze_encoder=freeze_encoder,
             output_hidden_states=False,
-            gradient_checkpointing=False,
+            gradient_checkpointing=getattr(
+                model_config.encoder, "gradient_checkpointing", False
+            ),
             extra_kwargs={},
         )
         logger.info(
@@ -175,7 +178,9 @@ class EncoderFactory:
             device=encoder_config.device,
             freeze_encoder=freeze_encoder,
             output_hidden_states=False,
-            gradient_checkpointing=False,
+            gradient_checkpointing=getattr(
+                encoder_config, "gradient_checkpointing", False
+            ),
             extra_kwargs={},
         )
         return EncoderFactory.create_transformer_encoder(cfg)

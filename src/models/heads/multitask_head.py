@@ -120,7 +120,11 @@ class MultiTaskHead(nn.Module):
                 f"Expected features shape (batch_size, hidden_dim), got {features.shape}"
             )
 
+        if not features.is_contiguous():
+            features = features.contiguous()
+
         outputs: Dict[str, Any] = {"tasks": {}}
+        tasks_out = outputs["tasks"]
         total_loss: Optional[torch.Tensor] = None
 
         for task_name, head in self.task_heads.items():
@@ -133,16 +137,15 @@ class MultiTaskHead(nn.Module):
                 task_output = {"logits": logits}
             else:
                 task_output = head_output
-                logits = task_output.get("logits")
+                if "logits" not in task_output:
+                    raise RuntimeError(
+                        f"Task head '{task_name}' must produce logits or logits field"
+                    )
+                logits = task_output["logits"]
 
-            if logits is None:
-                raise RuntimeError(
-                    f"Task head '{task_name}' must produce logits or logits field"
-                )
+            tasks_out[task_name] = task_output
 
-            outputs["tasks"][task_name] = task_output
-
-            if labels and task_name in labels:
+            if labels is not None and task_name in labels:
 
                 if task_name not in self.loss_fns:
                     raise RuntimeError(
@@ -154,12 +157,12 @@ class MultiTaskHead(nn.Module):
 
                 loss = loss_fn(logits, task_labels)
 
-                outputs["tasks"][task_name]["loss"] = loss
+                task_output["loss"] = loss
 
                 if total_loss is None:
                     total_loss = loss
                 else:
-                    total_loss = total_loss + loss
+                    total_loss += loss
 
         if total_loss is not None:
             outputs["total_loss"] = total_loss
@@ -179,9 +182,13 @@ class MultiTaskHead(nn.Module):
             Task prediction dictionary.
         """
 
+        was_training = self.training
         self.eval()
-
-        outputs = self.forward(features)
+        try:
+            outputs = self.forward(features)
+        finally:
+            if was_training:
+                self.train()
 
         predictions: Dict[str, Any] = {}
 

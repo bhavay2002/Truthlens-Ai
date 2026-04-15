@@ -91,32 +91,21 @@ class ClassificationHead(nn.Module):
             )
 
         self.config = config
+        self.has_hidden_layer = bool(config.hidden_dim)
 
         activation_cls = self.SUPPORTED_ACTIVATIONS[config.activation]
 
-        layers = []
-
-        if config.hidden_dim:
+        if self.has_hidden_layer:
             if config.hidden_dim <= 0:
                 raise ValueError("hidden_dim must be positive if provided")
 
-            layers.extend(
-                [
-                    nn.Linear(config.input_dim, config.hidden_dim),
-                    activation_cls(),
-                    nn.Dropout(config.dropout),
-                    nn.Linear(config.hidden_dim, config.num_classes),
-                ]
-            )
+            self.fc1 = nn.Linear(config.input_dim, config.hidden_dim)
+            self.activation = activation_cls()
+            self.dropout = nn.Dropout(config.dropout)
+            self.fc2 = nn.Linear(config.hidden_dim, config.num_classes)
         else:
-            layers.extend(
-                [
-                    nn.Dropout(config.dropout),
-                    nn.Linear(config.input_dim, config.num_classes),
-                ]
-            )
-
-        self.classifier = nn.Sequential(*layers)
+            self.dropout = nn.Dropout(config.dropout)
+            self.fc = nn.Linear(config.input_dim, config.num_classes)
 
         logger.info(
             "ClassificationHead initialized | input_dim=%d | num_classes=%d",
@@ -144,7 +133,16 @@ class ClassificationHead(nn.Module):
                 f"Expected 2D tensor (batch_size, input_dim), got {features.shape}"
             )
 
-        logits = self.classifier(features)
+        if not features.is_contiguous():
+            features = features.contiguous()
+
+        if self.has_hidden_layer:
+            x = self.activation(self.fc1(features))
+            x = self.dropout(x)
+            logits = self.fc2(x)
+        else:
+            x = self.dropout(features)
+            logits = self.fc(x)
 
         return logits
 

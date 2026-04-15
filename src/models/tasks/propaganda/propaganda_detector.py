@@ -111,6 +111,9 @@ class PropagandaDetector(BaseModel):
             )
         )
 
+        if hasattr(self.encoder, "gradient_checkpointing_enable"):
+            self.encoder.gradient_checkpointing_enable()
+
         # -------------------------------------------------
         # Classification Head
         # -------------------------------------------------
@@ -167,7 +170,7 @@ class PropagandaDetector(BaseModel):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         labels: Optional[torch.Tensor] = None,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> Dict[str, Any]:
 
         if input_ids is None or attention_mask is None:
             raise ValueError("input_ids and attention_mask must be provided")
@@ -179,18 +182,25 @@ class PropagandaDetector(BaseModel):
 
         pooled_output = encoder_outputs["pooled_output"]
 
+        if not pooled_output.is_contiguous():
+            pooled_output = pooled_output.contiguous()
+
         logits = self.classifier_head(pooled_output)
 
         # Temperature scaling
-        logits = logits / self.temperature
+        temperature = torch.clamp(self.temperature, 0.5, 5.0)
+        logits = logits / temperature
 
-        probabilities = F.softmax(logits, dim=-1)
+        if not self.training:
+            probabilities = F.softmax(logits, dim=-1)
+            predictions = probabilities.argmax(dim=-1)
+            confidence = probabilities.max(dim=-1).values
+        else:
+            probabilities = None
+            predictions = None
+            confidence = None
 
-        predictions = torch.argmax(probabilities, dim=-1)
-
-        confidence = torch.max(probabilities, dim=-1).values
-
-        outputs: Dict[str, torch.Tensor] = {
+        outputs: Dict[str, Any] = {
             "logits": logits,
             "probabilities": probabilities,
             "predictions": predictions,
@@ -227,12 +237,16 @@ class PropagandaDetector(BaseModel):
         attention_mask: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
 
+        was_training = self.training
         self.eval()
 
         outputs = self.forward(
             input_ids=input_ids,
             attention_mask=attention_mask,
         )
+
+        if was_training:
+            self.train()
 
         return {
             "predictions": outputs["predictions"],
