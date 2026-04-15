@@ -66,6 +66,17 @@ class FeatureFusion:
             duplicates = {name for name, cnt in counts.items() if cnt > 1}
             raise ValueError(f"Duplicate feature extractors detected: {duplicates}")
 
+    def _ensure_initialized(self) -> None:
+        if not hasattr(self, "_initialized"):
+            for feature in self.features:
+                feature.initialize()
+            self._initialized = True
+
+    def _ensure_validated(self) -> None:
+        if self.enforce_unique_names and not hasattr(self, "_validated"):
+            self._validate_feature_names()
+            self._validated = True
+
     def extract(self, context: FeatureContext) -> Dict[str, float]:
         """
         Execute all feature extractors and fuse outputs.
@@ -80,40 +91,67 @@ class FeatureFusion:
             Unified feature dictionary.
         """
 
-        if self.enforce_unique_names:
-            self._validate_feature_names()
+        self._ensure_validated()
+        self._ensure_initialized()
 
         fused_features: Dict[str, float] = {}
 
         for feature in self.features:
+            feature_output = feature.safe_extract(context)
 
-            try:
-                feature.initialize()
+            if False:  # disable completely in production
+                overlapping_keys = fused_features.keys() & feature_output.keys()
+                for key in overlapping_keys:
+                    logger.warning("Feature collision detected: %s (overwriting)", key)
 
-                feature_output = feature.safe_extract(context)
-
-                for key, value in feature_output.items():
-
-                    if key in fused_features:
-                        logger.warning(
-                            "Feature collision detected: %s (overwriting)", key
-                        )
-
-                    fused_features[key] = float(value)
-
-                feature.teardown()
-
-            except Exception as exc:  # noqa: BLE001
-                logger.exception(
-                    "Feature '%s' failed during extraction", feature.name
-                )
-                raise RuntimeError(
-                    f"Feature extraction failed for {feature.name}"
-                ) from exc
+            for key, value in feature_output.items():
+                fused_features[key] = float(value)
 
         logger.debug("Feature fusion completed | feature_count=%d", len(fused_features))
 
         return fused_features
+
+    def extract_batch(self, contexts: List[FeatureContext]) -> List[Dict[str, float]]:
+        """
+        Extract fused features for a batch of contexts.
+        """
+
+        self._ensure_validated()
+        self._ensure_initialized()
+
+        results = [{} for _ in contexts]
+        features_list = self.features
+
+        for feature in features_list:
+
+            if hasattr(feature, "extract_batch"):
+                batch_outputs = feature.extract_batch(contexts)
+
+                for index, feature_output in enumerate(batch_outputs):
+                    if not feature_output:
+                        continue
+
+                    res = results[index]
+                    res_local = res
+
+                    for key, value in feature_output.items():
+                        res_local[key] = float(value)
+
+                continue
+
+            for index, context in enumerate(contexts):
+                feature_output = feature.safe_extract(context)
+
+                if not feature_output:
+                    continue
+
+                res = results[index]
+                res_local = res
+
+                for key, value in feature_output.items():
+                    res_local[key] = float(value)
+
+        return results
 
     def list_features(self) -> List[str]:
         """
@@ -126,15 +164,27 @@ class FeatureFusion:
         Add a feature extractor to the pipeline.
         """
         self.features.append(feature)
+        if hasattr(self, "_validated"):
+            delattr(self, "_validated")
+        if hasattr(self, "_initialized"):
+            delattr(self, "_initialized")
 
     def remove_feature(self, feature_name: str) -> None:
         """
         Remove a feature extractor by name.
         """
         self.features = [f for f in self.features if f.name != feature_name]
+        if hasattr(self, "_validated"):
+            delattr(self, "_validated")
+        if hasattr(self, "_initialized"):
+            delattr(self, "_initialized")
 
     def clear(self) -> None:
         """
         Remove all feature extractors.
         """
         self.features.clear()
+        if hasattr(self, "_validated"):
+            delattr(self, "_validated")
+        if hasattr(self, "_initialized"):
+            delattr(self, "_initialized")

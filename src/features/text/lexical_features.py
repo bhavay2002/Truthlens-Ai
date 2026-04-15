@@ -29,9 +29,10 @@ from __future__ import annotations
 
 import logging
 import re
-from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, List
+
+import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
@@ -67,6 +68,33 @@ class LexicalFeatures(BaseFeature):
     name: str = "lexical_features"
     description: str = "Lexical richness and vocabulary diversity metrics"
 
+    def _compute_features(self, tokens: List[str]) -> Dict[str, float]:
+        if not tokens:
+            return {
+                "vocabulary_size": 0.0,
+                "hapax_legomena_ratio": 0.0,
+                "hapax_dislegomena_ratio": 0.0,
+                "lexical_density": 0.0,
+                "average_word_length": 0.0,
+            }
+
+        tokens_arr = np.asarray(tokens, dtype=str)
+        token_count = tokens_arr.size
+        unique_tokens, counts = np.unique(tokens_arr, return_counts=True)
+        word_lengths = np.char.str_len(tokens_arr)
+
+        vocabulary_size = unique_tokens.size
+        hapax_legomena = np.count_nonzero(counts == 1)
+        hapax_dislegomena = np.count_nonzero(counts == 2)
+
+        return {
+            "vocabulary_size": float(vocabulary_size),
+            "hapax_legomena_ratio": float(hapax_legomena / token_count),
+            "hapax_dislegomena_ratio": float(hapax_dislegomena / token_count),
+            "lexical_density": float(vocabulary_size / token_count),
+            "average_word_length": float(word_lengths.mean() if token_count else 0.0),
+        }
+
     def extract(self, context: FeatureContext) -> Dict[str, float]:
         """
         Extract lexical features from input text.
@@ -87,37 +115,9 @@ class LexicalFeatures(BaseFeature):
 
         if not tokens:
             logger.warning("No tokens extracted from text")
+            return self._compute_features([])
 
-            return {
-                "vocabulary_size": 0.0,
-                "hapax_legomena_ratio": 0.0,
-                "hapax_dislegomena_ratio": 0.0,
-                "lexical_density": 0.0,
-                "average_word_length": 0.0,
-            }
-
-        token_count = len(tokens)
-        counter = Counter(tokens)
-
-        vocabulary_size = len(counter)
-
-        hapax_legomena = sum(1 for count in counter.values() if count == 1)
-        hapax_dislegomena = sum(1 for count in counter.values() if count == 2)
-
-        hapax_legomena_ratio = hapax_legomena / token_count
-        hapax_dislegomena_ratio = hapax_dislegomena / token_count
-
-        avg_word_length = sum(len(t) for t in tokens) / token_count
-
-        lexical_density = vocabulary_size / token_count
-
-        features = {
-            "vocabulary_size": float(vocabulary_size),
-            "hapax_legomena_ratio": float(hapax_legomena_ratio),
-            "hapax_dislegomena_ratio": float(hapax_dislegomena_ratio),
-            "lexical_density": float(lexical_density),
-            "average_word_length": float(avg_word_length),
-        }
+        features = self._compute_features(tokens)
 
         logger.debug(
             "Lexical features extracted | tokens=%d vocab=%d",
@@ -126,3 +126,8 @@ class LexicalFeatures(BaseFeature):
         )
 
         return features
+
+    def extract_batch(self, contexts: List[FeatureContext]) -> List[Dict[str, float]]:
+        """Extract lexical features for a batch of contexts."""
+
+        return [self.extract(context) for context in contexts]

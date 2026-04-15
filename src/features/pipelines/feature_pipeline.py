@@ -1,5 +1,5 @@
 """
-File Name: feature_pipeline.py
+File Name: feature_pipeline.py 
 Module: Feature Engineering - Feature Pipeline
 Description:
     Implements the orchestrated feature extraction pipeline used across the
@@ -165,9 +165,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
+import torch
 from sklearn.feature_extraction.text import TfidfVectorizer
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
@@ -639,6 +640,14 @@ class FeaturePipeline:
         """
         bootstrap_feature_registry()
 
+        if torch.cuda.is_available():
+            try:
+                torch.backends.cuda.enable_flash_sdp(True)
+                torch.backends.cuda.enable_mem_efficient_sdp(True)
+                torch.backends.cuda.enable_math_sdp(False)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("CUDA SDP optimization setup skipped: %s", exc)
+
         if self.feature_names is None:
             self.feature_names = FeatureRegistry.list_features()
 
@@ -652,6 +661,18 @@ class FeaturePipeline:
         except Exception as exc:  # noqa: BLE001
             logger.warning("GraphPipeline unavailable in FeaturePipeline: %s", exc)
             self.graph_pipeline = None
+
+        if hasattr(self, "encoder"):
+            try:
+                self.encoder = torch.compile(self.encoder)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("torch.compile skipped for encoder: %s", exc)
+
+        if hasattr(self, "encoder") and hasattr(self.encoder, "gradient_checkpointing_enable"):
+            try:
+                self.encoder.gradient_checkpointing_enable()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Gradient checkpointing setup skipped: %s", exc)
 
         active_modules = [
             type(f).__name__
@@ -677,25 +698,29 @@ class FeaturePipeline:
         if self.fusion is None:
             raise RuntimeError("FeaturePipeline must be initialized before extraction")
 
-        features = self.fusion.extract(context)
+        with torch.no_grad():
+            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                features = self.fusion.extract(context)
 
         if self.graph_pipeline is not None:
             try:
-                graph_output = self.graph_pipeline.run(context.text)
-                context.cache["graph_pipeline_output"] = graph_output
+                graph_output = context.cache.get("graph_pipeline_output")
+                if graph_output is None:
+                    graph_output = self.graph_pipeline.run(context.text)
+                    context.cache["graph_pipeline_output"] = graph_output
 
                 graph_features = graph_output.get("graph_features", {})
                 if isinstance(graph_features, dict):
                     for key, value in graph_features.items():
                         if isinstance(value, (int, float)):
-                            features.setdefault(key, float(value))
+                            features[key] = float(value)
 
                 for section_name in ("entity_graph_metrics", "narrative_graph_metrics"):
                     section = graph_output.get(section_name, {})
                     if isinstance(section, dict):
                         for key, value in section.items():
                             if isinstance(value, (int, float)):
-                                features.setdefault(f"graph_pipeline_{key}", float(value))
+                                features[f"graph_pipeline_{key}"] = float(value)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("GraphPipeline feature merge skipped: %s", exc)
 
@@ -724,10 +749,56 @@ class FeaturePipeline:
         if not contexts:
             raise ValueError("Context list cannot be empty")
 
-        results = []
+        indexed_contexts = sorted(
+            enumerate(contexts), key=lambda item: len(item[1].text)
+        )
 
-        for ctx in contexts:
-            results.append(self.extract(ctx))
+        batch_size = 32
+
+        shared_cache: Dict[str, Any] = {}
+        for _, ctx in indexed_contexts:
+            ctx.shared = shared_cache
+
+        graph_cache: Dict[str, Any] = {}
+
+        if hasattr(self, "encoder") and hasattr(self, "tokenizer"):
+            texts = [ctx.text for _, ctx in indexed_contexts]
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+            with torch.no_grad():
+                with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                    inputs = self.tokenizer(
+                        texts,
+                        padding=True,
+                        truncation=True,
+                        return_tensors="pt",
+                    ).to(device)
+                    outputs = self.encoder(**inputs)
+
+            embeddings = outputs.last_hidden_state
+
+            for i, (_, ctx) in enumerate(indexed_contexts):
+                ctx.shared["embedding"] = embeddings[i]
+
+        results: List[Dict[str, float]] = [None] * len(contexts)  # type: ignore[assignment]
+
+        for start in range(0, len(indexed_contexts), batch_size):
+            batch = indexed_contexts[start : start + batch_size]
+            contexts_only = [ctx for _, ctx in batch]
+
+            if self.graph_pipeline is not None:
+                for ctx in contexts_only:
+                    text = ctx.text
+                    graph_output = graph_cache.get(text)
+                    if graph_output is None:
+                        graph_output = self.graph_pipeline.run(text)
+                        graph_cache[text] = graph_output
+                    ctx.cache["graph_pipeline_output"] = graph_output
+
+            batch_features = [self.extract(ctx) for ctx in contexts_only]
+
+            for (index, _), features in zip(batch, batch_features):
+                results[index] = features
 
         logger.info(
             "Batch feature extraction completed | samples=%d",
@@ -758,7 +829,7 @@ class FeaturePipeline:
         if self.scaler is None:
             return features
 
-        return self.scaler.transform(features)
+        return self.scaler.transform(features, return_array=False)
 
     def fit_selector(
         self,
@@ -786,7 +857,7 @@ class FeaturePipeline:
         if self.selector is None:
             return features
 
-        return self.selector.transform(features)
+        return self.selector.transform(features, return_array=False)
 
     def process(
         self,

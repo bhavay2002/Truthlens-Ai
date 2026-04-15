@@ -35,6 +35,8 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, List
 
+import numpy as np
+
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
 
@@ -80,10 +82,7 @@ class SyntacticFeatures(BaseFeature):
     name: str = "syntactic_features"
     description: str = "Sentence structure and POS distribution features"
 
-    def _extract_spacy(self, text: str) -> Dict[str, float]:
-        """Extract syntactic features using spaCy."""
-        doc = _NLP(text)
-
+    def _extract_spacy_doc(self, doc) -> Dict[str, float]:
         tokens = [t for t in doc if not t.is_space]
         sentences = list(doc.sents)
 
@@ -97,11 +96,12 @@ class SyntacticFeatures(BaseFeature):
         adv_ratio = pos_counter.get("ADV", 0) / token_count
         punct_ratio = pos_counter.get("PUNCT", 0) / token_count
 
-        sentence_lengths = [len([t for t in sent if not t.is_punct]) for sent in sentences]
-
-        avg_sentence_length = (
-            sum(sentence_lengths) / len(sentence_lengths) if sentence_lengths else 0.0
+        sentence_lengths = np.array(
+            [len([t for t in sent if not t.is_punct]) for sent in sentences],
+            dtype=np.float32,
         )
+
+        avg_sentence_length = float(sentence_lengths.mean()) if sentence_lengths.size else 0.0
 
         return {
             "sentence_count": float(len(sentences)),
@@ -112,6 +112,11 @@ class SyntacticFeatures(BaseFeature):
             "adverb_ratio": float(adv_ratio),
             "punctuation_ratio": float(punct_ratio),
         }
+
+    def _extract_spacy(self, text: str) -> Dict[str, float]:
+        """Extract syntactic features using spaCy."""
+        doc = _NLP(text)
+        return self._extract_spacy_doc(doc)
 
     def _extract_fallback(self, text: str) -> Dict[str, float]:
         """Fallback syntactic estimation without NLP libraries."""
@@ -163,3 +168,13 @@ class SyntacticFeatures(BaseFeature):
         )
 
         return features
+
+    def extract_batch(self, contexts: List[FeatureContext]) -> List[Dict[str, float]]:
+        """Extract syntactic features for a batch of contexts."""
+
+        if SPACY_AVAILABLE and _NLP is not None:
+            texts = [context.text for context in contexts]
+            docs = list(_NLP.pipe(texts, batch_size=32))
+            return [self._extract_spacy_doc(doc) for doc in docs]
+
+        return [self.extract(context) for context in contexts]

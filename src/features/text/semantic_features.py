@@ -33,7 +33,7 @@ from __future__ import annotations
 import logging
 import hashlib
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, List
 
 import numpy as np
 
@@ -52,6 +52,20 @@ try:
     _model = AutoModel.from_pretrained(MODEL_NAME)
 
     _model.eval()
+
+    if torch.cuda.is_available():
+        try:
+            torch.backends.cuda.enable_flash_sdp(True)
+            torch.backends.cuda.enable_mem_efficient_sdp(True)
+            torch.backends.cuda.enable_math_sdp(False)
+        except Exception:  # noqa: BLE001
+            logger.debug("CUDA SDP optimization setup skipped for semantic model")
+
+    if hasattr(_model, "gradient_checkpointing_enable"):
+        try:
+            _model.gradient_checkpointing_enable()
+        except Exception:  # noqa: BLE001
+            logger.debug("Gradient checkpointing setup skipped for semantic model")
 
     TRANSFORMER_AVAILABLE = True
 except Exception:  # noqa: BLE001
@@ -113,6 +127,36 @@ def _transformer_embedding(text: str) -> np.ndarray:
         return mean_embedding.squeeze(0).cpu().numpy()
 
 
+def _transformer_embeddings(texts: List[str]) -> np.ndarray:
+    """Generate batched embeddings using the transformer model."""
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    _model.to(device)
+
+    with torch.no_grad():
+        inputs = _tokenizer(
+            texts,
+            return_tensors="pt",
+            truncation=True,
+            padding=True,
+            max_length=512,
+        )
+        inputs = {key: value.to(device) for key, value in inputs.items()}
+
+        with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+            outputs = _model(**inputs)
+
+        token_embeddings = outputs.last_hidden_state
+        attention_mask = inputs["attention_mask"]
+
+        mask = attention_mask.unsqueeze(-1).to(token_embeddings.dtype)
+        summed = torch.sum(token_embeddings * mask, dim=1)
+        counts = torch.clamp(mask.sum(dim=1), min=1e-9)
+        mean_embeddings = summed / counts
+
+        return mean_embeddings.detach().cpu().numpy()
+
+
 @dataclass
 @register_feature
 class SemanticFeatures(BaseFeature):
@@ -171,3 +215,36 @@ class SemanticFeatures(BaseFeature):
         )
 
         return features
+
+    def extract_batch(self, contexts: List[FeatureContext]) -> List[Dict[str, float]]:
+        """Extract semantic features for a batch of contexts."""
+
+        if not contexts:
+            return []
+
+        embeddings: List[np.ndarray] = [np.asarray([])] * len(contexts)
+        text_contexts: List[str] = []
+        text_indices: List[int] = []
+
+        for index, context in enumerate(contexts):
+            if context.embeddings is not None:
+                embeddings[index] = np.asarray(context.embeddings)
+            elif context.text:
+                text_contexts.append(context.text)
+                text_indices.append(index)
+            else:
+                raise ValueError("FeatureContext.text cannot be empty")
+
+        if text_contexts:
+            if TRANSFORMER_AVAILABLE:
+                batch_embeddings = _transformer_embeddings(text_contexts)
+            else:
+                batch_embeddings = np.stack(
+                    [_fallback_embedding(text) for text in text_contexts],
+                    axis=0,
+                )
+
+            for index, embedding in zip(text_indices, batch_embeddings):
+                embeddings[index] = embedding
+
+        return [self.extract(FeatureContext(text="", embeddings=emb)) for emb in embeddings]

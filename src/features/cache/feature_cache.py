@@ -17,10 +17,10 @@ Author: ML Engineering System
 Date: 2026-04-03
 Dependencies:
     logging
+    pickle
     re
     pathlib
     typing
-    joblib
 Inputs:
     key : str
         Unique identifier for cached object
@@ -34,11 +34,11 @@ Outputs:
 from __future__ import annotations
 
 import logging
+import pickle
 import re
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Optional
-
-import joblib
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +59,8 @@ class FeatureCache:
         """
 
         self.cache_dir = Path(cache_dir)
+        self._key_cache: Dict[str, str] = {}
+        self._path_cache: Dict[str, Path] = {}
 
         try:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -92,10 +94,20 @@ class FeatureCache:
         Construct cache file path for a given key.
         """
 
-        safe_key = self._normalize_key(key)
-        filename = f"{safe_key}.joblib"
+        cached_path = self._path_cache.get(key)
+        if cached_path is not None:
+            return cached_path
 
-        return self.cache_dir / filename
+        safe_key = self._key_cache.get(key)
+        if safe_key is None:
+            safe_key = self._normalize_key(key)
+            self._key_cache[key] = safe_key
+
+        filename = f"{safe_key}.pkl"
+        path = self.cache_dir / filename
+        self._path_cache[key] = path
+
+        return path
 
     # -------------------------------------------------
     # Save Cache
@@ -117,10 +129,12 @@ class FeatureCache:
         """
 
         path = self._get_cache_path(key)
+        path_open = path.open
+        pickle_dump = pickle.dump
 
         try:
-            joblib.dump(data, path)
-            logger.info("Saved cache: %s", path)
+            with path_open("wb", buffering=1024 * 1024) as file_obj:
+                pickle_dump(data, file_obj, protocol=pickle.HIGHEST_PROTOCOL)
             return path
         except Exception as exc:
             logger.exception("Failed to save cache")
@@ -144,16 +158,35 @@ class FeatureCache:
         """
 
         path = self._get_cache_path(key)
-
-        if not path.exists():
-            return None
+        path_open = path.open
+        pickle_load = pickle.load
 
         try:
-            logger.info("Loading cache: %s", path)
-            return joblib.load(path)
+            with path_open("rb", buffering=1024 * 1024) as file_obj:
+                return pickle_load(file_obj)
+        except FileNotFoundError:
+            return None
         except Exception as exc:
             logger.exception("Failed to load cache")
             raise RuntimeError("Cache load failed") from exc
+
+    def load_many(self, keys: List[str]) -> List[Optional[Any]]:
+        """
+        Load multiple cache entries.
+        """
+
+        if len(keys) > 50:
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                return list(executor.map(self.load, keys))
+
+        results: List[Optional[Any]] = []
+        append = results.append
+        load = self.load
+
+        for key in keys:
+            append(load(key))
+
+        return results
 
     # -------------------------------------------------
     # Cache Exists
@@ -195,10 +228,17 @@ class FeatureCache:
         """
 
         try:
+            for file in self.cache_dir.glob("*.pkl"):
+                file.unlink()
+
+            # Backward-compatible cleanup for older cache files.
             for file in self.cache_dir.glob("*.joblib"):
                 file.unlink()
 
-            logger.info("Cache directory cleared: %s", self.cache_dir)
+            self._path_cache.clear()
+
+            if __debug__:
+                logger.debug("Cache directory cleared: %s", self.cache_dir)
 
         except Exception as exc:
             logger.exception("Failed to clear cache directory")

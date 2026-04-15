@@ -51,9 +51,21 @@ def _dict_to_matrix(features: List[FeatureVector]) -> tuple[np.ndarray, List[str
     if not features:
         raise ValueError("Feature list cannot be empty")
 
-    keys = sorted(features[0].keys())
+    all_keys = set()
+    for feature_vector in features:
+        all_keys.update(feature_vector.keys())
 
-    matrix = np.array([[f.get(k, 0.0) for k in keys] for f in features], dtype=np.float32)
+    keys = sorted(all_keys)
+
+    name_to_idx = {k: i for i, k in enumerate(keys)}
+    matrix = np.zeros((len(features), len(keys)), dtype=np.float32)
+
+    for i, feature_vector in enumerate(features):
+        row = matrix[i]
+        for key, value in feature_vector.items():
+            j = name_to_idx.get(key)
+            if j is not None:
+                row[j] = value
 
     return matrix, keys
 
@@ -62,12 +74,10 @@ def _matrix_to_dict(matrix: np.ndarray, keys: List[str]) -> List[FeatureVector]:
     """
     Convert matrix back to dictionary representation.
     """
-    output = []
-
-    for row in matrix:
-        output.append({k: float(v) for k, v in zip(keys, row)})
-
-    return output
+    return [
+        {keys[index]: float(value) for index, value in enumerate(row) if value != 0.0}
+        for row in matrix
+    ]
 
 
 @dataclass
@@ -112,7 +122,9 @@ class StandardScaler(BaseScaler):
         if not self.fitted:
             raise RuntimeError("StandardScaler must be fitted before transform")
 
-        return (X - self.mean_) / self.std_
+        X -= self.mean_
+        X /= self.std_
+        return X
 
 
 @dataclass
@@ -136,10 +148,12 @@ class MinMaxScaler(BaseScaler):
         if not self.fitted:
             raise RuntimeError("MinMaxScaler must be fitted before transform")
 
+        X -= self.min_
         denom = self.max_ - self.min_
         denom[denom == 0] = 1.0
+        X /= denom
 
-        return (X - self.min_) / denom
+        return X
 
 
 @dataclass
@@ -168,7 +182,10 @@ class RobustScaler(BaseScaler):
         if not self.fitted:
             raise RuntimeError("RobustScaler must be fitted before transform")
 
-        return (X - self.median_) / self.iqr_
+        X -= self.median_
+        X /= self.iqr_
+
+        return X
 
 
 @dataclass
@@ -197,11 +214,15 @@ class FeatureScalingPipeline:
 
     scaler: BaseScaler
     feature_order: List[str] = field(default_factory=list)
+    _name_to_idx: Dict[str, int] = field(default_factory=dict, init=False, repr=False)
+    _buffer: np.ndarray | None = field(default=None, init=False, repr=False)
+    use_fp16_output: bool = False
 
     def fit(self, features: List[FeatureVector]) -> None:
         matrix, keys = _dict_to_matrix(features)
 
         self.feature_order = keys
+        self._name_to_idx = {k: i for i, k in enumerate(keys)}
 
         self.scaler.fit(matrix)
 
@@ -211,26 +232,62 @@ class FeatureScalingPipeline:
             matrix.shape[1],
         )
 
-    def transform(self, features: List[FeatureVector]) -> List[FeatureVector]:
+    def transform(
+        self,
+        features: List[FeatureVector],
+        *,
+        return_array: bool = True,
+    ) -> List[FeatureVector] | np.ndarray:
 
         if not self.feature_order:
             raise RuntimeError("FeatureScalingPipeline must be fitted before transform")
 
-        matrix = np.array(
-            [[f.get(k, 0.0) for k in self.feature_order] for f in features],
-            dtype=np.float32,
-        )
+        expected_shape = (len(features), len(self.feature_order))
+        if self._buffer is None or self._buffer.shape != expected_shape:
+            self._buffer = np.zeros(expected_shape, dtype=np.float32)
+
+        matrix = self._buffer
+        matrix.fill(0.0)
+        name_to_idx = self._name_to_idx
+
+        for i, feature_vector in enumerate(features):
+            row = matrix[i]
+            f_local = feature_vector
+            row_local = row
+
+            for key, value in f_local.items():
+                j = name_to_idx.get(key)
+                if j is not None:
+                    row_local[j] = value
 
         scaled = self.scaler.transform(matrix)
 
+        if self.use_fp16_output:
+            scaled = scaled.astype(np.float16)
+
+        if return_array:
+            return scaled.copy()
+
         return _matrix_to_dict(scaled, self.feature_order)
 
-    def fit_transform(self, features: List[FeatureVector]) -> List[FeatureVector]:
+    def fit_transform(
+        self,
+        features: List[FeatureVector],
+        *,
+        return_array: bool = True,
+    ) -> List[FeatureVector] | np.ndarray:
 
         matrix, keys = _dict_to_matrix(features)
 
         self.feature_order = keys
+        self._name_to_idx = {k: i for i, k in enumerate(keys)}
 
         scaled = self.scaler.fit_transform(matrix)
+
+        if self.use_fp16_output:
+            scaled = scaled.astype(np.float16)
+
+        if return_array:
+            return scaled
 
         return _matrix_to_dict(scaled, keys)

@@ -30,9 +30,10 @@ from __future__ import annotations
 
 import logging
 import re
-from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, List
+
+import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
@@ -80,6 +81,34 @@ class TokenFeatures(BaseFeature):
     name: str = "token_features"
     description: str = "Basic token-level lexical statistics"
 
+    def _compute_features(self, tokens: List[str]) -> Dict[str, float]:
+        if not tokens:
+            return {
+                "token_count": 0.0,
+                "unique_token_count": 0.0,
+                "type_token_ratio": 0.0,
+                "avg_token_length": 0.0,
+                "max_token_length": 0.0,
+                "repetition_ratio": 0.0,
+            }
+
+        tokens_arr = np.asarray(tokens, dtype=str)
+        token_count = tokens_arr.size
+        unique_tokens, counts = np.unique(tokens_arr, return_counts=True)
+        token_lengths = np.char.str_len(tokens_arr)
+
+        unique_token_count = unique_tokens.size
+        repeated_tokens = counts[counts > 1].sum()
+
+        return {
+            "token_count": float(token_count),
+            "unique_token_count": float(unique_token_count),
+            "type_token_ratio": float(unique_token_count / token_count),
+            "avg_token_length": float(token_lengths.mean() if token_count else 0.0),
+            "max_token_length": float(token_lengths.max() if token_count else 0.0),
+            "repetition_ratio": float(repeated_tokens / token_count),
+        }
+
     def extract(self, context: FeatureContext) -> Dict[str, float]:
         """
         Extract token-level features.
@@ -100,37 +129,9 @@ class TokenFeatures(BaseFeature):
 
         if not tokens:
             logger.warning("No tokens extracted from text")
-            return {
-                "token_count": 0.0,
-                "unique_token_count": 0.0,
-                "type_token_ratio": 0.0,
-                "avg_token_length": 0.0,
-                "max_token_length": 0.0,
-                "repetition_ratio": 0.0,
-            }
+            return self._compute_features([])
 
-        token_lengths = [len(token) for token in tokens]
-        token_counter = Counter(tokens)
-
-        token_count = len(tokens)
-        unique_token_count = len(token_counter)
-
-        type_token_ratio = unique_token_count / token_count
-
-        avg_token_length = sum(token_lengths) / token_count
-        max_token_length = max(token_lengths)
-
-        repeated_tokens = sum(count for count in token_counter.values() if count > 1)
-        repetition_ratio = repeated_tokens / token_count
-
-        features = {
-            "token_count": float(token_count),
-            "unique_token_count": float(unique_token_count),
-            "type_token_ratio": float(type_token_ratio),
-            "avg_token_length": float(avg_token_length),
-            "max_token_length": float(max_token_length),
-            "repetition_ratio": float(repetition_ratio),
-        }
+        features = self._compute_features(tokens)
 
         logger.debug(
             "Token features extracted | tokens=%d unique=%d",
@@ -139,3 +140,8 @@ class TokenFeatures(BaseFeature):
         )
 
         return features
+
+    def extract_batch(self, contexts: List[FeatureContext]) -> List[Dict[str, float]]:
+        """Extract token features for a batch of contexts."""
+
+        return [self.extract(context) for context in contexts]

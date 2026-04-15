@@ -123,26 +123,45 @@ class DatasetFeatureGenerator:
         """
         Extract features with caching support.
         """
+        if self.cache_manager is None:
+            return self.pipeline.extract(contexts)
 
-        results: List[FeatureVector] = []
+        cache = self.cache_manager.get_cache(self.cache_namespace)
 
-        for ctx in contexts:
+        cached_results: List[Tuple[int, FeatureVector]] = []
+        uncached_contexts: List[FeatureContext] = []
+        uncached_indices: List[int] = []
 
-            if self.cache_manager:
+        for index, ctx in enumerate(contexts):
+            key = self.cache_manager._context_key(ctx)
+            cached = cache.load(key)
 
-                features = self.cache_manager.get_or_compute(
-                    namespace=self.cache_namespace,
-                    context=ctx,
-                    compute_fn=self.pipeline.pipeline.extract,
-                )
-
+            if cached is not None:
+                cached_results.append((index, cached))
             else:
+                uncached_contexts.append(ctx)
+                uncached_indices.append(index)
 
-                features = self.pipeline.pipeline.extract(ctx)
+        if uncached_contexts:
+            new_features = self.pipeline.extract(uncached_contexts)
 
-            results.append(features)
+            for index, feature_vector, ctx in zip(
+                uncached_indices,
+                new_features,
+                uncached_contexts,
+            ):
+                key = self.cache_manager._context_key(ctx)
+                cache.save(key, feature_vector)
+                cached_results.append((index, feature_vector))
 
-        return results
+        results: List[Optional[FeatureVector]] = [None] * len(contexts)
+        for index, feature_vector in cached_results:
+            results[index] = feature_vector
+
+        if any(result is None for result in results):
+            raise RuntimeError("Cached feature extraction returned incomplete results")
+
+        return [result for result in results if result is not None]
 
     def generate(
         self,
@@ -186,16 +205,18 @@ class DatasetFeatureGenerator:
         if self.cache_manager:
             features = self._cached_extract(contexts)
             pipeline = self.pipeline.pipeline
-            if pipeline.scaler:
+
+            if pipeline.scaler is not None:
                 if fit:
                     pipeline.fit_scaler(features)
                 features = pipeline.transform_scaler(features)
-            if pipeline.selector:
+
+            if pipeline.selector is not None:
                 if fit:
                     pipeline.fit_selector(features, labels)
                 features = pipeline.transform_selector(features)
         else:
-            features = self.pipeline.pipeline.process(
+            features = self.pipeline.extract_with_labels(
                 contexts,
                 labels=labels,
                 fit=fit,
@@ -206,10 +227,15 @@ class DatasetFeatureGenerator:
 
         feature_names = sorted(features[0].keys())
 
-        matrix = np.array(
-            [[f.get(name, 0.0) for name in feature_names] for f in features],
-            dtype=np.float32,
-        )
+        matrix = np.zeros((len(features), len(feature_names)), dtype=np.float32)
+        name_to_idx = {name: j for j, name in enumerate(feature_names)}
+
+        for i, feature_vector in enumerate(features):
+            row = matrix[i]
+            for key, value in feature_vector.items():
+                j = name_to_idx.get(key)
+                if j is not None:
+                    row[j] = value
 
         self._feature_order = feature_names
 
@@ -259,7 +285,7 @@ class DatasetFeatureGenerator:
         if not self.pipeline._initialized:
             self.pipeline.initialize()
 
-        raw_features = self.pipeline._sequential_extract(contexts)
+        raw_features = self.pipeline.extract(contexts)
 
         partitioned: Dict[str, List[FeatureVector]] = {}
         for sample in raw_features:
@@ -280,13 +306,17 @@ class DatasetFeatureGenerator:
             if not sec_feature_names:
                 continue
 
-            sec_matrix = np.array(
-                [
-                    [s.get(name, 0.0) for name in sec_feature_names]
-                    for s in sec_samples
-                ],
-                dtype=np.float32,
+            sec_matrix = np.zeros(
+                (len(sec_samples), len(sec_feature_names)), dtype=np.float32
             )
+            name_to_idx = {name: j for j, name in enumerate(sec_feature_names)}
+
+            for i, sample in enumerate(sec_samples):
+                row = sec_matrix[i]
+                for key, value in sample.items():
+                    j = name_to_idx.get(key)
+                    if j is not None:
+                        row[j] = value
 
             result[sec_name] = (sec_matrix, sec_feature_names)
 
