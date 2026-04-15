@@ -130,6 +130,8 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
         super().__init__(task_configs=task_configs)
 
         self.config = config
+        self._fused_attention_enabled = False
+        self._configure_fused_attention()
 
         # ----------------------------------------------------
         # Shared Encoder
@@ -236,6 +238,26 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
         self.temperature = nn.Parameter(torch.ones(1))
 
         logger.info("MultiTaskTruthLensModel initialized")
+
+    def _configure_fused_attention(self) -> None:
+        """
+        Enable fused scaled-dot-product attention kernels when CUDA is available.
+        """
+        if not torch.cuda.is_available():
+            return
+
+        try:
+            # Enable all SDP fused kernels and let PyTorch select the best one.
+            if hasattr(torch.backends.cuda, "enable_flash_sdp"):
+                torch.backends.cuda.enable_flash_sdp(True)
+            if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
+                torch.backends.cuda.enable_mem_efficient_sdp(True)
+            if hasattr(torch.backends.cuda, "enable_math_sdp"):
+                torch.backends.cuda.enable_math_sdp(True)
+            self._fused_attention_enabled = True
+            logger.info("Enabled fused attention kernels for CUDA.")
+        except Exception:
+            logger.exception("Unable to enable fused attention kernels.")
 
     def encode(
         self,
@@ -346,9 +368,15 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         labels: Optional[Dict[str, torch.Tensor]] = None,
+        pooled_embeddings: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
 
-        pooled = self.encode(input_ids=input_ids, attention_mask=attention_mask)
+        # Reuse externally-provided pooled embeddings to avoid repeated encoder passes.
+        pooled = (
+            pooled_embeddings
+            if pooled_embeddings is not None
+            else self.encode(input_ids=input_ids, attention_mask=attention_mask)
+        )
 
         # stabilize temperature
         temperature = torch.clamp(self.temperature, 0.5, 5.0)
@@ -381,9 +409,17 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
         narrative_frame_outputs = self.narrative_frame_head(pooled)
         emotion_outputs = self.emotion_head(pooled)
 
-        bias_probs = F.softmax(bias_logits, dim=-1)
-        ideology_probs = F.softmax(ideology_logits, dim=-1)
-        propaganda_probs = F.softmax(propaganda_logits, dim=-1)
+        training_with_labels = self.training and labels is not None
+
+        # Argmax over logits is equivalent to argmax over softmax probabilities.
+        bias_predictions = torch.argmax(bias_logits, dim=-1)
+        ideology_predictions = torch.argmax(ideology_logits, dim=-1)
+        propaganda_predictions = torch.argmax(propaganda_logits, dim=-1)
+
+        # Skip softmax allocation/computation during training when only logits are used by loss.
+        bias_probs = None if training_with_labels else F.softmax(bias_logits, dim=-1)
+        ideology_probs = None if training_with_labels else F.softmax(ideology_logits, dim=-1)
+        propaganda_probs = None if training_with_labels else F.softmax(propaganda_logits, dim=-1)
 
         outputs: Dict[str, Any] = {
 
@@ -392,19 +428,19 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
             "bias": {
                 "logits": bias_logits,
                 "probabilities": bias_probs,
-                "predictions": torch.argmax(bias_probs, dim=-1),
+                "predictions": bias_predictions,
             },
 
             "ideology": {
                 "logits": ideology_logits,
                 "probabilities": ideology_probs,
-                "predictions": torch.argmax(ideology_probs, dim=-1),
+                "predictions": ideology_predictions,
             },
 
             "propaganda": {
                 "logits": propaganda_logits,
                 "probabilities": propaganda_probs,
-                "predictions": torch.argmax(propaganda_probs, dim=-1),
+                "predictions": propaganda_predictions,
             },
 
             "narrative": narrative_outputs,
@@ -428,19 +464,19 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
             task_name="bias",
             logits=bias_logits,
             probabilities=bias_probs,
-            predictions=torch.argmax(bias_probs, dim=-1),
+            predictions=bias_predictions,
         )
         multitask_output.add_task_output(
             task_name="ideology",
             logits=ideology_logits,
             probabilities=ideology_probs,
-            predictions=torch.argmax(ideology_probs, dim=-1),
+            predictions=ideology_predictions,
         )
         multitask_output.add_task_output(
             task_name="propaganda",
             logits=propaganda_logits,
             probabilities=propaganda_probs,
-            predictions=torch.argmax(propaganda_probs, dim=-1),
+            predictions=propaganda_predictions,
         )
         multitask_output.add_task_output(
             task_name="narrative",
