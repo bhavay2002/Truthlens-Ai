@@ -11,7 +11,7 @@ Description:
 
 Author: TruthLens Engineering
 Date: 2026-04-03
-Dependencies:
+Dependencies: 
     - Python 3.10+
     - numpy
     - torch
@@ -22,7 +22,6 @@ Inputs:
 Outputs:
     - Deterministic random state across supported libraries
 """
-
 from __future__ import annotations
 
 import logging
@@ -33,148 +32,159 @@ from typing import Optional
 import numpy as np
 import torch
 
-
-# ---------------------------------------------------------
-# Logging
-# ---------------------------------------------------------
-
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------
-# Set Seed
-# ---------------------------------------------------------
+# =========================================================
+# Main Seed Function
+# =========================================================
 
-
-def set_seed(seed: int = 42, *, deterministic: bool = True) -> None:
+def set_seed(
+    seed: int = 42,
+    *,
+    deterministic: bool = False,
+    enable_tf32: bool = True,
+    matmul_precision: str = "high",
+) -> None:
     """
-    Set random seed for reproducibility across Python, NumPy, and PyTorch.
+    Set global seed + configure backend for performance or determinism.
 
     Parameters
     ----------
     seed : int
-        Random seed value.
+        Random seed
 
     deterministic : bool
-        Whether to enforce deterministic computation for CUDA/CuDNN.
+        True  -> reproducible but slower
+        False -> faster (recommended for training)
+
+    enable_tf32 : bool
+        Enable TensorFloat-32 (Ampere+ GPUs)
+
+    matmul_precision : str
+        "high" | "medium" | "highest"
     """
+
+    if not isinstance(seed, int):
+        raise TypeError("seed must be int")
+
+    # -----------------------------
+    # Core Seeding
+    # -----------------------------
+
+    random.seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    np.random.seed(seed)
+
+    torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+    # -----------------------------
+    # Backend Config
+    # -----------------------------
+
+    if deterministic:
+        _set_deterministic()
+    else:
+        _set_fast_mode(enable_tf32, matmul_precision)
+
+    logger.info(
+        "Seed set to %d | deterministic=%s",
+        seed,
+        deterministic
+    )
+
+
+# =========================================================
+# Deterministic Mode
+# =========================================================
+
+def _set_deterministic():
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
     try:
-        if not isinstance(seed, int):
-            raise TypeError("seed must be an integer")
+        torch.use_deterministic_algorithms(True)
+    except Exception:
+        pass
 
-        # Python random
-        random.seed(seed)
-
-        # Python hash seed
-        os.environ["PYTHONHASHSEED"] = str(seed)
-
-        # NumPy
-        np.random.seed(seed)
-
-        # PyTorch CPU
-        torch.manual_seed(seed)
-
-        # PyTorch CUDA
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed(seed)
-            torch.cuda.manual_seed_all(seed)
-
-        if deterministic:
-            _configure_deterministic_backend()
-
-        logger.info("Random seed set to %d", seed)
-
-    except Exception as exc:
-        logger.exception("Failed to set random seed")
-        raise RuntimeError("Random seed initialization failed") from exc
+    logger.debug("Deterministic mode enabled")
 
 
-# ---------------------------------------------------------
-# Deterministic Backend Configuration
-# ---------------------------------------------------------
+# =========================================================
+# Fast Mode (IMPORTANT)
+# =========================================================
 
+def _set_fast_mode(enable_tf32: bool, matmul_precision: str):
 
-def _configure_deterministic_backend() -> None:
-    """
-    Configure PyTorch backends for deterministic behavior.
-    """
+    # cuDNN auto-tuner
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = False
 
+    # TF32 (huge speedup on Ampere+)
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = enable_tf32
+        torch.backends.cudnn.allow_tf32 = enable_tf32
+
+    # Matmul precision (PyTorch 2+)
     try:
-        # CuDNN settings
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+        torch.set_float32_matmul_precision(matmul_precision)
+    except Exception:
+        pass
 
-        # Torch deterministic algorithms (PyTorch >=1.8)
-        try:
-            torch.use_deterministic_algorithms(True)
-        except Exception:
-            # Older PyTorch versions may not support this
-            pass
-
-        logger.debug("PyTorch deterministic backend enabled")
-
-    except Exception as exc:
-        logger.exception("Failed to configure deterministic backend")
-        raise RuntimeError("Deterministic backend configuration failed") from exc
+    logger.debug(
+        "Fast mode enabled | TF32=%s | matmul_precision=%s",
+        enable_tf32,
+        matmul_precision,
+    )
 
 
-# ---------------------------------------------------------
-# Seed Worker (DataLoader Support)
-# ---------------------------------------------------------
+# =========================================================
+# DataLoader Worker Seed
+# =========================================================
+
+def seed_worker(worker_id: int):
+
+    worker_seed = torch.initial_seed() % 2**32
+
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+    # Optional: torch seed for worker
+    torch.manual_seed(worker_seed)
+
+    logger.debug("Worker seed initialized: %d", worker_seed)
 
 
-def seed_worker(worker_id: int) -> None:
+# =========================================================
+# Generator (IMPORTANT for DataLoader)
+# =========================================================
+
+def create_generator(seed: int) -> torch.Generator:
     """
-    Initialize worker-specific seed for PyTorch DataLoader.
-
-    Ensures reproducibility in multi-worker dataloaders.
-
-    Parameters
-    ----------
-    worker_id : int
-        Worker process ID.
+    Create torch Generator for reproducible DataLoader.
     """
-
-    try:
-        worker_seed = torch.initial_seed() % 2**32
-        np.random.seed(worker_seed)
-        random.seed(worker_seed)
-
-        logger.debug("Initialized DataLoader worker seed: %d", worker_seed)
-
-    except Exception as exc:
-        logger.exception("Failed to initialize DataLoader worker seed")
-        raise RuntimeError("Worker seed initialization failed") from exc
+    g = torch.Generator()
+    g.manual_seed(seed)
+    return g
 
 
-# ---------------------------------------------------------
-# Get Current Seed State
-# ---------------------------------------------------------
-
+# =========================================================
+# Seed State Debugging
+# =========================================================
 
 def get_seed_state() -> dict[str, Optional[int]]:
-    """
-    Retrieve current seed-related state for debugging or logging.
 
-    Returns
-    -------
-    dict[str, Optional[int]]
-        Dictionary containing seed information.
-    """
+    state = {
+        "python_hash_seed": os.environ.get("PYTHONHASHSEED"),
+        "torch_seed": torch.initial_seed(),
+        "cuda_available": torch.cuda.is_available(),
+    }
 
-    try:
-        state = {
-            "python_hash_seed": os.environ.get("PYTHONHASHSEED"),
-            "torch_seed": torch.initial_seed(),
-            "cuda_available": torch.cuda.is_available(),
-        }
+    if torch.cuda.is_available():
+        state["cuda_seed"] = torch.cuda.initial_seed()
 
-        if torch.cuda.is_available():
-            state["cuda_seed"] = torch.cuda.initial_seed()
-
-        return state
-
-    except Exception as exc:
-        logger.exception("Failed to retrieve seed state")
-        raise RuntimeError("Seed state retrieval failed") from exc
+    return state

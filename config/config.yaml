@@ -7,18 +7,29 @@ model:
   encoder:
     name: roberta-base
     tokenizer_name: roberta-base
-
-    # reduced for faster training
     max_length: 384
-
     cache_dir: models/cache
+
+    # memory optimization
+    gradient_checkpointing: true
+
+    # execution optimization
+    flash_attention: true
+
+    # compilation
+    torch_compile: true
+    compile_mode: max-autotune
 
   architecture:
     type: multitask_transformer
-    shared_encoder: true
+    shared_encoder: true     # avoid repeated encoder calls
     dropout: 0.1
 
+    # memory efficiency
+    reduce_intermediate_allocation: true
+
   path: models/truthlens_model
+
 
 # ==========================================================
 # TRAINING
@@ -31,8 +42,9 @@ training:
 
   epochs: 4
 
-  # improved GPU utilization
   batch_size: 16
+
+  # throughput scaling
   gradient_accumulation_steps: 1
 
   learning_rate: 2e-5
@@ -42,13 +54,45 @@ training:
   scheduler: cosine
   optimizer: adamw
 
-  fp16: true
+  # mixed precision
+  amp:
+    enabled: true
+    dtype: bf16   # better than fp16 on modern GPUs
+
   gradient_clipping: 1.0
 
-  # performance optimizations
+  # ------------------------------------------------------
+  # DATA PIPELINE OPTIMIZATION
+  # ------------------------------------------------------
+
   dynamic_padding: true
   group_by_length: true
-  flash_attention: true
+
+  dataloader:
+    num_workers: 8
+    persistent_workers: true
+    prefetch_factor: 2
+    pin_memory: true   # critical
+
+  # ------------------------------------------------------
+  # EXECUTION OPTIMIZATION
+  # ------------------------------------------------------
+
+  torch_compile: true
+  compile_mode: max-autotune
+
+  fused_attention: true
+
+  # ------------------------------------------------------
+  # CHECKPOINT OPTIMIZATION
+  # ------------------------------------------------------
+
+  checkpoint:
+    save_steps: 500
+    save_total_limit: 3
+
+    async_save: true               # non-blocking
+    save_optimizer_every: 2000     # avoid every step
 
   resume_from_checkpoint: false
 
@@ -59,6 +103,7 @@ training:
     enabled: true
     patience: 2
     metric: eval_f1
+
 
 # ==========================================================
 # DATA
@@ -76,6 +121,7 @@ data:
 
   augmentation_multiplier: 1.5
 
+
 # ==========================================================
 # FEATURES
 # ==========================================================
@@ -89,6 +135,7 @@ features:
     max_features: 5000
     top_terms_per_doc: 4
 
+
 # ==========================================================
 # CROSS VALIDATION
 # ==========================================================
@@ -98,6 +145,7 @@ cross_validation:
   enabled: false
   splits: 5
   metric: eval_loss
+
 
 # ==========================================================
 # HYPERPARAMETER TUNING
@@ -125,6 +173,7 @@ hyperparameter_tuning:
       - 3
       - 4
 
+
 # ==========================================================
 # EVALUATION
 # ==========================================================
@@ -144,6 +193,7 @@ evaluation:
       - macro_f1
       - roc_auc
 
+
 # ==========================================================
 # LOGGING
 # ==========================================================
@@ -154,10 +204,8 @@ logging:
 
   training_log_path: logs/training.log
 
-  save_steps: 500
   eval_steps: 500
 
-  save_total_limit: 3
 
 # ==========================================================
 # PATHS
@@ -175,6 +223,7 @@ paths:
   confusion_matrix_path: reports/confusion_matrix.png
   cleaning_report_path: reports/data_cleaning_report.json
 
+
 # ==========================================================
 # API
 # ==========================================================
@@ -182,10 +231,11 @@ paths:
 api:
 
   title: TruthLens AI API
-  description: Multi-task NLP system for bias, ideology, propaganda, emotion, and narrative analysis
+  description: Multi-task NLP system
   version: 2.0.0
 
   text_preview_chars: 100
+
 
 # ==========================================================
 # INFERENCE
@@ -196,4 +246,5 @@ inference:
   batch_size: 16
   device: auto
 
+  use_half_precision: true
   allow_raw_text_fallback: true
