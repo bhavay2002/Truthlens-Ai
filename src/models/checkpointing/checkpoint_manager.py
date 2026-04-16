@@ -25,46 +25,108 @@ Outputs:
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import queue
 import shutil
+import threading
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 import torch
+import torch.distributed as dist
 
 logger = logging.getLogger(__name__)
 
 
-class CheckpointManager:
-    """
-    Utility class for managing training checkpoints.
-    """
+# =====================================================
+# Async Checkpoint Writer (Non-blocking)
+# =====================================================
 
-    def __init__(self, checkpoint_dir: str | Path) -> None:
+class AsyncCheckpointWriter:
+    def __init__(self, max_queue_size: int = 4) -> None:
+        self._queue: queue.Queue = queue.Queue(maxsize=max_queue_size)
+        self._thread = threading.Thread(target=self._worker, daemon=True)
+        self._thread.start()
+
+    def _worker(self):
+        while True:
+            item = self._queue.get()
+            if item is None:
+                break
+
+            path, obj = item
+            tmp_path = path.with_suffix(path.suffix + ".tmp")
+
+            torch.save(obj, tmp_path, _use_new_zipfile_serialization=True)
+            tmp_path.replace(path)
+
+    def save(self, path: Path, obj: Any):
+        try:
+            self._queue.put_nowait((path, obj))
+        except queue.Full:
+            try:
+                self._queue.get_nowait()
+                self._queue.put_nowait((path, obj))
+            except queue.Empty:
+                pass
+
+    def close(self):
+        self._queue.put(None)
+        self._thread.join()
+
+
+# =====================================================
+# Checkpoint Manager
+# =====================================================
+
+class CheckpointManager:
+
+    def __init__(self, checkpoint_dir: str | Path):
         self.checkpoint_dir = Path(checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
+        self._writer = AsyncCheckpointWriter()
+        self._last_hash: Optional[str] = None
+
     # -------------------------------------------------
-    # Internal Helpers
+    # Utils
     # -------------------------------------------------
 
     @staticmethod
-    def _checkpoint_step(path: Path) -> Optional[int]:
-        """
-        Extract step number from checkpoint directory name.
-        """
+    def should_save(step: int, save_every: int) -> bool:
+        return save_every > 0 and step % save_every == 0
 
-        name = path.name
+    @staticmethod
+    def _is_primary() -> bool:
+        return not (dist.is_available() and dist.is_initialized()) or dist.get_rank() == 0
 
-        if not name.startswith("checkpoint-"):
-            return None
+    @staticmethod
+    def _extract_state(model_or_state):
+        if isinstance(model_or_state, torch.nn.Module):
+            model = model_or_state
+            if hasattr(model, "_orig_mod"):
+                model = model._orig_mod
+            return model.state_dict()
+        return model_or_state
 
-        suffix = name.split("-", 1)[-1]
+    @staticmethod
+    def _to_cpu(state: Dict[str, Any]) -> Dict[str, Any]:
+        for k, v in state.items():
+            if torch.is_tensor(v):
+                t = v.detach().to("cpu", non_blocking=True)
+                state[k] = t.pin_memory()
+        return state
 
-        if not suffix.isdigit():
-            return None
-
-        return int(suffix)
+    @staticmethod
+    def _hash_state(state: Dict[str, Any]) -> str:
+        h = hashlib.md5()
+        for k, v in state.items():
+            h.update(k.encode())
+            if torch.is_tensor(v):
+                sample = v.flatten()[:10].contiguous()
+                h.update(sample.numpy().tobytes())
+        return h.hexdigest()
 
     # -------------------------------------------------
     # Save Checkpoint
@@ -73,176 +135,137 @@ class CheckpointManager:
     def save_checkpoint(
         self,
         step: int,
-        model_state_dict: Dict[str, Any],
-        optimizer_state_dict: Optional[Dict[str, Any]] = None,
-        scheduler_state_dict: Optional[Dict[str, Any]] = None,
+        model,
+        optimizer: Optional[torch.optim.Optimizer] = None,
+        scheduler: Optional[Any] = None,
         metadata: Optional[Dict[str, Any]] = None,
-    ) -> Path:
+        *,
+        save_optimizer: bool = False,
+        save_every: int = 1000,
+        deduplicate: bool = True,
+    ) -> Optional[Path]:
 
-        if step < 0:
-            raise ValueError("step must be non-negative")
+        if not self.should_save(step, save_every):
+            return None
+
+        if not self._is_primary():
+            return None
 
         checkpoint_path = self.checkpoint_dir / f"checkpoint-{step}"
         checkpoint_path.mkdir(parents=True, exist_ok=True)
 
         checkpoint_file = checkpoint_path / "checkpoint.pt"
-        tmp_file = checkpoint_path / "checkpoint.tmp"
 
-        checkpoint_data: Dict[str, Any] = {
+        # Extract state
+        state_dict = self._extract_state(model)
+        state_dict = self._to_cpu(state_dict)
+
+        # Deduplication
+        if deduplicate:
+            h = self._hash_state(state_dict)
+            if h == self._last_hash:
+                logger.info("Skipping duplicate checkpoint")
+                return None
+            self._last_hash = h
+
+        payload: Dict[str, Any] = {
             "step": step,
-            "model_state_dict": model_state_dict,
+            "model": state_dict,
         }
 
-        if optimizer_state_dict is not None:
-            checkpoint_data["optimizer_state_dict"] = optimizer_state_dict
+        if save_optimizer and optimizer is not None:
+            payload["optimizer"] = optimizer.state_dict()
 
-        if scheduler_state_dict is not None:
-            checkpoint_data["scheduler_state_dict"] = scheduler_state_dict
+        if scheduler is not None:
+            payload["scheduler"] = scheduler.state_dict()
 
-        if metadata is not None:
-            checkpoint_data["metadata"] = metadata
+        if metadata:
+            payload["metadata"] = metadata
 
-        try:
+        # Async save
+        self._writer.save(checkpoint_file, payload)
 
-            # Atomic checkpoint write
-            torch.save(checkpoint_data, tmp_file)
-
-            tmp_file.replace(checkpoint_file)
-
-            logger.info("Checkpoint saved: %s", checkpoint_file)
-
-        except Exception as exc:
-
-            logger.exception("Failed to save checkpoint: %s", checkpoint_file)
-
-            if tmp_file.exists():
-                tmp_file.unlink(missing_ok=True)
-
-            raise RuntimeError("Checkpoint saving failed") from exc
-
+        logger.info("Checkpoint queued: %s", checkpoint_file)
         return checkpoint_path
 
     # -------------------------------------------------
-    # Find Latest Checkpoint
+    # Sharded Save (for large models)
     # -------------------------------------------------
 
-    def get_latest_checkpoint(self) -> Optional[Path]:
+    def save_sharded(self, step: int, model, shards: int = 4):
 
-        try:
+        if not self._is_primary():
+            return []
 
-            checkpoints = self.list_checkpoints()
+        state = self._to_cpu(self._extract_state(model))
+        items = list(state.items())
 
-            if not checkpoints:
-                logger.info("No checkpoints found")
-                return None
+        shard_size = max(1, len(items) // shards)
+        paths = []
 
-            latest = checkpoints[-1]
+        for i in range(shards):
+            shard = dict(items[i * shard_size:(i + 1) * shard_size])
+            path = self.checkpoint_dir / f"checkpoint-{step}-shard-{i}.pt"
+            self._writer.save(path, shard)
+            paths.append(path)
 
-            logger.info("Latest checkpoint detected: %s", latest)
-
-            return latest
-
-        except Exception as exc:
-
-            logger.exception("Failed to detect latest checkpoint")
-
-            raise RuntimeError("Checkpoint detection failed") from exc
+        return paths
 
     # -------------------------------------------------
-    # List Checkpoints
+    # Load
+    # -------------------------------------------------
+
+    def load_checkpoint(self, path: str | Path) -> Dict[str, Any]:
+        path = Path(path)
+
+        if path.is_dir():
+            path = path / "checkpoint.pt"
+
+        if not path.exists():
+            raise FileNotFoundError(path)
+
+        return torch.load(path, map_location="cpu")
+
+    # -------------------------------------------------
+    # List + Latest
     # -------------------------------------------------
 
     def list_checkpoints(self) -> List[Path]:
+        checkpoints = []
 
-        checkpoint_pairs: List[tuple[int, Path]] = []
+        for p in self.checkpoint_dir.iterdir():
+            if p.is_dir() and p.name.startswith("checkpoint-"):
+                checkpoints.append(p)
 
-        for checkpoint in self.checkpoint_dir.iterdir():
+        return sorted(checkpoints, key=lambda x: int(x.name.split("-")[-1]))
 
-            if not checkpoint.is_dir():
-                continue
-
-            step = self._checkpoint_step(checkpoint)
-
-            if step is None:
-                continue
-
-            checkpoint_file = checkpoint / "checkpoint.pt"
-
-            if checkpoint_file.exists():
-                checkpoint_pairs.append((step, checkpoint))
-
-        checkpoint_pairs.sort(key=lambda item: item[0])
-
-        return [p for _, p in checkpoint_pairs]
+    def get_latest_checkpoint(self) -> Optional[Path]:
+        checkpoints = self.list_checkpoints()
+        return checkpoints[-1] if checkpoints else None
 
     # -------------------------------------------------
-    # Cleanup Old Checkpoints
+    # Cleanup
     # -------------------------------------------------
 
-    def cleanup_old_checkpoints(self, max_checkpoints: int = 3) -> None:
+    def cleanup_old_checkpoints(self, max_checkpoints: int = 3):
+        checkpoints = self.list_checkpoints()
 
-        if max_checkpoints < 1:
-            raise ValueError("max_checkpoints must be >= 1")
+        if len(checkpoints) <= max_checkpoints:
+            return
 
+        for p in checkpoints[:-max_checkpoints]:
+            shutil.rmtree(p)
+            logger.info("Deleted checkpoint: %s", p)
+
+    # -------------------------------------------------
+    # Shutdown
+    # -------------------------------------------------
+
+    def close(self):
+        self._writer.close()
+
+    def __del__(self):
         try:
-
-            checkpoints = self.list_checkpoints()
-
-            if len(checkpoints) <= max_checkpoints:
-                return
-
-            to_delete = checkpoints[:-max_checkpoints]
-
-            for checkpoint in to_delete:
-
-                if checkpoint.parent != self.checkpoint_dir:
-                    logger.warning("Skipping unsafe checkpoint deletion: %s", checkpoint)
-                    continue
-
-                logger.info("Removing old checkpoint: %s", checkpoint)
-
-                shutil.rmtree(checkpoint)
-
-        except Exception as exc:
-
-            logger.exception("Checkpoint cleanup failed")
-
-            raise RuntimeError("Checkpoint cleanup failed") from exc
-
-    # -------------------------------------------------
-    # Load Checkpoint
-    # -------------------------------------------------
-
-    def load_checkpoint(self, checkpoint_path: str | Path) -> Dict[str, Any]:
-
-        checkpoint_path = Path(checkpoint_path)
-
-        checkpoint_file = checkpoint_path / "checkpoint.pt"
-
-        if not checkpoint_file.exists():
-            raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_file}")
-
-        try:
-
-            checkpoint = torch.load(checkpoint_file, map_location="cpu")
-
-            logger.info("Checkpoint loaded: %s", checkpoint_file)
-
-            return checkpoint
-
-        except Exception as exc:
-
-            logger.exception("Failed to load checkpoint: %s", checkpoint_file)
-
-            raise RuntimeError("Checkpoint loading failed") from exc
-
-
-# ---------------------------------------------------------
-# Convenience Helper
-# ---------------------------------------------------------
-
-def get_last_checkpoint(checkpoint_dir: str | Path) -> Optional[Path]:
-
-    manager = CheckpointManager(checkpoint_dir)
-
-    return manager.get_latest_checkpoint()
+            self._writer.close()
+        except Exception:
+            pass
