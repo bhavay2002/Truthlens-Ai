@@ -82,6 +82,8 @@ class TrainerConfig:
     log_every_steps: int = 50
     checkpoint_dir: Optional[str] = None
     checkpoint_every_steps: int = 0
+    use_amp: Optional[bool] = None
+    amp_dtype: Optional[str] = None
 
 
 # ---------------------------------------------------------
@@ -124,8 +126,20 @@ class Trainer:
                 logger.warning(f"torch.compile failed: {e}")
 
         # AMP Setup
-        self.use_amp = self.device.type == "cuda"
-        self.autocast_dtype = _get_autocast_dtype()
+        if self.config.use_amp is None:
+            self.use_amp = self.device.type == "cuda"
+        else:
+            self.use_amp = bool(self.config.use_amp)
+
+        if self.config.amp_dtype:
+            if self.config.amp_dtype.lower() == "bf16":
+                self.autocast_dtype = torch.bfloat16
+            elif self.config.amp_dtype.lower() == "fp16":
+                self.autocast_dtype = torch.float16
+            else:
+                self.autocast_dtype = _get_autocast_dtype()
+        else:
+            self.autocast_dtype = _get_autocast_dtype()
         self.autocast_device_type = "cuda" if self.use_amp else "cpu"
 
         self.scaler = torch.cuda.amp.GradScaler(

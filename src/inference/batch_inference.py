@@ -39,12 +39,14 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import multiprocessing as mp
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 import pandas as pd
 from tqdm import tqdm
+import torch
 
 from src.inference.model_loader import ModelLoader
 from src.inference.feature_preparer import (
@@ -62,6 +64,9 @@ from src.graph.graph_pipeline import GraphPipeline
 
 logger = logging.getLogger(__name__)
 
+_worker_runner: Optional[AnalysisIntegrationRunner] = None
+_worker_graph: Optional[GraphPipeline] = None
+
 
 @dataclass
 class BatchInferenceConfig:
@@ -73,6 +78,25 @@ class BatchInferenceConfig:
     output_path: str = "batch_predictions.json"
     batch_size: int = 32
     models_dir: str = "models"
+    num_workers: int = 0
+
+
+def _init_worker() -> None:
+    global _worker_runner, _worker_graph
+    _worker_runner = AnalysisIntegrationRunner()
+    _worker_graph = GraphPipeline()
+
+
+def _analyze_text_worker(text: str) -> Dict[str, Any]:
+    if _worker_runner is None:
+        raise RuntimeError("Worker runner not initialized")
+    return _worker_runner.analyze_text(text)
+
+
+def _graph_run_worker(text: str) -> Dict[str, Any]:
+    if _worker_graph is None:
+        raise RuntimeError("Worker graph not initialized")
+    return _worker_graph.run(text)
 
 
 class BatchInferenceEngine:
@@ -114,12 +138,28 @@ class BatchInferenceEngine:
             )
 
         self.prediction_pipeline = PredictionPipeline(
-            config=PredictionPipelineConfig(device=str(self.model_loader.device)),
+            config=PredictionPipelineConfig(
+                device=str(self.model_loader.device),
+                return_probabilities=False,
+            ),
             bias_model=self.artifacts.bias_model,
             ideology_model=self.artifacts.ideology_model,
             propaganda_model=None,
             emotion_model=self.artifacts.emotion_model,
         )
+
+        if torch.cuda.is_available():
+            for model in [
+                self.artifacts.bias_model,
+                self.artifacts.ideology_model,
+                self.artifacts.emotion_model,
+            ]:
+                if model is not None:
+                    model.half()
+
+        compile_models = getattr(self.prediction_pipeline, "compile_models", None)
+        if callable(compile_models):
+            compile_models()
 
         self.report_generator = ReportGenerator()
         self.formatter = ResultFormatter()
@@ -149,46 +189,92 @@ class BatchInferenceEngine:
 
         return df
 
-    def _process_article(
+    def _process_batch(
         self,
-        text: str,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        texts: List[str],
+        metadata_list: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
         """
-        Run inference for a single article.
+        Run inference for a batch of articles.
         """
 
         if self.feature_preparer is None:
             raise RuntimeError("FeaturePreparer is required for batch inference")
 
-        features_dict = {"text_length": len(text)}
+        lengths = [len(text) for text in texts]
+        features_list = [{"text_length": length} for length in lengths]
+        prepared = self.feature_preparer.prepare_batch(features_list)
 
-        prepared_features = self.feature_preparer.prepare_single(features_dict)
+        prepared = torch.as_tensor(prepared, dtype=torch.float32)
 
-        prediction = self.prediction_pipeline.predict(prepared_features)
-        analysis_modules = self.analysis_runner.analyze_text(text)
-        graph_outputs = self.graph_pipeline.run(text)
+        if prepared.device.type == "cpu":
+            prepared = prepared.pin_memory()
 
-        report = self.report_generator.generate_report(
-            article_text=text,
-            title=metadata.get("title") if metadata else None,
-            source=metadata.get("source") if metadata else None,
-            bias_analysis={"bias": prediction.get("bias")},
-            emotion_analysis={"emotion": prediction.get("emotion")},
-            narrative_structure=analysis_modules.get("narrative_propagation", {}),
-            entity_graph=graph_outputs,
-            credibility_score=prediction.get("credibility_score"),
-        )
+        with torch.inference_mode(), torch.autocast(
+            device_type="cuda",
+            dtype=torch.bfloat16,
+            enabled=torch.cuda.is_available(),
+        ):
+            predictions = self.prediction_pipeline.predict(prepared)
 
-        api_output = self.formatter.format_api_response(prediction)
+        results: List[Dict[str, Any]] = []
 
-        result = {
-            "prediction": api_output,
-            "report": report,
-            "analysis_modules": analysis_modules,
-        }
+        bias_values = predictions.get("bias")
+        emotion_values = predictions.get("emotion")
+        credibility_values = predictions.get("credibility_score")
+        ideology_values = predictions.get("ideology")
+        propaganda_values = predictions.get("propaganda_probability")
 
-        return result
+        if self.config.num_workers > 0:
+            ctx = mp.get_context("spawn")
+            with ctx.Pool(self.config.num_workers, initializer=_init_worker) as pool:
+                analysis_results = pool.map(_analyze_text_worker, texts)
+                graph_results = pool.map(_graph_run_worker, texts)
+        else:
+            analysis_results = [self.analysis_runner.analyze_text(text) for text in texts]
+            graph_results = [self.graph_pipeline.run(text) for text in texts]
+
+        for i, text in enumerate(texts):
+            metadata = metadata_list[i]
+            analysis_modules = analysis_results[i]
+            graph_outputs = graph_results[i]
+
+            def _value_at(value: Any) -> Any:
+                return value[i] if isinstance(value, list) else value
+
+            report = self.report_generator.generate_report(
+                article_text=text,
+                title=metadata.get("title"),
+                source=metadata.get("source"),
+                bias_analysis={"bias": _value_at(bias_values)},
+                emotion_analysis={"emotion": _value_at(emotion_values)},
+                narrative_structure=analysis_modules.get("narrative_propagation", {}),
+                entity_graph=graph_outputs,
+                credibility_score=_value_at(credibility_values),
+            )
+
+            api_output = self.formatter.format_api_response(
+                {
+                    "bias": _value_at(bias_values),
+                    "ideology": _value_at(ideology_values),
+                    "propaganda_probability": _value_at(propaganda_values),
+                    "emotion": _value_at(emotion_values),
+                    "credibility_score": _value_at(credibility_values),
+                    "credibility_explanation": _value_at(
+                        predictions.get("credibility_explanation")
+                    ),
+                }
+            )
+
+            results.append(
+                {
+                    "prediction": api_output,
+                    "report": report,
+                    "analysis_modules": analysis_modules,
+                }
+            )
+
+        return results
 
     def run(self) -> List[Dict[str, Any]]:
         """
@@ -199,28 +285,42 @@ class BatchInferenceEngine:
 
         results: List[Dict[str, Any]] = []
 
-        iterator = tqdm(df.iterrows(), total=len(df), desc="Running inference")
+        batch_size = self.config.batch_size
 
-        for _, row in iterator:
+        for start in tqdm(range(0, len(df), batch_size), desc="Batch inference"):
+            batch_df = df.iloc[start:start + batch_size]
+            texts = batch_df[self.config.text_column].tolist()
 
-            text = row[self.config.text_column]
-
-            metadata = {
-                "title": row["title"] if "title" in row.index else None,
-                "source": row["source"] if "source" in row.index else None,
-            }
+            metadata_list = batch_df[["title", "source"]].to_dict("records")
 
             try:
-                result = self._process_article(text, metadata)
-                results.append(result)
-
+                batch_results = self._process_batch(texts, metadata_list)
+                results.extend(batch_results)
             except Exception as exc:
-                logger.exception("Inference failed for article")
-                results.append({"error": str(exc)})
+                logger.exception("Batch failed")
+                results.extend([{"error": str(exc)}] * len(texts))
 
         logger.info("Batch inference completed")
 
         return results
+
+    def export_onnx(self, path: str) -> None:
+        if self.artifacts.bias_model is None:
+            raise RuntimeError("Bias model unavailable for ONNX export")
+
+        dummy = torch.randn(1, 10, device=self.model_loader.device)
+
+        torch.onnx.export(
+            self.artifacts.bias_model,
+            dummy,
+            path,
+            input_names=["input"],
+            output_names=["logits"],
+            dynamic_axes={"input": {0: "batch"}},
+            opset_version=17,
+        )
+
+        logger.info("ONNX export completed: %s", path)
 
     def save_results(self, results: List[Dict[str, Any]]) -> None:
         """

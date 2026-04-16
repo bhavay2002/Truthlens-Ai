@@ -77,8 +77,28 @@ class ModelWrapper:
             self.ensemble_model.eval()
         self.temperature_scaler = temperature_scaler
         self.isotonic_calibrator = isotonic_calibrator
+        self.compute_probabilities = False
+        self.return_logits_only = False
 
-        logger.info("ModelWrapper initialized on device: %s", self.device)
+        if self.device.type == "cuda":
+            self.model.half()
+            if self.ensemble_model is not None:
+                self.ensemble_model.half()
+
+        if hasattr(torch, "compile"):
+            try:
+                self.model = torch.compile(self.model, mode="max-autotune")
+            except Exception:
+                pass
+
+            if self.ensemble_model is not None:
+                try:
+                    self.ensemble_model = torch.compile(
+                        self.ensemble_model,
+                        mode="max-autotune",
+                    )
+                except Exception:
+                    pass
 
     def set_temperature_scaler(self, scaler: TemperatureScaler) -> None:
         self.temperature_scaler = scaler
@@ -111,11 +131,16 @@ class ModelWrapper:
 
         batch = self._move_to_device(batch)
 
-        with torch.no_grad():
-            if self.ensemble_model is not None:
-                outputs = self._run_ensemble(batch)
-            else:
-                outputs = self.model(**batch)
+        with torch.inference_mode():
+            with torch.autocast(
+                device_type="cuda",
+                dtype=torch.bfloat16,
+                enabled=self.device.type == "cuda",
+            ):
+                if self.ensemble_model is not None:
+                    outputs = self._run_ensemble(batch)
+                else:
+                    outputs = self.model(**batch)
 
         return outputs
 
@@ -181,10 +206,7 @@ class ModelWrapper:
 
             self.model.load_state_dict(state_dict, strict=strict)
 
-            logger.info("Checkpoint loaded successfully: %s", checkpoint_path)
-
         except Exception as exc:
-            logger.exception("Failed to load checkpoint")
             raise RuntimeError("Checkpoint loading failed") from exc
 
     def _move_to_device(
@@ -199,7 +221,9 @@ class ModelWrapper:
 
         for key, value in batch.items():
             if isinstance(value, torch.Tensor):
-                moved_batch[key] = value.to(self.device)
+                if value.device.type == "cpu":
+                    value = value.pin_memory()
+                moved_batch[key] = value.to(self.device, non_blocking=True)
             else:
                 moved_batch[key] = value
 
@@ -214,31 +238,37 @@ class ModelWrapper:
         """
 
         if isinstance(outputs, dict):
+            if self.return_logits_only:
+                return outputs
 
+            softmax = torch.softmax
+            argmax = torch.argmax
             results: Dict[str, Any] = {}
 
             for key, value in outputs.items():
-
                 if isinstance(value, torch.Tensor):
-
                     if "logits" in key:
+                        logits = value
+                        if self.compute_probabilities:
+                            probs = softmax(logits, dim=-1)
+                            calibrated_probs = self._calibrate_probabilities(
+                                logits=logits,
+                                probabilities=probs,
+                            )
+                        else:
+                            probs = None
+                            calibrated_probs = None
 
-                        probs = torch.softmax(value, dim=-1)
-                        calibrated_probs = self._calibrate_probabilities(
-                            logits=value,
-                            probabilities=probs,
-                        )
-                        preds = torch.argmax(calibrated_probs, dim=-1)
+                        preds = argmax(logits, dim=-1)
+                        base = key.replace("logits", "")
+                        results[f"{base}predictions"] = preds
 
-                        results[key.replace("logits", "probabilities")] = probs
-                        results[
-                            key.replace("logits", "calibrated_probabilities")
-                        ] = calibrated_probs
-                        results[key.replace("logits", "predictions")] = preds
-
+                        if probs is not None:
+                            results[f"{base}probabilities"] = probs
+                        if calibrated_probs is not None:
+                            results[f"{base}calibrated_probabilities"] = calibrated_probs
                     else:
                         results[key] = value
-
                 else:
                     results[key] = value
 
@@ -254,11 +284,11 @@ class ModelWrapper:
     ) -> torch.Tensor:
         if self.temperature_scaler is not None:
             try:
-                logits_device = logits.to(self.temperature_scaler.device)
+                logits_device = logits
                 calibrated = self.temperature_scaler.predict_proba(logits_device)
                 return calibrated.to(probabilities.device)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Temperature scaling skipped during wrapper prediction: %s", exc)
+            except Exception:  # noqa: BLE001
+                pass
 
         if self.isotonic_calibrator is not None:
             try:
@@ -269,8 +299,8 @@ class ModelWrapper:
                     dtype=probabilities.dtype,
                     device=probabilities.device,
                 )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Isotonic calibration skipped during wrapper prediction: %s", exc)
+            except Exception:  # noqa: BLE001
+                pass
 
         return probabilities
 
@@ -278,30 +308,11 @@ class ModelWrapper:
         if self.ensemble_model is None:
             raise RuntimeError("Ensemble model is not configured.")
 
-        logits: Optional[torch.Tensor] = None
-
-        try:
-            maybe_outputs = self.ensemble_model(**batch)
-            if isinstance(maybe_outputs, torch.Tensor):
-                logits = maybe_outputs
-            elif isinstance(maybe_outputs, dict):
-                for key, value in maybe_outputs.items():
-                    if isinstance(value, torch.Tensor) and "logits" in key:
-                        logits = value
-                        break
-        except Exception:  # noqa: BLE001
-            logits = None
-
-        if logits is None:
-            if "ensemble_input" in batch and isinstance(batch["ensemble_input"], torch.Tensor):
-                logits = self.ensemble_model(batch["ensemble_input"].to(self.device))
-            elif "input_ids" in batch and isinstance(batch["input_ids"], torch.Tensor):
-                logits = self.ensemble_model(batch["input_ids"].to(self.device))
-            else:
-                raise RuntimeError(
-                    "Unable to run ensemble model: provide 'ensemble_input' "
-                    "or compatible batch kwargs."
-                )
+        logits = self.ensemble_model(**batch)
+        if isinstance(logits, dict):
+            logits = next(
+                value for value in logits.values() if isinstance(value, torch.Tensor)
+            )
 
         if not isinstance(logits, torch.Tensor):
             raise RuntimeError("Ensemble model must return logits tensor.")

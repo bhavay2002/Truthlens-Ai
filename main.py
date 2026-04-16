@@ -11,11 +11,13 @@ Trains a shared RoBERTa encoder with 6 task-specific prediction heads:
 """
 
 import logging
+import os
 import math
+import shutil
 import sys
+import threading
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -45,6 +47,7 @@ from src.utils.device_utils import get_device
 SETTINGS = load_settings()
 configure_logging(log_file=SETTINGS.paths.training_log_path)
 logger = logging.getLogger(__name__)
+os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 
 # -----------------------------------------------------
@@ -64,7 +67,8 @@ TRAIN_PATH = DRIVE_DATA_PATH / "unified_dataset_train.csv"
 VAL_PATH = DRIVE_DATA_PATH / "unified_dataset_validation.csv"
 TEST_PATH = DRIVE_DATA_PATH / "unified_dataset_test.csv"
 
-MODEL_SAVE_PATH = Path(SETTINGS.model.path)
+LOCAL_SAVE_PATH = Path("/content/truthlens_model")
+DRIVE_SAVE_PATH = Path(SETTINGS.model.path)
 
 
 # -----------------------------------------------------
@@ -98,9 +102,8 @@ EMOTION_COLUMNS = [f"emotion_{i}" for i in range(len(EMOTION_LABELS))]
 # -----------------------------------------------------
 class TruthLensMultiTaskDataset(Dataset):
 
-    def __init__(self, df, tokenizer, max_length=256, text_column="text"):
+    def __init__(self, df, max_length=256, text_column="text"):
         self.df = df.reset_index(drop=True)
-        self.tokenizer = tokenizer
         self.max_length = max_length
         self.text_column = text_column
 
@@ -140,66 +143,35 @@ class TruthLensMultiTaskDataset(Dataset):
         row = self.df.iloc[idx]
         text = str(row[self.text_column])
 
-        encoding = self.tokenizer(
-            text,
-            truncation=True,
-            padding="max_length",
-            max_length=self.max_length,
-            return_tensors="pt",
-        )
-
-        item = {
-            "input_ids": encoding["input_ids"].squeeze(0),
-            "attention_mask": encoding["attention_mask"].squeeze(0),
-        }
-
         labels = {
-            "bias": torch.tensor(
-                self._safe_int(row.get(BIAS_LABEL, 0)),
-                dtype=torch.long
-            ),
-            "ideology": torch.tensor(
-                self._safe_int(row.get(IDEOLOGY_LABEL, 1)),
-                dtype=torch.long
-            ),
-            "propaganda": torch.tensor(
-                self._safe_int(row.get(PROPAGANDA_LABEL, 0)),
-                dtype=torch.long
-            ),
-            "narrative": torch.tensor(
-                [
-                    float(max(
-                        self._safe_int(row.get("hero", 0)),
-                        self._entity_to_binary(row.get("hero_entities")),
-                    )),
-                    float(max(
-                        self._safe_int(row.get("villain", 0)),
-                        self._entity_to_binary(row.get("villain_entities")),
-                    )),
-                    float(max(
-                        self._safe_int(row.get("victim", 0)),
-                        self._entity_to_binary(row.get("victim_entities")),
-                    )),
-                ],
-                dtype=torch.float,
-            ),
-            "narrative_frame": torch.tensor(
-                [self._safe_float(row.get(c, 0)) for c in FRAME_COLUMNS],
-                dtype=torch.float,
-            ),
-            "emotion": torch.tensor(
-                [self._safe_float(row.get(c, 0)) for c in EMOTION_COLUMNS],
-                dtype=torch.float,
-            ),
+            "bias": self._safe_int(row.get(BIAS_LABEL, 0)),
+            "ideology": self._safe_int(row.get(IDEOLOGY_LABEL, 1)),
+            "propaganda": self._safe_int(row.get(PROPAGANDA_LABEL, 0)),
+            "narrative": [
+                float(max(
+                    self._safe_int(row.get("hero", 0)),
+                    self._entity_to_binary(row.get("hero_entities")),
+                )),
+                float(max(
+                    self._safe_int(row.get("villain", 0)),
+                    self._entity_to_binary(row.get("villain_entities")),
+                )),
+                float(max(
+                    self._safe_int(row.get("victim", 0)),
+                    self._entity_to_binary(row.get("victim_entities")),
+                )),
+            ],
+            "narrative_frame": [self._safe_float(row.get(c, 0)) for c in FRAME_COLUMNS],
+            "emotion": [self._safe_float(row.get(c, 0)) for c in EMOTION_COLUMNS],
         }
 
-        item["labels"] = labels
-
-        item["hero_entities"] = str(row.get("hero_entities") or "")
-        item["villain_entities"] = str(row.get("villain_entities") or "")
-        item["victim_entities"] = str(row.get("victim_entities") or "")
-
-        return item
+        return {
+            "text": text,
+            "labels": labels,
+            "hero_entities": row.get("hero_entities", ""),
+            "villain_entities": row.get("villain_entities", ""),
+            "victim_entities": row.get("victim_entities", ""),
+        }
 
 # -----------------------------------------------------
 # Load Data
@@ -213,7 +185,10 @@ def load_data():
 
     for df in (train_df, val_df, test_df):
         if "title" in df.columns and TEXT_COLUMN in df.columns:
-            df[TEXT_COLUMN] = df["title"].fillna("") + " " + df[TEXT_COLUMN].fillna("")
+            df[TEXT_COLUMN] = df["title"].fillna("").str.cat(
+                df[TEXT_COLUMN].fillna(""),
+                sep=" ",
+            )
 
     logger.info(
         "Dataset loaded — train: %d  val: %d  test: %d",
@@ -231,14 +206,26 @@ def load_data():
 
 def save_model(model, tokenizer):
 
-    create_folder(MODEL_SAVE_PATH)
+    create_folder(LOCAL_SAVE_PATH)
 
-    tokenizer.save_pretrained(str(MODEL_SAVE_PATH))
+    tokenizer.save_pretrained(str(LOCAL_SAVE_PATH))
 
-    torch.save(
-        model.state_dict(),
-        MODEL_SAVE_PATH / "pytorch_model.bin"
-    )
+    def _save_local(m):
+        torch.save(
+            m.state_dict(),
+            LOCAL_SAVE_PATH / "pytorch_model.bin"
+        )
+
+    save_thread = threading.Thread(target=_save_local, args=(model,), daemon=True)
+    save_thread.start()
+
+    def _copy_to_drive():
+        create_folder(DRIVE_SAVE_PATH)
+        for file in LOCAL_SAVE_PATH.iterdir():
+            shutil.copy2(file, DRIVE_SAVE_PATH / file.name)
+
+    copy_thread = threading.Thread(target=_copy_to_drive, daemon=True)
+    copy_thread.start()
 
     config_data = {
         "model_type": "multitask_truthlens",
@@ -247,11 +234,14 @@ def save_model(model, tokenizer):
 
     save_json(
         config_data,
-        MODEL_SAVE_PATH / "config.json",
+        LOCAL_SAVE_PATH / "config.json",
         indent=2
     )
 
-    logger.info("Model saved to %s", MODEL_SAVE_PATH)
+    save_thread.join(timeout=10)
+    copy_thread.join(timeout=10)
+
+    logger.info("Model saved locally and copying to Drive async")
 
 
 # -----------------------------------------------------
@@ -289,6 +279,8 @@ def main():
 
         logger.info("Training device: %s", device)
 
+        torch.backends.cudnn.benchmark = True
+
         # --------------------------------------------------
         # Data
         # --------------------------------------------------
@@ -296,17 +288,44 @@ def main():
         train_df, val_df, _ = load_data()
 
         tokenizer = AutoTokenizer.from_pretrained(model_name)
+        tok = tokenizer
+
+        def collate_fn(batch):
+            texts = [item["text"] for item in batch]
+            enc = tok(
+                texts,
+                padding=True,
+                truncation=True,
+                max_length=max_length,
+                return_tensors="pt",
+            )
+
+            batched_labels = {}
+            label_keys = list(batch[0]["labels"])
+            for key in label_keys:
+                get_labels = lambda item: item["labels"][key]
+                values = list(map(get_labels, batch))
+                if isinstance(values[0], (list, tuple)):
+                    batched_labels[key] = torch.tensor(values, dtype=torch.float)
+                elif isinstance(values[0], float):
+                    batched_labels[key] = torch.tensor(values, dtype=torch.float)
+                else:
+                    batched_labels[key] = torch.tensor(values, dtype=torch.long)
+
+            enc["labels"] = batched_labels
+            return {
+                key: value.pin_memory() if isinstance(value, torch.Tensor) else value
+                for key, value in enc.items()
+            }
 
         train_dataset = TruthLensMultiTaskDataset(
             train_df,
-            tokenizer,
             max_length=max_length,
             text_column=TEXT_COLUMN,
         )
 
         val_dataset = TruthLensMultiTaskDataset(
             val_df,
-            tokenizer,
             max_length=max_length,
             text_column=TEXT_COLUMN,
         )
@@ -315,11 +334,21 @@ def main():
             train_dataset,
             batch_size=batch_size,
             shuffle=True,
+            collate_fn=collate_fn,
+            num_workers=4,
+            pin_memory=True,
+            persistent_workers=True,
+            prefetch_factor=2,
         )
 
         val_loader = DataLoader(
             val_dataset,
             batch_size=batch_size,
+            collate_fn=collate_fn,
+            num_workers=4,
+            pin_memory=True,
+            persistent_workers=True,
+            prefetch_factor=2,
         )
 
         # --------------------------------------------------
@@ -329,17 +358,35 @@ def main():
         model_config = MultiTaskTruthLensConfig(model_name=model_name)
 
         model = MultiTaskTruthLensModel(config=model_config)
+        model = model.to(device)
+
+        if hasattr(model, "encoder") and hasattr(model.encoder, "gradient_checkpointing_enable"):
+            model.encoder.gradient_checkpointing_enable()
+
+        if hasattr(model, "config") and hasattr(model.config, "use_flash_attention"):
+            model.config.use_flash_attention = True
+
+        if hasattr(torch, "compile"):
+            model = torch.compile(model, mode="max-autotune")
 
         # --------------------------------------------------
         # Optimizer
         # --------------------------------------------------
 
-        optimizer = create_optimizer(
-            model.parameters(),
-            optimizer_name="adamw",
-            learning_rate=learning_rate,
-            weight_decay=weight_decay,
-        )
+        try:
+            optimizer = create_optimizer(
+                model.parameters(),
+                optimizer_name="adamw_fused",
+                learning_rate=learning_rate,
+                weight_decay=weight_decay,
+            )
+        except Exception:
+            optimizer = create_optimizer(
+                model.parameters(),
+                optimizer_name="adamw",
+                learning_rate=learning_rate,
+                weight_decay=weight_decay,
+            )
 
         steps_per_epoch = math.ceil(len(train_dataset) / batch_size)
 
@@ -365,6 +412,8 @@ def main():
             epochs=epochs,
             gradient_accumulation_steps=gradient_accumulation_steps,
             device=str(device),
+            use_amp=True,
+            amp_dtype="bf16",
         )
 
         trainer = Trainer(

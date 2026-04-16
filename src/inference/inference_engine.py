@@ -102,6 +102,9 @@ class InferenceEngine:
     ) -> None:
         self.config = config
         self.device = self._resolve_device(config.device)
+        self.use_amp = True
+        self.amp_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+        self.use_compile = True
         self.model = None
         self.tokenizer = None
         self.label_map: Optional[Dict[int, str]] = None
@@ -146,14 +149,28 @@ class InferenceEngine:
 
         try:
             logger.info("Loading tokenizer from %s", tokenizer_path)
-            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast=True)
 
             logger.info("Loading model from %s", model_path)
             self.model = AutoModelForSequenceClassification.from_pretrained(
-                model_path
+                model_path,
+                torch_dtype=self.amp_dtype if self.device.type == "cuda" else None,
+                low_cpu_mem_usage=True,
             )
 
-            self.model.to(self.device)
+            if self.device.type == "cuda":
+                if hasattr(torch.backends.cuda, "enable_flash_sdp"):
+                    torch.backends.cuda.enable_flash_sdp(True)
+                if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
+                    torch.backends.cuda.enable_mem_efficient_sdp(True)
+
+            self.model.to(self.device, non_blocking=True)
+
+            if self.use_compile:
+                try:
+                    self.model = torch.compile(self.model, mode="max-autotune")
+                except Exception:
+                    logger.warning("torch.compile failed")
             self.model.eval()
 
             self._load_label_map(model_path)
@@ -207,27 +224,53 @@ class InferenceEngine:
 
         results: List[PredictionResult] = []
 
-        with torch.no_grad():
+        with torch.inference_mode():
             for batch in batches:
                 encoded = self.tokenizer(
                     batch,
-                    padding=True,
+                    padding="longest",
                     truncation=True,
                     max_length=self.config.max_length,
                     return_tensors="pt",
                 )
 
-                encoded = move_to_device(encoded, self.device)
+                if self.device.type == "cuda":
+                    for key in encoded:
+                        encoded[key] = encoded[key].pin_memory().to(
+                            self.device,
+                            non_blocking=True,
+                        )
+                else:
+                    encoded = move_to_device(encoded, self.device)
 
-                logits = self._compute_logits(encoded)
-                probabilities = torch.softmax(logits, dim=-1)
-                calibrated_probabilities = self._apply_calibration(logits, probabilities)
+                with torch.autocast(
+                    device_type="cuda",
+                    dtype=self.amp_dtype,
+                    enabled=self.use_amp and self.device.type == "cuda",
+                ):
+                    logits = self._compute_logits(encoded)
+
+                needs_probs = (
+                    self.config.return_probabilities
+                    or self.temperature_scaler is not None
+                    or self.isotonic_calibrator is not None
+                    or self.ensemble_model is not None
+                )
+
+                if needs_probs:
+                    probabilities = torch.softmax(logits, dim=-1)
+                    calibrated_probabilities = self._apply_calibration(logits, probabilities)
+                else:
+                    probabilities = None
+                    calibrated_probabilities = logits
 
                 ensemble_probabilities = self._apply_ensemble(encoded)
                 if ensemble_probabilities is not None:
                     predicted_indices = torch.argmax(ensemble_probabilities, dim=-1)
-                else:
+                elif needs_probs:
                     predicted_indices = torch.argmax(calibrated_probabilities, dim=-1)
+                else:
+                    predicted_indices = torch.argmax(logits, dim=-1)
 
                 for i, text in enumerate(batch):
                     label_idx = predicted_indices[i].item()
@@ -238,11 +281,19 @@ class InferenceEngine:
                         else label_idx
                     )
 
-                    probs = probabilities[i].tolist()
-                    calibrated_probs = calibrated_probabilities[i].tolist()
+                    probs = (
+                        probabilities[i].tolist()
+                        if probabilities is not None and self.config.return_probabilities
+                        else None
+                    )
+                    calibrated_probs = (
+                        calibrated_probabilities[i].tolist()
+                        if needs_probs and self.config.return_probabilities
+                        else None
+                    )
                     ensemble_probs = (
                         ensemble_probabilities[i].tolist()
-                        if ensemble_probabilities is not None
+                        if ensemble_probabilities is not None and self.config.return_probabilities
                         else None
                     )
                     logit_values = logits[i].tolist()
@@ -263,6 +314,34 @@ class InferenceEngine:
                     results.append(result)
 
         return results
+
+    def export_onnx(self, output_path: str) -> None:
+        if self.model is None:
+            raise RuntimeError("Model not loaded")
+        if self.tokenizer is None:
+            raise RuntimeError("Tokenizer not loaded")
+
+        dummy = self.tokenizer(
+            ["ONNX export"],
+            return_tensors="pt",
+            padding="longest",
+            truncation=True,
+            max_length=self.config.max_length,
+        )
+
+        dummy = {key: value.to(self.device) for key, value in dummy.items()}
+
+        torch.onnx.export(
+            self.model,
+            (dummy,),
+            output_path,
+            input_names=list(dummy.keys()),
+            output_names=["logits"],
+            dynamic_axes={"input_ids": {0: "batch"}},
+            opset_version=17,
+        )
+
+        logger.info("ONNX model exported to %s", output_path)
 
     def predict_single(self, text: str) -> PredictionResult:
         """

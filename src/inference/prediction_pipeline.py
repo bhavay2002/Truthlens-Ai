@@ -55,6 +55,7 @@ logger = logging.getLogger(__name__)
 class PredictionPipelineConfig:
 
     device: str = "cpu"
+    return_probabilities: bool = True
 
     credibility_weight_bias: float = 0.25
     credibility_weight_propaganda: float = 0.35
@@ -344,11 +345,76 @@ class PredictionPipeline:
                 model.to(self.device)
                 model.eval()
 
+        if self.device.type == "cuda":
+            for model in [
+                self.bias_model,
+                self.ideology_model,
+                self.propaganda_model,
+                self.emotion_model,
+            ]:
+                if model is not None:
+                    model.half()
+
+        if torch.cuda.is_available():
+            for model in [
+                self.bias_model,
+                self.ideology_model,
+                self.propaganda_model,
+                self.emotion_model,
+            ]:
+                if model is not None:
+                    try:
+                        compiled = torch.compile(model, mode="max-autotune")
+                        if model is self.bias_model:
+                            self.bias_model = compiled
+                        elif model is self.ideology_model:
+                            self.ideology_model = compiled
+                        elif model is self.propaganda_model:
+                            self.propaganda_model = compiled
+                        elif model is self.emotion_model:
+                            self.emotion_model = compiled
+                    except Exception:
+                        logger.warning("torch.compile failed")
+
         logger.info("PredictionPipeline initialized on device: %s", self.device)
 
     # -----------------------------------------------------------------
     # Utilities
     # -----------------------------------------------------------------
+
+    def _forward_all(self, features: torch.Tensor) -> Dict[str, Any]:
+        outputs: Dict[str, Any] = {}
+
+        with torch.autocast(
+            device_type="cuda",
+            dtype=torch.bfloat16,
+            enabled=self.device.type == "cuda",
+        ):
+            if self.bias_model is not None:
+                outputs["bias"] = self.bias_model(features)
+
+            if self.ideology_model is not None:
+                outputs["ideology"] = self.ideology_model(features)
+
+            if self.propaganda_model is not None:
+                outputs["propaganda"] = self.propaganda_model(features)
+
+            if self.emotion_model is not None:
+                outputs["emotion"] = self.emotion_model(features)
+
+        return outputs
+
+    def _extract_logits(self, outputs: Any) -> torch.Tensor:
+        if isinstance(outputs, dict):
+            if "logits" in outputs:
+                return outputs["logits"]
+            if "probabilities" in outputs:
+                return torch.log(outputs["probabilities"] + 1e-9)
+        if hasattr(outputs, "logits"):
+            return outputs.logits
+        if isinstance(outputs, torch.Tensor):
+            return outputs
+        raise RuntimeError("Model output missing logits")
 
     def _predict_logits(
         self,
@@ -616,31 +682,111 @@ class PredictionPipeline:
         if not isinstance(features, torch.Tensor):
             raise TypeError("Features must be a torch.Tensor")
 
-        features = features.to(self.device)
+        if features.device.type == "cpu":
+            features = features.pin_memory()
+        features = features.to(self.device, non_blocking=True)
 
-        bias = self._predict_bias(features)
-        ideology = self._predict_ideology(features)
-        propaganda_prob = self._predict_propaganda(features)
-        emotion = self._predict_emotion(features)
+        with torch.inference_mode():
+            outputs = self._forward_all(features)
 
-        credibility_score, explanation = self._compute_credibility_score(
-            bias=bias,
-            propaganda_prob=propaganda_prob,
-            emotion=emotion,
-            ideology=ideology,
-        )
+            bias = None
+            if "bias" in outputs:
+                logits = self._extract_logits(outputs["bias"])
+                preds = torch.argmax(logits, dim=-1)
+                preds_cpu = preds.detach().cpu().numpy()
+                bias = ["non_bias" if p == 0 else "bias" for p in preds_cpu.tolist()]
 
-        result = {
+            ideology = None
+            if "ideology" in outputs:
+                logits = self._extract_logits(outputs["ideology"])
+                preds = torch.argmax(logits, dim=-1)
+                mapping = ["left", "center", "right"]
+                preds_cpu = preds.detach().cpu().numpy()
+                ideology = [mapping[p] for p in preds_cpu.tolist()]
+
+            propaganda_prob = None
+            if "propaganda" in outputs:
+                if self.config.return_probabilities:
+                    logits = self._extract_logits(outputs["propaganda"])
+                    if logits.size(-1) == 2:
+                        propaganda_prob = torch.sigmoid(logits[:, 1] - logits[:, 0])
+                    else:
+                        probs = torch.softmax(logits, dim=-1)
+                        propaganda_prob = probs[:, 1]
+                    propaganda_prob = propaganda_prob.detach()
+
+            emotion = None
+            if "emotion" in outputs:
+                if self.config.return_probabilities:
+                    logits = self._extract_logits(outputs["emotion"])
+                    probs = torch.sigmoid(logits)
+                    emotion = [
+                        dict(zip(EMOTION_LABELS, row.tolist()))
+                        for row in probs
+                    ]
+
+            credibility_scores: List[float] = []
+            explanations: List[Dict[str, float]] = []
+
+            batch_size = int(features.size(0))
+            for i in range(batch_size):
+                score, exp = self._compute_credibility_score(
+                    bias=bias[i] if bias else None,
+                    propaganda_prob=(
+                        float(propaganda_prob[i]) if propaganda_prob is not None else None
+                    ),
+                    emotion=emotion[i] if emotion else None,
+                    ideology=ideology[i] if ideology else None,
+                )
+                credibility_scores.append(score)
+                explanations.append(exp)
+
+        result: Dict[str, Any] = {
             "bias": bias,
             "ideology": ideology,
-            "propaganda_probability": propaganda_prob,
+            "propaganda_probability": (
+                propaganda_prob.cpu().tolist() if propaganda_prob is not None else None
+            ),
             "emotion": emotion,
-            "credibility_score": credibility_score,
-            "credibility_explanation": explanation,
+            "credibility_score": credibility_scores,
+            "credibility_explanation": explanations,
         }
+
+        if features.size(0) == 1:
+            result = {
+                "bias": bias[0] if bias else None,
+                "ideology": ideology[0] if ideology else None,
+                "propaganda_probability": (
+                    result["propaganda_probability"][0]
+                    if result["propaganda_probability"] is not None
+                    else None
+                ),
+                "emotion": emotion[0] if emotion else None,
+                "credibility_score": credibility_scores[0],
+                "credibility_explanation": explanations[0],
+            }
 
         logger.debug("Prediction result: %s", result)
         return result
+
+    def export_onnx(self, path: str) -> None:
+        model = self.bias_model or self.ideology_model or self.propaganda_model or self.emotion_model
+        if model is None:
+            raise RuntimeError("No model available for ONNX export")
+
+        dummy = torch.randn(1, 768, device=self.device)
+
+        torch.onnx.export(
+            model,
+            dummy,
+            path,
+            input_names=["input"],
+            output_names=["logits"],
+            dynamic_axes={"input": {0: "batch"}},
+            opset_version=17,
+        )
+
+        logger.info("ONNX export completed: %s", path)
 
     # -----------------------------------------------------------------
     # Prediction with Explanation

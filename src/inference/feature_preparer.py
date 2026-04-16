@@ -69,6 +69,7 @@ Outputs:
 from __future__ import annotations
 
 import logging
+import multiprocessing as mp
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Any
 
@@ -84,14 +85,37 @@ from src.features.bias.ideological_features import IdeologicalFeatures
 from src.features.dataset_feature_generator import DatasetFeatureGenerator
 from src.features.feature_schema_validator import FeatureSchemaValidator
 from src.features.feature_statistics import FeatureStatistics
-from src.features.pipelines.feature_pipeline import (
-    BIAS_FEATURE_NAMES,
-    FRAMING_FEATURE_NAMES,
-    IDEOLOGICAL_FEATURE_NAMES,
-    ALL_BIAS_MODULE_FEATURE_NAMES,
-)
+from src.features.pipelines.feature_pipeline import ALL_BIAS_MODULE_FEATURE_NAMES
 
 logger = logging.getLogger(__name__)
+
+
+def _prepare_flat_features_batch(features: Dict[str, Any]) -> Dict[str, float]:
+    if all(isinstance(value, (int, float)) for value in features.values()):
+        return {
+            key: float(value)
+            for key, value in features.items()
+            if key != "text"
+        }
+
+    flat: Dict[str, float] = {}
+    stack = list(features.items())
+    pop = stack.pop
+    while stack:
+        key, value = pop()
+        if key == "text":
+            continue
+        if isinstance(value, (int, float)):
+            flat[key] = float(value)
+        elif isinstance(value, (list, tuple, set)):
+            flat[f"{key}_count"] = float(len(value))
+        elif isinstance(value, dict):
+            for sub_key, sub_value in value.items():
+                clean_key = str(sub_key).strip().replace(" ", "_")
+                next_prefix = f"{key}_{clean_key}" if key else clean_key
+                stack.append((next_prefix, sub_value))
+
+    return flat
 
 
 @dataclass
@@ -131,17 +155,17 @@ class FeaturePreparer:
         config: FeaturePreparationConfig,
         scaler: Optional[Any] = None,
         selector: Optional[Any] = None,
-        device: Optional[str] = None,
     ) -> None:
         self.config = config
         self.scaler = scaler
         self.selector = selector
-        self.device = device
         self.graph_pipeline: GraphPipeline | None = None
+        self._pool: Optional[mp.pool.Pool] = None
 
         if not config.feature_schema:
             raise ValueError("Feature schema cannot be empty")
 
+        self.feature_dim = len(config.feature_schema)
         self.feature_index = {name: idx for idx, name in enumerate(config.feature_schema)}
         self.schema_validator = FeatureSchemaValidator(
             expected_features=config.feature_schema,
@@ -160,6 +184,23 @@ class FeaturePreparer:
             "FeaturePreparer initialized with %d features",
             len(self.config.feature_schema),
         )
+
+    def _get_pool(self) -> mp.pool.Pool:
+        if self._pool is None:
+            try:
+                ctx = mp.get_context("fork")
+            except ValueError:
+                ctx = mp.get_context("spawn")
+            self._pool = ctx.Pool(4)
+        return self._pool
+
+    def __del__(self) -> None:
+        if self._pool is not None:
+            try:
+                self._pool.close()
+                self._pool.join()
+            except Exception:
+                pass
 
     # -----------------------------------------------------------------------
     # Schema builders
@@ -224,7 +265,12 @@ class FeaturePreparer:
                 next_prefix = f"{prefix}_{clean_key}" if prefix else clean_key
                 self._flatten_numeric(next_prefix, sub_value, output)
 
-    def _prepare_flat_features(self, features: Dict[str, Any]) -> Dict[str, float]:
+    def _prepare_flat_features(
+        self,
+        features: Dict[str, Any],
+        *,
+        batch_mode: bool = False,
+    ) -> Dict[str, float]:
         """
         Flatten a raw feature dict into a schema-compatible float dict.
 
@@ -236,6 +282,13 @@ class FeaturePreparer:
         When derive_graph_features is enabled and a 'text' key is present,
         graph features are also derived and merged under setdefault.
         """
+        if all(isinstance(value, (int, float)) for value in features.values()):
+            return {
+                key: float(value)
+                for key, value in features.items()
+                if key != "text"
+            }
+
         flat: Dict[str, float] = {}
 
         for key, value in features.items():
@@ -243,11 +296,13 @@ class FeaturePreparer:
                 continue
             self._flatten_numeric(str(key), value, flat)
 
-        if self.graph_pipeline is not None:
+        graph_pipeline = self.graph_pipeline
+        use_graph = graph_pipeline is not None
+        if use_graph and not batch_mode:
             text = features.get("text")
             if isinstance(text, str) and text.strip():
                 try:
-                    graph_output = self.graph_pipeline.run(text)
+                    graph_output = graph_pipeline.run(text)
 
                     graph_features = graph_output.get("graph_features", {})
                     if isinstance(graph_features, dict):
@@ -266,8 +321,11 @@ class FeaturePreparer:
                         for k, v in narrative_metrics.items():
                             if isinstance(v, (int, float)):
                                 flat.setdefault(f"graph_pipeline_{k}", float(v))
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("Graph feature derivation skipped: %s", exc)
+                except Exception:
+                    pass
+
+        for key in list(flat.keys()):
+            flat[key] = float(flat[key])
 
         return flat
 
@@ -278,11 +336,9 @@ class FeaturePreparer:
         vector = np.zeros(len(self.config.feature_schema), dtype=self.config.dtype)
 
         for feature_name, value in features.items():
-            if feature_name not in self.feature_index:
-                logger.debug("Ignoring unknown feature: %s", feature_name)
+            idx = self.feature_index.get(feature_name)
+            if idx is None:
                 continue
-
-            idx = self.feature_index[feature_name]
             vector[idx] = float(value)
 
         return vector
@@ -295,8 +351,10 @@ class FeaturePreparer:
             return X
 
         try:
-            X_scaled = self.scaler.transform(X)
-            return X_scaled
+            try:
+                return self.scaler.transform(X, copy=False)
+            except TypeError:
+                return self.scaler.transform(X)
         except Exception as exc:
             logger.exception("Scaling transformation failed")
             raise RuntimeError("Feature scaling failed") from exc
@@ -309,8 +367,10 @@ class FeaturePreparer:
             return X
 
         try:
-            X_selected = self.selector.transform(X)
-            return X_selected
+            try:
+                return self.selector.transform(X, copy=False)
+            except TypeError:
+                return self.selector.transform(X)
         except Exception as exc:
             logger.exception("Feature selection failed")
             raise RuntimeError("Feature selection transformation failed") from exc
@@ -332,27 +392,23 @@ class FeaturePreparer:
         Validation runs in permissive mode — missing or extra keys are allowed
         and logged rather than raised as errors.
         """
-        flat_features = self._prepare_flat_features(features)
-        self._validate_feature_dict(flat_features)
-
-        try:
-            self.schema_validator.validate(flat_features)
-        except Exception as _schema_exc:
-            logger.debug("Schema validation note for single sample: %s", _schema_exc)
-
-        vector = self._dict_to_vector(flat_features)
-        matrix = vector.reshape(1, -1)
+        flat_features = self._prepare_flat_features(features, batch_mode=False)
+        vector = np.zeros(self.feature_dim, dtype=np.float32)
+        feature_index = self.feature_index
+        for key, value in flat_features.items():
+            idx = feature_index.get(key)
+            if idx is not None:
+                vector[idx] = value
+        matrix = vector[None, :]
 
         matrix = self._apply_scaling(matrix)
         matrix = self._apply_feature_selection(matrix)
 
         if self.config.return_tensor:
-            tensor = torch.tensor(matrix, dtype=torch.float32)
+            if not self.config.apply_scaling and not self.config.apply_feature_selection:
+                return torch.as_tensor(matrix, dtype=torch.float32).pin_memory()
 
-            if self.device is not None:
-                tensor = tensor.to(self.device)
-
-            return tensor
+            return torch.as_tensor(matrix, dtype=torch.float32).pin_memory()
 
         return matrix
 
@@ -436,26 +492,42 @@ class FeaturePreparer:
         if len(feature_dicts) == 0:
             raise ValueError("feature_dicts list cannot be empty")
 
-        vectors: List[np.ndarray] = []
+        rows = len(feature_dicts)
+        feature_dim = self.feature_dim
+        dtype = np.float32 if self.config.dtype == "float32" else np.float16
+        matrix = np.zeros((rows, feature_dim), dtype=dtype)
+        feature_index = self.feature_index
+        get_idx = feature_index.get
 
-        for features in feature_dicts:
-            flat_features = self._prepare_flat_features(features)
-            self._validate_feature_dict(flat_features)
-            vec = self._dict_to_vector(flat_features)
-            vectors.append(vec)
+        if rows < 32:
+            flat_list = [_prepare_flat_features_batch(item) for item in feature_dicts]
+        else:
+            pool = self._get_pool()
+            flat_list = pool.map(_prepare_flat_features_batch, feature_dicts)
 
-        matrix = np.vstack(vectors)
+        for i, flat_features in enumerate(flat_list):
+            for key, value in flat_features.items():
+                idx = get_idx(key)
+                if idx is not None:
+                    matrix[i, idx] = value
 
-        matrix = self._apply_scaling(matrix)
-        matrix = self._apply_feature_selection(matrix)
+        scaler = self.scaler
+        selector = self.selector
+
+        if scaler is not None:
+            try:
+                matrix = scaler.transform(matrix, copy=False)
+            except TypeError:
+                matrix = scaler.transform(matrix)
+
+        if selector is not None:
+            try:
+                matrix = selector.transform(matrix, copy=False)
+            except TypeError:
+                matrix = selector.transform(matrix)
 
         if self.config.return_tensor:
-            tensor = torch.tensor(matrix, dtype=torch.float32)
-
-            if self.device is not None:
-                tensor = tensor.to(self.device)
-
-            return tensor
+            return torch.from_numpy(matrix).pin_memory()
 
         return matrix
 

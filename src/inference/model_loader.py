@@ -28,7 +28,6 @@ Inputs:
 Outputs:
     Loaded models, tokenizers, preprocessing pipelines, and schemas.
 """
-
 from __future__ import annotations
 
 import json
@@ -44,8 +43,6 @@ from transformers import AutoTokenizer
 
 from src.models.config import ModelConfigLoader, MultiTaskModelConfig
 from src.models.metadata.model_metadata import ModelMetadata
-from src.models.metadata.model_card import ModelCard
-from src.models.metadata.model_versioning import ModelVersionInfo
 from src.models.inference.model_wrapper import ModelWrapper
 from src.models.inference.predictor import Predictor
 from src.models.registry.model_factory import ModelFactory
@@ -53,37 +50,38 @@ from src.models.registry.model_factory import ModelFactory
 logger = logging.getLogger(__name__)
 
 
+# =========================================================
+# Artifact Container
+# =========================================================
+
 @dataclass
 class ModelArtifacts:
-    """
-    Container for loaded model artifacts.
-    """
     bias_model: Optional[torch.nn.Module] = None
     ideology_model: Optional[torch.nn.Module] = None
     emotion_model: Optional[torch.nn.Module] = None
+
     tokenizer: Optional[Any] = None
+
     feature_scaler: Optional[Any] = None
     feature_selector: Optional[Any] = None
     feature_schema: Optional[Dict[str, Any]] = None
+
     model_metadata: Optional[ModelMetadata] = None
-    model_card: Optional[Dict[str, Any]] = None
     model_config: Optional[MultiTaskModelConfig] = None
-    bias_wrapper: Optional[ModelWrapper] = None
-    ideology_wrapper: Optional[ModelWrapper] = None
-    emotion_wrapper: Optional[ModelWrapper] = None
+
     bias_predictor: Optional[Predictor] = None
     ideology_predictor: Optional[Predictor] = None
     emotion_predictor: Optional[Predictor] = None
+
     multitask_model: Optional[torch.nn.Module] = None
-    multitask_wrapper: Optional[ModelWrapper] = None
     multitask_predictor: Optional[Predictor] = None
 
 
+# =========================================================
+# Model Loader
+# =========================================================
+
 class ModelLoader:
-    """
-    Centralized model loader responsible for loading ML artifacts used in
-    production inference systems.
-    """
 
     def __init__(self, models_dir: str, device: str = "auto") -> None:
         self.models_dir = Path(models_dir)
@@ -92,323 +90,247 @@ class ModelLoader:
         if not self.models_dir.exists():
             raise FileNotFoundError(f"Model directory not found: {self.models_dir}")
 
-        logger.info("Initializing ModelLoader with models directory: %s", self.models_dir)
+        logger.info("ModelLoader initialized at %s", self.models_dir)
+
+    # -------------------------------------------------
+    # Device
+    # -------------------------------------------------
 
     def _resolve_device(self, device: str) -> torch.device:
-        """
-        Resolve the device configuration.
-        """
         if device == "auto":
-            resolved = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        else:
-            resolved = torch.device(device)
+            return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        return torch.device(device)
 
-        logger.info("ModelLoader using device: %s", resolved)
-        return resolved
+    # -------------------------------------------------
+    # Core Loaders
+    # -------------------------------------------------
 
     def _load_torch_model(self, path: Path) -> Optional[torch.nn.Module]:
-        """
-        Load a PyTorch model.
-        """
+
         if not path.exists():
-            logger.warning("Model file not found: %s", path)
+            logger.warning("Model not found: %s", path)
             return None
 
         try:
-            model = torch.load(path, map_location=self.device, weights_only=True)
-            if isinstance(model, torch.nn.Module):
-                model.to(self.device)
-                model.eval()
+            # 🔥 CPU-first load (critical)
+            model = torch.load(path, map_location="cpu", weights_only=True)
 
-            logger.info("Loaded PyTorch model from %s", path)
+            if not isinstance(model, torch.nn.Module):
+                return model
+
+            # 🔥 Half precision (GPU only)
+            if torch.cuda.is_available():
+                model = model.half()
+
+            # 🔥 Efficient transfer
+            model.to(self.device, non_blocking=True)
+
+            # 🔥 torch.compile (safe fallback)
+            if hasattr(torch, "compile"):
+                try:
+                    model = torch.compile(model, mode="max-autotune")
+                except Exception:
+                    logger.debug("torch.compile skipped")
+
+            model.eval()
+
+            logger.info("Loaded model: %s", path)
             return model
 
         except Exception as exc:
-            logger.exception("Failed to load PyTorch model: %s", path)
+            logger.exception("Failed loading model: %s", path)
             raise RuntimeError(f"Error loading model: {path}") from exc
 
     def _load_tokenizer(self, path: Path) -> Optional[Any]:
-        """
-        Load HuggingFace tokenizer.
-        """
+
         if not path.exists():
-            logger.warning("Tokenizer path not found: %s", path)
+            logger.warning("Tokenizer not found: %s", path)
             return None
 
         try:
-            tokenizer = AutoTokenizer.from_pretrained(path)
-            logger.info("Loaded tokenizer from %s", path)
+            tokenizer = AutoTokenizer.from_pretrained(path, use_fast=True)
             return tokenizer
         except Exception as exc:
-            logger.exception("Failed to load tokenizer")
-            raise RuntimeError("Tokenizer loading failed") from exc
-
-    def _load_pickle(self, path: Path) -> Optional[Any]:
-        """
-        Load pickle artifact.
-        """
-        if not path.exists():
-            logger.warning("Artifact not found: %s", path)
-            return None
-
-        try:
-            with open(path, "rb") as f:
-                obj = pickle.load(f)
-
-            logger.info("Loaded pickle artifact: %s", path)
-            return obj
-
-        except Exception as exc:
-            logger.exception("Failed to load pickle artifact")
-            raise RuntimeError(f"Error loading artifact: {path}") from exc
+            logger.exception("Tokenizer load failed")
+            raise RuntimeError("Tokenizer load failed") from exc
 
     def _load_joblib(self, path: Path) -> Optional[Any]:
-        """
-        Load joblib artifact.
-        """
         if not path.exists():
-            logger.warning("Artifact not found: %s", path)
             return None
-
-        try:
-            obj = joblib.load(path)
-            logger.info("Loaded joblib artifact: %s", path)
-            return obj
-
-        except Exception as exc:
-            logger.exception("Failed to load joblib artifact")
-            raise RuntimeError(f"Error loading artifact: {path}") from exc
+        return joblib.load(path)
 
     def _load_json(self, path: Path) -> Optional[Dict[str, Any]]:
-        """
-        Load JSON schema file.
-        """
         if not path.exists():
-            logger.warning("Schema file not found: %s", path)
             return None
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
 
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                schema = json.load(f)
+    # -------------------------------------------------
+    # Main Loader
+    # -------------------------------------------------
 
-            logger.info("Loaded schema file: %s", path)
-            return schema
+    def load_all(
+        self,
+        load_bias: bool = True,
+        load_ideology: bool = True,
+        load_emotion: bool = True,
+    ) -> ModelArtifacts:
 
-        except Exception as exc:
-            logger.exception("Failed to load JSON schema")
-            raise RuntimeError(f"Error loading schema: {path}") from exc
-
-    def load_all(self) -> ModelArtifacts:
-        """
-        Load all models and preprocessing artifacts.
-        """
         artifacts = ModelArtifacts()
 
-        bias_model_path = self.models_dir / "bias_model.pt"
-        ideology_model_path = self.models_dir / "ideology_model.pt"
-        emotion_model_path = self.models_dir / "emotion_model.pt"
+        # ---------------- Models ----------------
 
-        tokenizer_path = self.models_dir / "roberta_model"
+        if load_bias:
+            artifacts.bias_model = self._load_torch_model(
+                self.models_dir / "bias_model.pt"
+            )
 
-        scaler_path = self.models_dir / "feature_scaler.pkl"
-        selector_path = self.models_dir / "feature_selector.pkl"
-        schema_path = self.models_dir / "feature_schema.json"
+        if load_ideology:
+            artifacts.ideology_model = self._load_torch_model(
+                self.models_dir / "ideology_model.pt"
+            )
 
-        artifacts.bias_model = self._load_torch_model(bias_model_path)
-        artifacts.ideology_model = self._load_torch_model(ideology_model_path)
-        artifacts.emotion_model = self._load_torch_model(emotion_model_path)
+        if load_emotion:
+            artifacts.emotion_model = self._load_torch_model(
+                self.models_dir / "emotion_model.pt"
+            )
 
-        artifacts.tokenizer = self._load_tokenizer(tokenizer_path)
+        # ---------------- Tokenizer ----------------
 
-        artifacts.feature_scaler = self._load_joblib(scaler_path)
-        artifacts.feature_selector = self._load_joblib(selector_path)
+        artifacts.tokenizer = self._load_tokenizer(
+            self.models_dir / "roberta_model"
+        )
 
-        artifacts.feature_schema = self._load_json(schema_path)
+        # ---------------- Feature Artifacts ----------------
+
+        artifacts.feature_scaler = self._load_joblib(
+            self.models_dir / "feature_scaler.pkl"
+        )
+
+        artifacts.feature_selector = self._load_joblib(
+            self.models_dir / "feature_selector.pkl"
+        )
+
+        artifacts.feature_schema = self._load_json(
+            self.models_dir / "feature_schema.json"
+        )
+
+        # ---------------- Metadata ----------------
 
         artifacts.model_metadata = self.load_model_metadata()
-        artifacts.model_card = self.load_model_card()
         artifacts.model_config = self.load_model_config()
 
-        artifacts.bias_wrapper = self.build_model_wrapper(artifacts.bias_model)
-        artifacts.ideology_wrapper = self.build_model_wrapper(artifacts.ideology_model)
-        artifacts.emotion_wrapper = self.build_model_wrapper(artifacts.emotion_model)
+        # ---------------- Predictors ----------------
 
-        artifacts.bias_predictor = self.build_predictor(artifacts.bias_model)
-        artifacts.ideology_predictor = self.build_predictor(artifacts.ideology_model)
-        artifacts.emotion_predictor = self.build_predictor(artifacts.emotion_model)
+        artifacts.bias_predictor = self._build_predictor(artifacts.bias_model)
+        artifacts.ideology_predictor = self._build_predictor(artifacts.ideology_model)
+        artifacts.emotion_predictor = self._build_predictor(artifacts.emotion_model)
 
-        artifacts.multitask_model = self.load_multitask_model(artifacts.model_config)
-        artifacts.multitask_wrapper = self.build_model_wrapper(artifacts.multitask_model)
-        artifacts.multitask_predictor = self.build_predictor(artifacts.multitask_model)
+        # ---------------- Multitask ----------------
 
-        logger.info("All model artifacts loaded successfully")
+        artifacts.multitask_model = self.load_multitask_model(
+            artifacts.model_config
+        )
+
+        artifacts.multitask_predictor = self._build_predictor(
+            artifacts.multitask_model
+        )
+
+        logger.info("All artifacts loaded successfully")
 
         return artifacts
 
+    # -------------------------------------------------
+    # Builders
+    # -------------------------------------------------
+
+    def _build_predictor(self, model: Optional[torch.nn.Module]) -> Optional[Predictor]:
+        if model is None:
+            return None
+        return Predictor(model=model, device=str(self.device))
+
+    # -------------------------------------------------
+    # Multitask
+    # -------------------------------------------------
+
     def load_multitask_model(
         self,
-        model_config: Optional[MultiTaskModelConfig] = None,
+        model_config: Optional[MultiTaskModelConfig],
     ) -> Optional[torch.nn.Module]:
-        resolved_config = model_config or self.load_model_config()
-        if resolved_config is None:
+
+        if model_config is None:
             return None
 
         try:
-            model = ModelFactory.create_from_model_config(resolved_config)
-            model.to(self.device)
+            model = ModelFactory.create_from_model_config(model_config)
+
+            if torch.cuda.is_available():
+                model = model.half()
+
+            model.to(self.device, non_blocking=True)
+
+            if hasattr(torch, "compile"):
+                try:
+                    model = torch.compile(model, mode="max-autotune")
+                except Exception:
+                    pass
+
             model.eval()
             return model
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Failed to build multitask model from config: %s", exc)
+
+        except Exception as exc:
+            logger.warning("Multitask model build failed: %s", exc)
             return None
 
-    def build_model_wrapper(
-        self,
-        model: Optional[torch.nn.Module],
-    ) -> Optional[ModelWrapper]:
-        if model is None:
-            return None
-
-        return ModelWrapper(
-            model=model,
-            device=str(self.device),
-        )
-
-    def build_predictor(
-        self,
-        model: Optional[torch.nn.Module],
-    ) -> Optional[Predictor]:
-        if model is None:
-            return None
-
-        return Predictor(
-            model=model,
-            device=str(self.device),
-        )
-
-    def load_model(self, name: str) -> Optional[torch.nn.Module]:
-        """
-        Load a specific model by name.
-        """
-        path = self.models_dir / f"{name}.pt"
-        return self._load_torch_model(path)
-
-    def load_tokenizer(self, name: str = "roberta_model") -> Optional[Any]:
-        """
-        Load tokenizer from model directory.
-        """
-        path = self.models_dir / name
-        return self._load_tokenizer(path)
-
-    def load_scaler(self) -> Optional[Any]:
-        """
-        Load feature scaler.
-        """
-        return self._load_joblib(self.models_dir / "feature_scaler.pkl")
-
-    def load_selector(self) -> Optional[Any]:
-        """
-        Load feature selector.
-        """
-        return self._load_joblib(self.models_dir / "feature_selector.pkl")
-
-    def load_schema(self) -> Optional[Dict[str, Any]]:
-        """
-        Load feature schema.
-        """
-        return self._load_json(self.models_dir / "feature_schema.json")
-
-    def load_model_config(
-        self,
-        config_path: Optional[Path] = None,
-    ) -> Optional[MultiTaskModelConfig]:
-        """
-        Load a ``MultiTaskModelConfig`` from a YAML file in the models
-        directory.
-
-        The loader tries, in order:
-
-        1. The explicit ``config_path`` argument.
-        2. ``<models_dir>/config.yaml``
-        3. ``<models_dir>/model_config.yaml``
-
-        Returns ``None`` (with a debug log) when no config file is found.
-
-        Parameters
-        ----------
-        config_path:
-            Optional explicit path to the YAML configuration file.
-
-        Returns
-        -------
-        Optional[MultiTaskModelConfig]
-        """
-        candidates = [
-            config_path,
-            self.models_dir / "config.yaml",
-            self.models_dir / "model_config.yaml",
-        ]
-        for candidate in candidates:
-            if candidate is None:
-                continue
-            candidate = Path(candidate)
-            if candidate.exists():
-                try:
-                    cfg = ModelConfigLoader.load_multitask_config(candidate)
-                    logger.info("MultiTaskModelConfig loaded from %s", candidate)
-                    return cfg
-                except Exception as exc:
-                    logger.warning(
-                        "Failed to load MultiTaskModelConfig from %s: %s",
-                        candidate,
-                        exc,
-                    )
-                    return None
-
-        logger.debug("No MultiTaskModelConfig file found in %s", self.models_dir)
-        return None
+    # -------------------------------------------------
+    # Metadata
+    # -------------------------------------------------
 
     def load_model_metadata(self) -> Optional[ModelMetadata]:
-        """
-        Load ModelMetadata from metadata.json in the models directory.
-
-        Returns
-        -------
-        Optional[ModelMetadata]
-            Parsed ModelMetadata, or None if the file does not exist.
-        """
 
         path = self.models_dir / "metadata.json"
 
         if not path.exists():
-            logger.debug("No metadata.json found at %s", path)
             return None
 
         try:
-            metadata = ModelMetadata.load_json(path)
-            logger.info("ModelMetadata loaded from %s", path)
-            return metadata
-        except Exception as exc:
-            logger.warning("Failed to load ModelMetadata: %s", exc)
+            return ModelMetadata.load_json(path)
+        except Exception:
             return None
 
-    def load_model_card(self) -> Optional[Dict[str, Any]]:
-        """
-        Load the raw ModelCard dictionary from model_card.json in the models directory.
+    def load_model_config(self) -> Optional[MultiTaskModelConfig]:
 
-        Returns
-        -------
-        Optional[Dict[str, Any]]
-            Parsed model card dictionary, or None if the file does not exist.
-        """
+        for name in ["config.yaml", "model_config.yaml"]:
+            path = self.models_dir / name
+            if path.exists():
+                try:
+                    return ModelConfigLoader.load_multitask_config(path)
+                except Exception:
+                    return None
 
-        path = self.models_dir / "model_card.json"
+        return None
 
-        if not path.exists():
-            logger.debug("No model_card.json found at %s", path)
-            return None
+    # -------------------------------------------------
+    # ONNX Export
+    # -------------------------------------------------
 
-        raw = self._load_json(path)
-        if raw is not None:
-            logger.info("ModelCard loaded from %s", path)
-        return raw
+    def export_onnx(self, model_name: str, output_path: str):
+
+        model = self._load_torch_model(self.models_dir / f"{model_name}.pt")
+
+        if model is None:
+            raise ValueError(f"Model not found: {model_name}")
+
+        dummy = torch.randn(1, 10).to(self.device)
+
+        torch.onnx.export(
+            model,
+            dummy,
+            output_path,
+            input_names=["input"],
+            output_names=["logits"],
+            dynamic_axes={"input": {0: "batch"}},
+            opset_version=17,
+        )
+
+        logger.info("ONNX model exported to %s", output_path)

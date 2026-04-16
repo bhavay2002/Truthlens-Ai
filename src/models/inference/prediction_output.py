@@ -74,20 +74,6 @@ class PredictionOutput:
     tasks: Dict[str, TaskPrediction] = field(default_factory=dict)
     metadata: Optional[Dict[str, Any]] = None
 
-    @staticmethod
-    def _task_name_from_key(key: str) -> Optional[str]:
-        suffixes = (
-            "_logits",
-            "_probabilities",
-            "_calibrated_probabilities",
-            "_predictions",
-            "_confidence",
-        )
-        for suffix in suffixes:
-            if key.endswith(suffix):
-                return key[: -len(suffix)]
-        return None
-
     @classmethod
     def from_raw_outputs(
         cls,
@@ -95,47 +81,40 @@ class PredictionOutput:
         *,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> "PredictionOutput":
-        if not isinstance(raw_outputs, dict):
-            raise TypeError("raw_outputs must be a dictionary")
-
-        if "tasks" in raw_outputs and isinstance(raw_outputs["tasks"], dict):
-            structured = cls(metadata=raw_outputs.get("metadata") or metadata)
-            for task_name, task_values in raw_outputs["tasks"].items():
-                if not isinstance(task_values, dict):
-                    continue
-                structured.tasks[task_name] = TaskPrediction(
-                    logits=task_values.get("logits"),
-                    probabilities=task_values.get("probabilities"),
-                    predictions=task_values.get("predictions"),
-                    confidence=task_values.get("confidence"),
-                    metadata=task_values.get("metadata"),
-                )
-            return structured
-
         structured = cls(metadata=metadata)
+        tasks = structured.tasks
+        get_task = tasks.get
+
+        field_map = {
+            "logits": "logits",
+            "probabilities": "probabilities",
+            "predictions": "predictions",
+            "confidence": "confidence",
+        }
 
         for key, value in raw_outputs.items():
-            task_name = cls._task_name_from_key(key)
-            if task_name is None:
+            split = key.rsplit("_", 1)
+            if len(split) != 2:
                 continue
 
-            task = structured.tasks.get(task_name)
+            task_name, field = split
+            if not task_name:
+                continue
+
+            task = get_task(task_name)
             if task is None:
                 task = TaskPrediction()
-                structured.tasks[task_name] = task
+                tasks[task_name] = task
 
-            if key.endswith("_logits"):
-                task.logits = value if isinstance(value, torch.Tensor) else None
-            elif key.endswith("_probabilities") and not key.endswith(
-                "_calibrated_probabilities"
-            ):
-                task.probabilities = value if isinstance(value, torch.Tensor) else None
-            elif key.endswith("_predictions"):
-                task.predictions = value if isinstance(value, torch.Tensor) else None
-            elif key.endswith("_confidence"):
-                task.confidence = value if isinstance(value, torch.Tensor) else None
+            attr = field_map.get(field)
+            if attr is not None:
+                setattr(task, attr, value)
 
         return structured
+
+    @classmethod
+    def fast_from_raw(cls, raw_outputs: Dict[str, Any]) -> Dict[str, Any]:
+        return raw_outputs
 
     def add_task(
         self,
@@ -172,9 +151,9 @@ class PredictionOutput:
         """
         Convert prediction output to dictionary representation.
         """
-
-        result: Dict[str, Any] = {
-            "tasks": {name: task.to_dict() for name, task in self.tasks.items()}
+        tasks = self.tasks
+        result = {
+            "tasks": {name: vars(task) for name, task in tasks.items()}
         }
 
         if self.metadata:
