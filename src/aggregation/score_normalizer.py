@@ -79,6 +79,8 @@ def normalize_minmax(
         raise TypeError("feature_range must be a tuple of two numeric values")
 
     a, b = float(feature_range[0]), float(feature_range[1])
+    if not np.isfinite([a, b]).all():
+        raise ValueError("feature_range values must be finite")
     if not a < b:
         raise ValueError("feature_range must satisfy a < b")
 

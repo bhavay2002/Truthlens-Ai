@@ -246,13 +246,19 @@ class ArgumentMiningAnalyzer:
         token_counts: Counter,
         markers: set
     ) -> float:
-
         if not tokens:
             return 0.0
 
-        hits = sum(token_counts[t] for t in markers if t in token_counts)
+        text_lower = text.lower()
+        hits = 0
 
-        return float(hits / max(len(tokens), 1))
+        for marker in markers:
+            if " " in marker:
+                hits += text_lower.count(marker)
+            else:
+                hits += token_counts.get(marker, 0)
+
+        return float(hits / len(tokens))
 
     # ------------------------------------------------------------
 

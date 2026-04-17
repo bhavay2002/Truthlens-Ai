@@ -44,6 +44,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from collections import Counter
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -136,6 +137,10 @@ class NarrativeConflictAnalyzer:
 
         self.nlp: Language = get_nlp(self.config.spacy_model)
 
+        self._conflict_verbs = {t.replace("_", " ").lower() for t in self.CONFLICT_VERBS}
+        self._opposition_markers = {t.replace("_", " ").lower() for t in self.OPPOSITION_MARKERS}
+        self._polarization_terms = {t.replace("_", " ").lower() for t in self.POLARIZATION_TERMS}
+
         logger.info("NarrativeConflictAnalyzer initialized")
 
     # -----------------------------------------------------
@@ -187,8 +192,8 @@ class NarrativeConflictAnalyzer:
         features: Dict[str, float] = {}
 
         features.update(self._conflict_verb_features(doc))
-        features.update(self._opposition_features(tokens))
-        features.update(self._polarization_features(tokens))
+        features.update(self._opposition_features(doc.text, tokens))
+        features.update(self._polarization_features(doc.text, tokens))
 
         features.update(
             self._actor_conflict_structure(
@@ -219,7 +224,7 @@ class NarrativeConflictAnalyzer:
         if not verbs:
             return {"conflict_verb_ratio": 0.0}
 
-        count = sum(1 for v in verbs if v in self.CONFLICT_VERBS)
+        count = sum(1 for v in verbs if v in self._conflict_verbs)
 
         return {"conflict_verb_ratio": count / len(verbs)}
 
@@ -228,12 +233,12 @@ class NarrativeConflictAnalyzer:
     # Opposition markers
     # -----------------------------------------------------
 
-    def _opposition_features(self, tokens: List[str]):
+    def _opposition_features(self, text: str, tokens: List[str]):
 
         if not tokens:
             return {"opposition_marker_ratio": 0.0}
 
-        count = sum(1 for t in tokens if t in self.OPPOSITION_MARKERS)
+        count = self._count_terms(text, tokens, self._opposition_markers)
 
         return {"opposition_marker_ratio": count / len(tokens)}
 
@@ -242,12 +247,12 @@ class NarrativeConflictAnalyzer:
     # Polarization
     # -----------------------------------------------------
 
-    def _polarization_features(self, tokens: List[str]):
+    def _polarization_features(self, text: str, tokens: List[str]):
 
         if not tokens:
             return {"polarization_ratio": 0.0}
 
-        count = sum(1 for t in tokens if t in self.POLARIZATION_TERMS)
+        count = self._count_terms(text, tokens, self._polarization_terms)
 
         return {"polarization_ratio": count / len(tokens)}
 
@@ -294,8 +299,7 @@ class NarrativeConflictAnalyzer:
     # -----------------------------------------------------
 
     def _punctuation_features(self, text: str):
-
-        length = max(len(text), 1)
+        length = max(len(text.split()), 1)
 
         return {
             "conflict_exclamation_ratio":
@@ -304,6 +308,17 @@ class NarrativeConflictAnalyzer:
             "conflict_question_ratio":
                 len(self.QUESTION_PATTERN.findall(text)) / length,
         }
+
+    def _count_terms(self, text: str, tokens: List[str], terms: set[str]) -> int:
+        text_lower = text.lower()
+        token_counts = Counter(tokens)
+        hits = 0
+        for term in terms:
+            if " " in term:
+                hits += text_lower.count(term)
+            else:
+                hits += token_counts.get(term, 0)
+        return hits
 
 
 # ---------------------------------------------------------

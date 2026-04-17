@@ -108,7 +108,7 @@ class SourceAttributionAnalyzer:
         "confirm","confirmed"
     }
 
-    QUOTE_PATTERN = re.compile(r"[\"“”']")
+    QUOTE_PATTERN = re.compile(r"[\"“”]")
 
     # ----------------------------------------------------
 

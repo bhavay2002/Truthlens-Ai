@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, Any, Iterable
+from typing import Dict, Any
 
 import numpy as np
 
@@ -83,8 +83,25 @@ class TruthLensScoreCalculator:
     Aggregates subsystem outputs to compute final TruthLens scores.
     """
 
+    @staticmethod
+    def _default_weights_dict() -> Dict[str, float]:
+        sw = ScoreWeights()
+        return {
+            "bias": sw.bias,
+            "emotion": sw.emotion,
+            "narrative": sw.narrative,
+            "discourse": sw.discourse,
+            "graph": sw.graph,
+            "credibility_bias_penalty": sw.credibility_bias_penalty,
+            "final_credibility": sw.final_credibility,
+            "final_manipulation": sw.final_manipulation,
+            "final_ideology": sw.final_ideology,
+            "analysis_influence_manipulation": sw.analysis_influence_manipulation,
+            "analysis_influence_credibility": sw.analysis_influence_credibility,
+        }
+
     def __init__(self, weights: Dict[str, float] | None = None) -> None:
-        self.weights = weights or {}
+        self.weights = weights or self._default_weights_dict()
         logger.info("TruthLensScoreCalculator initialized")
 
     def compute_scores(
@@ -175,11 +192,15 @@ class TruthLensScoreCalculator:
         """
         Estimate narrative manipulation risk.
         """
+        defaults = self._default_weights_dict()
         w = weights or self.weights
-        bias_w = w.get("bias", 0.4)
-        emotion_w = w.get("emotion", 0.35)
-        narrative_w = w.get("narrative", 0.25)
-        analysis_w = w.get("analysis_influence_manipulation", 0.15)
+        bias_w = w.get("bias", defaults["bias"])
+        emotion_w = w.get("emotion", defaults["emotion"])
+        narrative_w = w.get("narrative", defaults["narrative"])
+        analysis_w = w.get(
+            "analysis_influence_manipulation",
+            defaults["analysis_influence_manipulation"],
+        )
         risk = (
             bias_w * bias_score
             + emotion_w * emotion_score
@@ -200,11 +221,15 @@ class TruthLensScoreCalculator:
         """
         Estimate credibility based on discourse structure and bias signals.
         """
+        defaults = self._default_weights_dict()
         w = weights or self.weights
-        discourse_w = w.get("discourse", 0.5)
-        graph_w = w.get("graph", 0.3)
-        penalty_w = w.get("credibility_bias_penalty", 0.2)
-        analysis_w = w.get("analysis_influence_credibility", 0.10)
+        discourse_w = w.get("discourse", defaults["discourse"])
+        graph_w = w.get("graph", defaults["graph"])
+        penalty_w = w.get("credibility_bias_penalty", defaults["credibility_bias_penalty"])
+        analysis_w = w.get(
+            "analysis_influence_credibility",
+            defaults["analysis_influence_credibility"],
+        )
         credibility = (
             discourse_w * discourse_score
             + graph_w * graph_score
@@ -224,10 +249,11 @@ class TruthLensScoreCalculator:
         """
         Compute the final TruthLens composite score.
         """
+        defaults = self._default_weights_dict()
         w = weights or self.weights
-        credibility_w = w.get("final_credibility", 0.5)
-        manipulation_w = w.get("final_manipulation", 0.3)
-        ideology_w = w.get("final_ideology", 0.2)
+        credibility_w = w.get("final_credibility", defaults["final_credibility"])
+        manipulation_w = w.get("final_manipulation", defaults["final_manipulation"])
+        ideology_w = w.get("final_ideology", defaults["final_ideology"])
         score = (
             credibility_w * credibility_score
             + manipulation_w * (1.0 - manipulation_risk)

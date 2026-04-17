@@ -191,7 +191,7 @@ class NarrativeTemporalAnalyzer:
 
     def _tense_distribution(self, doc: Doc) -> Dict[str, float]:
 
-        verbs = [token for token in doc if token.pos_ == "VERB"]
+        verbs = [token for token in doc if token.pos_ in {"VERB", "AUX"}]
 
         if not verbs:
             return {
@@ -207,15 +207,14 @@ class NarrativeTemporalAnalyzer:
         for token in verbs:
 
             tag = token.tag_
+            lemma = token.lemma_.lower()
 
-            if tag in {"VBD","VBN"}:
-                past += 1
-
-            elif tag in {"VBZ","VBP","VBG"}:
-                present += 1
-
-            if token.text.lower() in {"will","shall"}:
+            if lemma in {"will", "shall"} or tag == "MD":
                 future += 1
+            elif tag in {"VBD", "VBN"}:
+                past += 1
+            elif tag in {"VB", "VBP", "VBZ", "VBG"}:
+                present += 1
 
         total = max(len(verbs), 1)
 

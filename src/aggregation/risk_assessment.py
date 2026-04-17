@@ -35,6 +35,12 @@ logger = logging.getLogger(__name__)
 LOW_THRESHOLD = 0.3
 MEDIUM_THRESHOLD = 0.6
 
+TRUTHLENS_RISK_KEY_MAP = {
+    "truthlens_manipulation_risk": "manipulation_risk",
+    "truthlens_credibility_score": "credibility_level",
+    "truthlens_final_score": "overall_truthlens_rating",
+}
+
 
 def _validate_score(value: float) -> float:
     """Validate and clamp score to [0,1]."""
@@ -77,7 +83,8 @@ def assess_risk_levels(
     scores: Dict[str, float],
     *,
     strict: bool = False,
-) -> Dict[str, str]:
+    return_meta: bool = False,
+) -> Dict[str, str] | Dict[str, object]:
     """
     Convert multiple numeric scores into categorical risk levels.
     """
@@ -86,19 +93,24 @@ def assess_risk_levels(
         raise ValueError("scores must be a dictionary")
 
     risk_levels: Dict[str, str] = {}
+    skipped: list[str] = []
 
     for key, value in scores.items():
 
-        if not isinstance(value, (int, float)):
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
             msg = f"Non-numeric score for key '{key}': {type(value)}"
             if strict:
                 raise TypeError(msg)
             logger.warning(msg)
+            skipped.append(key)
             continue
 
         risk_levels[key] = score_to_risk_level(value)
 
     logger.info("Risk assessment completed")
+
+    if return_meta:
+        return {"risk_levels": risk_levels, "skipped_keys": skipped}
 
     return risk_levels
 
@@ -111,21 +123,9 @@ def assess_truthlens_risks(scores: Dict[str, float]) -> Dict[str, str]:
     if not isinstance(scores, dict):
         raise ValueError("scores must be a dictionary")
 
-    output = {}
-
-    if "truthlens_manipulation_risk" in scores:
-        output["manipulation_risk"] = score_to_risk_level(
-            scores["truthlens_manipulation_risk"]
-        )
-
-    if "truthlens_credibility_score" in scores:
-        output["credibility_level"] = score_to_risk_level(
-            scores["truthlens_credibility_score"]
-        )
-
-    if "truthlens_final_score" in scores:
-        output["overall_truthlens_rating"] = score_to_risk_level(
-            scores["truthlens_final_score"]
-        )
+    output: Dict[str, str] = {}
+    for score_key, risk_key in TRUTHLENS_RISK_KEY_MAP.items():
+        if score_key in scores:
+            output[risk_key] = score_to_risk_level(scores[score_key])
 
     return output

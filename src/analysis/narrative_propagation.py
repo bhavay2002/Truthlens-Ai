@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------
 
 @dataclass(slots=True)
-class NarrativeConflictConfig:
+class NarrativePropagationConfig:
 
     spacy_model: str = "en_core_web_sm"
     normalize_ratios: bool = True
@@ -183,11 +183,19 @@ class NarrativePropagationAnalyzer:
     Extract adversarial narrative structures from text.
     """
 
-    def __init__(self, config: Optional[NarrativeConflictConfig] = None):
+    def __init__(self, config: Optional[NarrativePropagationConfig] = None):
 
-        self.config = config or NarrativeConflictConfig()
+        self.config = config or NarrativePropagationConfig()
 
         self.nlp: Language = get_nlp(self.config.spacy_model)
+
+        self._conflict_verbs = {
+            category: {t.replace("_", " ") for t in verbs}
+            for category, verbs in CONFLICT_VERBS.items()
+        }
+        self._opposition_markers = {t.replace("_", " ") for t in OPPOSITION_MARKERS}
+        self._polarization_terms = {t.replace("_", " ") for t in POLARIZATION_TERMS}
+        self._conflict_phrases = {t.replace("_", " ") for t in CONFLICT_PHRASES}
 
         logger.info("NarrativePropagationAnalyzer initialized")
 
@@ -260,8 +268,8 @@ class NarrativePropagationAnalyzer:
         total_tokens = max(len(tokens), 1)
 
         for category, verbs in CONFLICT_VERBS.items():
-
-            count = sum(1 for t in tokens if t in verbs)
+            normalized_verbs = self._conflict_verbs.get(category, set())
+            count = sum(1 for t in tokens if t in normalized_verbs)
 
             features[f"{category}_ratio"] = count / total_tokens
 
@@ -276,7 +284,7 @@ class NarrativePropagationAnalyzer:
 
         total_tokens = max(len(tokens), 1)
 
-        count = sum(1 for t in tokens if t in OPPOSITION_MARKERS)
+        count = sum(1 for t in tokens if t in self._opposition_markers)
 
         return {"opposition_marker_ratio": count / total_tokens}
 
@@ -289,7 +297,7 @@ class NarrativePropagationAnalyzer:
 
         total_tokens = max(len(tokens), 1)
 
-        count = sum(1 for t in tokens if t in POLARIZATION_TERMS)
+        count = sum(1 for t in tokens if t in self._polarization_terms)
 
         return {"polarization_ratio": count / total_tokens}
 
@@ -299,8 +307,7 @@ class NarrativePropagationAnalyzer:
     # -----------------------------------------------------
 
     def _conflict_phrases(self, text: str) -> Dict[str, float]:
-
-        count = phrase_match_count(text, CONFLICT_PHRASES)
+        count = phrase_match_count(text, self._conflict_phrases)
 
         return {"conflict_phrase_count": float(count)}
 
@@ -365,6 +372,9 @@ class NarrativePropagationAnalyzer:
 # Vector Conversion
 # ---------------------------------------------------------
 
-def narrative_conflict_vector(features: Dict[str, float]) -> np.ndarray:
-
+def narrative_propagation_vector(features: Dict[str, float]) -> np.ndarray:
     return make_vector(features, NARRATIVE_PROPAGATION_KEYS)
+
+
+def narrative_conflict_vector(features: Dict[str, float]) -> np.ndarray:
+    return narrative_propagation_vector(features)

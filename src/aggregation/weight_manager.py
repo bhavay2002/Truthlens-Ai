@@ -134,29 +134,43 @@ class WeightManager:
             raise ValueError(f"Unknown weight keys: {sorted(unknown_keys)}")
 
         for key, value in weights.items():
-
-            if not isinstance(value, (int, float)):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise TypeError(
-                    f"Weight '{key}' must be numeric, got {type(value).__name__}"
+                    f"Weight '{key}' must be numeric (non-boolean), got {type(value).__name__}"
                 )
 
-            if value < 0:
+            fval = float(value)
+            if not np.isfinite(fval):
+                raise ValueError(f"Weight '{key}' must be finite, got {value}")
+
+            if fval < 0:
                 raise ValueError(f"Weight '{key}' cannot be negative")
+
+    def _normalize_group(self, group_name: str) -> None:
+        keys = WEIGHT_GROUPS[group_name]
+        present = [k for k in keys if k in self.weights]
+
+        if not present:
+            return
+
+        values = np.array([self.weights[k] for k in present], dtype=np.float64)
+        total = float(np.sum(values))
+
+        if total == 0:
+            raise ValueError(
+                f"Sum of weights in group '{group_name}' cannot be zero"
+            )
+
+        normalized = values / total
+        for key, val in zip(present, normalized):
+            self.weights[key] = float(val)
 
     def _normalize_weights(self) -> None:
         """
-        Normalize weights so they sum to 1.
+        Normalize weights within each semantic group independently.
         """
-        values = np.array(list(self.weights.values()), dtype=np.float64)
-
-        total = float(np.sum(values))
-        if total == 0:
-            raise ValueError("Sum of weights cannot be zero")
-
-        normalized = values / total
-
-        for key, val in zip(self.weights.keys(), normalized):
-            self.weights[key] = float(val)
+        for group_name in WEIGHT_GROUPS:
+            self._normalize_group(group_name)
 
         self._cached_weights = self.weights.copy()
 

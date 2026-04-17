@@ -29,13 +29,13 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import Dict, List
+from collections import Counter
 
 import numpy as np
 from spacy.language import Language
 from spacy.tokens import Doc
 
 from src.analysis._nlp import get_nlp
-from src.analysis._text_features import phrase_match_count
 from src.analysis.feature_schema import DISCOURSE_COHERENCE_KEYS, make_vector
 
 
@@ -159,6 +159,14 @@ class DiscourseCoherenceAnalyzer:
 
         return features
 
+    def _sentence_similarity(self, a: str, b: str) -> float:
+        da, db = self.nlp(a), self.nlp(b)
+        ta = {t.lemma_.lower() for t in da if t.is_alpha and not t.is_stop}
+        tb = {t.lemma_.lower() for t in db if t.is_alpha and not t.is_stop}
+        if not ta and not tb:
+            return 0.0
+        return float(len(ta & tb) / max(len(ta | tb), 1))
+
     # ------------------------------------------------------------
     # Sentence Coherence
     # ------------------------------------------------------------
@@ -169,7 +177,7 @@ class DiscourseCoherenceAnalyzer:
             return {"sentence_coherence": 0.0}
 
         similarities = [
-            sentences[i].similarity(sentences[i + 1])
+            self._sentence_similarity(sentences[i].text, sentences[i + 1].text)
             for i in range(len(sentences) - 1)
         ]
 
@@ -187,7 +195,7 @@ class DiscourseCoherenceAnalyzer:
             return {"topic_drift": 0.0}
 
         similarities = [
-            sentences[i].similarity(sentences[i + 1])
+            self._sentence_similarity(sentences[i].text, sentences[i + 1].text)
             for i in range(len(sentences) - 1)
         ]
 
@@ -220,14 +228,18 @@ class DiscourseCoherenceAnalyzer:
     # ------------------------------------------------------------
 
     def _transition_usage(self, text: str, doc: Doc) -> Dict[str, float]:
-
         tokens = [token.text.lower() for token in doc if token.is_alpha]
-
         token_count = max(len(tokens), 1)
 
+        token_counts = Counter(tokens)
         text_lower = text.lower()
 
-        marker_hits = phrase_match_count(text_lower, self.TRANSITION_MARKERS)
+        marker_hits = 0
+        for marker in self.TRANSITION_MARKERS:
+            if " " in marker:
+                marker_hits += text_lower.count(marker)
+            else:
+                marker_hits += token_counts.get(marker, 0)
 
         ratio = marker_hits / token_count
 

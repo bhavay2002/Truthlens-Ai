@@ -186,10 +186,17 @@ class BiasProfileBuilder:
 
         if ideology_values:
 
-            arr = np.array(ideology_values)
+            arr = np.array(ideology_values, dtype=np.float32)
+            arr = np.clip(arr, 0.0, None)
+            total = float(arr.sum())
 
-            entropy = -np.sum(arr * np.log(arr + 1e-9))
-            dominance = float(arr.max())
+            if total > 0.0:
+                p = arr / total
+                entropy = float(-np.sum(p * np.log(p + 1e-9)))
+                dominance = float(np.max(p))
+            else:
+                entropy = 0.0
+                dominance = 0.0
 
         else:
 

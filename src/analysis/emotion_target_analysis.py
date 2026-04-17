@@ -205,6 +205,11 @@ class EmotionTargetAnalyzer:
 
         self.nlp: Language = get_nlp(self.config.spacy_model)
 
+        self.emotion_terms = {
+            emotion: {term.replace("_", " ") for term in terms}
+            for emotion, terms in EMOTION_TERMS.items()
+        }
+
         logger.info(
             "EmotionTargetAnalyzer initialized with model=%s",
             self.config.spacy_model,
@@ -317,26 +322,16 @@ class EmotionTargetAnalyzer:
     # -----------------------------------------------------
 
     def _resolve_target(self, token: Token) -> str | None:
+        ent_iob = token.ent_iob_
+        if ent_iob in {"B", "I"} and token.ent_type_:
+            try:
+                span = token.doc[token.ent_start: token.ent_end]
+                if span.text.strip():
+                    return span.text.lower().strip()
+            except Exception:
+                pass
 
-        head = token.head
-
-        if head.ent_type_:
-            return head.ent_type_
-
-        if head.pos_ == "NOUN":
-            return head.lemma_.lower()
-
-        if self.config.use_dependency_targets:
-
-            for child in head.children:
-
-                if child.ent_type_:
-                    return child.ent_type_
-
-                if child.pos_ == "NOUN":
-                    return child.lemma_.lower()
-
-        return None
+        return token.lemma_.lower().strip()
 
 
 # ---------------------------------------------------------
@@ -344,11 +339,17 @@ class EmotionTargetAnalyzer:
 # ---------------------------------------------------------
 
 def emotion_target_vector(features: Dict[str, float]) -> np.ndarray:
-
     if not isinstance(features, dict):
         raise ValueError("features must be a dictionary")
 
-    if not features:
-        raise ValueError("features must be a non-empty dictionary")
-
-    return make_vector(features, EMOTION_TARGET_KEYS)
+    ordered_keys = [
+        "emotion_target_diversity",
+        "emotion_target_focus",
+        "emotion_expression_ratio",
+        "emotion_type_diversity",
+        "dominant_emotion_strength",
+    ]
+    return np.array(
+        [float(features.get(k, 0.0)) for k in ordered_keys],
+        dtype=np.float32,
+    )

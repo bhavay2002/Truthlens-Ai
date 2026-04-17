@@ -38,7 +38,7 @@ from spacy.language import Language
 from spacy.tokens import Doc
 
 from src.analysis._nlp import get_nlp
-from src.analysis._text_features import extract_alpha_lemmas, build_counter, term_ratio as _term_ratio_util
+from src.analysis._text_features import extract_alpha_lemmas, build_counter
 from src.analysis.feature_schema import INFORMATION_DENSITY_KEYS, make_vector
 
 
@@ -164,6 +164,13 @@ class InformationDensityAnalyzer:
             disable=self.config.disable_components,
         )
 
+        self._factual_terms = {t.replace("_", " ") for t in self.FACTUAL_TERMS}
+        self._opinion_terms = {t.replace("_", " ") for t in self.OPINION_TERMS}
+        self._claim_terms = {t.replace("_", " ") for t in self.CLAIM_TERMS}
+        self._rhetorical_terms = {t.replace("_", " ") for t in self.RHETORICAL_TERMS}
+        self._emotional_terms = {t.replace("_", " ") for t in self.EMOTIONAL_TERMS}
+        self._modal_terms = {t.replace("_", " ") for t in self.MODAL_TERMS}
+
         logger.info(
             "InformationDensityAnalyzer initialized | model=%s",
             self.config.spacy_model,
@@ -207,12 +214,13 @@ class InformationDensityAnalyzer:
 
         features: Dict[str, float] = {}
 
-        features["factual_density"] = _term_ratio_util(token_counts, n_tokens, self.FACTUAL_TERMS)
-        features["opinion_density"] = _term_ratio_util(token_counts, n_tokens, self.OPINION_TERMS)
-        features["claim_density"] = _term_ratio_util(token_counts, n_tokens, self.CLAIM_TERMS)
-        features["rhetorical_density"] = _term_ratio_util(token_counts, n_tokens, self.RHETORICAL_TERMS)
-        features["emotion_density"] = _term_ratio_util(token_counts, n_tokens, self.EMOTIONAL_TERMS)
-        features["modal_density"] = _term_ratio_util(token_counts, n_tokens, self.MODAL_TERMS)
+        text_lower = doc.text.lower()
+        features["factual_density"] = self._lexicon_ratio(token_counts, n_tokens, text_lower, self._factual_terms)
+        features["opinion_density"] = self._lexicon_ratio(token_counts, n_tokens, text_lower, self._opinion_terms)
+        features["claim_density"] = self._lexicon_ratio(token_counts, n_tokens, text_lower, self._claim_terms)
+        features["rhetorical_density"] = self._lexicon_ratio(token_counts, n_tokens, text_lower, self._rhetorical_terms)
+        features["emotion_density"] = self._lexicon_ratio(token_counts, n_tokens, text_lower, self._emotional_terms)
+        features["modal_density"] = self._lexicon_ratio(token_counts, n_tokens, text_lower, self._modal_terms)
 
         features.update(self._punctuation_rhetoric(doc.text))
 
@@ -266,13 +274,30 @@ class InformationDensityAnalyzer:
         self,
         features: Dict[str, float]
     ) -> Dict[str, float]:
-
         factual = features.get("factual_density", 0.0)
         emotion = features.get("emotion_density", 0.0)
 
-        ratio = factual / max(emotion, 1e-6)
+        eps = 1e-6
+        ratio = float(factual / max(emotion, eps))
+        ratio = float(np.clip(ratio, 0.0, 10.0))
 
-        return {"information_emotion_ratio": float(ratio)}
+        return {"information_emotion_ratio": ratio}
+
+    def _lexicon_ratio(
+        self,
+        token_counts: Dict[str, int],
+        n_tokens: int,
+        text_lower: str,
+        lexicon: set,
+    ) -> float:
+        hits = 0
+        for term in lexicon:
+            if " " in term:
+                hits += text_lower.count(term)
+            else:
+                hits += token_counts.get(term, 0)
+
+        return float(hits / max(n_tokens, 1))
 
 
 # ------------------------------------------------------------

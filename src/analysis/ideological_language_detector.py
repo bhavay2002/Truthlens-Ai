@@ -201,6 +201,8 @@ class IdeologicalLanguageDetector:
             disable=self.config.disable_components,
         )
 
+        self.phrases = {p.replace("_", " ") for p in self.IDEOLOGY_PHRASES}
+
         logger.info(
             "IdeologicalLanguageDetector initialized | model=%s",
             self.config.spacy_model
@@ -270,7 +272,10 @@ class IdeologicalLanguageDetector:
         )
 
         # phrase detection (word-boundary aware)
-        features["ideology_phrase_density"] = self._phrase_density(doc.text.lower())
+        features["ideology_phrase_density"] = self._phrase_density(
+            doc.text.lower(),
+            n_tokens,
+        )
 
         logger.debug("Ideological language features computed")
 
@@ -294,11 +299,10 @@ class IdeologicalLanguageDetector:
 
     # ------------------------------------------------------------
 
-    def _phrase_density(self, text: str) -> float:
+    def _phrase_density(self, text: str, token_count: int) -> float:
+        hits = phrase_match_count(text, self.phrases)
 
-        hits = phrase_match_count(text, self.IDEOLOGY_PHRASES)
-
-        return float(hits / max(len(self.IDEOLOGY_PHRASES), 1))
+        return float(hits / max(token_count, 1))
 
 
 # ------------------------------------------------------------

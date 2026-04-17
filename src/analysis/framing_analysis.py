@@ -39,7 +39,7 @@ from spacy.language import Language
 from spacy.tokens import Doc
 
 from src.analysis._nlp import get_nlp
-from src.analysis._text_features import extract_alpha_lemmas, build_counter, term_ratio as _term_ratio_util
+from src.analysis._text_features import extract_alpha_lemmas, build_counter
 from src.analysis.feature_schema import FRAMING_KEYS, make_vector
 
 
@@ -145,6 +145,12 @@ class FramingAnalyzer:
             disable=self.config.disable_components,
         )
 
+        self._conflict_terms = {t.replace("_", " ") for t in self.CONFLICT_TERMS}
+        self._economic_terms = {t.replace("_", " ") for t in self.ECONOMIC_TERMS}
+        self._moral_terms = {t.replace("_", " ") for t in self.MORAL_TERMS}
+        self._human_terms = {t.replace("_", " ") for t in self.HUMAN_INTEREST_TERMS}
+        self._security_terms = {t.replace("_", " ") for t in self.SECURITY_TERMS}
+
         logger.info(
             "FramingAnalyzer initialized | model=%s",
             self.config.spacy_model,
@@ -188,20 +194,21 @@ class FramingAnalyzer:
 
         features: Dict[str, float] = {}
 
-        features["frame_conflict_score"] = _term_ratio_util(
-            token_counts, n_tokens, self.CONFLICT_TERMS
+        text_lower = doc.text.lower()
+        features["frame_conflict_score"] = self._lexicon_ratio(
+            token_counts, n_tokens, text_lower, self._conflict_terms
         )
-        features["frame_economic_score"] = _term_ratio_util(
-            token_counts, n_tokens, self.ECONOMIC_TERMS
+        features["frame_economic_score"] = self._lexicon_ratio(
+            token_counts, n_tokens, text_lower, self._economic_terms
         )
-        features["frame_moral_score"] = _term_ratio_util(
-            token_counts, n_tokens, self.MORAL_TERMS
+        features["frame_moral_score"] = self._lexicon_ratio(
+            token_counts, n_tokens, text_lower, self._moral_terms
         )
-        features["frame_human_interest_score"] = _term_ratio_util(
-            token_counts, n_tokens, self.HUMAN_INTEREST_TERMS
+        features["frame_human_interest_score"] = self._lexicon_ratio(
+            token_counts, n_tokens, text_lower, self._human_terms
         )
-        features["frame_security_score"] = _term_ratio_util(
-            token_counts, n_tokens, self.SECURITY_TERMS
+        features["frame_security_score"] = self._lexicon_ratio(
+            token_counts, n_tokens, text_lower, self._security_terms
         )
 
         features.update(self._frame_dominance(features))
@@ -240,10 +247,9 @@ class FramingAnalyzer:
     # ------------------------------------------------------------
 
     def _frame_dominance(self, features: Dict[str, float]) -> Dict[str, float]:
-
         frame_scores = [
-            v for k, v in features.items()
-            if k.startswith("frame_")
+            features.get(k, 0.0)
+            for k in self._BASE_FRAME_KEYS
         ]
 
         if not frame_scores:
@@ -255,19 +261,19 @@ class FramingAnalyzer:
     # Frame diversity
     # ------------------------------------------------------------
 
-    _BASE_FRAME_KEYS = {
+    _BASE_FRAME_KEYS = [
         "frame_conflict_score",
         "frame_economic_score",
         "frame_moral_score",
         "frame_human_interest_score",
         "frame_security_score",
-    }
+    ]
 
     def _frame_diversity(self, features: Dict[str, float]) -> Dict[str, float]:
 
         frame_scores = [
-            v for k, v in features.items()
-            if k in self._BASE_FRAME_KEYS
+            features.get(k, 0.0)
+            for k in self._BASE_FRAME_KEYS
         ]
 
         active_frames = sum(1 for score in frame_scores if score > 0)
@@ -275,6 +281,21 @@ class FramingAnalyzer:
         diversity = active_frames / max(len(frame_scores), 1)
 
         return {"frame_diversity_score": float(diversity)}
+
+    def _lexicon_ratio(
+        self,
+        token_counts: Counter,
+        n_tokens: int,
+        text_lower: str,
+        lexicon: set,
+    ) -> float:
+        hits = 0
+        for term in lexicon:
+            if " " in term:
+                hits += text_lower.count(term)
+            else:
+                hits += token_counts.get(term, 0)
+        return float(hits / max(n_tokens, 1))
 
 
 # ------------------------------------------------------------

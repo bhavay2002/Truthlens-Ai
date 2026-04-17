@@ -92,6 +92,15 @@ class AggregationPipeline:
         """
         return isinstance(value, (int, float)) and not isinstance(value, bool)
 
+    @staticmethod
+    def _to_float_or_default(value: Any, default: float | None = 0.0) -> float | None:
+        try:
+            if value is None or isinstance(value, bool):
+                return default
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
     def _inject_analysis_sections(
         self,
         profile: Dict[str, Any],
@@ -143,8 +152,8 @@ class AggregationPipeline:
 
     def normalize_profile(
         self,
-        profile: Dict[str, Dict[str, float]],
-    ) -> Dict[str, Dict[str, float]]:
+        profile: Dict[str, Dict[str, Any]],
+    ) -> Dict[str, Dict[str, Any]]:
         """
         Normalize numeric values in each feature section.
         """
@@ -195,30 +204,33 @@ class AggregationPipeline:
                 "ideology_right": 1.0 if prediction.get("ideology") == "right" else 0.0,
             },
             "propaganda": {
-                "propaganda_probability": float(
-                    prediction.get("propaganda_probability") or 0.0
+                "propaganda_probability": self._to_float_or_default(
+                    prediction.get("propaganda_probability"),
+                    0.0,
                 ),
             },
             "credibility": {
-                "credibility_score": float(
-                    prediction.get("credibility_score") or 0.0
+                "credibility_score": self._to_float_or_default(
+                    prediction.get("credibility_score"),
+                    0.0,
                 ),
             },
         }
 
         emotion = prediction.get("emotion")
         if isinstance(emotion, dict):
-            profile["emotion"] = {
-                k: float(v)
-                for k, v in emotion.items()
-                if isinstance(v, (int, float))
-            }
+            profile["emotion"] = {}
+            for key, value in emotion.items():
+                parsed = self._to_float_or_default(value, None)
+                if parsed is not None:
+                    profile["emotion"][key] = parsed
 
         credibility_explanation = prediction.get("credibility_explanation")
         if isinstance(credibility_explanation, dict):
             for comp_key, comp_val in credibility_explanation.items():
-                if isinstance(comp_val, (int, float)):
-                    profile["credibility"][comp_key] = float(comp_val)
+                parsed = self._to_float_or_default(comp_val, None)
+                if parsed is not None:
+                    profile["credibility"][comp_key] = parsed
 
         return profile
 

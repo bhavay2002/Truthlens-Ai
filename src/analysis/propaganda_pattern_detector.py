@@ -79,6 +79,13 @@ class PropagandaPatternDetector:
 
         logger.info("PropagandaPatternDetector initialized")
 
+    def _get_feature(self, features: Dict, *keys: str, default: float = 0.0) -> float:
+        for key in keys:
+            value = features.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return float(value)
+        return default
+
     # ------------------------------------------------------------
     # Main Analysis
     # ------------------------------------------------------------
@@ -120,6 +127,15 @@ class PropagandaPatternDetector:
             argument, info
         )
 
+        if (
+            features.get("fear_propaganda_score", 0.0) == 0.0
+            and features.get("scapegoating_score", 0.0) == 0.0
+            and features.get("polarization_score", 0.0) == 0.0
+        ):
+            logger.warning(
+                "PropagandaPatternDetector received no recognized upstream features; output may be defaulted."
+            )
+
         return features
 
     # ------------------------------------------------------------
@@ -132,10 +148,13 @@ class PropagandaPatternDetector:
         narrative: Dict[str, float],
         rhetoric: Dict[str, float],
     ) -> float:
-
-        emotion_signal = emotion.get("emotion_fear", 0.0)
-        rhetoric_signal = rhetoric.get("rhetoric_fear_appeal_score", 0.0)
-        narrative_signal = narrative.get("narrative_conflict_term_ratio", 0.0)
+        emotion_signal = self._get_feature(emotion, "emotion_fear", "emotion_expression_ratio")
+        rhetoric_signal = self._get_feature(rhetoric, "rhetoric_fear_appeal_score")
+        narrative_signal = self._get_feature(
+            narrative,
+            "narrative_conflict_term_ratio",
+            "conflict_verb_ratio",
+        )
 
         score = (
             emotion_signal * self.config.fear_weight_emotion
@@ -174,9 +193,12 @@ class PropagandaPatternDetector:
         narrative: Dict[str, float],
         rhetoric: Dict[str, float],
     ) -> float:
-
-        narrative_signal = narrative.get("narrative_polarization_ratio", 0.0)
-        rhetoric_signal = rhetoric.get("rhetoric_loaded_language_score", 0.0)
+        narrative_signal = self._get_feature(
+            narrative,
+            "narrative_polarization_ratio",
+            "polarization_ratio",
+        )
+        rhetoric_signal = self._get_feature(rhetoric, "rhetoric_loaded_language_score")
 
         score = (
             narrative_signal * self.config.polarization_weight_narrative
@@ -194,11 +216,10 @@ class PropagandaPatternDetector:
         emotion: Dict[str, float],
         rhetoric: Dict[str, float],
     ) -> float:
+        anger = self._get_feature(emotion, "emotion_anger")
+        fear = self._get_feature(emotion, "emotion_fear", "emotion_expression_ratio")
 
-        anger = emotion.get("emotion_anger", 0.0)
-        fear = emotion.get("emotion_fear", 0.0)
-
-        rhetoric_intensity = rhetoric.get("rhetoric_emotional_intensity", 0.0)
+        rhetoric_intensity = self._get_feature(rhetoric, "rhetoric_emotional_intensity")
 
         emotion_signal = (anger + fear) / 2
 

@@ -160,6 +160,12 @@ class RhetoricalDeviceDetector:
             disable=self.config.disable_components,
         )
 
+        self._exaggeration_terms = {t.replace("_", " ") for t in self.EXAGGERATION_TERMS}
+        self._loaded_language_terms = {t.replace("_", " ") for t in self.LOADED_LANGUAGE_TERMS}
+        self._emotional_appeal_terms = {t.replace("_", " ") for t in self.EMOTIONAL_APPEAL_TERMS}
+        self._fear_appeal_terms = {t.replace("_", " ") for t in self.FEAR_APPEAL_TERMS}
+        self._intensifiers = {t.replace("_", " ") for t in self.INTENSIFIERS}
+
         logger.info(
             "RhetoricalDeviceDetector initialized | model=%s",
             self.config.spacy_model,
@@ -203,20 +209,21 @@ class RhetoricalDeviceDetector:
 
         features: Dict[str, float] = {}
 
-        features["rhetoric_exaggeration_score"] = _term_ratio_util(
-            token_counts, n_tokens, self.EXAGGERATION_TERMS
+        text_lower = doc.text.lower()
+        features["rhetoric_exaggeration_score"] = self._lexicon_ratio(
+            token_counts, n_tokens, text_lower, self._exaggeration_terms
         )
-        features["rhetoric_loaded_language_score"] = _term_ratio_util(
-            token_counts, n_tokens, self.LOADED_LANGUAGE_TERMS
+        features["rhetoric_loaded_language_score"] = self._lexicon_ratio(
+            token_counts, n_tokens, text_lower, self._loaded_language_terms
         )
-        features["rhetoric_emotional_appeal_score"] = _term_ratio_util(
-            token_counts, n_tokens, self.EMOTIONAL_APPEAL_TERMS
+        features["rhetoric_emotional_appeal_score"] = self._lexicon_ratio(
+            token_counts, n_tokens, text_lower, self._emotional_appeal_terms
         )
-        features["rhetoric_fear_appeal_score"] = _term_ratio_util(
-            token_counts, n_tokens, self.FEAR_APPEAL_TERMS
+        features["rhetoric_fear_appeal_score"] = self._lexicon_ratio(
+            token_counts, n_tokens, text_lower, self._fear_appeal_terms
         )
-        features["rhetoric_intensifier_ratio"] = _term_ratio_util(
-            token_counts, n_tokens, self.INTENSIFIERS
+        features["rhetoric_intensifier_ratio"] = self._lexicon_ratio(
+            token_counts, n_tokens, text_lower, self._intensifiers
         )
 
         features.update(self._pattern_score(doc.text, self.SCAPEGOAT_PATTERNS, "rhetoric_scapegoating_score"))
@@ -285,6 +292,22 @@ class RhetoricalDeviceDetector:
         score = len(matches) / length
 
         return {"rhetoric_punctuation_score": float(score)}
+
+    def _lexicon_ratio(
+        self,
+        token_counts: Counter,
+        n_tokens: int,
+        text_lower: str,
+        lexicon: set,
+    ) -> float:
+        hits = 0
+        for term in lexicon:
+            if " " in term:
+                hits += text_lower.count(term)
+            else:
+                hits += token_counts.get(term, 0)
+
+        return float(hits / max(n_tokens, 1))
 
 
 # ------------------------------------------------------------

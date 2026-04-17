@@ -268,7 +268,7 @@ class NarrativeRoleExtractor:
 
             # ---------------- PASSIVE VOICE ----------------
             if token.dep_ == "nsubjpass":
-                entity = self._resolve_entity(token)
+                entity = self._normalize_entity(token)
                 if entity:
                     victim_entities.add(entity)
 
@@ -291,7 +291,7 @@ class NarrativeRoleExtractor:
 
         for child in token.children:
             if child.dep_ in {"nsubj", "nsubjpass"}:
-                return self._resolve_entity(child)
+                return self._normalize_entity(child)
 
         return None
 
@@ -300,23 +300,25 @@ class NarrativeRoleExtractor:
 
         for child in token.children:
             if child.dep_ in {"dobj", "pobj", "obj"}:
-                return self._resolve_entity(child)
+                return self._normalize_entity(child)
 
         return None
 
 
-    def _resolve_entity(self, token: Token) -> str | None:
-
-        if token.ent_type_:
-            return token.text.lower()
+    def _normalize_entity(self, token: Token) -> str | None:
+        if token.ent_iob_ in {"B", "I"} and token.ent_type_:
+            span = token.doc[token.left_edge.i: token.right_edge.i + 1]
+            if span.text.strip():
+                return span.text.lower().strip()
 
         if token.pos_ in {"PROPN", "NOUN"}:
-            return token.lemma_.lower()
+            return token.lemma_.lower().strip()
 
         head = token.head
-
-        if head.ent_type_:
-            return head.text.lower()
+        if head.ent_iob_ in {"B", "I"} and head.ent_type_:
+            span = head.doc[head.left_edge.i: head.right_edge.i + 1]
+            if span.text.strip():
+                return span.text.lower().strip()
 
         return None
 

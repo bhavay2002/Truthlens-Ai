@@ -74,7 +74,7 @@ class ScoreExplainer:
         numeric_items = [
             (k, float(v))
             for k, v in feature_section.items()
-            if isinstance(v, (int, float))
+            if isinstance(v, (int, float)) and not isinstance(v, bool)
         ]
 
         if not numeric_items:
@@ -108,8 +108,6 @@ class ScoreExplainer:
         """
         Produce explanation for a specific analysis section.
         """
-
-        top_k = self._validate_top_k(top_k)
 
         top_features = self.rank_contributors(feature_section, top_k)
 
@@ -170,8 +168,11 @@ class ScoreExplainer:
         items = [
             (k, float(v))
             for k, v in scores.items()
-            if isinstance(v, (int, float))
+            if isinstance(v, (int, float)) and not isinstance(v, bool)
         ]
+
+        if not items:
+            raise ValueError("scores must contain at least one numeric non-boolean value")
 
         sorted_items = sorted(
             items,

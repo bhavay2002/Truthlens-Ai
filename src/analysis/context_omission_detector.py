@@ -40,7 +40,6 @@ from src.analysis._nlp import get_nlp
 from src.analysis._text_features import (
     extract_alpha_lemmas,
     build_counter,
-    term_ratio as _term_ratio_util,
 )
 from src.analysis.feature_schema import CONTEXT_OMISSION_KEYS, make_vector
 
@@ -214,21 +213,15 @@ class ContextOmissionDetector:
 
         features: Dict[str, float] = {}
 
-        features["context_vague_reference_ratio"] = _term_ratio_util(
-            token_counts, n_tokens, self.VAGUE_REFERENCES
-        )
+        vague_hits = self._count_lexicon_hits(doc.text, tokens, self.VAGUE_REFERENCES)
+        attribution_hits = self._count_lexicon_hits(doc.text, tokens, self.ATTRIBUTION_MARKERS)
+        evidence_hits = self._count_lexicon_hits(doc.text, tokens, self.EVIDENCE_MARKERS)
+        uncertainty_hits = self._count_lexicon_hits(doc.text, tokens, self.UNCERTAINTY_MARKERS)
 
-        features["context_attribution_ratio"] = _term_ratio_util(
-            token_counts, n_tokens, self.ATTRIBUTION_MARKERS
-        )
-
-        features["context_evidence_ratio"] = _term_ratio_util(
-            token_counts, n_tokens, self.EVIDENCE_MARKERS
-        )
-
-        features["context_uncertainty_ratio"] = _term_ratio_util(
-            token_counts, n_tokens, self.UNCERTAINTY_MARKERS
-        )
+        features["context_vague_reference_ratio"] = float(vague_hits / max(n_tokens, 1))
+        features["context_attribution_ratio"] = float(attribution_hits / max(n_tokens, 1))
+        features["context_evidence_ratio"] = float(evidence_hits / max(n_tokens, 1))
+        features["context_uncertainty_ratio"] = float(uncertainty_hits / max(n_tokens, 1))
 
         features["context_quote_ratio"] = self._quote_ratio(doc.text)
 
@@ -236,8 +229,14 @@ class ContextOmissionDetector:
 
         # contextual grounding score
         features["context_grounding_score"] = (
-            features["context_evidence_ratio"]
-            + features["context_entity_ratio"]
+            float(
+                np.clip(
+                    0.5 * features["context_evidence_ratio"]
+                    + 0.5 * features["context_entity_ratio"],
+                    0.0,
+                    1.0,
+                )
+            )
         )
 
         logger.debug("Context omission features computed")
@@ -261,6 +260,19 @@ class ContextOmissionDetector:
         hits = sum(token_counts[t] for t in lexicon if t in token_counts)
 
         return float(hits / max(len(tokens), 1))
+
+    def _count_lexicon_hits(self, text: str, tokens: List[str], lexicon: set[str]) -> int:
+        token_counts = Counter(tokens)
+        text_lower = text.lower()
+        hits = 0
+
+        for term in lexicon:
+            if " " in term:
+                hits += text_lower.count(term)
+            else:
+                hits += token_counts.get(term, 0)
+
+        return hits
 
     def _quote_ratio(self, text: str) -> float:
 

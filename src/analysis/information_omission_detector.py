@@ -129,6 +129,11 @@ class InformationOmissionDetector:
             disable=self.config.disable_components,
         )
 
+        self._counterargument_markers = self._normalize_lexicon(self.COUNTERARGUMENT_MARKERS)
+        self._evidence_markers = self._normalize_lexicon(self.EVIDENCE_MARKERS)
+        self._claim_markers = self._normalize_lexicon(self.CLAIM_MARKERS)
+        self._framing_markers = self._normalize_lexicon(self.FRAMING_MARKERS)
+
         logger.info(
             "InformationOmissionDetector initialized | model=%s",
             self.config.spacy_model,
@@ -167,10 +172,10 @@ class InformationOmissionDetector:
 
         features: Dict[str, float] = {}
 
-        features.update(self._missing_counterarguments(tokens))
-        features.update(self._one_sided_framing(tokens))
-        features.update(self._evidence_chain_strength(tokens))
-        features.update(self._claim_evidence_balance(tokens))
+        features.update(self._missing_counterarguments(doc.text, tokens))
+        features.update(self._one_sided_framing(doc.text, tokens))
+        features.update(self._evidence_chain_strength(doc.text, tokens))
+        features.update(self._claim_evidence_balance(doc.text, tokens))
 
         logger.debug("Information omission features computed")
 
@@ -180,15 +185,12 @@ class InformationOmissionDetector:
     # Missing counterarguments
     # ------------------------------------------------------------
 
-    def _missing_counterarguments(self, tokens: List[str]) -> Dict[str, float]:
+    def _missing_counterarguments(self, text: str, tokens: List[str]) -> Dict[str, float]:
 
         if not tokens:
             return {"missing_counterargument_score": 0.0}
 
-        counter_hits = sum(
-            1 for token in tokens
-            if token in self.COUNTERARGUMENT_MARKERS
-        )
+        counter_hits = self._count_terms(text, tokens, self._counterargument_markers)
 
         score = 1.0 - (counter_hits / max(len(tokens), 1))
 
@@ -198,27 +200,17 @@ class InformationOmissionDetector:
     # One-sided framing
     # ------------------------------------------------------------
 
-    def _one_sided_framing(self, tokens: List[str]) -> Dict[str, float]:
+    def _one_sided_framing(self, text: str, tokens: List[str]) -> Dict[str, float]:
 
         if not tokens:
             return {"one_sided_framing_score": 0.0}
 
-        claim_hits = sum(
-            1 for token in tokens
-            if token in self.CLAIM_MARKERS
-        )
+        claim_hits = self._count_terms(text, tokens, self._claim_markers)
+        counter_hits = self._count_terms(text, tokens, self._counterargument_markers)
+        framing_hits = self._count_terms(text, tokens, self._framing_markers)
 
-        counter_hits = sum(
-            1 for token in tokens
-            if token in self.COUNTERARGUMENT_MARKERS
-        )
-
-        framing_hits = sum(
-            1 for token in tokens
-            if token in self.FRAMING_MARKERS
-        )
-
-        score = (claim_hits + framing_hits) / max(counter_hits + 1, 1)
+        raw = (claim_hits + framing_hits) / max(counter_hits + 1, 1)
+        score = float(raw / (1.0 + raw))
 
         return {"one_sided_framing_score": float(score)}
 
@@ -226,18 +218,12 @@ class InformationOmissionDetector:
     # Evidence chain strength
     # ------------------------------------------------------------
 
-    def _evidence_chain_strength(self, tokens: List[str]) -> Dict[str, float]:
+    def _evidence_chain_strength(self, text: str, tokens: List[str]) -> Dict[str, float]:
 
         if not tokens:
             return {"incomplete_evidence_score": 0.0}
 
-        counts = Counter(tokens)
-
-        evidence_hits = sum(
-            counts[token]
-            for token in counts
-            if token in self.EVIDENCE_MARKERS
-        )
+        evidence_hits = self._count_terms(text, tokens, self._evidence_markers)
 
         ratio = evidence_hits / max(len(tokens), 1)
 
@@ -249,17 +235,10 @@ class InformationOmissionDetector:
     # Claim vs Evidence balance
     # ------------------------------------------------------------
 
-    def _claim_evidence_balance(self, tokens: List[str]) -> Dict[str, float]:
+    def _claim_evidence_balance(self, text: str, tokens: List[str]) -> Dict[str, float]:
 
-        claim_hits = sum(
-            1 for token in tokens
-            if token in self.CLAIM_MARKERS
-        )
-
-        evidence_hits = sum(
-            1 for token in tokens
-            if token in self.EVIDENCE_MARKERS
-        )
+        claim_hits = self._count_terms(text, tokens, self._claim_markers)
+        evidence_hits = self._count_terms(text, tokens, self._evidence_markers)
 
         if claim_hits == 0:
             return {"claim_evidence_imbalance": 0.0}
@@ -267,6 +246,20 @@ class InformationOmissionDetector:
         imbalance = claim_hits / max(evidence_hits + 1, 1)
 
         return {"claim_evidence_imbalance": float(imbalance)}
+
+    def _normalize_lexicon(self, terms: set[str]) -> set[str]:
+        return {t.lower().replace("_", " ").strip() for t in terms if t}
+
+    def _count_terms(self, text: str, tokens: List[str], terms: set[str]) -> int:
+        text_lower = text.lower()
+        token_counts = Counter(tokens)
+        hits = 0
+        for term in terms:
+            if " " in term:
+                hits += text_lower.count(term)
+            else:
+                hits += token_counts.get(term, 0)
+        return hits
 
 
 # ------------------------------------------------------------

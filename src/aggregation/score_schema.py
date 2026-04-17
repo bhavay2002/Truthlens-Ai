@@ -80,8 +80,8 @@ class TruthLensScoreModel(BaseModel):
     @field_validator("*")
     @classmethod
     def validate_range(cls, v):
-        if not isinstance(v, (int, float)):
-            raise TypeError("Score must be numeric")
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise TypeError("Score must be numeric (non-boolean)")
         fv = float(v)
         if not (0.0 <= fv <= 1.0):
             raise ValueError(f"Score out of range [0,1]: {fv}")

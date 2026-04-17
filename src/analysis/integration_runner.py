@@ -135,6 +135,26 @@ class AnalysisIntegrationRunner:
             logger.warning("Analysis module failed at runtime: %s (%s)", name, exc)
             return {}
 
+    def _safe_run(self, name: str, func: Any, *, default: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            output = func()
+            return output if isinstance(output, dict) else default
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Analysis module failed at runtime: %s (%s)", name, exc)
+            return default
+
+    def _build_propaganda_input(self, outputs: Dict[str, Dict[str, Any]]) -> Dict[str, float]:
+        emotion = outputs.get("emotion_target", {}) or {}
+        conflict = outputs.get("narrative_conflict", {}) or {}
+        propagation = outputs.get("narrative_propagation", {}) or {}
+
+        return {
+            "emotion_fear": float(emotion.get("emotion_expression_ratio", 0.0)),
+            "narrative_conflict_term_ratio": float(conflict.get("conflict_verb_ratio", 0.0)),
+            "narrative_polarization_ratio": float(conflict.get("polarization_ratio", 0.0)),
+            "narrative_role_diversity": float(propagation.get("role_diversity", 0.0)),
+        }
+
     def _safe_analyze_doc(
         self,
         name: str,
@@ -231,16 +251,18 @@ class AnalysisIntegrationRunner:
             victim_entities=victim_entities,
         )
 
-        outputs["propaganda_pattern"] = (
-            self.propaganda_pattern.analyze(
-                emotion_features=outputs.get("emotion_target", {}),
-                narrative_features=outputs.get("narrative_conflict", {}),
+        outputs["propaganda_pattern"] = self._safe_run(
+            "propaganda_pattern",
+            lambda: self.propaganda_pattern.analyze(
+                emotion_features=self._build_propaganda_input(outputs),
+                narrative_features=self._build_propaganda_input(outputs),
                 rhetorical_features=outputs.get("rhetorical_device", {}),
                 argument_features=outputs.get("argument_mining", {}),
                 information_features=outputs.get("information_density", {}),
             )
             if self.propaganda_pattern is not None
-            else {}
+            else {},
+            default={},
         )
 
         if self.bias_profile_builder is not None:
