@@ -49,6 +49,7 @@ from src.aggregation.score_explainer import ScoreExplainer
 from src.aggregation.truthlens_score_calculator import (
     TruthLensScoreCalculator,
 )
+from src.aggregation.score_schema import TruthLensAggregationOutputModel
 from src.analysis.integration_runner import AnalysisIntegrationRunner
 
 
@@ -208,6 +209,34 @@ class AggregationPipeline:
 
         return enriched
 
+    def _sanitize_analysis_modules(
+        self,
+        analysis_modules: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        sanitized: Dict[str, Any] = {}
+
+        for module, output in analysis_modules.items():
+            if not isinstance(output, dict):
+                continue
+
+            safe_output: Dict[str, Any] = {}
+
+            for k, v in output.items():
+                if isinstance(v, (int, float, str, bool)):
+                    safe_output[k] = v
+                elif isinstance(v, (list, tuple, set)):
+                    safe_output[k] = len(v)
+                elif isinstance(v, dict):
+                    safe_output[k] = {
+                        sub_k: sub_v
+                        for sub_k, sub_v in v.items()
+                        if isinstance(sub_v, (int, float, str, bool))
+                    }
+
+            sanitized[module] = safe_output
+
+        return sanitized
+
     def normalize_profile(
         self,
         profile: Dict[str, Dict[str, float]],
@@ -229,7 +258,7 @@ class AggregationPipeline:
             ]
 
             if not numeric_keys:
-                normalized_profile[section] = features
+                normalized_profile[section] = features.copy()
                 continue
 
             values = [features[k] for k in numeric_keys]
@@ -275,7 +304,11 @@ class AggregationPipeline:
 
         emotion = prediction.get("emotion")
         if isinstance(emotion, dict):
-            profile["emotion"] = {k: float(v) for k, v in emotion.items()}
+            profile["emotion"] = {
+                k: float(v)
+                for k, v in emotion.items()
+                if isinstance(v, (int, float))
+            }
 
         credibility_explanation = prediction.get("credibility_explanation")
         if isinstance(credibility_explanation, dict):
@@ -334,26 +367,32 @@ class AggregationPipeline:
         enriched_profile = self._inject_analysis_sections(profile, resolved_analysis)
         normalized_profile = self.normalize_profile(enriched_profile)
 
+        weights = self.weight_manager.get_weights()
         scores = self.score_calculator.compute_scores(
-            normalized_profile
+            normalized_profile,
+            weights=weights,
         )
 
-        weighted_scores = self.apply_weights(scores)
+        weighted_scores = scores
 
-        risks = assess_truthlens_risks(scores)
+        risks = assess_truthlens_risks(weighted_scores)
 
         explanations = self.explainer.explain_profile(
             normalized_profile
         )
+
+        sanitized_analysis = self._sanitize_analysis_modules(resolved_analysis)
 
         result = {
             "scores": weighted_scores,
             "raw_scores": scores,
             "risks": risks,
             "explanations": explanations,
-            "analysis_modules": resolved_analysis,
+            "analysis_modules": sanitized_analysis,
         }
+
+        validated = TruthLensAggregationOutputModel(**result)
 
         logger.info("Aggregation pipeline completed")
 
-        return result
+        return validated.model_dump()

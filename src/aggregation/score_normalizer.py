@@ -13,7 +13,7 @@ Description:
         • Min-Max normalization
         • Z-score normalization
         • Robust scaling (median / IQR)
-        • Score clipping
+        • Score clipping 
 
 Dependencies:
     logging
@@ -52,6 +52,9 @@ def _to_array(values: Iterable[float]) -> np.ndarray:
     if arr.size == 0:
         raise ValueError("values cannot be empty")
 
+    if not np.isfinite(arr).all():
+        raise ValueError("values contain NaN or infinite values")
+
     return arr
 
 
@@ -68,16 +71,26 @@ def normalize_minmax(
 
     arr = _to_array(values)
 
+    if (
+        not isinstance(feature_range, tuple)
+        or len(feature_range) != 2
+        or not all(isinstance(x, (int, float)) for x in feature_range)
+    ):
+        raise TypeError("feature_range must be a tuple of two numeric values")
+
+    a, b = float(feature_range[0]), float(feature_range[1])
+    if not a < b:
+        raise ValueError("feature_range must satisfy a < b")
+
     vmin = float(np.min(arr))
     vmax = float(np.max(arr))
 
     if abs(vmax - vmin) < EPS:
         logger.warning("Min-max normalization encountered constant values")
-        return np.zeros_like(arr)
+        midpoint = (a + b) / 2.0
+        return np.full_like(arr, fill_value=midpoint, dtype=np.float32)
 
     norm = (arr - vmin) / (vmax - vmin)
-
-    a, b = feature_range
     norm = norm * (b - a) + a
 
     return norm.astype(np.float32)

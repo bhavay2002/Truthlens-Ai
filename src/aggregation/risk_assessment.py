@@ -42,6 +42,9 @@ def _validate_score(value: float) -> float:
     if not isinstance(value, (int, float)):
         raise TypeError("Score must be numeric")
 
+    if np.isnan(value) or np.isinf(value):
+        raise ValueError(f"Invalid score value: {value}")
+
     return float(np.clip(value, 0.0, 1.0))
 
 
@@ -49,10 +52,14 @@ def score_to_risk_level(score: float) -> str:
     """
     Convert numeric score into risk level.
 
-    Mapping:
-        0.0–0.3 → LOW
-        0.3–0.6 → MEDIUM
-        0.6–1.0 → HIGH
+    Mapping (left-closed, right-open intervals):
+        [0.0, 0.3) → LOW
+        [0.3, 0.6) → MEDIUM
+        [0.6, 1.0] → HIGH
+
+    Notes:
+        - 0.3 is classified as MEDIUM
+        - 0.6 is classified as HIGH
     """
 
     score = _validate_score(score)
@@ -66,7 +73,11 @@ def score_to_risk_level(score: float) -> str:
     return "HIGH"
 
 
-def assess_risk_levels(scores: Dict[str, float]) -> Dict[str, str]:
+def assess_risk_levels(
+    scores: Dict[str, float],
+    *,
+    strict: bool = False,
+) -> Dict[str, str]:
     """
     Convert multiple numeric scores into categorical risk levels.
     """
@@ -79,6 +90,10 @@ def assess_risk_levels(scores: Dict[str, float]) -> Dict[str, str]:
     for key, value in scores.items():
 
         if not isinstance(value, (int, float)):
+            msg = f"Non-numeric score for key '{key}': {type(value)}"
+            if strict:
+                raise TypeError(msg)
+            logger.warning(msg)
             continue
 
         risk_levels[key] = score_to_risk_level(value)

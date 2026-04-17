@@ -41,6 +41,20 @@ DEFAULT_WEIGHTS: Dict[str, float] = {
     "narrative": 0.25,
 }
 
+ALLOWED_WEIGHT_KEYS = {
+    "bias",
+    "emotion",
+    "narrative",
+    "discourse",
+    "graph",
+    "credibility_bias_penalty",
+    "final_credibility",
+    "final_manipulation",
+    "final_ideology",
+    "analysis_influence_manipulation",
+    "analysis_influence_credibility",
+}
+
 
 class WeightManager:
     """
@@ -90,6 +104,10 @@ class WeightManager:
         if not isinstance(weights, dict) or not weights:
             raise ValueError("Weights must be a non-empty dictionary")
 
+        unknown_keys = set(weights.keys()) - ALLOWED_WEIGHT_KEYS
+        if unknown_keys:
+            raise ValueError(f"Unknown weight keys: {sorted(unknown_keys)}")
+
         for key, value in weights.items():
 
             if not isinstance(value, (int, float)):
@@ -105,7 +123,8 @@ class WeightManager:
         Normalize weights so they sum to 1.
         """
 
-        values = np.array(list(self.weights.values()), dtype=np.float32)
+        keys = list(self.weights.keys())
+        values = np.array([self.weights[k] for k in keys], dtype=np.float64)
 
         total = float(np.sum(values))
 
@@ -114,7 +133,10 @@ class WeightManager:
 
         normalized = values / total
 
-        for key, val in zip(self.weights.keys(), normalized):
+        if not np.isclose(float(np.sum(normalized)), 1.0):
+            logger.warning("Weight normalization precision drift detected")
+
+        for key, val in zip(keys, normalized):
             self.weights[key] = float(val)
 
     def adjust_weight(self, key: str, value: float) -> Dict[str, float]:

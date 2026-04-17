@@ -70,11 +70,16 @@ class TruthLensScoreCalculator:
     Aggregates subsystem outputs to compute final TruthLens scores.
     """
 
-    def __init__(self, weights: ScoreWeights | None = None) -> None:
-        self.weights = weights or ScoreWeights()
+    def __init__(self, weights: Dict[str, float] | None = None) -> None:
+        self.weights = weights or {}
         logger.info("TruthLensScoreCalculator initialized")
 
-    def compute_scores(self, profile: Dict[str, Any]) -> TruthLensScoreSchema:
+    def compute_scores(
+        self,
+        profile: Dict[str, Any],
+        *,
+        weights: Dict[str, float] | None = None,
+    ) -> TruthLensScoreSchema:
         """
         Compute overall TruthLens scoring metrics.
         """
@@ -95,6 +100,7 @@ class TruthLensScoreCalculator:
             emotion_score,
             narrative_score,
             analysis_score,
+            weights,
         )
 
         credibility_score = self._compute_credibility(
@@ -102,12 +108,14 @@ class TruthLensScoreCalculator:
             discourse_score,
             graph_score,
             analysis_score,
+            weights,
         )
 
         truthlens_score = self._compute_final_score(
             credibility_score,
             manipulation_risk,
             ideology_score,
+            weights,
         )
 
         scores: TruthLensScoreSchema = {
@@ -132,13 +140,11 @@ class TruthLensScoreCalculator:
         if not isinstance(section, dict) or not section:
             return 0.0
 
-        values: Iterable[float] = [
+        values: list[float] = [
             float(v)
             for v in section.values()
             if isinstance(v, (int, float))
         ]
-
-        values = list(values)
 
         if not values:
             return 0.0
@@ -155,16 +161,21 @@ class TruthLensScoreCalculator:
         emotion_score: float,
         narrative_score: float,
         analysis_score: float,
+        weights: Dict[str, float] | None = None,
     ) -> float:
         """
         Estimate narrative manipulation risk.
         """
-
+        w = weights or self.weights
+        bias_w = w.get("bias", 0.4)
+        emotion_w = w.get("emotion", 0.35)
+        narrative_w = w.get("narrative", 0.25)
+        analysis_w = w.get("analysis_influence_manipulation", 0.15)
         risk = (
-            self.weights.bias * bias_score
-            + self.weights.emotion * emotion_score
-            + self.weights.narrative * narrative_score
-            + self.weights.analysis_influence_manipulation * analysis_score
+            bias_w * bias_score
+            + emotion_w * emotion_score
+            + narrative_w * narrative_score
+            + analysis_w * analysis_score
         )
 
         return float(np.clip(risk, 0.0, 1.0))
@@ -175,16 +186,21 @@ class TruthLensScoreCalculator:
         discourse_score: float,
         graph_score: float,
         analysis_score: float,
+        weights: Dict[str, float] | None = None,
     ) -> float:
         """
         Estimate credibility based on discourse structure and bias signals.
         """
-
+        w = weights or self.weights
+        discourse_w = w.get("discourse", 0.5)
+        graph_w = w.get("graph", 0.3)
+        penalty_w = w.get("credibility_bias_penalty", 0.2)
+        analysis_w = w.get("analysis_influence_credibility", 0.10)
         credibility = (
-            self.weights.discourse * discourse_score
-            + self.weights.graph * graph_score
-            - self.weights.credibility_bias_penalty * bias_score
-            + self.weights.analysis_influence_credibility * analysis_score
+            discourse_w * discourse_score
+            + graph_w * graph_score
+            - penalty_w * bias_score
+            + analysis_w * analysis_score
         )
 
         return float(np.clip(credibility, 0.0, 1.0))
@@ -194,15 +210,19 @@ class TruthLensScoreCalculator:
         credibility_score: float,
         manipulation_risk: float,
         ideology_score: float,
+        weights: Dict[str, float] | None = None,
     ) -> float:
         """
         Compute the final TruthLens composite score.
         """
-
+        w = weights or self.weights
+        credibility_w = w.get("final_credibility", 0.5)
+        manipulation_w = w.get("final_manipulation", 0.3)
+        ideology_w = w.get("final_ideology", 0.2)
         score = (
-            self.weights.final_credibility * credibility_score
-            + self.weights.final_manipulation * (1.0 - manipulation_risk)
-            + self.weights.final_ideology * (1.0 - ideology_score)
+            credibility_w * credibility_score
+            + manipulation_w * (1.0 - manipulation_risk)
+            + ideology_w * (1.0 - ideology_score)
         )
 
         return float(np.clip(score, 0.0, 1.0))

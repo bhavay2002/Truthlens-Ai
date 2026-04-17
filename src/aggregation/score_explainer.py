@@ -27,7 +27,7 @@ Outputs:
 from __future__ import annotations
 
 import logging
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List
 
 
 logger = logging.getLogger(__name__)
@@ -42,14 +42,22 @@ class ScoreExplainer:
     def __init__(self) -> None:
         logger.info("ScoreExplainer initialized")
 
+    @staticmethod
+    def _validate_top_k(top_k: int) -> int:
+        if not isinstance(top_k, int) or top_k <= 0:
+            raise ValueError("top_k must be a positive integer")
+        return top_k
+
     def rank_contributors(
         self,
         feature_section: Dict[str, float],
         top_k: int = 5,
-    ) -> List[Tuple[str, float]]:
+    ) -> List[Dict[str, float]]:
         """
         Rank features by magnitude contribution.
         """
+
+        top_k = self._validate_top_k(top_k)
 
         if not isinstance(feature_section, dict) or not feature_section:
             return []
@@ -69,7 +77,17 @@ class ScoreExplainer:
             reverse=True,
         )
 
-        return sorted_items[:top_k]
+        top_items = sorted_items[:top_k]
+
+        return [
+            {
+                "feature": k,
+                "value": v,
+                "magnitude": abs(v),
+                "direction": "positive" if v >= 0 else "negative",
+            }
+            for k, v in top_items
+        ]
 
     def explain_section(
         self,
@@ -82,14 +100,14 @@ class ScoreExplainer:
         Produce explanation for a specific analysis section.
         """
 
+        top_k = self._validate_top_k(top_k)
+
         top_features = self.rank_contributors(feature_section, top_k)
 
         return {
             "section": section_name,
-            "top_contributors": [
-                feature for feature, _ in top_features
-            ],
-            "feature_scores": dict(top_features),
+            "top_contributors": [item["feature"] for item in top_features],
+            "contributors": top_features,
         }
 
     def explain_profile(
@@ -101,6 +119,8 @@ class ScoreExplainer:
         """
         Generate explanation across all analysis sections.
         """
+
+        top_k = self._validate_top_k(top_k)
 
         if not isinstance(profile, dict):
             raise ValueError("profile must be a dictionary")
@@ -130,6 +150,8 @@ class ScoreExplainer:
         Identify the dominant contributors to the final TruthLens score.
         """
 
+        top_k = self._validate_top_k(top_k)
+
         if not isinstance(scores, dict) or not scores:
             raise ValueError("scores must be a non-empty dictionary")
 
@@ -149,7 +171,15 @@ class ScoreExplainer:
 
         explanation = {
             "top_contributors": [k for k, _ in top_items],
-            "contribution_values": dict(top_items),
+            "contributors": [
+                {
+                    "feature": k,
+                    "value": v,
+                    "magnitude": abs(v),
+                    "direction": "positive" if v >= 0 else "negative",
+                }
+                for k, v in top_items
+            ],
         }
 
         return explanation
