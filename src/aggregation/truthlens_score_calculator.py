@@ -65,6 +65,19 @@ class ScoreWeights:
     analysis_influence_credibility: float = 0.10
 
 
+SCORE_VECTOR_ORDER: tuple[str, ...] = (
+    "truthlens_bias_score",
+    "truthlens_emotion_score",
+    "truthlens_narrative_score",
+    "truthlens_discourse_score",
+    "truthlens_graph_score",
+    "truthlens_ideology_score",
+    "truthlens_manipulation_risk",
+    "truthlens_credibility_score",
+    "truthlens_final_score",
+)
+
+
 class TruthLensScoreCalculator:
     """
     Aggregates subsystem outputs to compute final TruthLens scores.
@@ -140,20 +153,16 @@ class TruthLensScoreCalculator:
         if not isinstance(section, dict) or not section:
             return 0.0
 
-        values: list[float] = [
+        values = [
             float(v)
             for v in section.values()
-            if isinstance(v, (int, float))
+            if isinstance(v, (int, float)) and not isinstance(v, bool)
         ]
 
         if not values:
             return 0.0
 
-        try:
-            return float(np.mean(np.asarray(values, dtype=np.float32)))
-        except Exception as exc:
-            logger.exception("Section aggregation failed")
-            raise RuntimeError("Feature aggregation failed") from exc
+        return sum(values) / len(values)
 
     def _compute_manipulation_risk(
         self,
@@ -237,7 +246,14 @@ def truthlens_score_vector(scores: TruthLensScoreSchema) -> np.ndarray:
         raise ValueError("scores must be a non-empty dictionary")
 
     try:
-        vector = np.asarray(list(scores.values()), dtype=np.float32)
+        missing = [k for k in SCORE_VECTOR_ORDER if k not in scores]
+        if missing:
+            raise KeyError(f"Missing score keys for vector conversion: {missing}")
+
+        vector = np.asarray(
+            [float(scores[k]) for k in SCORE_VECTOR_ORDER],
+            dtype=np.float32,
+        )
         return vector
     except Exception as exc:
         logger.exception("TruthLens score vector conversion failed")

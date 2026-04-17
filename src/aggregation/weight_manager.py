@@ -55,6 +55,26 @@ ALLOWED_WEIGHT_KEYS = {
     "analysis_influence_credibility",
 }
 
+WEIGHT_GROUPS = {
+    "manipulation": (
+        "bias",
+        "emotion",
+        "narrative",
+        "analysis_influence_manipulation",
+    ),
+    "credibility": (
+        "discourse",
+        "graph",
+        "credibility_bias_penalty",
+        "analysis_influence_credibility",
+    ),
+    "final": (
+        "final_credibility",
+        "final_manipulation",
+        "final_ideology",
+    ),
+}
+
 
 class WeightManager:
     """
@@ -64,6 +84,7 @@ class WeightManager:
 
     def __init__(self, weights: Dict[str, float] | None = None) -> None:
         self.weights = weights or DEFAULT_WEIGHTS.copy()
+        self._cached_weights: Dict[str, float] | None = None
         self._validate_weights(self.weights)
         self._normalize_weights()
 
@@ -87,9 +108,13 @@ class WeightManager:
         if not isinstance(weights, dict):
             raise ValueError("Weight configuration must be a dictionary")
 
-        self._validate_weights(weights)
+        # Merge with current state to preserve unspecified but valid keys
+        merged_weights = self.weights.copy()
+        merged_weights.update(weights)
 
-        self.weights = weights
+        self._validate_weights(merged_weights)
+
+        self.weights = merged_weights
         self._normalize_weights()
 
         logger.info("Weights loaded from config: %s", config_path)
@@ -122,36 +147,34 @@ class WeightManager:
         """
         Normalize weights so they sum to 1.
         """
-
-        keys = list(self.weights.keys())
-        values = np.array([self.weights[k] for k in keys], dtype=np.float64)
+        values = np.array(list(self.weights.values()), dtype=np.float64)
 
         total = float(np.sum(values))
-
         if total == 0:
             raise ValueError("Sum of weights cannot be zero")
 
         normalized = values / total
 
-        if not np.isclose(float(np.sum(normalized)), 1.0):
-            logger.warning("Weight normalization precision drift detected")
-
-        for key, val in zip(keys, normalized):
+        for key, val in zip(self.weights.keys(), normalized):
             self.weights[key] = float(val)
+
+        self._cached_weights = self.weights.copy()
 
     def adjust_weight(self, key: str, value: float) -> Dict[str, float]:
         """
         Dynamically adjust a specific weight and renormalize.
         """
 
-        if key not in self.weights:
-            raise KeyError(f"Weight '{key}' not found")
+        # Allow adjusting any allowed key, even if not currently present.
+        if key not in ALLOWED_WEIGHT_KEYS:
+            raise KeyError(f"Unknown weight key: '{key}'")
 
         if not isinstance(value, (int, float)) or value < 0:
             raise ValueError("Weight value must be non-negative numeric")
 
         self.weights[key] = float(value)
 
+        self._validate_weights(self.weights)
         self._normalize_weights()
 
         logger.info("Weight adjusted: %s=%s", key, value)
@@ -163,4 +186,7 @@ class WeightManager:
         Return current weight dictionary.
         """
 
-        return self.weights.copy()
+        if self._cached_weights is None:
+            self._cached_weights = self.weights.copy()
+
+        return self._cached_weights

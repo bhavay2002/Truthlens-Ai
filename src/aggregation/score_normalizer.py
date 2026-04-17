@@ -151,6 +151,9 @@ def clip_scores(
     Clip values to specified range.
     """
 
+    if min_value > max_value:
+        raise ValueError("min_value must be <= max_value")
+
     arr = _to_array(values)
 
     clipped = np.clip(arr, min_value, max_value)
@@ -171,6 +174,9 @@ def normalize_pipeline(
         zscore
         robust
     """
+
+    if not isinstance(method, str):
+        raise TypeError("method must be a string")
 
     method = method.lower()
 

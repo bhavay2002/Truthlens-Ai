@@ -32,6 +32,15 @@ from typing import Dict, Any, List
 
 logger = logging.getLogger(__name__)
 
+EXPLAINABLE_SECTIONS = {
+    "bias",
+    "emotion",
+    "narrative",
+    "discourse",
+    "graph",
+    "ideology",
+}
+
 
 class ScoreExplainer:
     """
@@ -128,6 +137,9 @@ class ScoreExplainer:
         explanations: Dict[str, Any] = {}
 
         for section, features in profile.items():
+
+            if section not in EXPLAINABLE_SECTIONS:
+                continue
 
             if not isinstance(features, dict):
                 continue

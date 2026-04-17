@@ -39,6 +39,7 @@ Outputs:
 
 from __future__ import annotations
 
+import copy
 import logging
 from typing import Dict, Any
 
@@ -61,6 +62,21 @@ class AggregationPipeline:
     End-to-end aggregation pipeline for TruthLens scoring.
     """
 
+    ANALYSIS_MERGE_MAP = [
+        ("bias", "analysis_framing_", "framing"),
+        ("bias", "analysis_ideological_", "ideological_language"),
+        ("bias", "analysis_context_", "context_omission"),
+        ("emotion", "analysis_emotion_target_", "emotion_target"),
+        ("narrative", "analysis_narrative_conflict_", "narrative_conflict"),
+        ("narrative", "analysis_narrative_propagation_", "narrative_propagation"),
+        ("narrative", "analysis_narrative_temporal_", "narrative_temporal"),
+        ("narrative", "analysis_propaganda_pattern_", "propaganda_pattern"),
+        ("discourse", "analysis_argument_", "argument_mining"),
+        ("discourse", "analysis_discourse_", "discourse_coherence"),
+        ("discourse", "analysis_rhetorical_", "rhetorical_device"),
+        ("discourse", "analysis_source_", "source_attribution"),
+    ]
+
     def __init__(self) -> None:
         self.weight_manager = WeightManager()
         self.score_calculator = TruthLensScoreCalculator()
@@ -69,143 +85,31 @@ class AggregationPipeline:
 
         logger.info("AggregationPipeline initialized")
 
-    def _flatten_analysis_outputs(
-        self,
-        analysis_modules: Dict[str, Any],
-    ) -> Dict[str, float]:
-        flattened: Dict[str, float] = {}
-
-        for module_name, module_output in analysis_modules.items():
-            if not isinstance(module_output, dict):
-                continue
-
-            for key, value in module_output.items():
-                feature_key = f"analysis_{module_name}_{key}"
-                if isinstance(value, (int, float)):
-                    flattened[feature_key] = float(value)
-                elif isinstance(value, (list, tuple, set)):
-                    flattened[f"{feature_key}_count"] = float(len(value))
-                elif isinstance(value, dict):
-                    for sub_key, sub_value in value.items():
-                        if isinstance(sub_value, (int, float)):
-                            flattened[
-                                f"{feature_key}_{sub_key}"
-                            ] = float(sub_value)
-
-        return flattened
-
-    def _merge_section(
-        self,
-        profile: Dict[str, Any],
-        section: str,
-        prefix: str,
-        module_data: Dict[str, Any],
-    ) -> None:
-        target = profile.get(section)
-        if not isinstance(target, dict):
-            target = {}
-
-        for key, value in module_data.items():
-            if isinstance(value, (int, float)):
-                target[f"{prefix}{key}"] = float(value)
-            elif isinstance(value, (list, tuple, set)):
-                target[f"{prefix}{key}_count"] = float(len(value))
-
-        profile[section] = target
+    @staticmethod
+    def _is_numeric(value: Any) -> bool:
+        """
+        Numeric check that excludes bool (bool is a subclass of int in Python).
+        """
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
 
     def _inject_analysis_sections(
         self,
         profile: Dict[str, Any],
         analysis_modules: Dict[str, Any],
     ) -> Dict[str, Any]:
-        enriched = dict(profile)
-        enriched["analysis_modules"] = analysis_modules
+        enriched = copy.deepcopy(profile)
 
-        analysis_section = self._flatten_analysis_outputs(analysis_modules)
-        if analysis_section:
-            existing_analysis = enriched.get("analysis")
-            if isinstance(existing_analysis, dict):
-                merged_analysis = dict(existing_analysis)
-                merged_analysis.update(analysis_section)
-                enriched["analysis"] = merged_analysis
-            else:
-                enriched["analysis"] = analysis_section
+        for section, prefix, module_key in self.ANALYSIS_MERGE_MAP:
+            module_data = analysis_modules.get(module_key)
+            if not isinstance(module_data, dict):
+                continue
 
-        self._merge_section(
-            enriched,
-            "bias",
-            "analysis_framing_",
-            analysis_modules.get("framing", {}),
-        )
-        self._merge_section(
-            enriched,
-            "bias",
-            "analysis_ideological_",
-            analysis_modules.get("ideological_language", {}),
-        )
-        self._merge_section(
-            enriched,
-            "bias",
-            "analysis_context_",
-            analysis_modules.get("context_omission", {}),
-        )
-
-        self._merge_section(
-            enriched,
-            "emotion",
-            "analysis_emotion_target_",
-            analysis_modules.get("emotion_target", {}),
-        )
-
-        self._merge_section(
-            enriched,
-            "narrative",
-            "analysis_narrative_conflict_",
-            analysis_modules.get("narrative_conflict", {}),
-        )
-        self._merge_section(
-            enriched,
-            "narrative",
-            "analysis_narrative_propagation_",
-            analysis_modules.get("narrative_propagation", {}),
-        )
-        self._merge_section(
-            enriched,
-            "narrative",
-            "analysis_narrative_temporal_",
-            analysis_modules.get("narrative_temporal", {}),
-        )
-        self._merge_section(
-            enriched,
-            "narrative",
-            "analysis_propaganda_pattern_",
-            analysis_modules.get("propaganda_pattern", {}),
-        )
-
-        self._merge_section(
-            enriched,
-            "discourse",
-            "analysis_argument_",
-            analysis_modules.get("argument_mining", {}),
-        )
-        self._merge_section(
-            enriched,
-            "discourse",
-            "analysis_discourse_",
-            analysis_modules.get("discourse_coherence", {}),
-        )
-        self._merge_section(
-            enriched,
-            "discourse",
-            "analysis_rhetorical_",
-            analysis_modules.get("rhetorical_device", {}),
-        )
-        self._merge_section(
-            enriched,
-            "discourse",
-            "analysis_source_",
-            analysis_modules.get("source_attribution", {}),
-        )
+            target = enriched.setdefault(section, {})
+            for key, value in module_data.items():
+                if self._is_numeric(value):
+                    target[f"{prefix}{key}"] = float(value)
+                elif isinstance(value, (list, tuple, set)):
+                    target[f"{prefix}{key}_count"] = float(len(value))
 
         return enriched
 
@@ -254,7 +158,7 @@ class AggregationPipeline:
 
             numeric_keys = [
                 k for k, v in features.items()
-                if isinstance(v, (int, float))
+                if self._is_numeric(v)
             ]
 
             if not numeric_keys:
@@ -265,7 +169,7 @@ class AggregationPipeline:
 
             norm_values = normalize_minmax(values)
 
-            normalized_section = features.copy()
+            normalized_section = dict(features)
 
             for k, v in zip(numeric_keys, norm_values):
                 normalized_section[k] = float(v)
@@ -325,13 +229,18 @@ class AggregationPipeline:
         """
         Apply dynamic weighting to selected subsystem scores.
         """
-
+        # NOTE:
+        # This helper remains for backward compatibility with any direct callers.
+        # The main pipeline now computes raw and weighted scores explicitly by
+        # calling score_calculator with and without weights.
         weights = self.weight_manager.get_weights()
 
         weighted_scores: Dict[str, float] = {}
 
+        # Weighting is applied only to numeric score entries.
         for key, value in scores.items():
-
+            if not self._is_numeric(value):
+                continue
             base_key = key.replace("truthlens_", "").replace("_score", "")
 
             weight = weights.get(base_key, 1.0)
@@ -364,28 +273,32 @@ class AggregationPipeline:
         elif isinstance(text, str) and text.strip():
             resolved_analysis = self.analysis_runner.analyze_text(text)
 
-        enriched_profile = self._inject_analysis_sections(profile, resolved_analysis)
+        sanitized_analysis = self._sanitize_analysis_modules(resolved_analysis)
+        enriched_profile = self._inject_analysis_sections(profile, sanitized_analysis)
         normalized_profile = self.normalize_profile(enriched_profile)
 
+        # Compute true raw scores (default formula weights)
+        raw_scores = self.score_calculator.compute_scores(
+            normalized_profile,
+            weights=None,
+        )
+
+        # Compute configured weighted scores (WeightManager supplied)
         weights = self.weight_manager.get_weights()
         scores = self.score_calculator.compute_scores(
             normalized_profile,
             weights=weights,
         )
 
-        weighted_scores = scores
-
-        risks = assess_truthlens_risks(weighted_scores)
+        risks = assess_truthlens_risks(scores)
 
         explanations = self.explainer.explain_profile(
             normalized_profile
         )
 
-        sanitized_analysis = self._sanitize_analysis_modules(resolved_analysis)
-
         result = {
-            "scores": weighted_scores,
-            "raw_scores": scores,
+            "scores": scores,
+            "raw_scores": raw_scores,
             "risks": risks,
             "explanations": explanations,
             "analysis_modules": sanitized_analysis,
@@ -393,6 +306,10 @@ class AggregationPipeline:
 
         validated = TruthLensAggregationOutputModel(**result)
 
-        logger.info("Aggregation pipeline completed")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Aggregation pipeline completed")
 
         return validated.model_dump()
+
+    def run_batch(self, profiles: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+        return [self.run(profile) for profile in profiles]
