@@ -191,6 +191,19 @@ class ArgumentMiningAnalyzer:
         token_counts = build_counter(tokens)
         n_tokens = len(tokens)
 
+        # Guard once here; all helper methods can then assume n_tokens > 0.
+        if n_tokens == 0:
+            return {
+                "argument_claim_ratio": 0.0,
+                "argument_premise_ratio": 0.0,
+                "argument_support_ratio": 0.0,
+                "argument_contrast_ratio": 0.0,
+                "argument_rebuttal_ratio": 0.0,
+                "argument_verb_density": 0.0,
+                "argument_clause_density": 0.0,
+                "argument_complexity": 0.0,
+            }
+
         features: Dict[str, float] = {}
 
         features["argument_claim_ratio"] = _term_ratio_util(
@@ -252,7 +265,7 @@ class ArgumentMiningAnalyzer:
 
         hits = phrase_match_count(text.lower(), phrases)
 
-        return float(hits / max(n_tokens, 1))
+        return float(hits / n_tokens)
 
     # ------------------------------------------------------------
 

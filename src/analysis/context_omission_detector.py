@@ -245,6 +245,8 @@ class ContextOmissionDetector:
         return features
 
     # ------------------------------------------------------------
+    # Lexical ratios (retained in case subclasses call this method)
+    # ------------------------------------------------------------
 
     def _term_ratio(
         self,
