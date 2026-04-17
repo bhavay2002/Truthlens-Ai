@@ -88,8 +88,8 @@ class ModelWrapper:
         if hasattr(torch, "compile"):
             try:
                 self.model = torch.compile(self.model, mode="max-autotune")
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Model compilation skipped: %s", exc)
 
             if self.ensemble_model is not None:
                 try:
@@ -97,8 +97,8 @@ class ModelWrapper:
                         self.ensemble_model,
                         mode="max-autotune",
                     )
-                except Exception:
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Ensemble model compilation skipped: %s", exc)
 
     def set_temperature_scaler(self, scaler: TemperatureScaler) -> None:
         self.temperature_scaler = scaler
@@ -287,8 +287,8 @@ class ModelWrapper:
                 logits_device = logits
                 calibrated = self.temperature_scaler.predict_proba(logits_device)
                 return calibrated.to(probabilities.device)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Temperature scaling skipped: %s", exc)
 
         if self.isotonic_calibrator is not None:
             try:
@@ -299,8 +299,8 @@ class ModelWrapper:
                     dtype=probabilities.dtype,
                     device=probabilities.device,
                 )
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Isotonic calibration skipped: %s", exc)
 
         return probabilities
 
@@ -308,11 +308,21 @@ class ModelWrapper:
         if self.ensemble_model is None:
             raise RuntimeError("Ensemble model is not configured.")
 
-        logits = self.ensemble_model(**batch)
-        if isinstance(logits, dict):
-            logits = next(
-                value for value in logits.values() if isinstance(value, torch.Tensor)
-            )
+        logits: Optional[torch.Tensor] = None
+        outputs = self.ensemble_model(**batch)
+
+        if isinstance(outputs, torch.Tensor):
+            logits = outputs
+        elif isinstance(outputs, dict):
+            for key, value in outputs.items():
+                if isinstance(value, torch.Tensor) and "logits" in key:
+                    logits = value
+                    break
+            if logits is None:
+                for value in outputs.values():
+                    if isinstance(value, torch.Tensor):
+                        logits = value
+                        break
 
         if not isinstance(logits, torch.Tensor):
             raise RuntimeError("Ensemble model must return logits tensor.")

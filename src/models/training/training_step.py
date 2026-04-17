@@ -36,6 +36,7 @@ import torch.nn as nn
 
 from ..checkpointing.checkpoint_manager import CheckpointManager
 from ..multitask.multitask_output import MultiTaskOutput
+from src.utils import move_to_device
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +159,9 @@ class TrainingStep:
 
             loss = raw_loss / self.config.gradient_accumulation_steps
 
+        if (step % self.config.gradient_accumulation_steps) == 0:
+            self.optimizer.zero_grad(set_to_none=True)
+
         self.scaler.scale(loss).backward()
 
         if (step + 1) % self.config.gradient_accumulation_steps == 0:
@@ -232,20 +236,13 @@ class TrainingStep:
 
 
     def _move_batch_to_device(self, batch):
+        if isinstance(batch, dict):
+            return move_to_device(batch, self.device, non_blocking=True)
 
         if isinstance(batch, (list, tuple)):
-            batch = {"inputs": batch}
+            return move_to_device({"inputs": batch}, self.device, non_blocking=True)
 
-        moved_batch: Dict[str, torch.Tensor] = {}
-
-        for key, value in batch.items():
-
-            if isinstance(value, torch.Tensor):
-                moved_batch[key] = value.to(self.device, non_blocking=True)
-            else:
-                moved_batch[key] = value
-
-        return moved_batch
+        raise TypeError("Unsupported batch format")
 
 
     def _prepare_model_inputs(self, batch: Dict[str, Any]):

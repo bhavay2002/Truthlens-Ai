@@ -201,7 +201,7 @@ class BiasClassifier(BaseModel):
             if labels.dim() != 1:
                 raise ValueError("labels must be 1D tensor")
 
-            loss = self.loss_fn(logits, labels)
+            if not ((labels >= 0).all() and (labels < self.NUM_CLASSES).all()):
 
             outputs["loss"] = loss
 

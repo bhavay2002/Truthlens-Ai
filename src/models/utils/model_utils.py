@@ -125,6 +125,10 @@ def preprocess_text(text: str) -> str:
 
     if text is None:
         raise ValueError("Input text cannot be None")
+    if not isinstance(text, str):
+        raise TypeError("Input text must be a string")
+    if not text.strip():
+        raise ValueError("Input text cannot be empty")
 
     normalized = str(text).replace("\n", " ").replace("\t", " ")
     normalized = re.sub(r"\s+", " ", normalized).strip()

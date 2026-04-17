@@ -149,7 +149,15 @@ class MultiTaskOutput:
             }
 
         result["loss"] = self.loss.detach() if detach and self.loss is not None else self.loss
-        result["task_losses"] = self.task_losses
+
+        if self.task_losses is not None:
+            if detach:
+                result["task_losses"] = {
+                    key: value.detach() if isinstance(value, torch.Tensor) else value
+                    for key, value in self.task_losses.items()
+                }
+            else:
+                result["task_losses"] = self.task_losses
 
         if self.metadata:
             result["metadata"] = self.metadata

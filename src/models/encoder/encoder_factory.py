@@ -129,7 +129,7 @@ class EncoderFactory:
     @staticmethod
     def create_from_model_config(
         model_config: MultiTaskModelConfig,
-        freeze_encoder: bool = False,
+        freeze_encoder: Optional[bool] = None,
     ) -> TransformerEncoder:
         """
         Build a TransformerEncoder from the encoder section of a
@@ -146,12 +146,18 @@ class EncoderFactory:
         -------
         TransformerEncoder
         """
+        effective_freeze = (
+            freeze_encoder
+            if freeze_encoder is not None
+            else getattr(model_config.encoder, "freeze_encoder", False)
+        )
+
         cfg = EncoderConfig(
             model_type="transformer",
             model_name=model_config.encoder.model_name,
             pooling=model_config.encoder.pooling,
             device=model_config.encoder.device,
-            freeze_encoder=freeze_encoder,
+            freeze_encoder=effective_freeze,
             output_hidden_states=False,
             gradient_checkpointing=getattr(
                 model_config.encoder, "gradient_checkpointing", False
@@ -162,7 +168,7 @@ class EncoderFactory:
             "EncoderFactory.create_from_model_config | model=%s pooling=%s freeze=%s",
             cfg.model_name,
             cfg.pooling,
-            freeze_encoder,
+            effective_freeze,
         )
         return EncoderFactory.create_transformer_encoder(cfg)
 

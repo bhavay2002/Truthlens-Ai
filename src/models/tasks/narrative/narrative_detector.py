@@ -198,9 +198,11 @@ class NarrativeDetector(BaseModel):
 
     def get_label_list(self) -> List[str]:
 
-        return self.LABELS
-
-    @classmethod
+                # thread-safe: avoid mutating config
+                if threshold is not None:
+                    outputs["probabilities"] = (
+                        outputs["probabilities"] > float(threshold)
+                    ).float()
     def from_task_config(
         cls,
         task_config: TaskConfig,

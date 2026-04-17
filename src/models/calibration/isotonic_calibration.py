@@ -69,6 +69,26 @@ class IsotonicCalibrator:
         self._calibrators: List[IsotonicRegression] = []
         self._num_classes: int = 0
         self._is_fitted: bool = False
+        self._binary_vector_input: bool = False
+
+    def _prepare_input(self, probabilities: np.ndarray, fit_stage: bool = False) -> np.ndarray:
+        probabilities = np.asarray(probabilities, dtype=np.float64)
+
+        if probabilities.ndim == 1:
+            p1 = probabilities.reshape(-1, 1)
+            if np.any((p1 < 0) | (p1 > 1)):
+                raise ValueError("Binary probabilities must be in [0, 1].")
+            probabilities = np.hstack([1.0 - p1, p1])
+            if fit_stage:
+                self._binary_vector_input = True
+
+        if probabilities.ndim != 2:
+            raise ValueError("probabilities must be shape (n_samples, n_classes) or (n_samples,)")
+
+        if np.any((probabilities < 0) | (probabilities > 1)):
+            raise ValueError("All probabilities must be in [0, 1].")
+
+        return probabilities
 
     def fit(
         self,
@@ -91,11 +111,8 @@ class IsotonicCalibrator:
             Fitted calibrator instance.
         """
 
-        probabilities = np.asarray(probabilities, dtype=np.float64)
+        probabilities = self._prepare_input(probabilities, fit_stage=True)
         labels = np.asarray(labels, dtype=np.int64)
-
-        if probabilities.ndim == 1:
-            probabilities = probabilities.reshape(-1, 1)
 
         if probabilities.shape[0] != labels.shape[0]:
             raise ValueError(
@@ -103,6 +120,9 @@ class IsotonicCalibrator:
             )
 
         n_classes = probabilities.shape[1]
+        if labels.min() < 0 or labels.max() >= n_classes:
+            raise ValueError(f"labels must be in [0, {n_classes - 1}]")
+
         self._num_classes = n_classes
         self._calibrators = []
 
@@ -142,10 +162,7 @@ class IsotonicCalibrator:
                 "IsotonicCalibrator must be fitted before calling predict_proba."
             )
 
-        probabilities = np.asarray(probabilities, dtype=np.float64)
-
-        if probabilities.ndim == 1:
-            probabilities = probabilities.reshape(-1, 1)
+        probabilities = self._prepare_input(probabilities, fit_stage=False)
 
         if probabilities.shape[1] != self._num_classes:
             raise ValueError(

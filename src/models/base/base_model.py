@@ -84,6 +84,10 @@ class BaseModel(nn.Module, ABC):
         """
         Returns the device where the model resides.
         """
+        for tensor in self.parameters():
+            return tensor.device
+        for tensor in self.buffers():
+            return tensor.device
         return self._device
 
     def num_parameters(self, trainable_only: bool = True) -> int:
@@ -139,7 +143,7 @@ class BaseModel(nn.Module, ABC):
 
     def load_checkpoint(
         self,
-        path: Path,
+        path: Path | str,
         optimizer: Optional[torch.optim.Optimizer] = None,
         map_location: Optional[str | torch.device] = None,
     ) -> Dict[str, Any]:
@@ -154,6 +158,7 @@ class BaseModel(nn.Module, ABC):
         Returns:
             Metadata dictionary stored with checkpoint.
         """
+        path = Path(path)
         if not path.exists():
             raise FileNotFoundError(f"Checkpoint not found: {path}")
 

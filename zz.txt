@@ -1,7 +1,7 @@
 Act as a senior Python engineer, code reviewer, and QA specialist.
 
 Your task is to perform a COMPLETE audit of all files inside:
-
+ 
 You must do the following systematically:
 
 --------------------------------------------------

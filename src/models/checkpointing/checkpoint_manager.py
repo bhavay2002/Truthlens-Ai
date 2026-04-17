@@ -47,12 +47,14 @@ class AsyncCheckpointWriter:
     def __init__(self, max_queue_size: int = 4) -> None:
         self._queue: queue.Queue = queue.Queue(maxsize=max_queue_size)
         self._thread = threading.Thread(target=self._worker, daemon=True)
+        self._closed = False
         self._thread.start()
 
     def _worker(self):
         while True:
             item = self._queue.get()
             if item is None:
+                self._queue.task_done()
                 break
 
             path, obj = item
@@ -63,19 +65,31 @@ class AsyncCheckpointWriter:
                 tmp_path.replace(path)
             except Exception as e:
                 logger.error("Checkpoint save failed: %s", e)
+            finally:
+                self._queue.task_done()
 
     def save(self, path: Path, obj: Any):
+        if self._closed:
+            raise RuntimeError("Cannot save: AsyncCheckpointWriter is closed")
         try:
             self._queue.put_nowait((path, obj))
         except queue.Full:
             logger.warning("Checkpoint queue full, dropping oldest checkpoint")
             try:
-                self._queue.get_nowait()
+                _ = self._queue.get_nowait()
+                self._queue.task_done()
                 self._queue.put_nowait((path, obj))
             except queue.Empty:
                 pass
 
+    def flush(self):
+        self._queue.join()
+
     def close(self):
+        if self._closed:
+            return
+        self.flush()
+        self._closed = True
         self._queue.put(None)
         self._thread.join()
 

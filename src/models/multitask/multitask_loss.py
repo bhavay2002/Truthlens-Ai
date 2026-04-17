@@ -149,6 +149,8 @@ class MultiTaskLoss(nn.Module):
 
             task_logits = logits[task_name]
             task_labels = labels[task_name]
+            if isinstance(task_labels, torch.Tensor) and task_labels.device != task_logits.device:
+                task_labels = task_labels.to(task_logits.device)
 
             loss_fn = self.loss_functions[task_name]
 
@@ -179,7 +181,12 @@ class MultiTaskLoss(nn.Module):
             else:
                 raise RuntimeError(f"Unsupported task type: {task_type}")
 
-            weighted_loss = loss * task_config.weight
+            weight = torch.as_tensor(
+                task_config.weight,
+                dtype=loss.dtype,
+                device=loss.device,
+            )
+            weighted_loss = loss * weight
 
             task_losses[task_name] = weighted_loss
 

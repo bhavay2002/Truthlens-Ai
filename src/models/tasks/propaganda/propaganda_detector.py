@@ -204,7 +204,7 @@ class PropagandaDetector(BaseModel):
             "logits": logits,
             "probabilities": probabilities,
             "predictions": predictions,
-            "confidence": confidence,
+                if not ((labels >= 0).all() and (labels < self.NUM_CLASSES).all()):
             "embeddings": pooled_output,
         }
 

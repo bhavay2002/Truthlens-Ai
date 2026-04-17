@@ -113,6 +113,34 @@ class PredictionOutput:
         return structured
 
     @classmethod
+    def from_flat(
+        cls,
+        flat_outputs: Dict[str, Any],
+        *,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> "PredictionOutput":
+        if not isinstance(flat_outputs, dict):
+            raise TypeError("flat_outputs must be a dictionary")
+
+        tasks_payload = flat_outputs.get("tasks")
+        if isinstance(tasks_payload, dict):
+            structured = cls(metadata=metadata)
+            for task_name, values in tasks_payload.items():
+                if not isinstance(values, dict):
+                    continue
+                structured.add_task(
+                    task_name=task_name,
+                    logits=values.get("logits"),
+                    probabilities=values.get("probabilities"),
+                    predictions=values.get("predictions"),
+                    confidence=values.get("confidence"),
+                    metadata=values.get("metadata"),
+                )
+            return structured
+
+        return cls.from_raw_outputs(flat_outputs, metadata=metadata)
+
+    @classmethod
     def fast_from_raw(cls, raw_outputs: Dict[str, Any]) -> Dict[str, Any]:
         return raw_outputs
 

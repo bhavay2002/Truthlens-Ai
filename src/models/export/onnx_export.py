@@ -34,8 +34,9 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
+import numpy as np
 import torch
 
 try:
@@ -79,6 +80,18 @@ class ONNXExporter:
 
     def __init__(self, config: Optional[ONNXExportConfig] = None) -> None:
         self.config = config or ONNXExportConfig()
+
+    @staticmethod
+    def _to_tensor_output(output: Any) -> torch.Tensor:
+        if isinstance(output, torch.Tensor):
+            return output
+        if isinstance(output, dict):
+            logits = output.get("logits")
+            if isinstance(logits, torch.Tensor):
+                return logits
+        if isinstance(output, tuple):
+            return output[0]
+        raise TypeError("Invalid output type")
 
     def _validate_model(self, model: torch.nn.Module) -> None:
         """Validate model instance."""
@@ -164,13 +177,19 @@ class ONNXExporter:
         logger.info("ONNX export completed successfully.")
 
         if self.config.verify_export:
-            self.verify(output_path, example_input)
+            passed, max_diff = self.verify(output_path, model, example_input)
+            if not passed:
+                raise RuntimeError(
+                    f"ONNX verification failed. max_diff={max_diff:.6f}"
+                )
+            logger.info("ONNX verification passed. max_diff=%.6f", max_diff)
 
         return output_path
 
     def verify(
         self,
         onnx_path: str | Path,
+        model: torch.nn.Module,
         example_input: torch.Tensor,
         atol: float = 1e-4,
     ) -> Tuple[bool, float]:
@@ -211,16 +230,33 @@ class ONNXExporter:
             logger.exception("ONNX model validation failed.")
             raise RuntimeError("Invalid ONNX model.") from exc
 
-        ort_session = ort.InferenceSession(str(onnx_path))
+        ort_session = ort.InferenceSession(
+            str(onnx_path),
+            providers=["CPUExecutionProvider"],
+        )
+
+        device = next(model.parameters()).device
+        example_input = example_input.to(device)
+
+        with torch.no_grad():
+            model.eval()
+            pt_output = self._to_tensor_output(
+                model(example_input)
+            ).detach().cpu().numpy()
 
         ort_inputs = {
-            ort_session.get_inputs()[0].name: example_input.cpu().numpy()
+            ort_session.get_inputs()[0].name: example_input.detach().cpu().numpy()
         }
+        ort_output = ort_session.run(None, ort_inputs)[0]
 
-        ort_outputs = ort_session.run(None, ort_inputs)[0]
+        max_diff = float(np.max(np.abs(pt_output - ort_output)))
+        passed = max_diff <= atol
 
-        max_diff = float(abs(ort_outputs).max())
+        logger.info(
+            "ONNX verification completed. passed=%s max_diff=%.6f atol=%.6f",
+            passed,
+            max_diff,
+            atol,
+        )
 
-        logger.info("ONNX verification completed. Max output magnitude: %.6f", max_diff)
-
-        return True, max_diff
+        return passed, max_diff

@@ -61,6 +61,7 @@ class AsyncCheckpointWriter:
     def __init__(self, max_queue_size: int = 4) -> None:
         self._queue: queue.Queue[tuple[Path, Any] | None] = queue.Queue(maxsize=max_queue_size)
         self._thread = threading.Thread(target=self._worker, daemon=True)
+        self._closed = False
         self._thread.start()
 
     def _worker(self) -> None:
@@ -82,6 +83,8 @@ class AsyncCheckpointWriter:
         tmp_path.replace(path)
 
     def save(self, path: Path, obj: Any, compress: bool = True) -> None:
+        if self._closed:
+            raise RuntimeError("Cannot enqueue save on closed AsyncCheckpointWriter")
         try:
             self._queue.put_nowait((path, (obj, compress)))
         except queue.Full:
@@ -96,6 +99,10 @@ class AsyncCheckpointWriter:
         self._queue.join()
 
     def close(self) -> None:
+        if self._closed:
+            return
+        self.flush()
+        self._closed = True
         self._queue.put(None)
         self._thread.join()
 

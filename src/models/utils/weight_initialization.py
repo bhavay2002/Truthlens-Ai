@@ -81,8 +81,8 @@ def initialize_weights(
             if method in {"xavier", "kaiming"}:
                 nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-            elif method == "normal":
-                nn.init.normal_(module.weight, mean=0.0, std=0.02)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0.0)
 
             elif method == "uniform":
                 nn.init.uniform_(module.weight, a=-0.1, b=0.1)

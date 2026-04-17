@@ -178,7 +178,7 @@ class IdeologyClassifier(BaseModel):
         Forward pass.
 
         Args:
-            input_ids:
+                if not ((labels >= 0).all() and (labels < self.NUM_CLASSES).all()):
                 Token ids tensor (batch_size, seq_len)
             attention_mask:
                 Attention mask tensor (batch_size, seq_len)

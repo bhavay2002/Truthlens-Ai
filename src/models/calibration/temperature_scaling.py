@@ -73,10 +73,14 @@ class TemperatureScaler(nn.Module):
             raise ValueError("max_iter must be positive.")
 
         self.config = config
-        self.temperature = nn.Parameter(torch.ones(1))
+        self.log_temperature = nn.Parameter(torch.zeros(1))
         self.device = torch.device(config.device)
 
         self.to(self.device)
+
+    @property
+    def temperature(self) -> torch.Tensor:
+        return torch.exp(self.log_temperature)
 
     def forward(self, logits: torch.Tensor) -> torch.Tensor:
         """
@@ -96,8 +100,10 @@ class TemperatureScaler(nn.Module):
         if logits.ndim < 2:
             raise ValueError("Logits must have shape [batch_size, num_classes].")
 
-        temperature = self.temperature.expand_as(logits)
+        if not torch.is_floating_point(logits):
+            logits = logits.float()
 
+        temperature = self.temperature.expand_as(logits)
         return logits / temperature
 
     def predict_proba(self, logits: torch.Tensor) -> torch.Tensor:
@@ -143,9 +149,11 @@ class TemperatureScaler(nn.Module):
         nll_criterion = nn.CrossEntropyLoss()
 
         optimizer = optim.LBFGS(
-            [self.temperature],
+            [self.log_temperature],
             lr=self.config.lr,
             max_iter=self.config.max_iter,
+            tolerance_grad=self.config.tolerance,
+            tolerance_change=self.config.tolerance,
         )
 
         logger.info("Starting temperature scaling optimization.")

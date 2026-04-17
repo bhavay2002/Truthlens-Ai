@@ -164,12 +164,13 @@ class Predictor:
                 if isinstance(value, torch.Tensor):
 
                     if "logits" in key:
+                        formatted[key] = value
                         probs = torch.softmax(value, dim=-1)
                         calibrated_probs = self._calibrate_probabilities(
                             logits=value,
                             probabilities=probs,
                         )
-                        preds = torch.argmax(calibrated_probs, dim=-1)
+                        preds = torch.argmax(value, dim=-1)
 
                         formatted[key.replace("logits", "predictions")] = preds
                         formatted[key.replace("logits", "probabilities")] = probs
@@ -257,7 +258,13 @@ class Predictor:
                     if isinstance(value, torch.Tensor) and "logits" in key:
                         logits = value
                         break
-        except Exception:  # noqa: BLE001
+                if logits is None:
+                    for value in maybe_outputs.values():
+                        if isinstance(value, torch.Tensor):
+                            logits = value
+                            break
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Ensemble model call failed: %s", exc)
             logits = None
 
         if logits is None:

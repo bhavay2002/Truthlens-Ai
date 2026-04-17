@@ -71,6 +71,9 @@ class BaseClassifier(BaseModel):
         if input_dim <= 0:
             raise ValueError("input_dim must be positive")
 
+        if not (0.0 <= dropout <= 1.0):
+            raise ValueError("dropout must be in [0.0, 1.0]")
+
         self.num_classes = num_classes
         self.input_dim = input_dim
         self.multi_label = multi_label
@@ -118,6 +121,10 @@ class BaseClassifier(BaseModel):
             raise ValueError(
                 f"Encoded features must be 2D (batch_size, feature_dim), "
                 f"got shape {features.shape}"
+            )
+        if features.size(1) != self.input_dim:
+            raise ValueError(
+                f"Encoded feature dim mismatch: expected {self.input_dim}, got {features.size(1)}"
             )
 
         features = self.dropout(features)

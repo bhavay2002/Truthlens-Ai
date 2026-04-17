@@ -71,7 +71,7 @@ class ModelLoader:
         model = self._load_model()
 
         # Efficient device transfer
-        model.to(self.device, non_blocking=True)
+        model.to(self.device)
 
         # Optional inference optimization
         if self.use_half and self.device.type == "cuda":

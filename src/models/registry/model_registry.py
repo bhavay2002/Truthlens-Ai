@@ -166,8 +166,8 @@ class ModelRegistry:
                     model_path = named_model_path
                 elif not MODEL_DIR.exists():
                     raise FileNotFoundError(f"Model path not found: {named_model_path}")
-            elif not MODEL_DIR.exists():
-                raise FileNotFoundError(f"Model path not found: {MODEL_DIR}")
+                else:
+                    raise FileNotFoundError(f"Model path not found: {named_model_path}")
 
             device_obj = torch.device(
                 device if device else ("cuda" if torch.cuda.is_available() else "cpu")
@@ -240,7 +240,12 @@ class ModelRegistry:
 
                 if checkpoint_path.exists():
                     state_dict = torch.load(checkpoint_path, map_location=device_obj, weights_only=True)
-                    model.load_state_dict(state_dict)
+                    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+
+                    if missing:
+                        logger.warning("Missing keys: %s", missing)
+                    if unexpected:
+                        logger.warning("Unexpected keys: %s", unexpected)
 
             if hasattr(model, "to"):
                 model.to(device_obj)

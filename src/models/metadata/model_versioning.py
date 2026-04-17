@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -108,6 +109,7 @@ class ModelVersionRegistry:
         _ensure_directory(self.registry_dir)
 
         self.registry_file = self.registry_dir / self.REGISTRY_FILENAME
+        self._lock = threading.Lock()
 
         if not self.registry_file.exists():
             self._initialize_registry()
@@ -154,12 +156,7 @@ class ModelVersionRegistry:
             Path to the created model version directory.
         """
 
-        registry = self._load_registry()
-
         model_name = version_info.model_name
-
-        if model_name not in registry["models"]:
-            registry["models"][model_name] = []
 
         version_directory = (
             self.registry_dir
@@ -171,9 +168,17 @@ class ModelVersionRegistry:
 
         version_info.artifact_path = str(version_directory)
 
-        registry["models"][model_name].append(asdict(version_info))
+        with self._lock:
+            registry = self._load_registry()
 
-        self._save_registry(registry)
+            model_name = version_info.model_name
+
+            if model_name not in registry["models"]:
+                registry["models"][model_name] = []
+
+            registry["models"][model_name].append(asdict(version_info))
+
+            self._save_registry(registry)
 
         metadata_file = version_directory / "version_metadata.json"
 
@@ -207,7 +212,8 @@ class ModelVersionRegistry:
 
         _validate_non_empty(model_name, "model_name")
 
-        registry = self._load_registry()
+        with self._lock:
+            registry = self._load_registry()
 
         if model_name not in registry["models"]:
             return []

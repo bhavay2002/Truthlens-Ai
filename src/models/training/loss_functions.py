@@ -85,8 +85,16 @@ class LossFactory:
         if not 0.0 <= config.label_smoothing < 1.0:
             raise ValueError("label_smoothing must be in [0,1)")
 
+        if not isinstance(config.weight, (int, float)):
+            raise TypeError("weight must be numeric")
+
+        weight = float(config.weight)
+
         if config.loss_type == "binary":
             base = nn.BCEWithLogitsLoss(reduction=config.reduction)
+            if weight != 1.0:
+                return lambda logits, targets: base(logits, targets) * weight
+            return base
 
         elif config.loss_type == "multi_class":
             base = nn.CrossEntropyLoss(
@@ -103,8 +111,8 @@ class LossFactory:
         else:
             raise RuntimeError("Unexpected loss type")
 
-        if config.weight != 1.0:
-            base = WeightedLossWrapper(base, config.weight)
+        if weight != 1.0:
+            base = WeightedLossWrapper(base, weight)
 
         return base
 
@@ -145,11 +153,10 @@ def binary_classification_loss(
     if targets.dim() == 1:
         targets = targets.unsqueeze(1)
 
-    if __debug__:
-        if logits.shape != targets.shape:
-            raise RuntimeError(
-                f"Binary loss shape mismatch: logits {logits.shape} vs targets {targets.shape}"
-            )
+    if logits.shape != targets.shape:
+        raise RuntimeError(
+            f"Binary loss shape mismatch: logits {logits.shape} vs targets {targets.shape}"
+        )
 
     return F.binary_cross_entropy_with_logits(
         logits.float(),  # AMP safety

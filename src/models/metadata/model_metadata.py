@@ -157,19 +157,25 @@ class ModelMetadata:
     tags: Optional[Dict[str, str]] = None
     extra: Optional[Dict[str, Any]] = None
 
+    def __post_init__(self) -> None:
+        if self.metrics is not None:
+            for key, value in self.metrics.items():
+                if not isinstance(value, (float, int)):
+                    raise ValueError(
+                        f"Metric '{key}' must be numeric but got {type(value)}"
+                    )
+
+        if self.tags is not None:
+            for key, value in self.tags.items():
+                if not isinstance(value, str):
+                    raise ValueError(
+                        f"Tag '{key}' must be a string but got {type(value)}"
+                    )
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert metadata object to dictionary."""
         try:
-            data = asdict(self)
-
-            if self.metrics is not None:
-                for key, value in self.metrics.items():
-                    if not isinstance(value, (float, int)):
-                        raise ValueError(
-                            f"Metric '{key}' must be numeric but got {type(value)}"
-                        )
-
-            return data
+            return asdict(self)
 
         except Exception as exc:
             logger.exception("Failed to convert ModelMetadata to dict.")

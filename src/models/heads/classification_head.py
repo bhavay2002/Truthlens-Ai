@@ -132,6 +132,11 @@ class ClassificationHead(nn.Module):
             raise ValueError(
                 f"Expected 2D tensor (batch_size, input_dim), got {features.shape}"
             )
+        if features.size(1) != self.config.input_dim:
+            raise ValueError(
+                f"Expected input feature dimension {self.config.input_dim}, "
+                f"got {features.size(1)}"
+            )
 
         if not features.is_contiguous():
             features = features.contiguous()
