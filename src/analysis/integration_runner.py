@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
+from spacy.tokens import Doc
+
+from src.analysis._nlp import get_nlp
 from src.analysis.argument_mining import ArgumentMiningAnalyzer
 from src.analysis.bias_profile_builder import BiasProfileBuilder
 from src.analysis.context_omission_detector import ContextOmissionDetector
@@ -23,11 +26,27 @@ from src.analysis.source_attribution_analyzer import SourceAttributionAnalyzer
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Runner canonical spaCy model for shared-Doc creation.
+# Uses the full pipeline (no disabled components) so every analyzer has
+# access to all annotations (tagger, parser, NER, lemmatizer, etc.).
+# ---------------------------------------------------------------------------
+_RUNNER_MODEL: str = "en_core_web_sm"
+
 
 @dataclass(slots=True)
 class AnalysisIntegrationRunner:
     """
     Executes analysis modules and returns a unified dictionary.
+
+    Single-pass tokenisation
+    ------------------------
+    ``analyze_text`` builds **one** spaCy :class:`~spacy.tokens.Doc` for the
+    input text using the shared pipeline cache (:func:`~src.analysis._nlp.get_nlp`).
+    That ``Doc`` is then passed to every analyzer that exposes an
+    ``analyze_doc`` method, eliminating repeated tokenisation.  Analyzers that
+    have not yet been upgraded fall back transparently to their existing
+    string-based ``analyze(text)`` API.
     """
 
     argument_mining: Optional[ArgumentMiningAnalyzer] = None
@@ -102,6 +121,10 @@ class AnalysisIntegrationRunner:
             logger.warning("Analysis module unavailable: %s (%s)", name, exc)
             return None
 
+    # ------------------------------------------------------------------
+    # Dispatch helpers
+    # ------------------------------------------------------------------
+
     def _safe_analyze(self, name: str, analyzer: Any, *args: Any, **kwargs: Any) -> Dict[str, Any]:
         if analyzer is None:
             return {}
@@ -112,46 +135,79 @@ class AnalysisIntegrationRunner:
             logger.warning("Analysis module failed at runtime: %s (%s)", name, exc)
             return {}
 
+    def _safe_analyze_doc(
+        self,
+        name: str,
+        analyzer: Any,
+        doc: Doc,
+        text: str,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Dispatch to ``analyze_doc(doc, **kwargs)`` when available, else fall back
+        to ``analyze(text, **kwargs)``.
+
+        This safe dispatch ensures backward compatibility: any analyzer that has
+        not yet been upgraded to the doc-aware API continues to work via the
+        string-based path.
+
+        Args:
+            name:     Analyzer name (used only for logging).
+            analyzer: Analyzer instance or ``None``.
+            doc:      Pre-built shared spaCy Doc for the current text.
+            text:     Original input string (fallback path).
+            **kwargs: Extra keyword arguments forwarded to ``analyze_doc`` /
+                      ``analyze`` (e.g. ``hero_entities``).
+
+        Returns:
+            Feature dictionary, or ``{}`` on failure.
+        """
+        if analyzer is None:
+            return {}
+        try:
+            if hasattr(analyzer, "analyze_doc"):
+                output = analyzer.analyze_doc(doc, **kwargs)
+            else:
+                output = analyzer.analyze(text, **kwargs)
+            return output if isinstance(output, dict) else {}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Analysis module failed at runtime: %s (%s)", name, exc)
+            return {}
+
     def analyze_text(self, text: str) -> Dict[str, Dict[str, Any]]:
         if not isinstance(text, str) or not text.strip():
             raise ValueError("text must be a non-empty string")
 
+        # ------------------------------------------------------------------
+        # Build shared Doc once – avoids repeated tokenisation across all
+        # analyzers.  The full pipeline (no disabled components) is used so
+        # every downstream module has access to the annotations it needs.
+        # ------------------------------------------------------------------
+        try:
+            _nlp = get_nlp(_RUNNER_MODEL)
+            shared_doc: Optional[Doc] = _nlp(text)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Shared Doc creation failed (%s); falling back to per-analyzer parsing", exc)
+            shared_doc = None
+
+        def _dispatch(name: str, analyzer: Any, **kwargs: Any) -> Dict[str, Any]:
+            if shared_doc is not None:
+                return self._safe_analyze_doc(name, analyzer, shared_doc, text, **kwargs)
+            return self._safe_analyze(name, analyzer, text, **kwargs)
+
         outputs: Dict[str, Dict[str, Any]] = {}
 
-        outputs["argument_mining"] = self._safe_analyze(
-            "argument_mining", self.argument_mining, text
-        )
-        outputs["context_omission"] = self._safe_analyze(
-            "context_omission", self.context_omission, text
-        )
-        outputs["discourse_coherence"] = self._safe_analyze(
-            "discourse_coherence", self.discourse_coherence, text
-        )
-        outputs["emotion_target"] = self._safe_analyze(
-            "emotion_target", self.emotion_target, text
-        )
-        outputs["framing"] = self._safe_analyze("framing", self.framing, text)
-        outputs["ideological_language"] = self._safe_analyze(
-            "ideological_language", self.ideological_language, text
-        )
-        outputs["information_density"] = self._safe_analyze(
-            "information_density", self.information_density, text
-        )
-        outputs["information_omission"] = self._safe_analyze(
-            "information_omission", self.information_omission, text
-        )
-        outputs["narrative_temporal"] = self._safe_analyze(
-            "narrative_temporal", self.narrative_temporal, text
-        )
-        outputs["rhetorical_device"] = self._safe_analyze(
-            "rhetorical_device", self.rhetorical_device, text
-        )
-        outputs["source_attribution"] = self._safe_analyze(
-            "source_attribution", self.source_attribution, text
-        )
-        outputs["narrative_role"] = self._safe_analyze(
-            "narrative_role", self.narrative_role, text
-        )
+        outputs["argument_mining"] = _dispatch("argument_mining", self.argument_mining)
+        outputs["context_omission"] = _dispatch("context_omission", self.context_omission)
+        outputs["discourse_coherence"] = _dispatch("discourse_coherence", self.discourse_coherence)
+        outputs["emotion_target"] = _dispatch("emotion_target", self.emotion_target)
+        outputs["framing"] = _dispatch("framing", self.framing)
+        outputs["ideological_language"] = _dispatch("ideological_language", self.ideological_language)
+        outputs["information_density"] = _dispatch("information_density", self.information_density)
+        outputs["information_omission"] = _dispatch("information_omission", self.information_omission)
+        outputs["narrative_temporal"] = _dispatch("narrative_temporal", self.narrative_temporal)
+        outputs["rhetorical_device"] = _dispatch("rhetorical_device", self.rhetorical_device)
+        outputs["source_attribution"] = _dispatch("source_attribution", self.source_attribution)
+        outputs["narrative_role"] = _dispatch("narrative_role", self.narrative_role)
 
         roles = outputs["narrative_role"]
         hero_entities = roles.get("hero_entities", []) if isinstance(roles, dict) else []
@@ -160,18 +216,16 @@ class AnalysisIntegrationRunner:
         )
         victim_entities = roles.get("victim_entities", []) if isinstance(roles, dict) else []
 
-        outputs["narrative_conflict"] = self._safe_analyze(
+        outputs["narrative_conflict"] = _dispatch(
             "narrative_conflict",
             self.narrative_conflict,
-            text,
             hero_entities=hero_entities,
             villain_entities=villain_entities,
             victim_entities=victim_entities,
         )
-        outputs["narrative_propagation"] = self._safe_analyze(
+        outputs["narrative_propagation"] = _dispatch(
             "narrative_propagation",
             self.narrative_propagation,
-            text,
             hero_entities=hero_entities,
             villain_entities=villain_entities,
             victim_entities=victim_entities,
@@ -218,4 +272,3 @@ class AnalysisIntegrationRunner:
             outputs["bias_profile"] = {}
 
         return outputs
-

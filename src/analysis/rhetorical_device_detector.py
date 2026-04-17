@@ -35,9 +35,17 @@ from dataclasses import dataclass
 from typing import Dict, List
 
 import numpy as np
-import spacy
 from spacy.language import Language
 from spacy.tokens import Doc
+
+from src.analysis._nlp import get_nlp
+from src.analysis._text_features import (
+    extract_alpha_lemmas,
+    build_counter,
+    term_ratio as _term_ratio_util,
+    phrase_match_count,
+)
+from src.analysis.feature_schema import RHETORICAL_DEVICE_KEYS, make_vector
 
 
 logger = logging.getLogger(__name__)
@@ -147,16 +155,10 @@ class RhetoricalDeviceDetector:
 
         self.config = config or RhetoricalDeviceConfig()
 
-        try:
-            self.nlp: Language = spacy.load(
-                self.config.spacy_model,
-                disable=self.config.disable_components
-            )
-        except Exception as exc:
-            logger.exception("spaCy model loading failed")
-            raise RuntimeError(
-                f"Failed to load spaCy model: {self.config.spacy_model}"
-            ) from exc
+        self.nlp: Language = get_nlp(
+            self.config.spacy_model,
+            disable=self.config.disable_components,
+        )
 
         logger.info(
             "RhetoricalDeviceDetector initialized | model=%s",
@@ -178,30 +180,54 @@ class RhetoricalDeviceDetector:
             raise ValueError("Input text must be non-empty")
 
         doc: Doc = self.nlp(text)
+        return self.analyze_doc(doc)
 
-        tokens: List[str] = [
-            token.lemma_.lower()
-            for token in doc
-            if token.is_alpha
-        ]
+    # ------------------------------------------------------------
+
+    def analyze_doc(self, doc: Doc) -> Dict[str, float]:
+        """Compute rhetorical device features from a pre-built spaCy Doc.
+
+        Builds the token counter once and reuses it across all term-ratio
+        computations, and uses word-boundary-aware phrase matching.
+
+        Args:
+            doc: A processed spaCy Doc instance.
+
+        Returns:
+            Dictionary of rhetorical device feature names to float values.
+        """
+
+        tokens: List[str] = extract_alpha_lemmas(doc)
+        token_counts = build_counter(tokens)
+        n_tokens = len(tokens)
 
         features: Dict[str, float] = {}
 
-        features.update(self._term_ratio(tokens, self.EXAGGERATION_TERMS, "rhetoric_exaggeration_score"))
-        features.update(self._term_ratio(tokens, self.LOADED_LANGUAGE_TERMS, "rhetoric_loaded_language_score"))
-        features.update(self._term_ratio(tokens, self.EMOTIONAL_APPEAL_TERMS, "rhetoric_emotional_appeal_score"))
-        features.update(self._term_ratio(tokens, self.FEAR_APPEAL_TERMS, "rhetoric_fear_appeal_score"))
-        features.update(self._term_ratio(tokens, self.INTENSIFIERS, "rhetoric_intensifier_ratio"))
+        features["rhetoric_exaggeration_score"] = _term_ratio_util(
+            token_counts, n_tokens, self.EXAGGERATION_TERMS
+        )
+        features["rhetoric_loaded_language_score"] = _term_ratio_util(
+            token_counts, n_tokens, self.LOADED_LANGUAGE_TERMS
+        )
+        features["rhetoric_emotional_appeal_score"] = _term_ratio_util(
+            token_counts, n_tokens, self.EMOTIONAL_APPEAL_TERMS
+        )
+        features["rhetoric_fear_appeal_score"] = _term_ratio_util(
+            token_counts, n_tokens, self.FEAR_APPEAL_TERMS
+        )
+        features["rhetoric_intensifier_ratio"] = _term_ratio_util(
+            token_counts, n_tokens, self.INTENSIFIERS
+        )
 
-        features.update(self._pattern_score(text, self.SCAPEGOAT_PATTERNS, "rhetoric_scapegoating_score"))
-        features.update(self._pattern_score(text, self.FALSE_DILEMMA_PATTERNS, "rhetoric_false_dilemma_score"))
+        features.update(self._pattern_score(doc.text, self.SCAPEGOAT_PATTERNS, "rhetoric_scapegoating_score"))
+        features.update(self._pattern_score(doc.text, self.FALSE_DILEMMA_PATTERNS, "rhetoric_false_dilemma_score"))
 
-        features.update(self._rhetorical_punctuation(text))
+        features.update(self._rhetorical_punctuation(doc.text))
 
         return features
 
     # ------------------------------------------------------------
-    # Lexical ratios
+    # Lexical ratios (kept for backward compatibility)
     # ------------------------------------------------------------
 
     def _term_ratio(
@@ -238,10 +264,7 @@ class RhetoricalDeviceDetector:
 
         text_lower = text.lower()
 
-        hits = sum(
-            1 for pattern in patterns
-            if pattern in text_lower
-        )
+        hits = phrase_match_count(text_lower, patterns)
 
         length = max(len(text.split()), 1)
 
@@ -270,21 +293,4 @@ class RhetoricalDeviceDetector:
 
 def rhetorical_feature_vector(features: Dict[str, float]) -> np.ndarray:
 
-    ordered_keys = [
-
-        "rhetoric_exaggeration_score",
-        "rhetoric_loaded_language_score",
-        "rhetoric_emotional_appeal_score",
-        "rhetoric_fear_appeal_score",
-        "rhetoric_intensifier_ratio",
-        "rhetoric_scapegoating_score",
-        "rhetoric_false_dilemma_score",
-        "rhetoric_punctuation_score",
-    ]
-
-    vector = np.array(
-        [float(features.get(k, 0.0)) for k in ordered_keys],
-        dtype=np.float32,
-    )
-
-    return vector
+    return make_vector(features, RHETORICAL_DEVICE_KEYS)

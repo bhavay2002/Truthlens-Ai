@@ -40,9 +40,12 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 import numpy as np
-import spacy
 from spacy.language import Language
 from spacy.tokens import Doc
+
+from src.analysis._nlp import get_nlp
+from src.analysis._text_features import phrase_match_count
+from src.analysis.feature_schema import NARRATIVE_PROPAGATION_KEYS, make_vector
 
 logger = logging.getLogger(__name__)
 
@@ -184,11 +187,7 @@ class NarrativePropagationAnalyzer:
 
         self.config = config or NarrativeConflictConfig()
 
-        try:
-            self.nlp: Language = spacy.load(self.config.spacy_model)
-        except Exception as exc:
-            logger.exception("spaCy model loading failed")
-            raise RuntimeError("Failed to load spaCy model") from exc
+        self.nlp: Language = get_nlp(self.config.spacy_model)
 
         logger.info("NarrativePropagationAnalyzer initialized")
 
@@ -209,6 +208,33 @@ class NarrativePropagationAnalyzer:
             raise ValueError("Input text must be non-empty")
 
         doc: Doc = self.nlp(text)
+        return self.analyze_doc(
+            doc,
+            hero_entities=hero_entities,
+            villain_entities=villain_entities,
+            victim_entities=victim_entities,
+        )
+
+    # -----------------------------------------------------
+
+    def analyze_doc(
+        self,
+        doc: Doc,
+        hero_entities: Optional[List[str]] = None,
+        villain_entities: Optional[List[str]] = None,
+        victim_entities: Optional[List[str]] = None,
+    ) -> Dict[str, float]:
+        """Compute narrative propagation features from a pre-built spaCy Doc.
+
+        Args:
+            doc:              A processed spaCy Doc instance.
+            hero_entities:    Hero entity strings from narrative role extraction.
+            villain_entities: Villain entity strings.
+            victim_entities:  Victim entity strings.
+
+        Returns:
+            Dictionary of narrative propagation feature names to float values.
+        """
 
         tokens = [t.lemma_.lower() for t in doc if t.is_alpha]
 
@@ -217,9 +243,9 @@ class NarrativePropagationAnalyzer:
         features.update(self._conflict_verbs(tokens))
         features.update(self._opposition_markers(tokens))
         features.update(self._polarization(tokens))
-        features.update(self._conflict_phrases(text.lower()))
-        features.update(self._actor_roles(text, hero_entities, villain_entities, victim_entities))
-        features.update(self._punctuation_features(text))
+        features.update(self._conflict_phrases(doc.text.lower()))
+        features.update(self._actor_roles(doc.text, hero_entities, villain_entities, victim_entities))
+        features.update(self._punctuation_features(doc.text))
 
         return features
 
@@ -274,7 +300,7 @@ class NarrativePropagationAnalyzer:
 
     def _conflict_phrases(self, text: str) -> Dict[str, float]:
 
-        count = sum(1 for phrase in CONFLICT_PHRASES if phrase in text)
+        count = phrase_match_count(text, CONFLICT_PHRASES)
 
         return {"conflict_phrase_count": float(count)}
 
@@ -341,28 +367,4 @@ class NarrativePropagationAnalyzer:
 
 def narrative_conflict_vector(features: Dict[str, float]) -> np.ndarray:
 
-    ordered_keys = [
-
-        "violent_conflict_ratio",
-        "political_conflict_ratio",
-        "discursive_conflict_ratio",
-        "institutional_conflict_ratio",
-        "coercion_conflict_ratio",
-
-        "opposition_marker_ratio",
-        "polarization_ratio",
-        "conflict_phrase_count",
-
-        "hero_mentions",
-        "villain_mentions",
-        "victim_mentions",
-
-        "hero_villain_conflict_score",
-        "villain_victim_harm_score",
-        "hero_victim_protection_score",
-    ]
-
-    return np.array(
-        [float(features.get(k, 0.0)) for k in ordered_keys],
-        dtype=np.float32,
-    )
+    return make_vector(features, NARRATIVE_PROPAGATION_KEYS)

@@ -27,6 +27,8 @@ from typing import Dict
 
 import numpy as np
 
+from src.analysis.feature_schema import PROPAGANDA_PATTERN_KEYS, make_vector
+
 
 logger = logging.getLogger(__name__)
 
@@ -235,17 +237,4 @@ class PropagandaPatternDetector:
 
 def propaganda_pattern_vector(features: Dict[str, float]) -> np.ndarray:
 
-    ordered_keys = [
-        "fear_propaganda_score",
-        "scapegoating_score",
-        "polarization_score",
-        "emotional_amplification_score",
-        "narrative_imbalance_score",
-    ]
-
-    vector = np.array(
-        [float(features.get(k, 0.0)) for k in ordered_keys],
-        dtype=np.float32,
-    )
-
-    return vector
+    return make_vector(features, PROPAGANDA_PATTERN_KEYS)

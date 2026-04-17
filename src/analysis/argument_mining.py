@@ -31,9 +31,17 @@ from typing import Dict, List
 from collections import Counter
 
 import numpy as np
-import spacy
 from spacy.language import Language
 from spacy.tokens import Doc
+
+from src.analysis._nlp import get_nlp
+from src.analysis._text_features import (
+    extract_alpha_lemmas,
+    build_counter,
+    phrase_match_count,
+    term_ratio as _term_ratio_util,
+)
+from src.analysis.feature_schema import ARGUMENT_MINING_KEYS, make_vector
 
 logger = logging.getLogger(__name__)
 
@@ -138,16 +146,10 @@ class ArgumentMiningAnalyzer:
 
         self.config = config or ArgumentMiningConfig()
 
-        try:
-            self.nlp: Language = spacy.load(
-                self.config.spacy_model,
-                disable=self.config.disable_components
-            )
-        except Exception as exc:
-            logger.exception("spaCy model loading failed")
-            raise RuntimeError(
-                f"Failed to load spaCy model: {self.config.spacy_model}"
-            ) from exc
+        self.nlp: Language = get_nlp(
+            self.config.spacy_model,
+            disable=self.config.disable_components,
+        )
 
         logger.info(
             "ArgumentMiningAnalyzer initialized | model=%s",
@@ -167,35 +169,61 @@ class ArgumentMiningAnalyzer:
             raise ValueError("Input text must be non-empty")
 
         doc: Doc = self.nlp(text)
+        return self.analyze_doc(doc)
 
-        tokens = [
-            token.lemma_.lower()
-            for token in doc
-            if token.is_alpha
-        ]
+    # ------------------------------------------------------------
 
-        token_counts = Counter(tokens)
+    def analyze_doc(self, doc: Doc) -> Dict[str, float]:
+        """Compute argument mining features from a pre-built spaCy Doc.
+
+        Accepts a :class:`~spacy.tokens.Doc` that was already processed by a
+        spaCy pipeline (typically the shared instance from the integration
+        runner), avoiding redundant tokenisation.
+
+        Args:
+            doc: A processed spaCy Doc instance.
+
+        Returns:
+            Dictionary of argument mining feature names to float values.
+        """
+
+        tokens = extract_alpha_lemmas(doc)
+        token_counts = build_counter(tokens)
+        n_tokens = len(tokens)
+
+        # Guard once here; all helper methods can then assume n_tokens > 0.
+        if n_tokens == 0:
+            return {
+                "argument_claim_ratio": 0.0,
+                "argument_premise_ratio": 0.0,
+                "argument_support_ratio": 0.0,
+                "argument_contrast_ratio": 0.0,
+                "argument_rebuttal_ratio": 0.0,
+                "argument_verb_density": 0.0,
+                "argument_clause_density": 0.0,
+                "argument_complexity": 0.0,
+            }
 
         features: Dict[str, float] = {}
 
-        features["argument_claim_ratio"] = self._marker_ratio(
-            text, tokens, token_counts, self.CLAIM_MARKERS
+        features["argument_claim_ratio"] = _term_ratio_util(
+            token_counts, n_tokens, self.CLAIM_MARKERS
         )
 
-        features["argument_premise_ratio"] = self._marker_ratio(
-            text, tokens, token_counts, self.PREMISE_MARKERS
+        features["argument_premise_ratio"] = _term_ratio_util(
+            token_counts, n_tokens, self.PREMISE_MARKERS
         )
 
         features["argument_support_ratio"] = self._phrase_ratio(
-            text, self.SUPPORT_MARKERS
+            doc.text, n_tokens, self.SUPPORT_MARKERS
         )
 
-        features["argument_contrast_ratio"] = self._marker_ratio(
-            text, tokens, token_counts, self.CONTRAST_MARKERS
+        features["argument_contrast_ratio"] = _term_ratio_util(
+            token_counts, n_tokens, self.CONTRAST_MARKERS
         )
 
         features["argument_rebuttal_ratio"] = self._phrase_ratio(
-            text, self.REBUTTAL_MARKERS
+            doc.text, n_tokens, self.REBUTTAL_MARKERS
         )
 
         features.update(self._argument_density(doc))
@@ -231,14 +259,13 @@ class ArgumentMiningAnalyzer:
     def _phrase_ratio(
         self,
         text: str,
-        phrases: set
+        n_tokens: int,
+        phrases: set,
     ) -> float:
 
-        text_lower = text.lower()
+        hits = phrase_match_count(text.lower(), phrases)
 
-        hits = sum(1 for phrase in phrases if phrase in text_lower)
-
-        return float(hits / max(len(text.split()), 1))
+        return float(hits / n_tokens)
 
     # ------------------------------------------------------------
 
@@ -265,20 +292,4 @@ class ArgumentMiningAnalyzer:
 
 def argument_feature_vector(features: Dict[str, float]) -> np.ndarray:
 
-    ordered_keys = [
-        "argument_claim_ratio",
-        "argument_premise_ratio",
-        "argument_support_ratio",
-        "argument_contrast_ratio",
-        "argument_rebuttal_ratio",
-        "argument_verb_density",
-        "argument_clause_density",
-        "argument_complexity",
-    ]
-
-    vector = np.array(
-        [float(features.get(k, 0.0)) for k in ordered_keys],
-        dtype=np.float32
-    )
-
-    return vector
+    return make_vector(features, ARGUMENT_MINING_KEYS)

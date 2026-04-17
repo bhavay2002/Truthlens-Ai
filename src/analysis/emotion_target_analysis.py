@@ -29,9 +29,11 @@ from dataclasses import dataclass
 from typing import Dict, DefaultDict, List
 
 import numpy as np
-import spacy
 from spacy.language import Language
 from spacy.tokens import Doc, Token
+
+from src.analysis._nlp import get_nlp
+from src.analysis.feature_schema import EMOTION_TARGET_KEYS, make_vector
 
 logger = logging.getLogger(__name__)
 
@@ -201,13 +203,7 @@ class EmotionTargetAnalyzer:
 
         self.config = config or EmotionTargetConfig()
 
-        try:
-            self.nlp: Language = spacy.load(self.config.spacy_model)
-        except Exception as exc:
-            logger.exception("spaCy model loading failed")
-            raise RuntimeError(
-                f"Failed to load spaCy model: {self.config.spacy_model}"
-            ) from exc
+        self.nlp: Language = get_nlp(self.config.spacy_model)
 
         logger.info(
             "EmotionTargetAnalyzer initialized with model=%s",
@@ -231,6 +227,20 @@ class EmotionTargetAnalyzer:
         except Exception as exc:
             logger.exception("spaCy processing failed")
             raise RuntimeError("Text processing failed") from exc
+
+        return self.analyze_doc(doc)
+
+    # -----------------------------------------------------
+
+    def analyze_doc(self, doc: Doc) -> Dict[str, float]:
+        """Compute emotion target features from a pre-built spaCy Doc.
+
+        Args:
+            doc: A processed spaCy Doc instance.
+
+        Returns:
+            Dictionary of emotion target feature names to float values.
+        """
 
         entity_emotion_map: DefaultDict[str, int] = defaultdict(int)
         emotion_count: int = 0
@@ -341,24 +351,4 @@ def emotion_target_vector(features: Dict[str, float]) -> np.ndarray:
     if not features:
         raise ValueError("features must be a non-empty dictionary")
 
-    numeric_values: List[float] = []
-
-    for key, value in features.items():
-
-        if isinstance(value, (int, float, np.number)):
-            numeric_values.append(float(value))
-        else:
-            logger.warning("Non-numeric emotion target feature skipped: %s", key)
-
-    if not numeric_values:
-        raise ValueError("No numeric values found in features")
-
-    try:
-        vector = np.array(numeric_values, dtype=np.float32)
-        return vector
-
-    except Exception as exc:
-        logger.exception("Emotion target vector conversion failed")
-        raise RuntimeError(
-            "Failed to convert emotion target features"
-        ) from exc
+    return make_vector(features, EMOTION_TARGET_KEYS)
