@@ -35,9 +35,12 @@ from collections import Counter
 from typing import Dict, List
 
 import numpy as np
-import spacy
 from spacy.language import Language
 from spacy.tokens import Doc
+
+from src.analysis._nlp import get_nlp
+from src.analysis._text_features import extract_alpha_lemmas, build_counter
+from src.analysis.feature_schema import INFORMATION_OMISSION_KEYS, make_vector
 
 
 logger = logging.getLogger(__name__)
@@ -121,16 +124,10 @@ class InformationOmissionDetector:
 
         self.config = config or InformationOmissionConfig()
 
-        try:
-            self.nlp: Language = spacy.load(
-                self.config.spacy_model,
-                disable=self.config.disable_components
-            )
-        except Exception as exc:
-            logger.exception("spaCy model loading failed")
-            raise RuntimeError(
-                f"Failed to load spaCy model: {self.config.spacy_model}"
-            ) from exc
+        self.nlp: Language = get_nlp(
+            self.config.spacy_model,
+            disable=self.config.disable_components,
+        )
 
         logger.info(
             "InformationOmissionDetector initialized | model=%s",
@@ -152,12 +149,21 @@ class InformationOmissionDetector:
             raise ValueError("Input text must be non-empty")
 
         doc: Doc = self.nlp(text)
+        return self.analyze_doc(doc)
 
-        tokens: List[str] = [
-            token.lemma_.lower()
-            for token in doc
-            if token.is_alpha
-        ]
+    # ------------------------------------------------------------
+
+    def analyze_doc(self, doc: Doc) -> Dict[str, float]:
+        """Compute information omission features from a pre-built spaCy Doc.
+
+        Args:
+            doc: A processed spaCy Doc instance.
+
+        Returns:
+            Dictionary of information omission feature names to float values.
+        """
+
+        tokens: List[str] = extract_alpha_lemmas(doc)
 
         features: Dict[str, float] = {}
 
@@ -269,16 +275,4 @@ class InformationOmissionDetector:
 
 def information_omission_vector(features: Dict[str, float]) -> np.ndarray:
 
-    ordered_keys = [
-        "missing_counterargument_score",
-        "one_sided_framing_score",
-        "incomplete_evidence_score",
-        "claim_evidence_imbalance",
-    ]
-
-    vector = np.array(
-        [float(features.get(k, 0.0)) for k in ordered_keys],
-        dtype=np.float32,
-    )
-
-    return vector
+    return make_vector(features, INFORMATION_OMISSION_KEYS)

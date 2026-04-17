@@ -34,9 +34,12 @@ from dataclasses import dataclass
 from typing import Dict, List
 
 import numpy as np
-import spacy
 from spacy.language import Language
 from spacy.tokens import Doc
+
+from src.analysis._nlp import get_nlp
+from src.analysis._text_features import extract_alpha_lemmas, build_counter, term_ratio as _term_ratio_util
+from src.analysis.feature_schema import INFORMATION_DENSITY_KEYS, make_vector
 
 
 logger = logging.getLogger(__name__)
@@ -156,16 +159,10 @@ class InformationDensityAnalyzer:
 
         self.config = config or InformationDensityConfig()
 
-        try:
-            self.nlp: Language = spacy.load(
-                self.config.spacy_model,
-                disable=self.config.disable_components
-            )
-        except Exception as exc:
-            logger.exception("spaCy model loading failed")
-            raise RuntimeError(
-                f"Failed to load spaCy model: {self.config.spacy_model}"
-            ) from exc
+        self.nlp: Language = get_nlp(
+            self.config.spacy_model,
+            disable=self.config.disable_components,
+        )
 
         logger.info(
             "InformationDensityAnalyzer initialized | model=%s",
@@ -187,23 +184,37 @@ class InformationDensityAnalyzer:
             raise ValueError("Input text must be non-empty")
 
         doc: Doc = self.nlp(text)
+        return self.analyze_doc(doc)
 
-        tokens: List[str] = [
-            token.lemma_.lower()
-            for token in doc
-            if token.is_alpha
-        ]
+    # ------------------------------------------------------------
+
+    def analyze_doc(self, doc: Doc) -> Dict[str, float]:
+        """Compute information density features from a pre-built spaCy Doc.
+
+        Builds the token counter once and reuses it across all term-ratio
+        computations, eliminating repeated Counter construction.
+
+        Args:
+            doc: A processed spaCy Doc instance.
+
+        Returns:
+            Dictionary of information density feature names to float values.
+        """
+
+        tokens: List[str] = extract_alpha_lemmas(doc)
+        token_counts = build_counter(tokens)
+        n_tokens = len(tokens)
 
         features: Dict[str, float] = {}
 
-        features.update(self._term_ratio(tokens, self.FACTUAL_TERMS, "factual_density"))
-        features.update(self._term_ratio(tokens, self.OPINION_TERMS, "opinion_density"))
-        features.update(self._term_ratio(tokens, self.CLAIM_TERMS, "claim_density"))
-        features.update(self._term_ratio(tokens, self.RHETORICAL_TERMS, "rhetorical_density"))
-        features.update(self._term_ratio(tokens, self.EMOTIONAL_TERMS, "emotion_density"))
-        features.update(self._term_ratio(tokens, self.MODAL_TERMS, "modal_density"))
+        features["factual_density"] = _term_ratio_util(token_counts, n_tokens, self.FACTUAL_TERMS)
+        features["opinion_density"] = _term_ratio_util(token_counts, n_tokens, self.OPINION_TERMS)
+        features["claim_density"] = _term_ratio_util(token_counts, n_tokens, self.CLAIM_TERMS)
+        features["rhetorical_density"] = _term_ratio_util(token_counts, n_tokens, self.RHETORICAL_TERMS)
+        features["emotion_density"] = _term_ratio_util(token_counts, n_tokens, self.EMOTIONAL_TERMS)
+        features["modal_density"] = _term_ratio_util(token_counts, n_tokens, self.MODAL_TERMS)
 
-        features.update(self._punctuation_rhetoric(text))
+        features.update(self._punctuation_rhetoric(doc.text))
 
         features.update(self._information_emotion_ratio(features))
 
@@ -212,7 +223,7 @@ class InformationDensityAnalyzer:
         return features
 
     # ------------------------------------------------------------
-    # Lexical density
+    # Lexical density (kept for backward compatibility)
     # ------------------------------------------------------------
 
     def _term_ratio(
@@ -270,20 +281,4 @@ class InformationDensityAnalyzer:
 
 def information_density_vector(features: Dict[str, float]) -> np.ndarray:
 
-    ordered_keys = [
-        "factual_density",
-        "opinion_density",
-        "claim_density",
-        "rhetorical_density",
-        "emotion_density",
-        "modal_density",
-        "rhetorical_punctuation_density",
-        "information_emotion_ratio",
-    ]
-
-    vector = np.array(
-        [float(features.get(k, 0.0)) for k in ordered_keys],
-        dtype=np.float32,
-    )
-
-    return vector
+    return make_vector(features, INFORMATION_DENSITY_KEYS)

@@ -40,9 +40,10 @@ from dataclasses import dataclass
 from typing import Dict, List, Set
 
 import numpy as np
-import spacy
 from spacy.language import Language
 from spacy.tokens import Doc, Token
+
+from src.analysis._nlp import get_nlp
 
 logger = logging.getLogger(__name__)
 
@@ -197,13 +198,7 @@ class NarrativeRoleExtractor:
 
         self.config = config or NarrativeRoleConfig()
 
-        try:
-            self.nlp: Language = spacy.load(self.config.spacy_model)
-        except Exception as exc:
-            logger.exception("spaCy model loading failed")
-            raise RuntimeError(
-                f"Failed to load spaCy model: {self.config.spacy_model}"
-            ) from exc
+        self.nlp: Language = get_nlp(self.config.spacy_model)
 
         logger.info("NarrativeRoleExtractor initialized")
 
@@ -217,7 +212,20 @@ class NarrativeRoleExtractor:
             raise ValueError("Input text must be non-empty")
 
         doc: Doc = self.nlp(text)
+        return self.analyze_doc(doc)
 
+    # -----------------------------------------------------
+
+    def analyze_doc(self, doc: Doc) -> Dict[str, List[str]]:
+        """Extract narrative roles from a pre-built spaCy Doc.
+
+        Args:
+            doc: A processed spaCy Doc instance.
+
+        Returns:
+            Dictionary with ``hero_entities``, ``villain_entities``, and
+            ``victim_entities`` lists.
+        """
         hero_entities: Set[str] = set()
         villain_entities: Set[str] = set()
         victim_entities: Set[str] = set()

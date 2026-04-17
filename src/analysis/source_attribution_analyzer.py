@@ -32,9 +32,12 @@ from collections import Counter
 from typing import Dict, List
 
 import numpy as np
-import spacy
 from spacy.language import Language
 from spacy.tokens import Doc
+
+from src.analysis._nlp import get_nlp
+from src.analysis._text_features import extract_alpha_lemmas, build_counter, term_ratio as _term_ratio_util
+from src.analysis.feature_schema import SOURCE_ATTRIBUTION_KEYS, make_vector
 
 
 logger = logging.getLogger(__name__)
@@ -113,16 +116,10 @@ class SourceAttributionAnalyzer:
 
         self.config = config or SourceAttributionConfig()
 
-        try:
-            self.nlp: Language = spacy.load(
-                self.config.spacy_model,
-                disable=self.config.disable_components
-            )
-        except Exception as exc:
-            logger.exception("spaCy model loading failed")
-            raise RuntimeError(
-                f"Failed to load spaCy model: {self.config.spacy_model}"
-            ) from exc
+        self.nlp: Language = get_nlp(
+            self.config.spacy_model,
+            disable=self.config.disable_components,
+        )
 
         logger.info(
             "SourceAttributionAnalyzer initialized | model=%s",
@@ -144,21 +141,43 @@ class SourceAttributionAnalyzer:
             raise ValueError("Input text must be non-empty")
 
         doc: Doc = self.nlp(text)
+        return self.analyze_doc(doc)
 
-        tokens: List[str] = [
-            token.lemma_.lower()
-            for token in doc
-            if token.is_alpha
-        ]
+    # ------------------------------------------------------------
+
+    def analyze_doc(self, doc: Doc) -> Dict[str, float]:
+        """Compute source attribution features from a pre-built spaCy Doc.
+
+        Builds the token counter once and reuses it across all term-ratio
+        computations, eliminating repeated Counter construction.
+
+        Args:
+            doc: A processed spaCy Doc instance.
+
+        Returns:
+            Dictionary of source attribution feature names to float values.
+        """
+
+        tokens: List[str] = extract_alpha_lemmas(doc)
+        token_counts = build_counter(tokens)
+        n_tokens = len(tokens)
 
         features: Dict[str, float] = {}
 
-        features.update(self._term_ratio(tokens, self.EXPERT_TERMS, "expert_attribution_ratio"))
-        features.update(self._term_ratio(tokens, self.ANONYMOUS_TERMS, "anonymous_source_ratio"))
-        features.update(self._term_ratio(tokens, self.CREDIBILITY_TERMS, "credibility_indicator_ratio"))
-        features.update(self._term_ratio(tokens, self.ATTRIBUTION_VERBS, "attribution_verb_ratio"))
+        features["expert_attribution_ratio"] = _term_ratio_util(
+            token_counts, n_tokens, self.EXPERT_TERMS
+        )
+        features["anonymous_source_ratio"] = _term_ratio_util(
+            token_counts, n_tokens, self.ANONYMOUS_TERMS
+        )
+        features["credibility_indicator_ratio"] = _term_ratio_util(
+            token_counts, n_tokens, self.CREDIBILITY_TERMS
+        )
+        features["attribution_verb_ratio"] = _term_ratio_util(
+            token_counts, n_tokens, self.ATTRIBUTION_VERBS
+        )
 
-        features.update(self._quote_ratio(text))
+        features.update(self._quote_ratio(doc.text))
         features.update(self._entity_source_ratio(doc))
 
         features.update(self._source_balance_score(features))
@@ -166,7 +185,7 @@ class SourceAttributionAnalyzer:
         return features
 
     # ------------------------------------------------------------
-    # Lexical ratios
+    # Lexical ratios (kept for backward compatibility)
     # ------------------------------------------------------------
 
     def _term_ratio(
@@ -238,20 +257,4 @@ class SourceAttributionAnalyzer:
 
 def source_attribution_vector(features: Dict[str, float]) -> np.ndarray:
 
-    ordered_keys = [
-
-        "expert_attribution_ratio",
-        "anonymous_source_ratio",
-        "credibility_indicator_ratio",
-        "attribution_verb_ratio",
-        "quotation_ratio",
-        "named_source_ratio",
-        "source_credibility_balance",
-    ]
-
-    vector = np.array(
-        [float(features.get(k, 0.0)) for k in ordered_keys],
-        dtype=np.float32,
-    )
-
-    return vector
+    return make_vector(features, SOURCE_ATTRIBUTION_KEYS)
