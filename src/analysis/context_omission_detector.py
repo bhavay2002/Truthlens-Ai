@@ -33,9 +33,16 @@ from dataclasses import dataclass
 from typing import Dict, List
 
 import numpy as np
-import spacy
 from spacy.language import Language
 from spacy.tokens import Doc
+
+from src.analysis._nlp import get_nlp
+from src.analysis._text_features import (
+    extract_alpha_lemmas,
+    build_counter,
+    term_ratio as _term_ratio_util,
+)
+from src.analysis.feature_schema import CONTEXT_OMISSION_KEYS, make_vector
 
 logger = logging.getLogger(__name__)
 
@@ -164,16 +171,10 @@ class ContextOmissionDetector:
 
         self.config = config or ContextOmissionConfig()
 
-        try:
-            self.nlp: Language = spacy.load(
-                self.config.spacy_model,
-                disable=self.config.disable_components
-            )
-        except Exception as exc:
-            logger.exception("spaCy model loading failed")
-            raise RuntimeError(
-                f"Failed to load spaCy model: {self.config.spacy_model}"
-            ) from exc
+        self.nlp: Language = get_nlp(
+            self.config.spacy_model,
+            disable=self.config.disable_components,
+        )
 
         logger.info(
             "ContextOmissionDetector initialized | model=%s",
@@ -193,34 +194,43 @@ class ContextOmissionDetector:
             raise ValueError("Input text cannot be empty")
 
         doc: Doc = self.nlp(text)
+        return self.analyze_doc(doc)
 
-        tokens = [
-            token.lemma_.lower()
-            for token in doc
-            if token.is_alpha
-        ]
+    # ------------------------------------------------------------
 
-        token_counts = Counter(tokens)
+    def analyze_doc(self, doc: Doc) -> Dict[str, float]:
+        """Compute context omission features from a pre-built spaCy Doc.
+
+        Args:
+            doc: A processed spaCy Doc instance.
+
+        Returns:
+            Dictionary of context omission feature names to float values.
+        """
+
+        tokens = extract_alpha_lemmas(doc)
+        token_counts = build_counter(tokens)
+        n_tokens = len(tokens)
 
         features: Dict[str, float] = {}
 
-        features["context_vague_reference_ratio"] = self._term_ratio(
-            token_counts, tokens, self.VAGUE_REFERENCES
+        features["context_vague_reference_ratio"] = _term_ratio_util(
+            token_counts, n_tokens, self.VAGUE_REFERENCES
         )
 
-        features["context_attribution_ratio"] = self._term_ratio(
-            token_counts, tokens, self.ATTRIBUTION_MARKERS
+        features["context_attribution_ratio"] = _term_ratio_util(
+            token_counts, n_tokens, self.ATTRIBUTION_MARKERS
         )
 
-        features["context_evidence_ratio"] = self._term_ratio(
-            token_counts, tokens, self.EVIDENCE_MARKERS
+        features["context_evidence_ratio"] = _term_ratio_util(
+            token_counts, n_tokens, self.EVIDENCE_MARKERS
         )
 
-        features["context_uncertainty_ratio"] = self._term_ratio(
-            token_counts, tokens, self.UNCERTAINTY_MARKERS
+        features["context_uncertainty_ratio"] = _term_ratio_util(
+            token_counts, n_tokens, self.UNCERTAINTY_MARKERS
         )
 
-        features["context_quote_ratio"] = self._quote_ratio(text)
+        features["context_quote_ratio"] = self._quote_ratio(doc.text)
 
         features.update(self._entity_context_features(doc))
 
@@ -249,8 +259,6 @@ class ContextOmissionDetector:
         hits = sum(token_counts[t] for t in lexicon if t in token_counts)
 
         return float(hits / max(len(tokens), 1))
-
-    # ------------------------------------------------------------
 
     def _quote_ratio(self, text: str) -> float:
 
@@ -284,20 +292,4 @@ class ContextOmissionDetector:
 
 def context_feature_vector(features: Dict[str, float]) -> np.ndarray:
 
-    ordered_keys = [
-        "context_vague_reference_ratio",
-        "context_attribution_ratio",
-        "context_evidence_ratio",
-        "context_uncertainty_ratio",
-        "context_quote_ratio",
-        "context_entity_ratio",
-        "context_entity_type_diversity",
-        "context_grounding_score",
-    ]
-
-    vector = np.array(
-        [float(features.get(k, 0.0)) for k in ordered_keys],
-        dtype=np.float32
-    )
-
-    return vector
+    return make_vector(features, CONTEXT_OMISSION_KEYS)

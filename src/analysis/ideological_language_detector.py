@@ -40,9 +40,17 @@ from collections import Counter
 from typing import Dict, List, Set
 
 import numpy as np
-import spacy
 from spacy.language import Language
 from spacy.tokens import Doc
+
+from src.analysis._nlp import get_nlp
+from src.analysis._text_features import (
+    extract_alpha_lemmas,
+    build_counter,
+    term_ratio as _term_ratio_util,
+    phrase_match_count,
+)
+from src.analysis.feature_schema import IDEOLOGICAL_LANGUAGE_KEYS, make_vector
 
 logger = logging.getLogger(__name__)
 
@@ -188,16 +196,10 @@ class IdeologicalLanguageDetector:
 
         self.config = config or IdeologicalLanguageConfig()
 
-        try:
-            self.nlp: Language = spacy.load(
-                self.config.spacy_model,
-                disable=self.config.disable_components
-            )
-        except Exception as exc:
-            logger.exception("spaCy model loading failed")
-            raise RuntimeError(
-                f"Failed to load spaCy model: {self.config.spacy_model}"
-            ) from exc
+        self.nlp: Language = get_nlp(
+            self.config.spacy_model,
+            disable=self.config.disable_components,
+        )
 
         logger.info(
             "IdeologicalLanguageDetector initialized | model=%s",
@@ -222,31 +224,43 @@ class IdeologicalLanguageDetector:
             logger.exception("spaCy processing failed")
             raise RuntimeError("Text processing failed") from exc
 
-        tokens = [
-            token.lemma_.lower()
-            for token in doc
-            if token.is_alpha
-        ]
+        return self.analyze_doc(doc)
 
-        token_counts = Counter(tokens)
+    # ------------------------------------------------------------
+
+    def analyze_doc(self, doc: Doc) -> Dict[str, float]:
+        """Compute ideological language features from a pre-built spaCy Doc.
+
+        Builds the token counter once and reuses it for all term ratios.
+
+        Args:
+            doc: A processed spaCy Doc instance.
+
+        Returns:
+            Dictionary of ideological language feature names to float values.
+        """
+
+        tokens = extract_alpha_lemmas(doc)
+        token_counts = build_counter(tokens)
+        n_tokens = len(tokens)
 
         features: Dict[str, float] = {}
 
         # lexical ratios
-        features["liberty_language_ratio"] = self._term_ratio(
-            token_counts, tokens, self.LIBERTY_TERMS
+        features["liberty_language_ratio"] = _term_ratio_util(
+            token_counts, n_tokens, self.LIBERTY_TERMS
         )
 
-        features["equality_language_ratio"] = self._term_ratio(
-            token_counts, tokens, self.EQUALITY_TERMS
+        features["equality_language_ratio"] = _term_ratio_util(
+            token_counts, n_tokens, self.EQUALITY_TERMS
         )
 
-        features["tradition_language_ratio"] = self._term_ratio(
-            token_counts, tokens, self.TRADITION_TERMS
+        features["tradition_language_ratio"] = _term_ratio_util(
+            token_counts, n_tokens, self.TRADITION_TERMS
         )
 
-        features["anti_elite_language_ratio"] = self._term_ratio(
-            token_counts, tokens, self.ELITE_TERMS
+        features["anti_elite_language_ratio"] = _term_ratio_util(
+            token_counts, n_tokens, self.ELITE_TERMS
         )
 
         # ideological polarity
@@ -255,10 +269,8 @@ class IdeologicalLanguageDetector:
             - features["equality_language_ratio"]
         )
 
-        # phrase detection
-        features["ideology_phrase_density"] = self._phrase_density(
-            text.lower()
-        )
+        # phrase detection (word-boundary aware)
+        features["ideology_phrase_density"] = self._phrase_density(doc.text.lower())
 
         logger.debug("Ideological language features computed")
 
@@ -284,7 +296,7 @@ class IdeologicalLanguageDetector:
 
     def _phrase_density(self, text: str) -> float:
 
-        hits = sum(1 for phrase in self.IDEOLOGY_PHRASES if phrase in text)
+        hits = phrase_match_count(text, self.IDEOLOGY_PHRASES)
 
         return float(hits / max(len(self.IDEOLOGY_PHRASES), 1))
 
@@ -298,18 +310,4 @@ def ideological_language_vector(features: Dict[str, float]) -> np.ndarray:
     if not isinstance(features, dict):
         raise ValueError("features must be dictionary")
 
-    ordered_keys = [
-        "liberty_language_ratio",
-        "equality_language_ratio",
-        "tradition_language_ratio",
-        "anti_elite_language_ratio",
-        "liberty_vs_equality_balance",
-        "ideology_phrase_density",
-    ]
-
-    vector = np.array(
-        [float(features.get(k, 0.0)) for k in ordered_keys],
-        dtype=np.float32
-    )
-
-    return vector
+    return make_vector(features, IDEOLOGICAL_LANGUAGE_KEYS)

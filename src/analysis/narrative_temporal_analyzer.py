@@ -26,9 +26,12 @@ from collections import Counter
 from typing import Dict, List
 
 import numpy as np
-import spacy
 from spacy.language import Language
 from spacy.tokens import Doc
+
+from src.analysis._nlp import get_nlp
+from src.analysis._text_features import extract_alpha_lemmas, build_counter, term_ratio as _term_ratio_util
+from src.analysis.feature_schema import NARRATIVE_TEMPORAL_KEYS, make_vector
 
 
 logger = logging.getLogger(__name__)
@@ -104,13 +107,7 @@ class NarrativeTemporalAnalyzer:
 
         self.config = config or NarrativeTemporalConfig()
 
-        try:
-            self.nlp: Language = spacy.load(self.config.spacy_model)
-        except Exception as exc:
-            logger.exception("spaCy model loading failed")
-            raise RuntimeError(
-                f"Failed to load spaCy model: {self.config.spacy_model}"
-            ) from exc
+        self.nlp: Language = get_nlp(self.config.spacy_model)
 
         logger.info("NarrativeTemporalAnalyzer initialized")
 
@@ -130,18 +127,32 @@ class NarrativeTemporalAnalyzer:
             raise ValueError("Input text must be non-empty")
 
         doc: Doc = self.nlp(text)
+        return self.analyze_doc(doc)
 
-        tokens: List[str] = [
-            token.lemma_.lower()
-            for token in doc
-            if token.is_alpha
-        ]
+    # -----------------------------------------------------
+
+    def analyze_doc(self, doc: Doc) -> Dict[str, float]:
+        """Compute temporal narrative features from a pre-built spaCy Doc.
+
+        Builds the token counter once and reuses it across all term-ratio
+        computations, eliminating repeated Counter construction.
+
+        Args:
+            doc: A processed spaCy Doc instance.
+
+        Returns:
+            Dictionary of temporal narrative feature names to float values.
+        """
+
+        tokens: List[str] = extract_alpha_lemmas(doc)
+        token_counts = build_counter(tokens)
+        n_tokens = len(tokens)
 
         features: Dict[str, float] = {}
 
-        features.update(self._term_ratio(tokens, self.PAST_TERMS, "past_framing_ratio"))
-        features.update(self._term_ratio(tokens, self.CRISIS_TERMS, "crisis_escalation_ratio"))
-        features.update(self._term_ratio(tokens, self.URGENCY_TERMS, "urgency_language_ratio"))
+        features["past_framing_ratio"] = _term_ratio_util(token_counts, n_tokens, self.PAST_TERMS)
+        features["crisis_escalation_ratio"] = _term_ratio_util(token_counts, n_tokens, self.CRISIS_TERMS)
+        features["urgency_language_ratio"] = _term_ratio_util(token_counts, n_tokens, self.URGENCY_TERMS)
 
         features.update(self._tense_distribution(doc))
         features.update(self._temporal_contrast(features))
@@ -152,7 +163,7 @@ class NarrativeTemporalAnalyzer:
 
 
     # -----------------------------------------------------
-    # Term ratio helper
+    # Term ratio helper (kept for backward compatibility)
     # -----------------------------------------------------
 
     def _term_ratio(
@@ -236,20 +247,4 @@ class NarrativeTemporalAnalyzer:
 
 def narrative_temporal_vector(features: Dict[str, float]) -> np.ndarray:
 
-    ordered_keys = [
-
-        "past_framing_ratio",
-        "crisis_escalation_ratio",
-        "urgency_language_ratio",
-
-        "past_tense_ratio",
-        "present_tense_ratio",
-        "future_tense_ratio",
-
-        "temporal_contrast_score",
-    ]
-
-    return np.array(
-        [float(features.get(k, 0.0)) for k in ordered_keys],
-        dtype=np.float32,
-    )
+    return make_vector(features, NARRATIVE_TEMPORAL_KEYS)

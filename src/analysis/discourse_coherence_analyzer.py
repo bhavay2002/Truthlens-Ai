@@ -31,9 +31,12 @@ from dataclasses import dataclass
 from typing import Dict, List
 
 import numpy as np
-import spacy
 from spacy.language import Language
 from spacy.tokens import Doc
+
+from src.analysis._nlp import get_nlp
+from src.analysis._text_features import phrase_match_count
+from src.analysis.feature_schema import DISCOURSE_COHERENCE_KEYS, make_vector
 
 
 logger = logging.getLogger(__name__)
@@ -104,16 +107,10 @@ class DiscourseCoherenceAnalyzer:
 
         self.config = config or DiscourseCoherenceConfig()
 
-        try:
-            self.nlp: Language = spacy.load(
-                self.config.spacy_model,
-                disable=self.config.disable_components,
-            )
-        except Exception as exc:
-            logger.exception("spaCy model loading failed")
-            raise RuntimeError(
-                f"Failed to load spaCy model: {self.config.spacy_model}"
-            ) from exc
+        self.nlp: Language = get_nlp(
+            self.config.spacy_model,
+            disable=self.config.disable_components,
+        )
 
         logger.info(
             "DiscourseCoherenceAnalyzer initialized | model=%s",
@@ -135,6 +132,19 @@ class DiscourseCoherenceAnalyzer:
             raise ValueError("Input text must be non-empty")
 
         doc: Doc = self.nlp(text)
+        return self.analyze_doc(doc)
+
+    # ------------------------------------------------------------
+
+    def analyze_doc(self, doc: Doc) -> Dict[str, float]:
+        """Compute discourse coherence features from a pre-built spaCy Doc.
+
+        Args:
+            doc: A processed spaCy Doc instance.
+
+        Returns:
+            Dictionary of discourse coherence feature names to float values.
+        """
 
         sentences = list(doc.sents)
 
@@ -143,7 +153,7 @@ class DiscourseCoherenceAnalyzer:
         features.update(self._sentence_coherence(sentences))
         features.update(self._topic_drift(sentences))
         features.update(self._narrative_continuity(doc))
-        features.update(self._transition_usage(text, doc))
+        features.update(self._transition_usage(doc.text, doc))
 
         logger.debug("Discourse coherence features computed")
 
@@ -217,15 +227,7 @@ class DiscourseCoherenceAnalyzer:
 
         text_lower = text.lower()
 
-        marker_hits = 0
-
-        for marker in self.TRANSITION_MARKERS:
-
-            if " " in marker:
-                if marker in text_lower:
-                    marker_hits += 1
-            else:
-                marker_hits += tokens.count(marker)
+        marker_hits = phrase_match_count(text_lower, self.TRANSITION_MARKERS)
 
         ratio = marker_hits / token_count
 
@@ -238,16 +240,4 @@ class DiscourseCoherenceAnalyzer:
 
 def discourse_coherence_vector(features: Dict[str, float]) -> np.ndarray:
 
-    ordered_keys = [
-        "sentence_coherence",
-        "topic_drift",
-        "narrative_continuity",
-        "discourse_transition_ratio",
-    ]
-
-    vector = np.array(
-        [float(features.get(k, 0.0)) for k in ordered_keys],
-        dtype=np.float32,
-    )
-
-    return vector
+    return make_vector(features, DISCOURSE_COHERENCE_KEYS)

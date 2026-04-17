@@ -35,9 +35,12 @@ from dataclasses import dataclass
 from typing import Dict, List
 
 import numpy as np
-import spacy
 from spacy.language import Language
 from spacy.tokens import Doc
+
+from src.analysis._nlp import get_nlp
+from src.analysis._text_features import extract_alpha_lemmas, build_counter, term_ratio as _term_ratio_util
+from src.analysis.feature_schema import FRAMING_KEYS, make_vector
 
 
 logger = logging.getLogger(__name__)
@@ -137,16 +140,10 @@ class FramingAnalyzer:
 
         self.config = config or FramingAnalysisConfig()
 
-        try:
-            self.nlp: Language = spacy.load(
-                self.config.spacy_model,
-                disable=self.config.disable_components
-            )
-        except Exception as exc:
-            logger.exception("spaCy model loading failed")
-            raise RuntimeError(
-                f"Failed to load spaCy model: {self.config.spacy_model}"
-            ) from exc
+        self.nlp: Language = get_nlp(
+            self.config.spacy_model,
+            disable=self.config.disable_components,
+        )
 
         logger.info(
             "FramingAnalyzer initialized | model=%s",
@@ -168,20 +165,44 @@ class FramingAnalyzer:
             raise ValueError("Input text must be non-empty")
 
         doc: Doc = self.nlp(text)
+        return self.analyze_doc(doc)
 
-        tokens: List[str] = [
-            token.lemma_.lower()
-            for token in doc
-            if token.is_alpha
-        ]
+    # ------------------------------------------------------------
+
+    def analyze_doc(self, doc: Doc) -> Dict[str, float]:
+        """Compute framing features from a pre-built spaCy Doc.
+
+        Builds the token counter once and reuses it for all frame scores,
+        avoiding repeated Counter construction.
+
+        Args:
+            doc: A processed spaCy Doc instance.
+
+        Returns:
+            Dictionary of framing feature names to float values.
+        """
+
+        tokens: List[str] = extract_alpha_lemmas(doc)
+        token_counts = build_counter(tokens)
+        n_tokens = len(tokens)
 
         features: Dict[str, float] = {}
 
-        features.update(self._frame_score(tokens, self.CONFLICT_TERMS, "frame_conflict_score"))
-        features.update(self._frame_score(tokens, self.ECONOMIC_TERMS, "frame_economic_score"))
-        features.update(self._frame_score(tokens, self.MORAL_TERMS, "frame_moral_score"))
-        features.update(self._frame_score(tokens, self.HUMAN_INTEREST_TERMS, "frame_human_interest_score"))
-        features.update(self._frame_score(tokens, self.SECURITY_TERMS, "frame_security_score"))
+        features["frame_conflict_score"] = _term_ratio_util(
+            token_counts, n_tokens, self.CONFLICT_TERMS
+        )
+        features["frame_economic_score"] = _term_ratio_util(
+            token_counts, n_tokens, self.ECONOMIC_TERMS
+        )
+        features["frame_moral_score"] = _term_ratio_util(
+            token_counts, n_tokens, self.MORAL_TERMS
+        )
+        features["frame_human_interest_score"] = _term_ratio_util(
+            token_counts, n_tokens, self.HUMAN_INTEREST_TERMS
+        )
+        features["frame_security_score"] = _term_ratio_util(
+            token_counts, n_tokens, self.SECURITY_TERMS
+        )
 
         features.update(self._frame_dominance(features))
         features.update(self._frame_diversity(features))
@@ -189,7 +210,7 @@ class FramingAnalyzer:
         return features
 
     # ------------------------------------------------------------
-    # Frame scoring
+    # Frame scoring (kept for backward compatibility)
     # ------------------------------------------------------------
 
     def _frame_score(
@@ -262,18 +283,4 @@ class FramingAnalyzer:
 
 def framing_feature_vector(features: Dict[str, float]) -> np.ndarray:
 
-    ordered_keys = [
-
-        "frame_conflict_score",
-        "frame_economic_score",
-        "frame_moral_score",
-        "frame_human_interest_score",
-        "frame_security_score",
-    ]
-
-    vector = np.array(
-        [float(features.get(k, 0.0)) for k in ordered_keys],
-        dtype=np.float32,
-    )
-
-    return vector
+    return make_vector(features, FRAMING_KEYS)
