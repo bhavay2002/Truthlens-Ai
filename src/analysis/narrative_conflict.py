@@ -153,10 +153,20 @@ class NarrativeConflictAnalyzer:
         hero_entities: Optional[List[str]] = None,
         villain_entities: Optional[List[str]] = None,
         victim_entities: Optional[List[str]] = None,
-    ) -> Dict[str, float]:
+        return_vector: bool = False,
+    ) -> Dict[str, float] | tuple[Dict[str, float], np.ndarray]:
 
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError("Input text must be non-empty")
+        if not isinstance(text, str):
+            raise TypeError("text must be a string")
+
+        text = text.strip()
+
+        if not text:
+            features = {k: 0.0 for k in NARRATIVE_CONFLICT_KEYS}
+            return (
+                features,
+                make_vector(features, NARRATIVE_CONFLICT_KEYS),
+            ) if return_vector else features
 
         doc: Doc = self.nlp(text)
         return self.analyze_doc(

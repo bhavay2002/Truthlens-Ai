@@ -44,7 +44,7 @@ from spacy.language import Language
 from spacy.tokens import Doc
 
 from src.analysis._nlp import get_nlp
-from src.analysis._text_features import phrase_match_count
+from src.analysis._text_features import phrase_match_count, normalize_lexicon_terms
 from src.analysis.feature_schema import NARRATIVE_PROPAGATION_KEYS, make_vector
 
 logger = logging.getLogger(__name__)
@@ -210,10 +210,20 @@ class NarrativePropagationAnalyzer:
         hero_entities: Optional[List[str]] = None,
         villain_entities: Optional[List[str]] = None,
         victim_entities: Optional[List[str]] = None,
-    ) -> Dict[str, float]:
+        return_vector: bool = False,
+    ) -> Dict[str, float] | tuple[Dict[str, float], np.ndarray]:
 
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError("Input text must be non-empty")
+        if not isinstance(text, str):
+            raise TypeError("text must be a string")
+
+        text = text.strip()
+
+        if not text:
+            features = {k: 0.0 for k in NARRATIVE_PROPAGATION_KEYS}
+            return (
+                features,
+                make_vector(features, NARRATIVE_PROPAGATION_KEYS),
+            ) if return_vector else features
 
         doc: Doc = self.nlp(text)
         return self.analyze_doc(
@@ -307,7 +317,10 @@ class NarrativePropagationAnalyzer:
     # -----------------------------------------------------
 
     def _conflict_phrases(self, text: str) -> Dict[str, float]:
-        count = phrase_match_count(text, self._conflict_phrases)
+        count = phrase_match_count(
+            text,
+            normalize_lexicon_terms(self._conflict_phrases),
+        )
 
         return {"conflict_phrase_count": float(count)}
 

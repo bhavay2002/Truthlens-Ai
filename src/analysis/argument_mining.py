@@ -39,6 +39,7 @@ from src.analysis._text_features import (
     extract_alpha_lemmas,
     build_counter,
     phrase_match_count,
+    normalize_lexicon_terms,
     term_ratio as _term_ratio_util,
 )
 from src.analysis.feature_schema import ARGUMENT_MINING_KEYS, make_vector
@@ -54,7 +55,7 @@ logger = logging.getLogger(__name__)
 class ArgumentMiningConfig:
 
     spacy_model: str = "en_core_web_sm"
-    disable_components: tuple = ("ner",)
+    disable_components: tuple[str, ...] = ("ner",)
 
 
 # ------------------------------------------------------------
@@ -158,15 +159,19 @@ class ArgumentMiningAnalyzer:
 
     # ------------------------------------------------------------
 
-    def analyze(self, text: str) -> Dict[str, float]:
+    def analyze(self, text: str, return_vector: bool = False):
 
         if not isinstance(text, str):
-            raise ValueError("Input text must be string")
+            raise TypeError("text must be a string")
 
         text = text.strip()
 
         if not text:
-            raise ValueError("Input text must be non-empty")
+            features = {k: 0.0 for k in ARGUMENT_MINING_KEYS}
+            return (
+                features,
+                make_vector(features, ARGUMENT_MINING_KEYS),
+            ) if return_vector else features
 
         doc: Doc = self.nlp(text)
         return self.analyze_doc(doc)
@@ -269,7 +274,10 @@ class ArgumentMiningAnalyzer:
         phrases: set,
     ) -> float:
 
-        hits = phrase_match_count(text.lower(), phrases)
+        hits = phrase_match_count(
+            text.lower(),
+            normalize_lexicon_terms(phrases),
+        )
 
         return float(hits / n_tokens)
 

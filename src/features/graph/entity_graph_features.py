@@ -97,9 +97,10 @@ class EntityGraphFeatures(BaseFeature):
             self._analyzer = None
 
     def extract(self, context: FeatureContext) -> Dict[str, float]:
-
-        if not context.text:
-            raise ValueError("FeatureContext.text cannot be empty")
+        if not isinstance(context.text, str):
+            raise TypeError("FeatureContext.text must be a string")
+        if not context.text.strip():
+            return {}
 
         if self._builder is not None and self._analyzer is not None:
             graph = self._builder.build_graph(context.text)
@@ -139,12 +140,13 @@ class EntityGraphFeatures(BaseFeature):
         entity_count = len(entities)
         density = 0.0
         if entity_count > 1:
-            density = edge_count / (entity_count * (entity_count - 1))
+            max_edges = entity_count * (entity_count - 1) / 2.0
+            density = edge_count / max_edges
 
         features = {
             "entity_count": float(entity_count),
             "entity_edge_count": float(edge_count),
-            "entity_avg_degree": float(edge_count / max(entity_count, 1)),
+            "entity_avg_degree": float((2.0 * edge_count) / max(entity_count, 1)),
             "entity_density": float(density),
             "entity_centralization": 0.0,
         }

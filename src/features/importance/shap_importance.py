@@ -72,11 +72,10 @@ class ShapImportance:
             raise RuntimeError("SHAP library is required for SHAP importance")
 
         try:
-            explainer = shap.Explainer(self.model, X)
+            return shap.Explainer(self.model, X)
         except Exception:  # noqa: BLE001
-            explainer = shap.KernelExplainer(self.model.predict, X)
-
-        return explainer
+            background = X[: min(len(X), 100)]
+            return shap.KernelExplainer(self.model.predict, background)
 
     def _sample_data(self, X: np.ndarray) -> np.ndarray:
         """
@@ -113,6 +112,8 @@ class ShapImportance:
 
         if X.shape[1] != len(feature_names):
             raise ValueError("Feature names must match feature dimension")
+        if X.ndim != 2:
+            raise ValueError("X must be 2D")
 
         X_sample = self._sample_data(X)
 
@@ -120,10 +121,16 @@ class ShapImportance:
 
         shap_values = explainer(X_sample)
 
-        values = shap_values.values
+        values = getattr(shap_values, "values", shap_values)
+
+        if isinstance(values, list):
+            values = np.stack(values, axis=0).mean(axis=0)
+        values = np.asarray(values)
 
         if values.ndim == 3:
-            values = np.mean(values, axis=0)
+            values = np.mean(values, axis=1)
+        elif values.ndim != 2:
+            raise ValueError(f"Unsupported SHAP values shape: {values.shape}")
 
         importance_scores = np.mean(np.abs(values), axis=0)
 

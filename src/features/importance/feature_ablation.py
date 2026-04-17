@@ -87,6 +87,10 @@ class FeatureAblation:
         Perform ablation by removing one feature at a time.
         """
 
+        if X.ndim != 2:
+            raise ValueError("X must be a 2D matrix")
+        if y.ndim != 1 or len(y) != X.shape[0]:
+            raise ValueError("y must be 1D and match X rows")
         if X.shape[1] != len(feature_names):
             raise ValueError("Feature names must match feature dimension")
 
@@ -96,7 +100,8 @@ class FeatureAblation:
 
         for i, name in enumerate(feature_names):
 
-            X_ablate = np.delete(X, i, axis=1)
+            X_ablate = X.copy()
+            X_ablate[:, i] = 0.0
 
             pred = self._predict(X_ablate)
 
@@ -125,6 +130,11 @@ class FeatureAblation:
         Perform ablation on feature groups.
         """
 
+        if X.ndim != 2:
+            raise ValueError("X must be a 2D matrix")
+        if y.ndim != 1 or len(y) != X.shape[0]:
+            raise ValueError("y must be 1D and match X rows")
+
         baseline = self._baseline_score(X, y)
 
         name_to_idx = {name: i for i, name in enumerate(feature_names)}
@@ -134,10 +144,12 @@ class FeatureAblation:
         for group_name, group_features in groups.items():
 
             indices = [name_to_idx[f] for f in group_features if f in name_to_idx]
+            if not indices:
+                results[group_name] = 0.0
+                continue
 
-            keep_indices = [i for i in range(X.shape[1]) if i not in indices]
-
-            X_ablate = X[:, keep_indices]
+            X_ablate = X.copy()
+            X_ablate[:, indices] = 0.0
 
             pred = self._predict(X_ablate)
 

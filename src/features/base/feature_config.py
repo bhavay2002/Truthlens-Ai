@@ -170,42 +170,55 @@ class FeatureConfigLoader:
         FeaturePipelineConfig
         """
 
-        if "groups" not in config_dict:
-            raise ValueError("Feature config must contain 'groups' field")
+        if not isinstance(config_dict, dict):
+            raise TypeError("Feature config must be a dictionary")
+
+        groups_raw = config_dict.get("groups")
+        if not isinstance(groups_raw, list):
+            raise ValueError("Feature config must contain 'groups' as a list")
 
         groups: List[FeatureGroupConfig] = []
 
-        for group_data in config_dict["groups"]:
+        for group_data in groups_raw:
+            if not isinstance(group_data, dict):
+                raise ValueError("Each group must be a dictionary")
+            if "group_name" not in group_data:
+                raise ValueError("Each group must define 'group_name'")
+
+            features_raw = group_data.get("features", [])
+            if not isinstance(features_raw, list):
+                raise ValueError("group.features must be a list")
 
             feature_defs: List[FeatureDefinition] = []
-
-            for feature_data in group_data.get("features", []):
-                feature_def = FeatureDefinition(
-                    name=feature_data["name"],
-                    enabled=feature_data.get("enabled", True),
-                    params=feature_data.get("params", {}),
+            for feature_data in features_raw:
+                if not isinstance(feature_data, dict):
+                    raise ValueError("Each feature entry must be a dictionary")
+                if "name" not in feature_data:
+                    raise ValueError("Each feature must define 'name'")
+                feature_defs.append(
+                    FeatureDefinition(
+                        name=feature_data["name"],
+                        enabled=feature_data.get("enabled", True),
+                        params=feature_data.get("params", {}),
+                    )
                 )
-                feature_defs.append(feature_def)
 
-            group = FeatureGroupConfig(
-                group_name=group_data["group_name"],
-                enabled=group_data.get("enabled", True),
-                features=feature_defs,
+            groups.append(
+                FeatureGroupConfig(
+                    group_name=group_data["group_name"],
+                    enabled=group_data.get("enabled", True),
+                    features=feature_defs,
+                )
             )
-
-            groups.append(group)
 
         pipeline_config = FeaturePipelineConfig(
             groups=groups,
             global_params=config_dict.get("global_params", {}),
         )
-
         pipeline_config.validate()
-
         logger.info(
             "Loaded feature configuration with %d groups and %d enabled features",
             len(groups),
             len(pipeline_config.enabled_features()),
         )
-
         return pipeline_config

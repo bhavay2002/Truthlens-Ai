@@ -96,6 +96,12 @@ class PermutationImportance:
         Dict[str, float]
         """
 
+        if self.n_repeats <= 0:
+            raise ValueError("n_repeats must be > 0")
+        if X.ndim != 2:
+            raise ValueError("X must be 2D")
+        if y.ndim != 1 or len(y) != X.shape[0]:
+            raise ValueError("y must be 1D and match X rows")
         if X.shape[1] != len(feature_names):
             raise ValueError("Feature name count must match feature dimension")
 
@@ -103,6 +109,9 @@ class PermutationImportance:
 
         baseline_pred = self._predict(X)
         baseline_score = self.metric(y, baseline_pred)
+
+        if not np.isfinite(baseline_score):
+            raise ValueError("Baseline metric is not finite")
 
         logger.info("Baseline model score: %.6f", baseline_score)
 
@@ -123,6 +132,11 @@ class PermutationImportance:
                 pred = self._predict(X_permuted)
 
                 score = self.metric(y, pred)
+
+                if not np.isfinite(score):
+                    raise ValueError(
+                        f"Metric returned non-finite score for feature '{name}'"
+                    )
 
                 scores.append(baseline_score - score)
 

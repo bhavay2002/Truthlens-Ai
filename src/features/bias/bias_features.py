@@ -164,6 +164,8 @@ BIAS_PHRASES = [
     r"in\s+truth",
 ]
 
+COMPILED_BIAS_PHRASES = [re.compile(p) for p in BIAS_PHRASES]
+
 
 # ---------------------------------------------------------
 # Utility
@@ -210,13 +212,15 @@ class BiasFeatures(BaseFeature):
     # -----------------------------------------------------
 
     def extract(self, context: FeatureContext) -> Dict[str, float]:
-
-        if not context.text:
-            raise ValueError("FeatureContext.text cannot be empty")
+        if not isinstance(context.text, str):
+            raise TypeError("FeatureContext.text must be a string")
+        if not context.text.strip():
+            return {}
 
         text = context.text
+        text_lower = text.lower()
 
-        tokens = context.tokens or _tokenize(text)
+        tokens = context.tokens or _tokenize(text_lower)
 
         if not tokens:
             logger.warning("No tokens available for bias feature extraction")
@@ -243,7 +247,7 @@ class BiasFeatures(BaseFeature):
         # Phrase bias detection
         # -------------------------------------------------
 
-        phrase_count = sum(bool(re.search(p, text.lower())) for p in BIAS_PHRASES)
+        phrase_count = sum(bool(p.search(text_lower)) for p in COMPILED_BIAS_PHRASES)
 
         # -------------------------------------------------
         # Structural rhetoric signals

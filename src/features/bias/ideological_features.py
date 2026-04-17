@@ -104,6 +104,8 @@ IDEOLOGY_PHRASES = [
     r"radical\s+agenda",
 ]
 
+COMPILED_IDEOLOGY_PHRASES = [re.compile(p) for p in IDEOLOGY_PHRASES]
+
 
 # ---------------------------------------------------------
 # Feature Extractor
@@ -134,12 +136,14 @@ class IdeologicalFeatures(BaseFeature):
     # -----------------------------------------------------
 
     def extract(self, context: FeatureContext) -> Dict[str, float]:
-
-        if not context.text:
-            raise ValueError("FeatureContext.text cannot be empty")
+        if not isinstance(context.text, str):
+            raise TypeError("FeatureContext.text must be a string")
+        if not context.text.strip():
+            return {}
 
         text = context.text
-        tokens = context.tokens or _tokenize(text)
+        text_lower = text.lower()
+        tokens = context.tokens or _tokenize(text_lower)
 
         if not tokens:
             logger.warning("No tokens available for ideological feature extraction")
@@ -157,16 +161,14 @@ class IdeologicalFeatures(BaseFeature):
         # phrase detection
         # -------------------------------------------------
 
-        phrase_count = sum(
-            bool(re.search(p, text.lower()))
-            for p in IDEOLOGY_PHRASES
-        )
+        phrase_count = sum(bool(p.search(text_lower)) for p in COMPILED_IDEOLOGY_PHRASES)
 
         # -------------------------------------------------
         # balance metric
         # -------------------------------------------------
 
-        balance = 1.0 - abs(left_ratio - right_ratio)
+        signal = left_ratio + right_ratio
+        balance = 1.0 - (abs(left_ratio - right_ratio) / signal) if signal > 0 else 0.0
 
         # -------------------------------------------------
         # entropy of ideological distribution

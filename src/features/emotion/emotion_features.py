@@ -95,18 +95,18 @@ class EmotionFeatures(BaseFeature):
     description: str = "20-class emotion distribution and intensity features"
 
     def extract(self, context: FeatureContext) -> Dict[str, float]:
-
-        if not context.text:
-            raise ValueError("FeatureContext.text cannot be empty")
+        if not isinstance(context.text, str):
+            raise TypeError("FeatureContext.text must be a string")
+        if not context.text.strip():
+            return {}
 
         emotion_scores = _lexicon_emotions(context.text)
 
-        values = np.array(list(emotion_scores.values()), dtype=np.float32)
-
-        dominant_idx = int(np.argmax(values))
+        ordered_values = np.array([emotion_scores[e] for e in EMOTION_LABELS], dtype=np.float32)
+        dominant_idx = int(np.argmax(ordered_values))
         dominant_emotion = EMOTION_LABELS[dominant_idx]
 
-        intensity = float(np.max(values) - np.mean(values))
+        intensity = float(np.max(ordered_values) - np.mean(ordered_values))
 
         features: Dict[str, float] = {}
 

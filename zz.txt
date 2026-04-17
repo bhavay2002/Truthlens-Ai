@@ -1,0 +1,67 @@
+Act as a senior Python engineer, code reviewer, and QA specialist.
+
+Your task is to perform a COMPLETE audit of all files inside:
+
+You must do the following systematically:
+
+--------------------------------------------------
+1. STATIC CODE ANALYSIS
+--------------------------------------------------
+- Identify syntax errors, import issues, and missing dependencies
+- Detect logical bugs and incorrect assumptions
+- Check for edge cases (empty inputs, None, type mismatches)
+- Identify unused variables, dead code, and redundancy
+- Verify correct use of classes, functions, and data flow
+- Ensure consistency across files (naming, structure, contracts)
+
+--------------------------------------------------
+2. ARCHITECTURE & DESIGN REVIEW
+--------------------------------------------------
+- Explain the purpose of each file
+- Validate module interactions and data flow between components
+- Detect tight coupling or bad abstractions
+- Suggest improvements for scalability and maintainability
+
+--------------------------------------------------
+3. BUG DETECTION & FIXES
+--------------------------------------------------
+For every issue found:
+- Clearly describe the bug
+- Explain WHY it is a problem
+- Provide corrected code snippet
+- Mention impact severity (low / medium / critical)
+
+--------------------------------------------------
+4. TEST COVERAGE
+--------------------------------------------------
+- Identify missing test cases
+- Write unit tests (pytest style) for:
+    • normal cases
+    • edge cases
+    • failure scenarios
+- Ensure tests are realistic and runnable
+
+--------------------------------------------------
+5. PERFORMANCE & OPTIMIZATION
+--------------------------------------------------
+- Identify inefficient loops, redundant computations
+- Suggest better algorithms or data structures if needed
+
+--------------------------------------------------
+6. FINAL SUMMARY
+--------------------------------------------------
+Provide:
+- Total issues found
+- Critical bugs
+- Suggested refactor priorities
+- Overall code quality score (1–10)
+
+--------------------------------------------------
+IMPORTANT RULES:
+--------------------------------------------------
+- Do NOT skip any file
+- Be extremely precise and technical
+- Do NOT give generic advice — everything must be tied to actual code
+- Assume this is production-level code for an AI system
+
+Now analyze all files step by step.

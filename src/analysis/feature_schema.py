@@ -119,29 +119,15 @@ NARRATIVE_CONFLICT_KEYS: List[str] = [
     "conflict_verb_ratio",
     "opposition_marker_ratio",
     "polarization_ratio",
-    "hero_mentions",
-    "villain_mentions",
-    "victim_mentions",
-    "hero_villain_conflict_score",
-    "villain_victim_harm_score",
-    "hero_victim_protection_score",
+    "hero_villain_victim_ratio",
+    "rhetorical_punctuation_ratio",
 ]
 
 NARRATIVE_PROPAGATION_KEYS: List[str] = [
-    "violent_conflict_ratio",
-    "political_conflict_ratio",
-    "discursive_conflict_ratio",
-    "institutional_conflict_ratio",
-    "coercion_conflict_ratio",
-    "opposition_marker_ratio",
-    "polarization_ratio",
-    "conflict_phrase_count",
-    "hero_mentions",
-    "villain_mentions",
-    "victim_mentions",
-    "hero_villain_conflict_score",
-    "villain_victim_harm_score",
-    "hero_victim_protection_score",
+    "frame_repetition_score",
+    "cross_sentence_reinforcement",
+    "thematic_persistence",
+    "propagation_intensity",
 ]
 
 NARRATIVE_TEMPORAL_KEYS: List[str] = [
@@ -191,40 +177,18 @@ SOURCE_ATTRIBUTION_KEYS: List[str] = [
 
 def make_vector(
     features: Dict[str, float],
-    schema_keys: List[str],
-    *,
+    keys: List[str],
     strict: bool = False,
 ) -> np.ndarray:
-    """Convert a feature dict to a deterministic ``np.float32`` vector.
+    if features is None:
+        raise ValueError("features cannot be None")
 
-    The vector length and element order are fully determined by *schema_keys*,
-    independent of the order in which keys were inserted into *features*.
+    missing = [k for k in keys if k not in features]
+    if strict and missing:
+        raise ValueError(f"Missing required feature keys: {missing}")
 
-    Args:
-        features:    Mapping of feature name → numeric value.
-        schema_keys: Ordered list of canonical key names for this vector type.
-        strict:      When ``True``, raises :class:`ValueError` if any key in
-                     *schema_keys* is absent from *features*, or if *features*
-                     contains keys not present in *schema_keys*.  Useful in
-                     tests and debug builds.
-
-    Returns:
-        ``np.ndarray`` of shape ``(len(schema_keys),)`` and dtype ``float32``.
-        Missing keys are filled with ``0.0`` (unless *strict* is ``True``).
-
-    Raises:
-        ValueError: In strict mode when keys are missing or unknown.
-    """
-    if strict:
-        missing = [k for k in schema_keys if k not in features]
-        if missing:
-            raise ValueError(f"Missing required feature keys: {missing}")
-        unknown = [k for k in features if k not in schema_keys]
-        if unknown:
-            raise ValueError(f"Unknown feature keys not in schema: {unknown}")
-
-    return np.array(
-        [float(features.get(k, 0.0)) for k in schema_keys],
+    return np.asarray(
+        [float(features.get(k, 0.0)) for k in keys],
         dtype=np.float32,
     )
 

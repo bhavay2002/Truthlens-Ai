@@ -153,6 +153,8 @@ class EmotionIntensityFeatures(BaseFeature):
         Compute emotion distribution using transformer model.
         Maps transformer outputs into TruthLens 20-emotion schema.
         """
+        if not TRANSFORMER_AVAILABLE or _tokenizer is None or _model is None:
+            return {emotion: 0.0 for emotion in EMOTION_LABELS}
 
         inputs = _tokenizer(
             text,
@@ -197,15 +199,19 @@ class EmotionIntensityFeatures(BaseFeature):
             l = lexicon_scores.get(emotion, 0.0)
 
             scores[emotion] = 0.7 * t + 0.3 * l
+        total = sum(scores.values())
+        if total > 0:
+            scores = {k: v / total for k, v in scores.items()}
 
         return scores
 
     # --------------------------------------------------------
 
     def extract(self, context: FeatureContext) -> Dict[str, float]:
-
-        if not context.text:
-            raise ValueError("FeatureContext.text cannot be empty")
+        if not isinstance(context.text, str):
+            raise TypeError("FeatureContext.text must be a string")
+        if not context.text.strip():
+            return {}
 
         scores = self._hybrid_emotions(context.text)
 

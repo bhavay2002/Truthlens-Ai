@@ -11,17 +11,21 @@ from src.features.base.feature_registry import register_feature
 logger = logging.getLogger(__name__)
 
 
+def _is_number(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
 def _numeric_output(prefix: str, raw: Dict[str, Any]) -> Dict[str, float]:
     output: Dict[str, float] = {}
     for key, value in raw.items():
         feature_key = f"{prefix}{key}"
-        if isinstance(value, (int, float)):
+        if _is_number(value):
             output[feature_key] = float(value)
         elif isinstance(value, (list, tuple, set)):
             output[f"{feature_key}_count"] = float(len(value))
         elif isinstance(value, dict):
             for sub_key, sub_value in value.items():
-                if isinstance(sub_value, (int, float)):
+                if _is_number(sub_value):
                     output[f"{feature_key}_{sub_key}"] = float(sub_value)
     return output
 
@@ -38,18 +42,13 @@ class _BaseAnalysisFeature(BaseFeature):
     def initialize(self) -> None:
         if self._analyzer is not None or self._load_failed:
             return
-
         try:
             module = importlib.import_module(self.module_path)
             analyzer_type = getattr(module, self.analyzer_class)
             self._analyzer = analyzer_type()
         except Exception as exc:  # noqa: BLE001
             self._load_failed = True
-            logger.warning(
-                "Skipping %s because analyzer init failed: %s",
-                self.name,
-                exc,
-            )
+            logger.exception("Analyzer init failed for %s: %s", self.name, exc)
 
     def _analyze(self, context: FeatureContext) -> Dict[str, Any]:
         if self._analyzer is None:
@@ -57,9 +56,11 @@ class _BaseAnalysisFeature(BaseFeature):
         return self._analyzer.analyze(context.text)
 
     def extract(self, context: FeatureContext) -> Dict[str, float]:
+        if not isinstance(context.text, str):
+            logger.warning("Skipping %s: context.text is not a string", self.name)
+            return {}
         if not context.text.strip():
             return {}
-
         if self._analyzer is None:
             self.initialize()
         if self._analyzer is None:
@@ -68,7 +69,7 @@ class _BaseAnalysisFeature(BaseFeature):
         try:
             raw = self._analyze(context)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Skipping %s due to runtime failure: %s", self.name, exc)
+            logger.exception("Runtime failure in %s: %s", self.name, exc)
             return {}
 
         if isinstance(raw, dict):

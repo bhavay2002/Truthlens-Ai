@@ -1,58 +1,6 @@
 """
 File Name: batch_feature_pipeline.py
 Module: Feature Engineering - Batch Feature Pipeline
-Description:
-    Implements a high-throughput batch feature extraction pipeline used for
-    dataset-scale processing in the TruthLens system. The pipeline wraps the
-    single-instance FeaturePipeline and provides:
-
-        • parallel batch execution
-        • deterministic ordering
-        • progress-aware logging
-        • optional fault tolerance
-        • scalable dataset processing
-
-    Integrates all feature extractor modules:
-
-        BiasFeatures            → 10 features (bias_*)
-        FramingFeatures         → 10 features (frame_*)
-        IdeologicalFeatures     →  8 features (ideology_*)
-        ArgumentStructureFeatures →  7 features (argument_*)
-        DiscourseFeatures       →  7 features (discourse_*)
-        EntityGraphFeatures     →  5 features (entity_*)
-        InteractionGraphFeatures →  6 features (interaction_*)
-        ConflictFeatures        →  9 features (conflict_*)
-        NarrativeFeatures       → 11 features (narrative_*)
-        NarrativeFrameFeatures  →  9 features (narrative_frame_*)
-        NarrativeRoleFeatures   →  7 features (narrative_role_*)
-        ManipulationPatterns    → 13 features (manipulation_*)
-        PropagandaFeatures      → 11 features (propaganda_*)
-        PropagandaLexiconFeatures → 11 features (propaganda_*)
-        LexicalFeatures         →  5 features (vocabulary_/hapax_)
-        SemanticFeatures        →  5 features (embedding_*)
-        SyntacticFeatures       →  7 features (sentence_/pos_*)
-        TokenFeatures           →  6 features (token_*)
-
-    All extractors are auto-discovered via FeatureRegistry at initialization.
-    The extract_by_section() method partitions each sample's output into
-    named sections using partition_feature_sections() from feature_pipeline:
-        bias, framing, ideology, emotion, discourse, graph,
-        narrative, propaganda, text, other
-
-    Designed for research experiments and production preprocessing jobs.
-
-Dependencies:
-    dataclasses
-    typing
-    logging
-    multiprocessing
-    itertools
-
-Inputs:
-    List[FeatureContext]
-
-Outputs:
-    List[Dict[str, float]] feature vectors
 """
 
 from __future__ import annotations
@@ -73,9 +21,6 @@ from src.features.pipelines.feature_pipeline import (
 logger = logging.getLogger(__name__)
 
 
-# =========================================================
-# Dataset Wrapper (for DataLoader)
-# =========================================================
 class FeatureDataset(Dataset):
     def __init__(self, contexts: List[FeatureContext]):
         self.contexts = contexts
@@ -87,18 +32,11 @@ class FeatureDataset(Dataset):
         return self.contexts[idx]
 
 
-# =========================================================
-# Collate Function (Dynamic Padding + Length Grouping)
-# =========================================================
 def collate_fn(batch: List[FeatureContext]) -> List[FeatureContext]:
-    # Sort by text length (reduces padding cost later)
-    batch.sort(key=lambda x: len(x.text) if hasattr(x, "text") else 0)
+    batch.sort(key=lambda x: len(x.text) if isinstance(x.text, str) else 0)
     return batch
 
 
-# =========================================================
-# Optimized Batch Feature Pipeline
-# =========================================================
 @dataclass
 class BatchFeaturePipeline:
     pipeline: FeaturePipeline
@@ -110,73 +48,53 @@ class BatchFeaturePipeline:
 
     _initialized: bool = field(default=False, init=False)
 
-    # =====================================================
-    # Initialization
-    # =====================================================
     def initialize(self) -> None:
-        if not self._initialized:
-            self.pipeline.initialize()
+        if self._initialized:
+            return
 
-            # Optional: torch compile (PyTorch 2.x)
-            if hasattr(self.pipeline, "model"):
-                try:
-                    self.pipeline.model = torch.compile(self.pipeline.model)
-                    logger.info("Model compiled with torch.compile")
-                except Exception:
-                    logger.warning("torch.compile failed, skipping")
+        self.pipeline.initialize()
 
-            self._initialized = True
+        if hasattr(self.pipeline, "model"):
+            try:
+                self.pipeline.model = torch.compile(self.pipeline.model)
+                logger.info("Model compiled with torch.compile")
+            except Exception:  # noqa: BLE001
+                logger.warning("torch.compile failed, skipping")
 
-            logger.info(
-                "BatchFeaturePipeline initialized | batch_size=%d workers=%d device=%s",
-                self.batch_size,
-                self.num_workers,
-                self.device,
-            )
+        self._initialized = True
+        logger.info(
+            "BatchFeaturePipeline initialized | batch_size=%d workers=%d device=%s",
+            self.batch_size,
+            self.num_workers,
+            self.device,
+        )
 
-    # =====================================================
-    # Core Batch Extraction (NO per-sample loops)
-    # =====================================================
-    def _process_batch(
-        self, batch: List[FeatureContext]
-    ) -> List[Dict[str, float]]:
-        """
-        Process one batch efficiently.
-        """
+    def _run_batch_extract(self, batch: List[FeatureContext]) -> List[Dict[str, float]]:
+        if hasattr(self.pipeline, "batch_extract"):
+            return self.pipeline.batch_extract(batch)
+        if hasattr(self.pipeline, "extract_batch"):
+            return self.pipeline.extract_batch(batch)
+        raise AttributeError("FeaturePipeline must expose batch_extract() or extract_batch().")
 
-        # 🔥 Shared cache (prevents repeated encoder calls)
+    def _process_batch(self, batch: List[FeatureContext]) -> List[Dict[str, float]]:
         shared_cache: Dict[str, Any] = {}
 
-        # Attach shared cache to each context
         for ctx in batch:
-            if not hasattr(ctx, "shared"):
-                ctx.shared = shared_cache
-            else:
-                ctx.shared.update(shared_cache)
-
-        # AMP context
-        if self.device == "cuda" and self.use_amp:
-            autocast_ctx = torch.cuda.amp.autocast(dtype=torch.float16)
-        else:
-            autocast_ctx = torch.no_grad()
+            if not isinstance(ctx.cache, dict):
+                ctx.cache = {}
+            ctx.cache.setdefault("_shared_cache", shared_cache)
 
         with torch.no_grad():
-            with autocast_ctx:
-                # 🚀 CRITICAL: Batch extraction
-                features = self.pipeline.extract_batch(batch)
+            if self.device == "cuda" and self.use_amp:
+                with torch.cuda.amp.autocast(dtype=torch.float16):
+                    features = self._run_batch_extract(batch)
+            else:
+                features = self._run_batch_extract(batch)
 
         return features
 
-    # =====================================================
-    # DataLoader Execution
-    # =====================================================
-    def _dataloader_extract(
-        self,
-        contexts: List[FeatureContext],
-    ) -> List[Dict[str, float]]:
-
+    def _dataloader_extract(self, contexts: List[FeatureContext]) -> List[Dict[str, float]]:
         dataset = FeatureDataset(contexts)
-
         loader = DataLoader(
             dataset,
             batch_size=self.batch_size,
@@ -187,60 +105,35 @@ class BatchFeaturePipeline:
         )
 
         results: List[Dict[str, float]] = []
-
-        logger.info(
-            "Starting optimized batch extraction | samples=%d",
-            len(contexts),
-        )
+        logger.info("Starting optimized batch extraction | samples=%d", len(contexts))
 
         for batch in loader:
-            batch_results = self._process_batch(batch)
-            results.extend(batch_results)
+            results.extend(self._process_batch(batch))
 
-        logger.info(
-            "Batch extraction completed | samples=%d",
-            len(results),
-        )
-
+        logger.info("Batch extraction completed | samples=%d", len(results))
         return results
 
-    # =====================================================
-    # Public API
-    # =====================================================
-    def extract(
-        self,
-        contexts: List[FeatureContext],
-    ) -> List[Dict[str, float]]:
-
+    def extract(self, contexts: List[FeatureContext]) -> List[Dict[str, float]]:
         if not contexts:
             raise ValueError("Input contexts cannot be empty")
+        if not all(isinstance(c, FeatureContext) for c in contexts):
+            raise TypeError("contexts must be a list of FeatureContext")
 
         if not self._initialized:
             self.initialize()
 
         return self._dataloader_extract(contexts)
 
-    # =====================================================
-    # Section-wise Output
-    # =====================================================
-    def extract_by_section(
-        self,
-        contexts: List[FeatureContext],
-    ) -> List[Dict[str, Dict[str, float]]]:
-
+    def extract_by_section(self, contexts: List[FeatureContext]) -> List[Dict[str, Dict[str, float]]]:
         flat_results = self.extract(contexts)
         return [partition_feature_sections(f) for f in flat_results]
 
-    # =====================================================
-    # Training-Compatible Pipeline
-    # =====================================================
     def extract_with_labels(
         self,
         contexts: List[FeatureContext],
         labels: Optional[List[int]] = None,
         fit: bool = False,
     ) -> List[Dict[str, float]]:
-
         if fit:
             return self.pipeline.process(contexts, labels=labels, fit=True)
         return self.pipeline.process(contexts, labels=labels, fit=False)

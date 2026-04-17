@@ -129,6 +129,7 @@ class CorrelationSelector:
 
     def fit(self, X: np.ndarray) -> None:
         corr = np.corrcoef(X, rowvar=False)
+        corr = np.nan_to_num(corr, nan=0.0, posinf=0.0, neginf=0.0)
 
         keep = set(range(X.shape[1]))
 
@@ -168,6 +169,8 @@ class TopKSelector:
     fitted: bool = False
 
     def fit(self, X: np.ndarray, y: Optional[np.ndarray] = None) -> None:
+        if self.k <= 0 or self.k > X.shape[1]:
+            raise ValueError("k must be in [1, n_features]")
         if self.method == "variance":
             scores = np.var(X, axis=0)
 

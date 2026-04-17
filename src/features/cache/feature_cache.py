@@ -33,9 +33,11 @@ Outputs:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import pickle
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -61,6 +63,7 @@ class FeatureCache:
         self.cache_dir = Path(cache_dir)
         self._key_cache: Dict[str, str] = {}
         self._path_cache: Dict[str, Path] = {}
+        self._lock = threading.Lock()
 
         try:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -93,21 +96,20 @@ class FeatureCache:
         """
         Construct cache file path for a given key.
         """
+        if not isinstance(key, str):
+            raise TypeError("Cache key must be a string")
 
-        cached_path = self._path_cache.get(key)
-        if cached_path is not None:
-            return cached_path
+        with self._lock:
+            cached_path = self._path_cache.get(key)
+            if cached_path is not None:
+                return cached_path
 
-        safe_key = self._key_cache.get(key)
-        if safe_key is None:
-            safe_key = self._normalize_key(key)
-            self._key_cache[key] = safe_key
-
-        filename = f"{safe_key}.pkl"
-        path = self.cache_dir / filename
-        self._path_cache[key] = path
-
-        return path
+            digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+            safe_prefix = self._normalize_key(key)[:40] if key.strip() else "empty"
+            filename = f"{safe_prefix}_{digest}.pkl"
+            path = self.cache_dir / filename
+            self._path_cache[key] = path
+            return path
 
     # -------------------------------------------------
     # Save Cache

@@ -124,6 +124,8 @@ FRAME_PHRASES = [
     r"amid\s+growing\s+concerns",
 ]
 
+COMPILED_FRAME_PHRASES = [re.compile(p) for p in FRAME_PHRASES]
+
 # ---------------------------------------------------------
 # Feature Extractor
 # ---------------------------------------------------------
@@ -158,12 +160,14 @@ class FramingFeatures(BaseFeature):
     # -----------------------------------------------------
 
     def extract(self, context: FeatureContext) -> Dict[str, float]:
-
-        if not context.text:
-            raise ValueError("FeatureContext.text cannot be empty")
+        if not isinstance(context.text, str):
+            raise TypeError("FeatureContext.text must be a string")
+        if not context.text.strip():
+            return {}
 
         text = context.text
-        tokens = context.tokens or _tokenize(text)
+        text_lower = text.lower()
+        tokens = context.tokens or _tokenize(text_lower)
 
         if not tokens:
             logger.warning("No tokens available for framing feature extraction")
@@ -188,16 +192,13 @@ class FramingFeatures(BaseFeature):
         # phrase detection
         # -------------------------------------------------
 
-        phrase_count = sum(
-            bool(re.search(p, text.lower()))
-            for p in FRAME_PHRASES
-        )
+        phrase_count = sum(bool(p.search(text_lower)) for p in COMPILED_FRAME_PHRASES)
 
         # -------------------------------------------------
         # structural narrative signals
         # -------------------------------------------------
 
-        quote_count = text.count('"') + text.count("'")
+        quote_count = text.count('"')
         quote_density = quote_count / max(len(text), 1)
 
         # -------------------------------------------------

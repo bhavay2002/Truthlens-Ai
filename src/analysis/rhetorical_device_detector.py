@@ -42,8 +42,8 @@ from src.analysis._nlp import get_nlp
 from src.analysis._text_features import (
     extract_alpha_lemmas,
     build_counter,
-    term_ratio as _term_ratio_util,
     phrase_match_count,
+    normalize_lexicon_terms,
 )
 from src.analysis.feature_schema import RHETORICAL_DEVICE_KEYS, make_vector
 
@@ -271,7 +271,7 @@ class RhetoricalDeviceDetector:
 
         text_lower = text.lower()
 
-        hits = phrase_match_count(text_lower, patterns)
+        hits = phrase_match_count(text_lower, normalize_lexicon_terms(patterns))
 
         length = max(len(text.split()), 1)
 

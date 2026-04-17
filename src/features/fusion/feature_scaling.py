@@ -65,7 +65,9 @@ def _dict_to_matrix(features: List[FeatureVector]) -> tuple[np.ndarray, List[str
         for key, value in feature_vector.items():
             j = name_to_idx.get(key)
             if j is not None:
-                row[j] = value
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    continue
+                row[j] = float(value)
 
     return matrix, keys
 
@@ -121,10 +123,10 @@ class StandardScaler(BaseScaler):
     def transform(self, X: np.ndarray) -> np.ndarray:
         if not self.fitted:
             raise RuntimeError("StandardScaler must be fitted before transform")
-
-        X -= self.mean_
-        X /= self.std_
-        return X
+        X_out = X.astype(np.float32, copy=True)
+        X_out -= self.mean_
+        X_out /= self.std_
+        return X_out
 
 
 @dataclass
@@ -147,13 +149,13 @@ class MinMaxScaler(BaseScaler):
     def transform(self, X: np.ndarray) -> np.ndarray:
         if not self.fitted:
             raise RuntimeError("MinMaxScaler must be fitted before transform")
-
-        X -= self.min_
+        X_out = X.astype(np.float32, copy=True)
+        X_out -= self.min_
         denom = self.max_ - self.min_
+        denom = denom.copy()
         denom[denom == 0] = 1.0
-        X /= denom
-
-        return X
+        X_out /= denom
+        return X_out
 
 
 @dataclass
@@ -181,11 +183,10 @@ class RobustScaler(BaseScaler):
     def transform(self, X: np.ndarray) -> np.ndarray:
         if not self.fitted:
             raise RuntimeError("RobustScaler must be fitted before transform")
-
-        X -= self.median_
-        X /= self.iqr_
-
-        return X
+        X_out = X.astype(np.float32, copy=True)
+        X_out -= self.median_
+        X_out /= self.iqr_
+        return X_out
 
 
 @dataclass

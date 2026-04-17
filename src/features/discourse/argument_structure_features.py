@@ -113,10 +113,15 @@ class ArgumentStructureFeatures(BaseFeature):
 
     def extract(self, context: FeatureContext) -> Dict[str, float]:
         """Extract argument structure features."""
-        if not context.text:
-            raise ValueError("FeatureContext.text cannot be empty")
+        if not isinstance(context.text, str):
+            raise TypeError("FeatureContext.text must be a string")
+        if not context.text.strip():
+            return {}
 
-        tokens = context.tokens or _tokenize(context.text)
+        text = context.text
+        text_lower = text.lower()
+
+        tokens = context.tokens or _tokenize(text_lower)
 
         if not tokens:
             logger.warning("No tokens available for argument structure extraction")
@@ -135,7 +140,7 @@ class ArgumentStructureFeatures(BaseFeature):
         counter_ratio = ratio(COUNTERARGUMENT_MARKERS)
 
         # rhetorical questions detected via question marks and interrogatives
-        question_marks = context.text.count("?")
+        question_marks = text.count("?")
         interrogatives = sum(counter.get(w, 0) for w in RHETORICAL_QUESTION_PATTERNS)
 
         rhetorical_ratio = (question_marks + interrogatives) / max(total_tokens, 1)

@@ -1,28 +1,6 @@
 """
 File Name: lexical_features.py
 Module: Text Feature Engineering - Lexical Features
-Description:
-    Implements lexical richness and vocabulary diversity features for the
-    TruthLens feature engineering system. These features quantify the
-    complexity, diversity, and structural properties of vocabulary used in
-    the input text.
-
-    The module integrates with the TruthLens BaseFeature abstraction and
-    FeatureRegistry for automatic discovery and execution in the feature
-    pipeline.
-
-Dependencies:
-    re
-    collections
-    dataclasses
-    typing
-    logging
-
-Inputs:
-    FeatureContext (text and optional tokens)
-
-Outputs:
-    Dict[str, float] containing lexical richness features
 """
 
 from __future__ import annotations
@@ -41,30 +19,14 @@ logger = logging.getLogger(__name__)
 
 
 def _tokenize(text: str) -> List[str]:
-    """
-    Simple tokenizer fallback if tokens are not provided
-    in FeatureContext.
-    """
     if not isinstance(text, str):
         raise ValueError("Input text must be a string")
-
     return re.findall(r"\b\w+\b", text.lower())
 
 
 @dataclass
 @register_feature
 class LexicalFeatures(BaseFeature):
-    """
-    Computes lexical diversity and richness statistics.
-
-    Example features:
-    - vocabulary_size
-    - hapax_legomena_ratio
-    - hapax_dislegomena_ratio
-    - lexical_density
-    - average_word_length
-    """
-
     name: str = "lexical_features"
     description: str = "Lexical richness and vocabulary diversity metrics"
 
@@ -92,27 +54,16 @@ class LexicalFeatures(BaseFeature):
             "hapax_legomena_ratio": float(hapax_legomena / token_count),
             "hapax_dislegomena_ratio": float(hapax_dislegomena / token_count),
             "lexical_density": float(vocabulary_size / token_count),
-            "average_word_length": float(word_lengths.mean() if token_count else 0.0),
+            "average_word_length": float(word_lengths.mean()),
         }
 
     def extract(self, context: FeatureContext) -> Dict[str, float]:
-        """
-        Extract lexical features from input text.
-
-        Parameters
-        ----------
-        context : FeatureContext
-
-        Returns
-        -------
-        Dict[str, float]
-        """
-
-        if not context.text:
-            raise ValueError("FeatureContext.text cannot be empty")
+        if not isinstance(context.text, str):
+            raise TypeError("FeatureContext.text must be a string")
+        if not context.text.strip():
+            return {}
 
         tokens = context.tokens or _tokenize(context.text)
-
         if not tokens:
             logger.warning("No tokens extracted from text")
             return self._compute_features([])
@@ -121,13 +72,10 @@ class LexicalFeatures(BaseFeature):
 
         logger.debug(
             "Lexical features extracted | tokens=%d vocab=%d",
-            token_count,
-            vocabulary_size,
+            len(tokens),
+            int(features["vocabulary_size"]),
         )
-
         return features
 
     def extract_batch(self, contexts: List[FeatureContext]) -> List[Dict[str, float]]:
-        """Extract lexical features for a batch of contexts."""
-
         return [self.extract(context) for context in contexts]

@@ -39,15 +39,11 @@ EXPLAINABLE_SECTIONS = {
     "discourse",
     "graph",
     "ideology",
+    "analysis",
 }
 
 
 class ScoreExplainer:
-    """
-    Generates explanations for TruthLens scores by identifying
-    dominant contributing signals.
-    """
-
     def __init__(self) -> None:
         logger.info("ScoreExplainer initialized")
 
@@ -61,11 +57,7 @@ class ScoreExplainer:
         self,
         feature_section: Dict[str, float],
         top_k: int = 5,
-    ) -> List[Dict[str, float]]:
-        """
-        Rank features by magnitude contribution.
-        """
-
+    ) -> List[Dict[str, Any]]:
         top_k = self._validate_top_k(top_k)
 
         if not isinstance(feature_section, dict) or not feature_section:
@@ -82,11 +74,8 @@ class ScoreExplainer:
 
         sorted_items = sorted(
             numeric_items,
-            key=lambda x: abs(x[1]),
-            reverse=True,
-        )
-
-        top_items = sorted_items[:top_k]
+            key=lambda x: (-abs(x[1]), x[0]),
+        )[:top_k]
 
         return [
             {
@@ -95,7 +84,7 @@ class ScoreExplainer:
                 "magnitude": abs(v),
                 "direction": "positive" if v >= 0 else "negative",
             }
-            for k, v in top_items
+            for k, v in sorted_items
         ]
 
     def explain_section(
@@ -105,12 +94,7 @@ class ScoreExplainer:
         *,
         top_k: int = 5,
     ) -> Dict[str, Any]:
-        """
-        Produce explanation for a specific analysis section.
-        """
-
         top_features = self.rank_contributors(feature_section, top_k)
-
         return {
             "section": section_name,
             "top_contributors": [item["feature"] for item in top_features],
@@ -123,30 +107,18 @@ class ScoreExplainer:
         *,
         top_k: int = 3,
     ) -> Dict[str, Any]:
-        """
-        Generate explanation across all analysis sections.
-        """
-
         top_k = self._validate_top_k(top_k)
 
         if not isinstance(profile, dict):
             raise ValueError("profile must be a dictionary")
 
         explanations: Dict[str, Any] = {}
-
         for section, features in profile.items():
-
             if section not in EXPLAINABLE_SECTIONS:
                 continue
-
             if not isinstance(features, dict):
                 continue
-
-            explanations[section] = self.explain_section(
-                section,
-                features,
-                top_k=top_k,
-            )
+            explanations[section] = self.explain_section(section, features, top_k=top_k)
 
         return explanations
 
@@ -156,10 +128,6 @@ class ScoreExplainer:
         *,
         top_k: int = 3,
     ) -> Dict[str, Any]:
-        """
-        Identify the dominant contributors to the final TruthLens score.
-        """
-
         top_k = self._validate_top_k(top_k)
 
         if not isinstance(scores, dict) or not scores:
@@ -170,19 +138,12 @@ class ScoreExplainer:
             for k, v in scores.items()
             if isinstance(v, (int, float)) and not isinstance(v, bool)
         ]
-
         if not items:
             raise ValueError("scores must contain at least one numeric non-boolean value")
 
-        sorted_items = sorted(
-            items,
-            key=lambda x: abs(x[1]),
-            reverse=True,
-        )
+        top_items = sorted(items, key=lambda x: (-abs(x[1]), x[0]))[:top_k]
 
-        top_items = sorted_items[:top_k]
-
-        explanation = {
+        return {
             "top_contributors": [k for k, _ in top_items],
             "contributors": [
                 {
@@ -195,21 +156,10 @@ class ScoreExplainer:
             ],
         }
 
-        return explanation
-
 
 def summarize_score_explanation(
     scores: Dict[str, float],
     *,
     top_k: int = 3,
 ) -> Dict[str, Any]:
-    """
-    Utility wrapper for quick explanation generation.
-    """
-
-    explainer = ScoreExplainer()
-
-    return explainer.explain_final_score(
-        scores,
-        top_k=top_k,
-    )
+    return ScoreExplainer().explain_final_score(scores, top_k=top_k)

@@ -21,43 +21,30 @@ Outputs:
 
 from __future__ import annotations
 
-from typing import TypedDict, Dict, Any
+from typing import TypedDict, Dict, Any, Literal
 
 from pydantic import BaseModel, field_validator
 
 
 class TruthLensScoreSchema(TypedDict):
-    """
-    Core TruthLens numeric scoring schema.
-    """
-
     truthlens_bias_score: float
     truthlens_emotion_score: float
     truthlens_narrative_score: float
     truthlens_discourse_score: float
     truthlens_graph_score: float
     truthlens_ideology_score: float
-
     truthlens_manipulation_risk: float
     truthlens_credibility_score: float
     truthlens_final_score: float
 
 
 class TruthLensRiskSchema(TypedDict, total=False):
-    """
-    Risk level schema derived from numeric scores.
-    """
-
     manipulation_risk: str
     credibility_level: str
     overall_truthlens_rating: str
 
 
 class TruthLensAggregationOutputSchema(TypedDict):
-    """
-    Complete aggregation pipeline output schema.
-    """
-
     scores: TruthLensScoreSchema
     raw_scores: TruthLensScoreSchema
     risks: TruthLensRiskSchema
@@ -72,14 +59,13 @@ class TruthLensScoreModel(BaseModel):
     truthlens_discourse_score: float
     truthlens_graph_score: float
     truthlens_ideology_score: float
-
     truthlens_manipulation_risk: float
     truthlens_credibility_score: float
     truthlens_final_score: float
 
     @field_validator("*")
     @classmethod
-    def validate_range(cls, v):
+    def validate_range(cls, v: float) -> float:
         if isinstance(v, bool) or not isinstance(v, (int, float)):
             raise TypeError("Score must be numeric (non-boolean)")
         fv = float(v)
@@ -89,9 +75,9 @@ class TruthLensScoreModel(BaseModel):
 
 
 class TruthLensRiskModel(BaseModel):
-    manipulation_risk: str | None = None
-    credibility_level: str | None = None
-    overall_truthlens_rating: str | None = None
+    manipulation_risk: Literal["LOW", "MEDIUM", "HIGH"] | None = None
+    credibility_level: Literal["LOW", "MEDIUM", "HIGH"] | None = None
+    overall_truthlens_rating: Literal["LOW", "MEDIUM", "HIGH"] | None = None
 
 
 class TruthLensAggregationOutputModel(BaseModel):

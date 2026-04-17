@@ -168,6 +168,11 @@ def phrase_match_count(
     return _phrase_match_baseline(text_lower, phrases)
 
 
+def normalize_lexicon_terms(terms: set[str]) -> set[str]:
+    """Normalize lexicon entries for phrase matching."""
+    return {t.replace("_", " ").strip().lower() for t in terms if t and t.strip()}
+
+
 def _phrase_match_baseline(
     text_lower: str,
     phrases: Collection[str],

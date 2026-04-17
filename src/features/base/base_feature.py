@@ -16,7 +16,7 @@ Dependencies:
     logging
 
 Inputs:
-    text: str
+    text: str = ""
     metadata: Optional[Dict]
 
 Outputs:
@@ -169,6 +169,9 @@ class BaseFeature:
         if not self.enabled:
             logger.debug("Feature '%s' is disabled", self.name)
             return {}
+
+        if not isinstance(context.text, str):
+            raise TypeError("FeatureContext.text must be a string")
 
         try:
             features = self.extract(context)

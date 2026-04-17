@@ -94,9 +94,10 @@ class InteractionGraphFeatures(BaseFeature):
             self._analyzer = None
 
     def extract(self, context: FeatureContext) -> Dict[str, float]:
-
-        if not context.text:
-            raise ValueError("FeatureContext.text cannot be empty")
+        if not isinstance(context.text, str):
+            raise TypeError("FeatureContext.text must be a string")
+        if not context.text.strip():
+            return {}
 
         if self._builder is not None and self._analyzer is not None:
             graph = self._builder.build_graph(context.text)
@@ -135,24 +136,25 @@ class InteractionGraphFeatures(BaseFeature):
         # Fallback when graph subsystem is unavailable.
         sentences = _split_sentences(context.text)
         nodes = set()
-        edges = []
+        edges = set()
 
         for sentence in sentences:
             entities = _extract_entities(sentence)
             nodes.update(entities)
-            for pair in itertools.combinations(entities, 2):
-                edges.append(pair)
+            for pair in itertools.combinations(sorted(set(entities)), 2):
+                edges.add(pair)
 
         node_count = len(nodes)
         edge_count = len(edges)
         density = 0.0
         if node_count > 1:
-            density = edge_count / (node_count * (node_count - 1))
+            max_edges = node_count * (node_count - 1) / 2.0
+            density = edge_count / max_edges
 
         features = {
             "interaction_node_count": float(node_count),
             "interaction_edge_count": float(edge_count),
-            "interaction_avg_degree": float(edge_count / max(node_count, 1)),
+            "interaction_avg_degree": float((2.0 * edge_count) / max(node_count, 1)),
             "interaction_density": float(density),
             "interaction_clustering": 0.0,
             "interaction_component_count": 0.0,

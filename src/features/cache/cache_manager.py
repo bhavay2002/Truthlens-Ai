@@ -36,6 +36,8 @@ Outputs:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import threading
 from multiprocessing import Manager
@@ -134,7 +136,13 @@ class CacheManager:
         """
         Derive a stable cache key from a FeatureContext.
         """
-        return context.text or ""
+        payload = {
+            "text": context.text if isinstance(context.text, str) else "",
+            "tokens": context.tokens or [],
+            "metadata": context.metadata or {},
+        }
+        raw = json.dumps(payload, sort_keys=True, default=str)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def _memory_key(self, namespace: str, key: str) -> str:
         return f"{namespace}:{key}"
@@ -168,18 +176,20 @@ class CacheManager:
             if cached is not None:
                 logger.debug("Cache hit | namespace=%s", namespace)
                 if can_store:
-                    if memory_key not in memory_cache:
-                        memory_cache[memory_key] = cached
-                        self._memory_size += 1
+                    with self._lock:
+                        if memory_key not in memory_cache:
+                            memory_cache[memory_key] = cached
+                            self._memory_size += 1
                 return cached
 
             result = compute_fn(context)
             cache_save(key, result)
 
             if can_store:
-                if memory_key not in memory_cache:
-                    memory_cache[memory_key] = result
-                    self._memory_size += 1
+                with self._lock:
+                    if memory_key not in memory_cache:
+                        memory_cache[memory_key] = result
+                        self._memory_size += 1
 
             return result
 
@@ -228,10 +238,11 @@ class CacheManager:
             if cached is not None:
                 results[index] = cached
                 if remaining_slots > 0:
-                    if memory_key not in memory_cache:
-                        memory_cache[memory_key] = cached
-                        self._memory_size += 1
-                        remaining_slots -= 1
+                    with self._lock:
+                        if memory_key not in memory_cache:
+                            memory_cache[memory_key] = cached
+                            self._memory_size += 1
+                            remaining_slots -= 1
             else:
                 missing_contexts.append(contexts[index])
                 missing_indices.append(index)
@@ -255,10 +266,11 @@ class CacheManager:
                 cache_save(key, feature_vector)
 
                 if remaining_slots > 0:
-                    if memory_key not in memory_cache:
-                        memory_cache[memory_key] = feature_vector
-                        self._memory_size += 1
-                        remaining_slots -= 1
+                    with self._lock:
+                        if memory_key not in memory_cache:
+                            memory_cache[memory_key] = feature_vector
+                            self._memory_size += 1
+                            remaining_slots -= 1
 
         return results
 
@@ -282,7 +294,8 @@ class CacheManager:
             del self._memory_cache[key]
 
         if keys_to_remove:
-            self._memory_size = max(0, self._memory_size - len(keys_to_remove))
+            with self._lock:
+                self._memory_size = max(0, self._memory_size - len(keys_to_remove))
 
         logger.info("Cache namespace cleared: %s", namespace)
 
@@ -295,7 +308,8 @@ class CacheManager:
             self.clear_namespace(namespace)
 
         self._memory_cache.clear()
-        self._memory_size = 0
+        with self._lock:
+            self._memory_size = 0
 
         logger.info("All cache namespaces cleared")
 

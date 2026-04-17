@@ -217,15 +217,19 @@ class EmotionTargetAnalyzer:
 
     # -----------------------------------------------------
 
-    def analyze(self, text: str) -> Dict[str, float]:
+    def analyze(self, text: str, return_vector: bool = False):
 
         if not isinstance(text, str):
-            raise ValueError("Input text must be a string")
+            raise TypeError("text must be a string")
 
         cleaned_text = text.strip()
 
         if not cleaned_text:
-            raise ValueError("Input text must be a non-empty string")
+            features = {k: 0.0 for k in EMOTION_TARGET_KEYS}
+            return (
+                features,
+                make_vector(features, EMOTION_TARGET_KEYS),
+            ) if return_vector else features
 
         try:
             doc: Doc = self.nlp(cleaned_text)

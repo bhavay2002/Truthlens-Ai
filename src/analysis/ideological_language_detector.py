@@ -49,6 +49,7 @@ from src.analysis._text_features import (
     build_counter,
     term_ratio as _term_ratio_util,
     phrase_match_count,
+    normalize_lexicon_terms,
 )
 from src.analysis.feature_schema import IDEOLOGICAL_LANGUAGE_KEYS, make_vector
 
@@ -300,7 +301,7 @@ class IdeologicalLanguageDetector:
     # ------------------------------------------------------------
 
     def _phrase_density(self, text: str, token_count: int) -> float:
-        hits = phrase_match_count(text, self.phrases)
+        hits = phrase_match_count(text, normalize_lexicon_terms(self.phrases))
 
         return float(hits / max(token_count, 1))
 

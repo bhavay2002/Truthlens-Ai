@@ -160,15 +160,19 @@ class FramingAnalyzer:
     # Main analysis
     # ------------------------------------------------------------
 
-    def analyze(self, text: str) -> Dict[str, float]:
+    def analyze(self, text: str, return_vector: bool = False):
 
         if not isinstance(text, str):
-            raise ValueError("Input text must be a string")
+            raise TypeError("text must be a string")
 
         text = text.strip()
 
         if not text:
-            raise ValueError("Input text must be non-empty")
+            features = {k: 0.0 for k in FRAMING_KEYS}
+            return (
+                features,
+                make_vector(features, FRAMING_KEYS),
+            ) if return_vector else features
 
         doc: Doc = self.nlp(text)
         return self.analyze_doc(doc)

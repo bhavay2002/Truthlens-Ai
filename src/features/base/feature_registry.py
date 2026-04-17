@@ -25,6 +25,7 @@ Outputs:
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Dict, List, Type
 
 from src.features.base.base_feature import BaseFeature
@@ -41,6 +42,7 @@ class FeatureRegistry:
     """
 
     _registry: Dict[str, Type[BaseFeature]] = {}
+    _lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Registration Methods
@@ -73,12 +75,13 @@ class FeatureRegistry:
 
         feature_name = getattr(feature_cls, "name", feature_cls.__name__)
 
-        if feature_name in cls._registry:
-            raise ValueError(
-                f"Feature '{feature_name}' already registered"
-            )
+        with cls._lock:
+            if feature_name in cls._registry:
+                raise ValueError(
+                    f"Feature '{feature_name}' already registered"
+                )
 
-        cls._registry[feature_name] = feature_cls
+            cls._registry[feature_name] = feature_cls
 
         logger.debug("Registered feature: %s", feature_name)
 
@@ -176,7 +179,8 @@ class FeatureRegistry:
         Clear the registry (mainly used in tests).
         """
 
-        cls._registry.clear()
+        with cls._lock:
+            cls._registry.clear()
         logger.warning("Feature registry cleared")
 
     # ------------------------------------------------------------------

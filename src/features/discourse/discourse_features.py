@@ -116,10 +116,15 @@ class DiscourseFeatures(BaseFeature):
 
     def extract(self, context: FeatureContext) -> Dict[str, float]:
         """Extract discourse-related features."""
-        if not context.text:
-            raise ValueError("FeatureContext.text cannot be empty")
+        if not isinstance(context.text, str):
+            raise TypeError("FeatureContext.text must be a string")
+        if not context.text.strip():
+            return {}
 
-        tokens = context.tokens or _tokenize(context.text)
+        text = context.text
+        text_lower = text.lower()
+
+        tokens = context.tokens or _tokenize(text_lower)
 
         if not tokens:
             logger.warning("No tokens available for discourse feature extraction")
