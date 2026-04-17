@@ -37,7 +37,7 @@ def load_model_and_tokenizer() -> Tuple[Any, Any]:
 def _get_device(model: Any) -> torch.device:
     try:
         return next(model.parameters()).device
-    except StopIteration:
+    except (StopIteration, AttributeError, TypeError):
         return torch.device("cpu")
 
 

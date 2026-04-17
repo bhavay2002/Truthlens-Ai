@@ -251,12 +251,28 @@ def is_primary_process() -> bool:
 # Device Summary
 # =========================================================
 
-def device_summary() -> Dict[str, Any]:
+def device_name() -> str:
+    """Return a human-readable name for the current compute device."""
+    device = get_device()
 
+    if device.type == "cuda":
+        try:
+            return torch.cuda.get_device_name(0)
+        except Exception:
+            return "CUDA GPU"
+
+    if device.type == "mps":
+        return "Apple MPS"
+
+    return "CPU"
+
+
+def device_summary() -> Dict[str, Any]:
     device = get_device()
 
     summary = {
-        "device": str(device),
+        "device": str(device),              # e.g. cuda:0
+        "device_name": device_name(),       # e.g. RTX 3060 ✅ NEW
         "gpu_count": get_gpu_count(),
         "cuda": torch.cuda.is_available(),
     }

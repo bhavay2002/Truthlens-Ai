@@ -58,13 +58,17 @@ class AsyncCheckpointWriter:
             path, obj = item
             tmp_path = path.with_suffix(path.suffix + ".tmp")
 
-            torch.save(obj, tmp_path, _use_new_zipfile_serialization=True)
-            tmp_path.replace(path)
+            try:
+                torch.save(obj, tmp_path, _use_new_zipfile_serialization=True)
+                tmp_path.replace(path)
+            except Exception as e:
+                logger.error("Checkpoint save failed: %s", e)
 
     def save(self, path: Path, obj: Any):
         try:
             self._queue.put_nowait((path, obj))
         except queue.Full:
+            logger.warning("Checkpoint queue full, dropping oldest checkpoint")
             try:
                 self._queue.get_nowait()
                 self._queue.put_nowait((path, obj))
@@ -112,11 +116,14 @@ class CheckpointManager:
 
     @staticmethod
     def _to_cpu(state: Dict[str, Any]) -> Dict[str, Any]:
+        new_state: Dict[str, Any] = {}
         for k, v in state.items():
             if torch.is_tensor(v):
                 t = v.detach().to("cpu", non_blocking=True)
-                state[k] = t.pin_memory()
-        return state
+                new_state[k] = t.pin_memory()
+            else:
+                new_state[k] = v
+        return new_state
 
     @staticmethod
     def _hash_state(state: Dict[str, Any]) -> str:
@@ -124,9 +131,19 @@ class CheckpointManager:
         for k, v in state.items():
             h.update(k.encode())
             if torch.is_tensor(v):
-                sample = v.flatten()[:10].contiguous()
+                sample = v.detach().cpu().flatten()[:10].contiguous()
                 h.update(sample.numpy().tobytes())
         return h.hexdigest()
+
+    @staticmethod
+    def _extract_step(path: Path) -> Optional[int]:
+        parts = path.name.split("-")
+        if len(parts) < 2:
+            return None
+        try:
+            return int(parts[-1])
+        except ValueError:
+            return None
 
     # -------------------------------------------------
     # Save Checkpoint
@@ -204,7 +221,9 @@ class CheckpointManager:
         paths = []
 
         for i in range(shards):
-            shard = dict(items[i * shard_size:(i + 1) * shard_size])
+            start = i * shard_size
+            end = (i + 1) * shard_size if i < shards - 1 else len(items)
+            shard = dict(items[start:end])
             path = self.checkpoint_dir / f"checkpoint-{step}-shard-{i}.pt"
             self._writer.save(path, shard)
             paths.append(path)
@@ -231,13 +250,22 @@ class CheckpointManager:
     # -------------------------------------------------
 
     def list_checkpoints(self) -> List[Path]:
-        checkpoints = []
+        if not self.checkpoint_dir.exists():
+            return []
+
+        checkpoints: list[tuple[Path, int]] = []
 
         for p in self.checkpoint_dir.iterdir():
-            if p.is_dir() and p.name.startswith("checkpoint-"):
-                checkpoints.append(p)
+            if not (p.is_dir() and p.name.startswith("checkpoint-")):
+                continue
 
-        return sorted(checkpoints, key=lambda x: int(x.name.split("-")[-1]))
+            step = self._extract_step(p)
+            if step is None:
+                continue
+
+            checkpoints.append((p, step))
+
+        return [p for p, _ in sorted(checkpoints, key=lambda x: x[1])]
 
     def get_latest_checkpoint(self) -> Optional[Path]:
         checkpoints = self.list_checkpoints()
@@ -248,14 +276,24 @@ class CheckpointManager:
     # -------------------------------------------------
 
     def cleanup_old_checkpoints(self, max_checkpoints: int = 3):
+        if max_checkpoints <= 0:
+            raise ValueError(
+                f"max_checkpoints must be a positive integer, got {max_checkpoints}"
+            )
+
+        self._writer.close()
+
         checkpoints = self.list_checkpoints()
 
         if len(checkpoints) <= max_checkpoints:
             return
 
         for p in checkpoints[:-max_checkpoints]:
-            shutil.rmtree(p)
-            logger.info("Deleted checkpoint: %s", p)
+            try:
+                shutil.rmtree(p)
+                logger.info("Deleted checkpoint: %s", p)
+            except Exception as e:
+                logger.warning("Failed to delete checkpoint %s: %s", p, e)
 
     # -------------------------------------------------
     # Shutdown
@@ -264,8 +302,47 @@ class CheckpointManager:
     def close(self):
         self._writer.close()
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self._writer.close()
+
     def __del__(self):
         try:
             self._writer.close()
         except Exception:
             pass
+
+
+
+# =====================================================
+# Module-level convenience function
+# =====================================================
+
+def get_last_checkpoint(checkpoint_dir: str | Path) -> "Optional[Path]":
+    """Return the path to the most recent checkpoint in *checkpoint_dir*.
+
+    Returns ``None`` if the directory does not exist or contains no valid
+    checkpoints.
+    """
+    checkpoint_dir = Path(checkpoint_dir)
+    if not checkpoint_dir.exists():
+        return None
+    try:
+        checkpoints: list[tuple[Path, int]] = []
+        for p in checkpoint_dir.iterdir():
+            if not (p.is_dir() and p.name.startswith("checkpoint-")):
+                continue
+            parts = p.name.split("-")
+            if len(parts) < 2:
+                continue
+            try:
+                step = int(parts[-1])
+            except ValueError:
+                continue
+            checkpoints.append((p, step))
+        return max(checkpoints, key=lambda x: x[1])[0] if checkpoints else None
+    except Exception as e:
+        logger.warning("Failed to get last checkpoint: %s", e)
+        return None

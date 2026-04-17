@@ -114,6 +114,9 @@ LOGS_DIR = SETTINGS.paths.logs_dir
 MODEL_PATH = SETTINGS.model.path
 TOKENIZED_DATASET_CACHE_DIR = MODELS_DIR / "tokenized_dataset"
 
+GOOGLE_DRIVE_REPORTS_DIR = SETTINGS.paths.reports_dir
+GOOGLE_DRIVE_CHECKPOINTS_DIR = MODELS_DIR / "checkpoints"
+
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 MODEL_PATH.mkdir(parents=True, exist_ok=True)
@@ -155,11 +158,11 @@ def _to_hf_dataset(df: pd.DataFrame) -> Dataset:
     return dataset
 
 
-def tokenize_function(example, tokenizer):
+def tokenize_function(example, tokenizer, text_column: str = "text"):
     return tokenizer(
-        example["text"],
+        example[text_column],
         truncation=True,
-        padding=False,
+        padding="max_length",
         max_length=MAX_LENGTH,
     )
 
@@ -171,6 +174,77 @@ def get_last_checkpoint(directory: Path):
         return hf_get_last_checkpoint(str(directory))
     except Exception:
         return None
+
+
+# -------------------------------------------------------
+# HELPER UTILITIES
+# -------------------------------------------------------
+
+def _compute_checkpoint_save_steps(
+    train_examples: int,
+    batch_size: int,
+    gradient_accumulation_steps: int,
+    epochs: int,
+) -> int:
+    """Return the number of optimizer steps between each checkpoint save.
+
+    Uses a 10% cadence: saves every ~10% of total training progress.
+    Always returns at least 1.
+    """
+    forward_steps_per_epoch = math.ceil(train_examples / batch_size)
+    optimizer_steps_per_epoch = math.ceil(forward_steps_per_epoch / gradient_accumulation_steps)
+    total_steps = optimizer_steps_per_epoch * epochs
+    save_steps = math.ceil(total_steps * 0.1)
+    return max(1, save_steps)
+
+
+def _validate_split_df(
+    df: pd.DataFrame,
+    name: str,
+    text_column: str,
+    label_column: str = "label",
+) -> None:
+    """Validate that *df* contains the required columns and non-empty text.
+
+    Raises:
+        ValueError: If a required column is missing or every text entry is blank.
+    """
+    if text_column not in df.columns:
+        raise ValueError(f"{name}: missing required column '{text_column}'")
+    if label_column not in df.columns:
+        raise ValueError(f"{name}: missing required column '{label_column}'")
+    if df[text_column].astype(str).str.strip().eq("").all():
+        raise ValueError(f"{name}: '{text_column}' column contains only empty strings")
+
+
+def _split_train_val_test(
+    df: pd.DataFrame,
+    train_ratio: float = 0.70,
+    val_ratio: float = 0.15,
+    label_column: str = "label",
+    random_state: int = 42,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Split *df* into train / validation / test partitions.
+
+    Returns:
+        (train_df, val_df, test_df)
+    """
+    test_ratio = 1.0 - train_ratio - val_ratio
+    train_df, temp_df = train_test_split(
+        df,
+        test_size=(val_ratio + test_ratio),
+        random_state=random_state,
+        stratify=df[label_column] if label_column in df.columns else None,
+    )
+    relative_val = val_ratio / (val_ratio + test_ratio)
+    val_df, test_df = train_test_split(
+        temp_df,
+        test_size=(1.0 - relative_val),
+        random_state=random_state,
+        stratify=temp_df[label_column] if label_column in temp_df.columns else None,
+    )
+    return train_df.reset_index(drop=True), val_df.reset_index(drop=True), test_df.reset_index(drop=True)
+
 
 
 # -------------------------------------------------------
@@ -186,7 +260,19 @@ def train_model(df: pd.DataFrame, params: dict[str, Any] | None = None):
     batch_size = int(params.get("batch_size", DEFAULT_BATCH_SIZE))
     epochs = int(params.get("epochs", DEFAULT_EPOCHS))
 
-    train_df, val_df, test_df = train_test_split(df, test_size=0.2, random_state=SEED)
+    train_df, val_df, test_df = _split_train_val_test(
+        df,
+        train_ratio=1 - (DEFAULT_VALIDATION_SIZE + DEFAULT_TEST_SIZE),
+        val_ratio=DEFAULT_VALIDATION_SIZE,
+        label_column="label",
+        random_state=SEED,
+    )
+
+    text_col = SETTINGS.training.text_column
+
+    _validate_split_df(train_df, "train", text_col)
+    _validate_split_df(val_df, "validation", text_col)
+    _validate_split_df(test_df, "test", text_col)
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
@@ -201,12 +287,12 @@ def train_model(df: pd.DataFrame, params: dict[str, Any] | None = None):
     map_num_proc = min(4, os.cpu_count() or 1)
 
     train_dataset = train_dataset.map(
-        lambda x: tokenize_function(x, tokenizer),
+        lambda x: tokenize_function(x, tokenizer, text_col),
         batched=True,
         num_proc=map_num_proc,
     )
     val_dataset = val_dataset.map(
-        lambda x: tokenize_function(x, tokenizer),
+        lambda x: tokenize_function(x, tokenizer, text_col),
         batched=True,
         num_proc=map_num_proc,
     )
@@ -227,6 +313,13 @@ def train_model(df: pd.DataFrame, params: dict[str, Any] | None = None):
         except Exception as e:
             logger.warning(f"compile failed: {e}")
 
+    save_steps = _compute_checkpoint_save_steps(
+        train_examples=len(train_df),
+        batch_size=batch_size,
+        gradient_accumulation_steps=2,
+        epochs=epochs,
+    )
+
     training_args = TrainingArguments(
 
         output_dir=str(MODELS_DIR),
@@ -243,7 +336,8 @@ def train_model(df: pd.DataFrame, params: dict[str, Any] | None = None):
         logging_dir=str(LOGS_DIR),
         logging_steps=200,
 
-        save_strategy="epoch",
+        save_strategy="steps",
+        save_steps=save_steps,
         evaluation_strategy="epoch",
 
         load_best_model_at_end=True,

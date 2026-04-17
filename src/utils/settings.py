@@ -249,6 +249,18 @@ def load_settings() -> AppSettings:
     if validation_size + test_size >= 1:
         raise ValueError("validation_size + test_size must be < 1")
 
+    cv_config = config.get("cross_validation", {})
+    hpt_config = config.get("hyperparameter_tuning", {})
+
+    lr_range = hpt_config.get("learning_rate_range")
+    if not isinstance(lr_range, list) or len(lr_range) < 2:
+        lr_range = [1e-6, 5e-5]
+
+    valid_metrics = {"eval_loss", "accuracy", "f1"}
+    cv_metric = str(cv_config.get("metric", "eval_loss"))
+    if cv_metric not in valid_metrics:
+        cv_metric = "eval_loss"
+
     training = TrainingSettings(
         seed=int(get_config_value(config, "training", "seed", default=42)),
         epochs=int(get_config_value(config, "training", "epochs", default=3)),
@@ -260,18 +272,35 @@ def load_settings() -> AppSettings:
         validation_size=validation_size,
         test_size=test_size,
         text_column=str(get_config_value(config, "training", "text_column", default="text")),
-        run_cross_validation=False,
-        cross_validation_splits=5,
-        cross_validation_metric="eval_loss",
-        run_hyperparameter_tuning=False,
-        optuna_trials=10,
-        optuna_direction="minimize",
-        optuna_metric="eval_loss",
-        optuna_learning_rate_min=1e-6,
-        optuna_learning_rate_max=5e-5,
-        optuna_batch_sizes=(8, 16),
-        optuna_epoch_choices=(2, 3),
-        optuna_validation_split=0.2,
+
+        # ===============================
+        # Cross Validation
+        # ===============================
+        run_cross_validation=bool(cv_config.get("enabled", False)),
+        cross_validation_splits=max(2, int(cv_config.get("splits", 5))),
+        cross_validation_metric=cv_metric,
+
+        # ===============================
+        # Hyperparameter Tuning (Optuna)
+        # ===============================
+        run_hyperparameter_tuning=bool(hpt_config.get("enabled", False)),
+        optuna_trials=max(1, int(hpt_config.get("trials", 10))),
+        optuna_direction=str(hpt_config.get("direction", "minimize")).lower(),
+        optuna_metric=str(hpt_config.get("metric", "eval_loss")),
+
+        optuna_learning_rate_min=float(lr_range[0]),
+        optuna_learning_rate_max=float(lr_range[-1]),
+
+        optuna_batch_sizes=_as_int_tuple(
+            hpt_config.get("batch_sizes"), (8, 16)
+        ),
+        optuna_epoch_choices=_as_int_tuple(
+            hpt_config.get("epoch_choices"), (2, 3)
+        ),
+
+        optuna_validation_split=float(
+            hpt_config.get("validation_split", 0.2)
+        ),
     )
 
     # ---------------- API ----------------

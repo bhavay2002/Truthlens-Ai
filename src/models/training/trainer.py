@@ -118,7 +118,7 @@ class Trainer:
         self.model.to(self.device)
 
         #  torch.compile (safe fallback)
-        if hasattr(torch, "compile"):
+        if hasattr(torch, "compile")and torch.cuda.is_available():
             try:
                 self.model = torch.compile(self.model)
                 logger.info("torch.compile enabled")

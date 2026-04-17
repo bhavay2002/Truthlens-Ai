@@ -370,6 +370,11 @@ def augment_dataset(
     ensure_dataframe(df, name="df", required_columns=[text_column])
     ensure_non_empty_text_column(df, text_column)
 
+    if multiplier <= 0:
+        raise ValueError(
+            f"multiplier must be a positive number, got {multiplier}"
+        )
+
     if multiplier <= 1:
         return df.copy()
 

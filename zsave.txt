@@ -6,6 +6,8 @@ Key  optimizations needed batch inference torch.no_grad() half precision inferen
 # Download spacy model
 !python -m spacy download en_core_web_sm
 
+pip install torch --index-url https://download.pytorch.org/whl/cu121
+
 # Download nltk resources
 import nltk
 nltk.download('punkt')
