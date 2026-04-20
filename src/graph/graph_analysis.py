@@ -25,10 +25,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from itertools import combinations
-from typing import Dict, List, Set
+from typing import Dict, List
 
-import numpy as np
+import numpy as np  # retained for compatibility if helpers are reintroduced
 
 from graph_hardening_patch import compute_undirected_basic_metrics, ordered_graph_metrics_vector
 
@@ -85,6 +84,8 @@ class GraphAnalyzer:
                 raise ValueError("graph keys must be strings")
             if not isinstance(neighbors, list):
                 raise ValueError("graph values must be lists of neighbors")
+            if not all(isinstance(n, str) for n in neighbors):
+                raise ValueError("all neighbors must be strings")
 
     def analyze(self, graph: Dict[str, List[str]]) -> GraphMetrics:
         """
@@ -118,63 +119,6 @@ class GraphAnalyzer:
         logger.debug("Graph metrics computed: %s", metrics)
 
         return metrics
-
-    def _compute_density(self, nodes: int, edges: int) -> float:
-        """Compute graph density."""
-        if nodes <= 1:
-            return 0.0
-
-        possible_edges = nodes * (nodes - 1)
-        return float(edges / possible_edges)
-
-    def _compute_centralization(self, degrees: List[int]) -> float:
-        """Estimate network centralization."""
-        if not degrees:
-            return 0.0
-
-        max_degree = max(degrees)
-        diff_sum = sum(max_degree - d for d in degrees)
-
-        normalization = len(degrees) * (len(degrees) - 1)
-        if normalization == 0:
-            return 0.0
-
-        return float(diff_sum / normalization)
-
-    def _estimate_clustering(self, graph: Dict[str, Set[str]]) -> float:
-        """
-        Estimate clustering coefficient using neighbor overlap.
-        """
-
-        if not graph:
-            return 0.0
-
-        undirected = {node: set(neighbors) for node, neighbors in graph.items()}
-
-        for node, neighbors in list(undirected.items()):
-            for neighbor in neighbors:
-                undirected.setdefault(neighbor, set()).add(node)
-
-        local_coefficients: List[float] = []
-
-        for neighbors in undirected.values():
-            degree = len(neighbors)
-
-            if degree < 2:
-                local_coefficients.append(0.0)
-                continue
-
-            neighbor_list = sorted(neighbors)
-
-            links_between_neighbors = 0
-            for left, right in combinations(neighbor_list, 2):
-                if right in undirected.get(left, set()):
-                    links_between_neighbors += 1
-
-            possible_links = degree * (degree - 1) / 2.0
-            local_coefficients.append(links_between_neighbors / possible_links)
-
-        return float(np.mean(local_coefficients)) if local_coefficients else 0.0
 
 
 def graph_feature_vector(features: Dict[str, float]) -> np.ndarray:

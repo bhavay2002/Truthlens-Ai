@@ -147,6 +147,7 @@ class GraphFeatureExtractor:
         features = self.extract_features(text)
 
         return self.extract_feature_vector_from_features(features)
+
     def extract_from_graphs(
         self,
         entity_graph: Dict[str, List[str]] | None = None,
@@ -180,12 +181,34 @@ class GraphFeatureExtractor:
         self,
         features: Dict[str, float],
     ) -> np.ndarray:
+        if not isinstance(features, dict):
+            raise ValueError("features must be a dictionary")
+
         vectors: List[np.ndarray] = []
+
         if self.config.enable_entity_graph:
-            vectors.append(ordered_entity_graph_vector(features))
-            vectors.append(ordered_graph_metrics_vector(features))
+            required_entity = {
+                "entity_graph_nodes", "entity_graph_edges", "entity_graph_avg_degree",
+                "entity_graph_density", "entity_graph_dominant_degree", "entity_graph_degree_variance",
+                "graph_nodes", "graph_edges", "graph_avg_degree", "graph_max_degree",
+                "graph_min_degree", "graph_degree_variance", "graph_density",
+                "graph_centralization", "graph_clustering_estimate",
+            }
+            if required_entity.issubset(features.keys()):
+                vectors.append(ordered_entity_graph_vector(features))
+                vectors.append(ordered_graph_metrics_vector(features))
+            else:
+                logger.warning("Missing required entity graph feature keys; skipping entity vectors")
+
         if self.config.enable_narrative_graph:
-            vectors.append(ordered_narrative_graph_vector(features))
+            required_narrative = {
+                "narrative_graph_nodes", "narrative_graph_edges", "narrative_graph_avg_degree",
+                "narrative_graph_density", "narrative_graph_isolated_nodes", "narrative_graph_components",
+            }
+            if required_narrative.issubset(features.keys()):
+                vectors.append(ordered_narrative_graph_vector(features))
+            else:
+                logger.warning("Missing required narrative graph feature keys; skipping narrative vector")
 
         if not vectors:
             return np.zeros(0, dtype=np.float32)

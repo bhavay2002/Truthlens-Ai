@@ -97,14 +97,23 @@ class GraphConfigLoader:
         """
         Parse configuration dictionary into GraphConfig.
         """
-
         hardened = parse_graph_config(config_data)
+        if isinstance(hardened, dict):
+            enable_entity_graph = hardened.get("enable_entity_graph", True)
+            enable_narrative_graph = hardened.get("enable_narrative_graph", True)
+            min_keyword_length = hardened.get("min_keyword_length", 4)
+            max_keywords_per_sentence = hardened.get("max_keywords_per_sentence", 4)
+        else:
+            enable_entity_graph = hardened.enable_entity_graph
+            enable_narrative_graph = hardened.enable_narrative_graph
+            min_keyword_length = hardened.min_keyword_length
+            max_keywords_per_sentence = hardened.max_keywords_per_sentence
 
         config = GraphConfig(
-            enable_entity_graph=hardened.enable_entity_graph,
-            enable_narrative_graph=hardened.enable_narrative_graph,
-            min_keyword_length=hardened.min_keyword_length,
-            max_keywords_per_sentence=hardened.max_keywords_per_sentence,
+            enable_entity_graph=enable_entity_graph,
+            enable_narrative_graph=enable_narrative_graph,
+            min_keyword_length=min_keyword_length,
+            max_keywords_per_sentence=max_keywords_per_sentence,
         )
 
         self._validate_config(config)
@@ -123,3 +132,9 @@ class GraphConfigLoader:
 
         if config.max_keywords_per_sentence < 1:
             raise ValueError("max_keywords_per_sentence must be >= 1")
+
+        if not isinstance(config.enable_entity_graph, bool):
+            raise ValueError("enable_entity_graph must be bool")
+
+        if not isinstance(config.enable_narrative_graph, bool):
+            raise ValueError("enable_narrative_graph must be bool")

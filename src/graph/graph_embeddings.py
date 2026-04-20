@@ -61,6 +61,9 @@ class GraphEmbeddingGenerator:
 
         self.config = config
 
+        if self.config.spectral_dim < 1:
+            raise ValueError("spectral_dim must be >= 1")
+
         logger.info(
             "GraphEmbeddingGenerator initialized (type=%s)",
             config.embedding_type,

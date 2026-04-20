@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from typing import Dict, List, Set
+from typing import ClassVar, Dict, List
 
 import numpy as np
 import spacy
@@ -74,6 +74,7 @@ class EntityGraphBuilder:
     """
     Constructs and analyzes entity co-occurrence graphs from text.
     """
+    _NLP_CACHE: ClassVar[dict[str, Language]] = {}
 
     def __init__(self, spacy_model: str = "en_core_web_sm") -> None:
         """
@@ -89,10 +90,15 @@ class EntityGraphBuilder:
             raise ValueError("spacy_model must be a valid model name")
 
         try:
-            self.nlp: Language = spacy.load(spacy_model)
-        except Exception as exc:  # pragma: no cover
-            logger.exception("spaCy model loading failed")
-            raise RuntimeError("Failed to load spaCy model") from exc
+            if spacy_model not in self._NLP_CACHE:
+                self._NLP_CACHE[spacy_model] = spacy.load(spacy_model)
+            self.nlp = self._NLP_CACHE[spacy_model]
+        except Exception:  # pragma: no cover
+            logger.warning(
+                "spaCy model not found (%s), falling back to blank English pipeline",
+                spacy_model,
+            )
+            self.nlp = spacy.blank("en")
 
         logger.info("EntityGraphBuilder initialized with model: %s", spacy_model)
 
@@ -126,7 +132,7 @@ class EntityGraphBuilder:
             logger.exception("spaCy processing failed")
             raise RuntimeError("Text processing failed") from exc
 
-        graph: Dict[str, List[str]] = defaultdict(list)
+        graph_sets: Dict[str, set[str]] = defaultdict(set)
 
         for sentence in doc.sents:
             entities = [
@@ -142,19 +148,20 @@ class EntityGraphBuilder:
                 continue
 
             for entity in entities:
-                graph.setdefault(entity, [])
+                graph_sets.setdefault(entity, set())
 
             if len(entities) < 2:
                 continue
 
             for i, entity_a in enumerate(entities):
                 for entity_b in entities[i + 1 :]:
-                    graph[entity_a].append(entity_b)
-                    graph[entity_b].append(entity_a)
+                    graph_sets[entity_a].add(entity_b)
+                    graph_sets[entity_b].add(entity_a)
 
+        graph = {k: sorted(v) for k, v in graph_sets.items()}
         logger.debug("Entity graph built with %d nodes", len(graph))
 
-        return dict(graph)
+        return graph
 
     def extract_graph_features(
         self, graph: Dict[str, List[str]]
@@ -184,17 +191,16 @@ class EntityGraphBuilder:
         edges = unique_undirected_edges(undirected)
         edge_count = len(edges)
 
-        degree_counts = Counter({node: len(undirected[node]) for node in nodes})
+        degrees = {node: len(undirected[node]) for node in nodes}
 
-        dominant_degree = degree_counts.most_common(1)[0][1] if degree_counts else 0
+        dominant_degree = max(degrees.values(), default=0)
 
-        avg_degree = float(np.mean(list(degree_counts.values()))) if degree_counts else 0.0
+        avg_degree = float(np.mean(list(degrees.values()))) if degrees else 0.0
 
         density = float((2 * edge_count) / (node_count * (node_count - 1))) if node_count > 1 else 0.0
 
         connectivity_variance = (
-            float(np.var(list(degree_counts.values())))
-            if degree_counts
+            float(np.var(list(degrees.values()))) if degrees
             else 0.0
         )
 

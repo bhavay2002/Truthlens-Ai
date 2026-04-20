@@ -117,7 +117,7 @@ class GraphVisualizer:
 
         plt.figure(figsize=(10, 8))
 
-        pos = nx.spring_layout(G)
+        pos = nx.spring_layout(G, seed=42)
 
         nx.draw_networkx_nodes(G, pos)
         nx.draw_networkx_edges(G, pos)
@@ -161,7 +161,7 @@ class GraphVisualizer:
 
         plt.figure(figsize=(10, 8))
 
-        pos = nx.spring_layout(G)
+        pos = nx.spring_layout(G, seed=42)
 
         nx.draw_networkx_nodes(G, pos)
         nx.draw_networkx_edges(G, pos)

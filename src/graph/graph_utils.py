@@ -150,7 +150,7 @@ def unique_edge_pairs(adjacency: AdjacencySet) -> Set[EdgePair]:
     Returns
     -------
     Set[Tuple[str, str]]
-        Unique directed edges
+        Unique directed edges (for undirected semantics, canonicalize/sort pairs)
     """
 
     if not isinstance(adjacency, dict):
@@ -184,12 +184,27 @@ def node_set(adjacency: AdjacencySet) -> Set[str]:
     return nodes
 
 
-def edge_count(adjacency: AdjacencySet) -> int:
+def edge_count_directed(adjacency: AdjacencySet) -> int:
     """
-    Count edges in adjacency graph.
+    Count edges in adjacency graph (directed semantics).
     """
-
     return sum(len(neighbors) for neighbors in adjacency.values())
+
+
+def edge_count_undirected(adjacency: AdjacencySet) -> int:
+    """
+    Count unique undirected edges in adjacency graph.
+    """
+    if not isinstance(adjacency, dict):
+        raise ValueError("adjacency must be a dictionary")
+    edges: Set[EdgePair] = set()
+    for u, nbrs in adjacency.items():
+        for v in nbrs:
+            if u == v:
+                continue
+            a, b = sorted((u, v))
+            edges.add((a, b))
+    return len(edges)
 
 
 def graph_summary(adjacency: AdjacencySet) -> Dict[str, int]:
@@ -202,11 +217,11 @@ def graph_summary(adjacency: AdjacencySet) -> Dict[str, int]:
     """
 
     nodes = node_set(adjacency)
-    edges = edge_count(adjacency)
+    edges = edge_count_directed(adjacency)
 
     summary = {
         "nodes": len(nodes),
-        "edges": edges,
+        "edges": edges,  # directed-style count; use edge_count_undirected for undirected semantics
     }
 
     return summary

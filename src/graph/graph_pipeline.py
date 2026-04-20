@@ -48,6 +48,7 @@ class GraphPipelineConfig:
     enable_entity_graph: bool = True
     enable_narrative_graph: bool = True
     return_vector: bool = True
+    run_analysis_modules: bool = True
 
 
 class GraphPipeline:
@@ -94,7 +95,7 @@ class GraphPipeline:
                 enable_narrative_graph=extractor_cfg.enable_narrative_graph,
             )
         )
-        self.analysis_runner = AnalysisIntegrationRunner()
+        self.analysis_runner = AnalysisIntegrationRunner() if config.run_analysis_modules else None
 
         logger.info("GraphPipeline initialized")
 
@@ -132,9 +133,6 @@ class GraphPipeline:
             entity_graph = self.entity_graph_builder.build_graph(text)
             results["entity_graph"] = entity_graph
 
-            entity_metrics = self.graph_analyzer.analyze(entity_graph)
-            results["entity_graph_metrics"] = entity_metrics.to_dict()
-
         # -------------------------------------------
         # Narrative Graph
         # -------------------------------------------
@@ -142,8 +140,10 @@ class GraphPipeline:
             narrative_graph = self.narrative_graph_builder.build_graph(text)
             results["narrative_graph"] = narrative_graph
 
-            narrative_metrics = self.graph_analyzer.analyze(narrative_graph)
-            results["narrative_graph_metrics"] = narrative_metrics.to_dict()
+        if entity_graph is not None:
+            results["entity_graph_metrics"] = self.graph_analyzer.analyze(entity_graph).to_dict()
+        if narrative_graph is not None:
+            results["narrative_graph_metrics"] = self.graph_analyzer.analyze(narrative_graph).to_dict()
 
         # -------------------------------------------
         # Unified Graph Features
@@ -154,7 +154,8 @@ class GraphPipeline:
         )
 
         results["graph_features"] = features
-        results["analysis_modules"] = self.analysis_runner.analyze_text(text)
+        if self.analysis_runner is not None:
+            results["analysis_modules"] = self.analysis_runner.analyze_text(text)
 
         # -------------------------------------------
         # Feature Vector
