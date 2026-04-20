@@ -44,6 +44,11 @@ def evaluate(
             f"Shape mismatch: y_true {y_true_arr.shape} vs y_pred {y_pred_arr.shape}"
         )
 
+    if y_proba is not None:
+        y_proba_arr = np.asarray(y_proba)
+        if y_proba_arr.shape[0] != y_true_arr.shape[0]:
+            raise ValueError("y_proba must have same number of samples as y_true.")
+
     metrics = compute_classification_metrics(
         y_true=y_true_arr,
         y_pred=y_pred_arr,

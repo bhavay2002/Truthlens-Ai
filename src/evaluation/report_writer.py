@@ -74,12 +74,18 @@ def save_report(
             }
             if numeric_summary:
                 figure_path = output_path.parent / "evaluation_summary_metrics.png"
-                plot_feature_importance(
-                    features=list(numeric_summary.keys()),
-                    scores=list(numeric_summary.values()),
-                    top_k=min(20, len(numeric_summary)),
-                    save_path=figure_path,
-                )
+                try:
+                    plot_feature_importance(
+                        features=list(numeric_summary.keys()),
+                        scores=list(numeric_summary.values()),
+                        top_k=min(20, len(numeric_summary)),
+                        save_path=figure_path,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Summary plot generation failed; JSON report still saved.",
+                        exc_info=True,
+                    )
 
     except Exception as exc:
         logger.exception("Failed to save evaluation report")

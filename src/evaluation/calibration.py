@@ -58,6 +58,10 @@ def _validate_inputs(
     if np.any(probs_arr < 0) or np.any(probs_arr > 1):
         raise ValueError("Probabilities must be within [0, 1].")
 
+    labels = y_true_arr.astype(np.int64)
+    if labels.min() < 0:
+        raise ValueError("Labels must be non-negative integers for calibration.")
+
     return y_true_arr, probs_arr
 
 

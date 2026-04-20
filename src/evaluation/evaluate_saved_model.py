@@ -36,7 +36,7 @@ Outputs:
 from __future__ import annotations
 
 import logging
-from typing import Dict, Tuple, Any
+from typing import Dict, Tuple, Any, Optional
 from pathlib import Path
 import json
 
@@ -90,6 +90,7 @@ def _validate_inputs(
 def _evaluate_core_tasks(
     preds: Dict[str, Any],
     labels: Dict[str, Any],
+    pred_probs_by_task: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Dict[str, Any]]:
 
     results: Dict[str, Dict[str, Any]] = {}
@@ -99,21 +100,25 @@ def _evaluate_core_tasks(
     results["bias"] = Evaluator.classification(
         labels["bias"],
         preds["bias"],
+        y_proba=(pred_probs_by_task or {}).get("bias"),
     )
 
     results["ideology"] = Evaluator.classification(
         labels["ideology"],
         preds["ideology"],
+        y_proba=(pred_probs_by_task or {}).get("ideology"),
     )
 
     results["propaganda"] = Evaluator.classification(
         labels["propaganda"],
         preds["propaganda"],
+        y_proba=(pred_probs_by_task or {}).get("propaganda"),
     )
 
     results["frame"] = Evaluator.classification(
         labels["frame"],
         preds["frame"],
+        y_proba=(pred_probs_by_task or {}).get("frame"),
     )
 
     logger.info("Evaluating multilabel emotion task")
@@ -168,13 +173,18 @@ def evaluate_tasks(
     preds: Dict[str, Any],
     labels: Dict[str, Any],
     df: pd.DataFrame | None = None,
+    pred_probs_by_task: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, float]]:
 
     logger.info("Starting TruthLens multi-task evaluation")
 
     _validate_inputs(preds, labels)
 
-    results = _evaluate_core_tasks(preds, labels)
+    results = _evaluate_core_tasks(
+        preds,
+        labels,
+        pred_probs_by_task=pred_probs_by_task,
+    )
 
     summary = Evaluator.multitask(results)
 
@@ -191,11 +201,31 @@ def evaluate_and_save(
     preds: Dict[str, Any],
     labels: Dict[str, Any],
     output_path: str | Path,
-    pred_probs: np.ndarray | None = None,
+    pred_probs: np.ndarray | Dict[str, Any] | None = None,
     df: pd.DataFrame | None = None,
 ) -> Dict[str, Any]:
+    pred_probs_by_task: Dict[str, Any] = {}
+    bias_probs: np.ndarray | None = None
 
-    results, summary = evaluate_tasks(preds, labels, df)
+    if isinstance(pred_probs, dict):
+        pred_probs_by_task = pred_probs
+        maybe_bias = pred_probs.get("bias")
+        if maybe_bias is not None:
+            maybe_bias_arr = np.asarray(maybe_bias)
+            if maybe_bias_arr.ndim == 2 and maybe_bias_arr.shape[1] >= 2:
+                bias_probs = maybe_bias_arr
+    elif pred_probs is not None:
+        pred_probs_arr = np.asarray(pred_probs)
+        if pred_probs_arr.ndim == 2 and pred_probs_arr.shape[1] >= 2:
+            bias_probs = pred_probs_arr
+            pred_probs_by_task["bias"] = pred_probs_arr
+
+    results, summary = evaluate_tasks(
+        preds,
+        labels,
+        df,
+        pred_probs_by_task=pred_probs_by_task,
+    )
 
     task_corr = compute_task_correlation(preds)
 
@@ -204,13 +234,13 @@ def evaluate_and_save(
 
     try:
 
-        if pred_probs is not None:
+        if bias_probs is not None:
             ece = expected_calibration_error(
                 labels["bias"],
-                pred_probs[:, 1]
+                bias_probs[:, 1]
             )
 
-            uncertainty = uncertainty_statistics(pred_probs)
+            uncertainty = uncertainty_statistics(bias_probs)
 
     except Exception as exc:
         logger.warning("Calibration/uncertainty computation failed: %s", exc)
@@ -269,7 +299,7 @@ def run_evaluation(
     pred_path: str | Path,
     label_path: str | Path,
     output_report: str | Path,
-    pred_probs: np.ndarray | None = None,
+    pred_probs: np.ndarray | Dict[str, Any] | None = None,
     dataset_path: str | Path | None = None,
 ) -> Dict[str, Any]:
 
@@ -288,23 +318,27 @@ def run_evaluation(
 
     tracker_available = True
     try:
-        from src.evaluation.mlflow_tracker import start_experiment, log_metrics
+        from src.evaluation.mlflow_tracker import start_experiment, log_metrics, end_run
     except ImportError as exc:
         logger.warning("MLflow tracking disabled (dependency missing): %s", exc)
         tracker_available = False
     else:
         start_experiment()
 
-    report = evaluate_and_save(
-        preds=preds,
-        labels=labels,
-        output_path=output_report,
-        pred_probs=pred_probs,
-        df=df,
-    )
+    try:
+        report = evaluate_and_save(
+            preds=preds,
+            labels=labels,
+            output_path=output_report,
+            pred_probs=pred_probs,
+            df=df,
+        )
 
-    if tracker_available:
-        log_metrics(report["summary"])
-        logger.info("MLflow experiment logged")
+        if tracker_available:
+            log_metrics(report["summary"])
+            logger.info("MLflow experiment logged")
+    finally:
+        if tracker_available:
+            end_run()
 
     return report

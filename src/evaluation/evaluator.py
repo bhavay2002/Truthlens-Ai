@@ -430,7 +430,6 @@ class Evaluator:
             raise TypeError("X must be a numpy ndarray")
         if not isinstance(y, np.ndarray):
             raise TypeError("y must be a numpy ndarray")
-        ensure_positive_int(n_repeats, name="n_repeats", min_value=1)
         if len(feature_names) != X.shape[1]:
             raise ValueError(
                 f"feature_names length ({len(feature_names)}) must match "
@@ -593,7 +592,8 @@ class Evaluator:
         """
         if not isinstance(X, np.ndarray):
             raise TypeError("X must be a numpy ndarray")
-        ensure_positive_int(int(max_samples or 1), name="max_samples", min_value=1)
+        if max_samples is not None:
+            ensure_positive_int(max_samples, name="max_samples", min_value=1)
         if len(feature_names) != X.shape[1]:
             raise ValueError(
                 f"feature_names length ({len(feature_names)}) must match "

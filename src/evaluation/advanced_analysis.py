@@ -93,10 +93,7 @@ def actor_graph_metrics(df: pd.DataFrame) -> Dict[str, float]:
 
     graph = nx.DiGraph()
 
-    for _, row in df.iterrows():
-
-        hero = row.get("hero_entities")
-        villain = row.get("villain_entities")
+    for hero, villain in zip(df["hero_entities"], df["villain_entities"]):
 
         if hero and villain:
             graph.add_edge(str(hero), str(villain))
@@ -251,6 +248,10 @@ def cross_task_attention(
                     task_b,
                     min_len,
                 )
+
+            if a.size < 2 or b.size < 2:
+                correlations[f"{task_a}_{task_b}"] = 0.0
+                continue
 
             try:
                 corr = float(np.corrcoef(a, b)[0, 1])

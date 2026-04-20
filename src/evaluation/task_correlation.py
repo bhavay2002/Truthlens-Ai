@@ -68,7 +68,13 @@ def compute_task_correlation(
     logger.info("Computing task correlation matrix")
 
     try:
-        corr = df.corr(method="pearson")
+        df_num = df.apply(pd.to_numeric, errors="coerce")
+        usable = df_num.dropna(axis=1, how="all")
+        if usable.shape[1] < 2:
+            raise ValueError(
+                "Need at least two numeric task columns for correlation."
+            )
+        corr = usable.corr(method="pearson")
     except Exception as exc:
         logger.exception("Failed to compute correlation matrix")
         raise RuntimeError("Correlation computation failed") from exc

@@ -4,7 +4,6 @@ Your task is to perform a COMPLETE audit of all files inside:
  
 You must do the following systematically:
 
---------------------------------------------------
 1. STATIC CODE ANALYSIS
 --------------------------------------------------
 - Identify syntax errors, import issues, and missing dependencies

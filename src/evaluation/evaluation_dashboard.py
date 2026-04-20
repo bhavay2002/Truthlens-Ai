@@ -38,7 +38,6 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     st = None
 
-from src.explainability.explanation_report_generator import ExplanationReportGenerator
 from src.visualization.visualize import plot_feature_importance
 
 logger = logging.getLogger(__name__)
@@ -239,6 +238,10 @@ def launch_dashboard(
     """
 
     _ensure_streamlit()
+    st.set_page_config(
+        page_title="TruthLens AI Evaluation Dashboard",
+        layout="wide"
+    )
 
     logger.info("Launching TruthLens evaluation dashboard")
 
@@ -249,11 +252,6 @@ def launch_dashboard(
         st.error(f"Failed to load evaluation report: {exc}")
         logger.exception("Dashboard failed to load report")
         return
-
-    st.set_page_config(
-        page_title="TruthLens AI Evaluation Dashboard",
-        layout="wide"
-    )
 
     st.title("TruthLens AI Evaluation Dashboard")
 
