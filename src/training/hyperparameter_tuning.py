@@ -52,7 +52,6 @@ from src.utils.input_validation import (
 )
 from src.utils.seed_utils import set_seed
 from src.utils.settings import load_settings
-from src.models.training.training_utils import TrainingMetrics
 from src.training.checkpointing import list_checkpoints
 
 logger = logging.getLogger(__name__)
@@ -139,16 +138,21 @@ def _evaluate_params(
         validation_df=val_df,
     )
 
-    trainer, eval_dataset = train_function(train_df, **kwargs)
+    try:
+        trainer, eval_dataset = train_function(train_df, **kwargs)
+        metrics = trainer.evaluate(eval_dataset)
+        score = _resolve_metric(metrics, metric_name)
+    finally:
+        model_ref = getattr(trainer, "model", None)
+        del trainer
+        del eval_dataset
+        if model_ref is not None:
+            del model_ref
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
 
-    metrics = trainer.evaluate(eval_dataset)
-
-    # 🔥 GPU cleanup (NEW)
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    gc.collect()
-
-    return _resolve_metric(metrics, metric_name)
+    return score
 
 
 def _sample_params_fallback(rng):
@@ -192,18 +196,29 @@ def run_optuna(
 
     df = df[df[label_column].notna()].reset_index(drop=True)
 
-    stratify_labels = df[label_column]
-    if stratify_labels.nunique(dropna=True) <= 1:
-        stratify_labels = None
-
-    train_df, val_df = train_test_split(
-        df,
-        test_size=0.2,
-        stratify=stratify_labels,
-        random_state=seed,
-    )
+    if validation_df is not None:
+        ensure_dataframe(
+            validation_df,
+            name="validation_df",
+            required_columns=[text_column, label_column],
+        )
+        ensure_non_empty_text_column(validation_df, text_column)
+        validation_df = validation_df[validation_df[label_column].notna()].reset_index(drop=True)
+        train_df = df.copy()
+        val_df = validation_df.copy()
+    else:
+        stratify_labels = df[label_column]
+        if stratify_labels.nunique(dropna=True) <= 1:
+            stratify_labels = None
+        train_df, val_df = train_test_split(
+            df,
+            test_size=0.2,
+            stratify=stratify_labels,
+            random_state=seed,
+        )
 
     n_trials = n_trials or SETTINGS.training.optuna_trials
+    ensure_positive_int(n_trials, name="n_trials")
     metric_name = metric_name or SETTINGS.training.optuna_metric
     direction = direction or SETTINGS.training.optuna_direction
     if direction not in _VALID_OPTIMIZATION_DIRECTIONS:
@@ -224,7 +239,6 @@ def run_optuna(
         sampler=sampler,
         pruner=MedianPruner(n_startup_trials=2),
     )
-
     cache = {}
 
     def objective(trial):

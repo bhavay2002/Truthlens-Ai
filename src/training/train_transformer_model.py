@@ -47,7 +47,6 @@ from __future__ import annotations
 import logging
 import math
 import os
-import shutil
 from pathlib import Path
 from typing import Any, Tuple
 
@@ -162,7 +161,7 @@ def tokenize_function(example, tokenizer, text_column: str = "text"):
     return tokenizer(
         example[text_column],
         truncation=True,
-        padding="max_length",
+        padding=False,
         max_length=MAX_LENGTH,
     )
 
@@ -389,4 +388,5 @@ def train_model(df: pd.DataFrame, params: dict[str, Any] | None = None):
     trainer.save_model(str(MODEL_PATH))
     tokenizer.save_pretrained(str(MODEL_PATH))
 
-    return trainer, test_df
+    # Return eval-ready HF dataset for CV/HPO contract compatibility
+    return trainer, val_dataset

@@ -35,18 +35,6 @@ from typing import Any, Optional
 
 import torch
 
-try:
-    from transformers import (
-        get_linear_schedule_with_warmup,
-        get_cosine_schedule_with_warmup,
-        get_cosine_with_hard_restarts_schedule_with_warmup,
-        get_polynomial_decay_schedule_with_warmup,
-        get_constant_schedule,
-        get_constant_schedule_with_warmup,
-    )
-except Exception as exc:  # pragma: no cover
-    raise ImportError("transformers is required for scheduler_factory.") from exc
-
 
 logger = logging.getLogger(__name__)
 
@@ -54,16 +42,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------
 # SUPPORTED SCHEDULERS
 # ---------------------------------------------------------
-
-SUPPORTED_SCHEDULERS = {
-    "linear": get_linear_schedule_with_warmup,
-    "cosine": get_cosine_schedule_with_warmup,
-    "cosine_restarts": get_cosine_with_hard_restarts_schedule_with_warmup,
-    "polynomial": get_polynomial_decay_schedule_with_warmup,
-    "constant": get_constant_schedule,
-    "constant_with_warmup": get_constant_schedule_with_warmup,
-}
-
 
 # ---------------------------------------------------------
 # CORE FACTORY
@@ -87,13 +65,37 @@ def create_scheduler(
 
     scheduler_key = scheduler_name.lower()
 
-    if scheduler_key not in SUPPORTED_SCHEDULERS:
+    try:
+        from transformers import (
+            get_linear_schedule_with_warmup,
+            get_cosine_schedule_with_warmup,
+            get_cosine_with_hard_restarts_schedule_with_warmup,
+            get_polynomial_decay_schedule_with_warmup,
+            get_constant_schedule,
+            get_constant_schedule_with_warmup,
+        )
+    except Exception as exc:  # pragma: no cover
+        raise ImportError("transformers is required for scheduler_factory.") from exc
+
+    supported_schedulers = {
+        "linear": get_linear_schedule_with_warmup,
+        "cosine": get_cosine_schedule_with_warmup,
+        "cosine_restarts": get_cosine_with_hard_restarts_schedule_with_warmup,
+        "polynomial": get_polynomial_decay_schedule_with_warmup,
+        "constant": get_constant_schedule,
+        "constant_with_warmup": get_constant_schedule_with_warmup,
+    }
+
+    if scheduler_key not in supported_schedulers:
         raise ValueError(
             f"Unsupported scheduler '{scheduler_name}'. "
-            f"Supported: {list(SUPPORTED_SCHEDULERS.keys())}"
+            f"Supported: {list(supported_schedulers.keys())}"
         )
 
-    scheduler_fn = SUPPORTED_SCHEDULERS[scheduler_key]
+    scheduler_fn = supported_schedulers[scheduler_key]
+
+    if not (0.0 <= warmup_ratio <= 1.0):
+        raise ValueError("warmup_ratio must be between 0.0 and 1.0")
 
     # ---------------------------------------------------------
     # Auto warmup computation

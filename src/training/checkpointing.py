@@ -51,9 +51,10 @@ logger = logging.getLogger(__name__)
 CHECKPOINT_FILE = "checkpoint.pt"
 METADATA_FILE = "metadata.json"
 
-# GPU performance boost
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
+# GPU performance boost (guarded; avoid unsafe import-time behavior on non-CUDA envs)
+if torch.cuda.is_available():
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
 
 # ---------------------------------------------------------
@@ -196,11 +197,13 @@ def save_checkpoint(
         except AttributeError:
             logger.warning("Scheduler has no state_dict()")
 
+    saved_path = checkpoint_path
     if use_compression:
         _atomic_save_compressed(checkpoint_data, checkpoint_path)
+        saved_path = Path(str(checkpoint_path) + ".gz")
     else:
         _atomic_save(checkpoint_data, checkpoint_path)
-    logger.info("Checkpoint saved: %s", checkpoint_path)
+    logger.info("Checkpoint saved: %s", saved_path)
 
     # metadata
     if metadata is not None:
@@ -210,21 +213,16 @@ def save_checkpoint(
 
     if export_formats:
         target_model = export_model if export_model else model
-
-        threading.Thread(
-            target=_export_artifacts,
-            kwargs=dict(
-                model=target_model,
-                checkpoint_dir=checkpoint_dir,
-                export_formats=export_formats,
-                example_input=export_example_input,
-            ),
-            daemon=True,
-        ).start()
+        _export_artifacts(
+            model=target_model,
+            checkpoint_dir=checkpoint_dir,
+            export_formats=export_formats,
+            example_input=export_example_input,
+        )
 
     _copy_to_drive(checkpoint_dir, drive_checkpoint_dir)
 
-    return checkpoint_path
+    return saved_path
 
 
 # ---------------------------------------------------------
@@ -313,7 +311,10 @@ def list_checkpoints(checkpoint_root: str | Path) -> list[Path]:
 
     checkpoints = [
         p for p in checkpoint_root.iterdir()
-        if p.is_dir() and (p / CHECKPOINT_FILE).exists()
+        if p.is_dir() and (
+            (p / CHECKPOINT_FILE).exists()
+            or (p / f"{CHECKPOINT_FILE}.gz").exists()
+        )
     ]
 
     def sort_key(p: Path):

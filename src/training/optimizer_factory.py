@@ -159,15 +159,25 @@ def create_optimizer(
     # ---------------------------------------------------------
 
     if optimizer_key in {"adamw", "adam"}:
-
-        optimizer = optimizer_class(
-            param_groups,
+        adam_common_kwargs = dict(
             lr=learning_rate,
             betas=betas,
             eps=eps,
-            fused=fused_available if optimizer_key == "adamw" else False,
-            **kwargs,
         )
+
+        if optimizer_key == "adamw":
+            optimizer = optimizer_class(
+                param_groups,
+                fused=fused_available,
+                **adam_common_kwargs,
+                **kwargs,
+            )
+        else:
+            optimizer = optimizer_class(
+                param_groups,
+                **adam_common_kwargs,
+                **kwargs,
+            )
 
     elif optimizer_key == "sgd":
 

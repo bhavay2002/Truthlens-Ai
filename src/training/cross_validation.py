@@ -168,8 +168,8 @@ def _run_feature_diagnostics(texts: list[str], label: str = "") -> None:
         Descriptive tag used in log messages (e.g. "cross-validation dataset").
     """
     try:
-        from src.features.pipelines.feature_pipeline import FeaturePipeline
-        from src.features.pipelines.batch_feature_pipeline import BatchFeaturePipeline
+        from src.pipelines.feature_pipeline import FeaturePipeline
+        from src.pipelines.batch_feature_pipeline import BatchFeaturePipeline
 
         tag = f" [{label}]" if label else ""
         logger.info("Running feature diagnostics%s | samples=%d", tag, len(texts))
@@ -248,6 +248,13 @@ def cross_validate_model(
         if n_splits is not None
         else SETTINGS.training.cross_validation_splits
     )
+    ensure_positive_int(effective_splits, name="n_splits")
+
+    min_class_count = int(working_df[resolved_label_column].value_counts().min())
+    if effective_splits > min_class_count:
+        raise ValueError(
+            f"n_splits={effective_splits} exceeds minimum class frequency={min_class_count}"
+        )
 
     effective_metric = metric_name or SETTINGS.training.cross_validation_metric
 

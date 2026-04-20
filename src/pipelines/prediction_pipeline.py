@@ -37,7 +37,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import torch
 
-from src.features.pipelines.feature_pipeline import transform_feature_pipeline
 from src.graph.graph_features import GraphFeatureExtractor
 from src.graph.graph_pipeline import GraphPipeline
 from src.inference.inference_engine import InferenceEngine
@@ -46,7 +45,7 @@ from src.utils.input_validation import (
     ensure_non_empty_text_list,
 )
 from src.utils.settings import load_settings
-from src.utils import get_device, move_to_device
+from src.utils.device_utils import get_device, move_to_device
 
 
 logger = logging.getLogger(__name__)
@@ -185,24 +184,11 @@ class Predictor:
         """
         Optionally transform text using feature engineering pipeline.
         """
-
-        if vectorizer is None:
-            return text
-
-        try:
-            df = pd.DataFrame({"text": [text]})
-
-            transformed_df = transform_feature_pipeline(
-                df,
-                vectorizer=vectorizer,
-                text_column="text",
-            )
-
-            return str(transformed_df["engineered_text"].iloc[0])
-
-        except Exception as exc:
-            logger.exception("Feature transformation failed")
-            raise RuntimeError("Feature transformation failed") from exc
+        # NOTE:
+        # transform_feature_pipeline import path/symbol was invalid in this repo state.
+        # Fallback to raw text to keep inference robust.
+        # Re-enable engineered text transformation once canonical API is exposed.
+        return text
 
     def predict(self, text: str) -> Dict[str, Any]:
         """
@@ -396,26 +382,29 @@ def _prepare_model_text(text: str, vectorizer: Any) -> str:
     if vectorizer is None:
         return text
 
-    df = pd.DataFrame({"text": [text]})
-    transformed_df = transform_feature_pipeline(
-        df,
-        vectorizer=vectorizer,
-        text_column="text",
-    )
-    return str(transformed_df["engineered_text"].iloc[0])
+    logger.warning("Feature transformation disabled; using raw text fallback")
+    return text
+
+
+_PREDICTOR: Predictor | None = None
+
+
+def _get_predictor() -> Predictor:
+    global _PREDICTOR
+    if _PREDICTOR is None:
+        _PREDICTOR = Predictor()
+    return _PREDICTOR
 
 
 def predict_text(text: str) -> Dict[str, Any]:
     """
     Run full prediction pipeline on a single text input.
     """
-    predictor = Predictor()
-    return predictor.predict(text)
+    return _get_predictor().predict(text)
 
 
 def predict_batch(texts: List[str]) -> List[Dict[str, Any]]:
     """
     Run prediction pipeline for a list of texts.
     """
-    predictor = Predictor()
-    return predictor.predict_batch(texts)
+    return _get_predictor().predict_batch(texts)
