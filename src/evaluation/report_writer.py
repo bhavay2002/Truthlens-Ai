@@ -49,7 +49,8 @@ def _validate_report(report: Dict[str, Any]) -> None:
 
 def save_report(
     report: Dict[str, Any],
-    path: str | Path
+    path: str | Path,
+    generate_plots: bool = True,
 ) -> Path:
     """
     Save evaluation report to disk in JSON format.
@@ -66,7 +67,7 @@ def save_report(
         logger.info("Evaluation report saved to %s", output_path)
 
         summary = report.get("summary")
-        if isinstance(summary, dict):
+        if generate_plots and isinstance(summary, dict):
             numeric_summary = {
                 k: float(v)
                 for k, v in summary.items()

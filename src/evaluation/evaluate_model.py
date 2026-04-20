@@ -39,6 +39,9 @@ def evaluate(
     if y_true_arr.shape[0] == 0:
         raise ValueError("y_true cannot be empty.")
 
+    if y_true_arr.ndim != 1 or y_pred_arr.ndim != 1:
+        raise ValueError("y_true and y_pred must be 1D arrays.")
+
     if y_true_arr.shape != y_pred_arr.shape:
         raise ValueError(
             f"Shape mismatch: y_true {y_true_arr.shape} vs y_pred {y_pred_arr.shape}"
@@ -52,7 +55,7 @@ def evaluate(
     metrics = compute_classification_metrics(
         y_true=y_true_arr,
         y_pred=y_pred_arr,
-        y_proba=y_proba,
+        y_proba=y_proba_arr if y_proba is not None else None,
     )
 
     labels, counts = np.unique(y_true_arr, return_counts=True)

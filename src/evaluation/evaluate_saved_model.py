@@ -227,7 +227,12 @@ def evaluate_and_save(
         pred_probs_by_task=pred_probs_by_task,
     )
 
-    task_corr = compute_task_correlation(preds)
+    try:
+        task_corr = compute_task_correlation(preds)
+        task_corr_dict = task_corr.to_dict()
+    except Exception as exc:
+        logger.warning("Task correlation failed: %s", exc)
+        task_corr_dict = {}
 
     ece = None
     uncertainty = None
@@ -248,7 +253,7 @@ def evaluate_and_save(
     report = {
         "tasks": results,
         "summary": summary,
-        "task_correlation": task_corr.to_dict(),
+        "task_correlation": task_corr_dict,
         "ece": ece,
         "uncertainty": uncertainty,
     }
@@ -317,6 +322,7 @@ def run_evaluation(
             df = pd.read_csv(dataset_path)
 
     tracker_available = True
+    run_started = False
     try:
         from src.evaluation.mlflow_tracker import start_experiment, log_metrics, end_run
     except ImportError as exc:
@@ -324,6 +330,7 @@ def run_evaluation(
         tracker_available = False
     else:
         start_experiment()
+        run_started = True
 
     try:
         report = evaluate_and_save(
@@ -334,11 +341,11 @@ def run_evaluation(
             df=df,
         )
 
-        if tracker_available:
+        if tracker_available and run_started:
             log_metrics(report["summary"])
             logger.info("MLflow experiment logged")
     finally:
-        if tracker_available:
+        if tracker_available and run_started:
             end_run()
 
     return report

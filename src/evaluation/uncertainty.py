@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 EPS = 1e-12
 
 
-def _validate_probs(probs: Iterable) -> np.ndarray:
+def _validate_probs(probs: Iterable, strict: bool = True) -> np.ndarray:
     """
     Validate probability tensor.
     """
@@ -46,25 +46,28 @@ def _validate_probs(probs: Iterable) -> np.ndarray:
         raise ValueError("Probability array cannot be empty.")
 
     if np.any(probs_arr < 0) or np.any(probs_arr > 1):
-        logger.warning("Probability values outside [0,1] detected.")
+        msg = "Probability values outside [0,1] detected."
+        if strict:
+            raise ValueError(msg)
+        logger.warning(msg)
 
     row_sums = probs_arr.sum(axis=1)
 
     if not np.allclose(row_sums, 1.0, atol=1e-3):
-        logger.warning(
-            "Probabilities do not sum to 1 across classes. "
-            "Results may be unreliable."
-        )
+        msg = "Probabilities do not sum to 1 across classes."
+        if strict:
+            raise ValueError(msg)
+        logger.warning("%s Results may be unreliable.", msg)
 
     return probs_arr
 
 
-def predictive_entropy(probs: Iterable) -> np.ndarray:
+def predictive_entropy(probs: Iterable, strict: bool = True) -> np.ndarray:
     """
     Compute predictive entropy for each sample.
     """
 
-    probs_arr = _validate_probs(probs)
+    probs_arr = _validate_probs(probs, strict=strict)
 
     entropy = -np.sum(
         probs_arr * np.log(probs_arr + EPS),
@@ -76,12 +79,12 @@ def predictive_entropy(probs: Iterable) -> np.ndarray:
     return entropy
 
 
-def confidence_scores(probs: Iterable) -> np.ndarray:
+def confidence_scores(probs: Iterable, strict: bool = True) -> np.ndarray:
     """
     Compute model confidence scores as max probability per sample.
     """
 
-    probs_arr = _validate_probs(probs)
+    probs_arr = _validate_probs(probs, strict=strict)
 
     confidence = np.max(probs_arr, axis=1)
 
@@ -93,15 +96,15 @@ def confidence_scores(probs: Iterable) -> np.ndarray:
     return confidence
 
 
-def uncertainty_statistics(probs: Iterable) -> Dict[str, float]:
+def uncertainty_statistics(probs: Iterable, strict: bool = True) -> Dict[str, float]:
     """
     Compute aggregated uncertainty statistics.
     """
 
-    probs_arr = _validate_probs(probs)
+    probs_arr = _validate_probs(probs, strict=strict)
 
-    entropy = predictive_entropy(probs_arr)
-    confidence = confidence_scores(probs_arr)
+    entropy = predictive_entropy(probs_arr, strict=False)
+    confidence = confidence_scores(probs_arr, strict=False)
 
     stats: Dict[str, float] = {
         "mean_entropy": float(np.mean(entropy)),

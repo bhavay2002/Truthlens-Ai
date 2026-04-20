@@ -46,23 +46,42 @@ def _validate_inputs(
     Validate and convert calibration inputs.
     """
 
-    y_true_arr = np.asarray(y_true)
-    probs_arr = np.asarray(probs)
+    labels = np.asarray(y_true, dtype=np.int64)
+    probs_arr = np.asarray(probs, dtype=float)
 
-    if y_true_arr.shape[0] == 0:
+    if labels.shape[0] == 0:
         raise ValueError("y_true cannot be empty.")
 
-    if y_true_arr.shape[0] != probs_arr.shape[0]:
+    if labels.shape[0] != probs_arr.shape[0]:
         raise ValueError("y_true and probs must have the same length.")
 
     if np.any(probs_arr < 0) or np.any(probs_arr > 1):
         raise ValueError("Probabilities must be within [0, 1].")
 
-    labels = y_true_arr.astype(np.int64)
     if labels.min() < 0:
         raise ValueError("Labels must be non-negative integers for calibration.")
 
-    return y_true_arr, probs_arr
+    return labels, probs_arr
+
+
+def _validate_bins(n_bins: int) -> None:
+    if not isinstance(n_bins, int) or n_bins < 1:
+        raise ValueError("n_bins must be a positive integer")
+
+
+def _to_probs_2d(labels: np.ndarray, probs_arr: np.ndarray) -> np.ndarray:
+    if probs_arr.ndim == 1:
+        if np.unique(labels).size > 2:
+            raise ValueError("1D probabilities are only valid for binary labels.")
+        return np.stack([1.0 - probs_arr, probs_arr], axis=1)
+    if probs_arr.ndim != 2:
+        raise ValueError("probs must be 1D or 2D")
+    n_classes = np.unique(labels).size
+    if probs_arr.shape[1] < 2:
+        raise ValueError("2D probs must have at least 2 class columns.")
+    if probs_arr.shape[1] < n_classes:
+        raise ValueError("Probability columns fewer than number of label classes.")
+    return probs_arr
 
 
 def expected_calibration_error(
@@ -77,17 +96,10 @@ def expected_calibration_error(
     across probability bins.
     """
 
-    y_true_arr, probs_arr = _validate_inputs(y_true, probs)
+    _validate_bins(n_bins)
+    labels, probs_arr = _validate_inputs(y_true, probs)
+    probs_2d = _to_probs_2d(labels, probs_arr)
     metric = CalibrationMetrics(CalibrationMetricConfig(n_bins=n_bins))
-
-    if probs_arr.ndim == 1:
-        probs_2d = np.stack([1.0 - probs_arr, probs_arr], axis=1)
-    else:
-        probs_2d = probs_arr
-
-    labels = y_true_arr.astype(np.int64)
-    if labels.min() < 0:
-        raise ValueError("Labels must be non-negative integers for calibration.")
 
     ece = metric.expected_calibration_error(
         torch.tensor(probs_2d, dtype=torch.float32),
@@ -109,16 +121,11 @@ def plot_reliability_diagram(
     Generate and save reliability diagram for model calibration.
     """
 
-    y_true_arr, probs_arr = _validate_inputs(y_true, probs)
+    _validate_bins(n_bins)
+    labels, probs_arr = _validate_inputs(y_true, probs)
+    probs_2d = _to_probs_2d(labels, probs_arr)
 
     metric = CalibrationMetrics(CalibrationMetricConfig(n_bins=n_bins))
-
-    if probs_arr.ndim == 1:
-        probs_2d = np.stack([1.0 - probs_arr, probs_arr], axis=1)
-    else:
-        probs_2d = probs_arr
-
-    labels = y_true_arr.astype(np.int64)
     stats = metric.reliability_statistics(
         torch.tensor(probs_2d, dtype=torch.float32),
         torch.tensor(labels, dtype=torch.long),

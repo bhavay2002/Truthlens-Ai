@@ -126,9 +126,6 @@ class Evaluator:
         y_proba_arr = np.asarray(y_proba)
 
         unique_labels = np.unique(y_true_arr)
-        label_to_idx = {label: idx for idx, label in enumerate(unique_labels)}
-        y_true_idx = np.asarray([label_to_idx[label] for label in y_true_arr], dtype=np.int64)
-
         if y_proba_arr.ndim == 1:
             if len(unique_labels) > 2:
                 logger.warning(
@@ -136,12 +133,22 @@ class Evaluator:
                 )
                 return None
             probs = np.stack([1.0 - y_proba_arr, y_proba_arr], axis=1)
+            y_true_idx = (y_true_arr == unique_labels[-1]).astype(np.int64)
             return y_true_idx, probs
 
         if y_proba_arr.ndim == 2:
             if y_proba_arr.shape[1] < 2:
                 logger.warning("Skipping calibration metrics: insufficient class columns.")
                 return None
+            if y_proba_arr.shape[1] != len(unique_labels):
+                logger.warning(
+                    "Skipping calibration metrics: probs columns (%d) != #classes (%d).",
+                    y_proba_arr.shape[1],
+                    len(unique_labels),
+                )
+                return None
+            label_to_idx = {label: idx for idx, label in enumerate(unique_labels)}
+            y_true_idx = np.asarray([label_to_idx[label] for label in y_true_arr], dtype=np.int64)
             return y_true_idx, y_proba_arr
 
         logger.warning("Skipping calibration metrics: unsupported y_proba shape.")
@@ -184,27 +191,22 @@ class Evaluator:
 
         Evaluator._validate_inputs(y_true, y_pred, y_proba)
 
-        try:
-            metrics = compute_classification_metrics(
+        metrics = compute_classification_metrics(
+            y_true=y_true,
+            y_pred=y_pred,
+            y_proba=y_proba
+        )
+
+        if y_proba is not None:
+            calibration_metrics = Evaluator._compute_calibration_bundle(
                 y_true=y_true,
-                y_pred=y_pred,
-                y_proba=y_proba
+                y_proba=y_proba,
             )
+            if calibration_metrics:
+                metrics["calibration"] = calibration_metrics
 
-            if y_proba is not None:
-                calibration_metrics = Evaluator._compute_calibration_bundle(
-                    y_true=y_true,
-                    y_proba=y_proba,
-                )
-                if calibration_metrics:
-                    metrics["calibration"] = calibration_metrics
-
-            logger.info("Classification evaluation completed")
-            return metrics
-
-        except Exception as exc:
-            logger.exception("Classification evaluation failed")
-            raise RuntimeError("Classification evaluation failed") from exc
+        logger.info("Classification evaluation completed")
+        return metrics
 
     @staticmethod
     def multilabel(
@@ -324,7 +326,7 @@ class Evaluator:
             deletion_score, insertion_score
         """
         normalized_tokens = ensure_non_empty_text_list(tokens, name="tokens")
-        if len(tokens) != len(scores):
+        if len(normalized_tokens) != len(scores):
             raise ValueError("tokens and scores must have the same length")
         if not callable(predict_fn):
             raise TypeError("predict_fn must be callable")

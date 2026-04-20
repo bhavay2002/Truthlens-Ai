@@ -134,6 +134,10 @@ def end_run(status: Optional[str] = None) -> None:
         logger.warning("MLflow is not installed; skipping run close.")
         return
 
+    allowed = {None, "FINISHED", "FAILED", "KILLED"}
+    if status not in allowed:
+        raise ValueError(f"Invalid MLflow run status: {status}")
+
     try:
         mlflow.end_run(status=status)
         logger.info("MLflow run ended")

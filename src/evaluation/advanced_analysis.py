@@ -45,7 +45,7 @@ Outputs:
 from __future__ import annotations
 
 import logging
-from typing import Callable, Dict, Any, List, Optional
+from typing import Callable, Dict, Any, List, Optional, Literal
 
 import numpy as np
 import networkx as nx
@@ -56,9 +56,6 @@ from src.explainability.attention_rollout import AttentionRollout
 from src.features.importance.feature_ablation import FeatureAblation
 from src.features.importance.permutation_importance import PermutationImportance
 from src.features.importance.shap_importance import ShapImportance
-from src.features.dataset_feature_generator import DatasetFeatureGenerator
-from src.features.feature_schema_validator import FeatureSchemaValidator
-from src.features.feature_statistics import FeatureStatistics
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +92,12 @@ def actor_graph_metrics(df: pd.DataFrame) -> Dict[str, float]:
 
     for hero, villain in zip(df["hero_entities"], df["villain_entities"]):
 
-        if hero and villain:
+        if (
+            pd.notna(hero)
+            and pd.notna(villain)
+            and str(hero).strip()
+            and str(villain).strip()
+        ):
             graph.add_edge(str(hero), str(villain))
 
     nodes = graph.number_of_nodes()
@@ -147,6 +149,7 @@ def cross_task_attention(
     attention_maps: Dict[str, Any],
     tokens: Optional[Dict[str, List[str]]] = None,
     use_rollout: bool = True,
+    align: Literal["strict", "truncate"] = "strict",
 ) -> Dict[str, float]:
     """
     Compute correlations between attention maps of different tasks to
@@ -221,9 +224,19 @@ def cross_task_attention(
                     task,
                     exc,
                 )
-                task_vectors[task] = _safe_array(value).flatten()
+                try:
+                    if isinstance(value, list) and value and isinstance(value[0], torch.Tensor):
+                        task_vectors[task] = np.concatenate(
+                            [v.detach().cpu().numpy().ravel() for v in value]
+                        ).astype(float, copy=False)
+                    else:
+                        task_vectors[task] = _safe_array(value).astype(float, copy=False).ravel()
+                except Exception as inner_exc:
+                    raise ValueError(
+                        f"Failed to build fallback attention vector for task '{task}'"
+                    ) from inner_exc
         else:
-            task_vectors[task] = _safe_array(value).flatten()
+            task_vectors[task] = _safe_array(value).astype(float, copy=False).ravel()
 
     correlations: Dict[str, float] = {}
 
@@ -239,6 +252,10 @@ def cross_task_attention(
             b = task_vectors[task_b]
 
             if a.size != b.size:
+                if align == "strict":
+                    raise ValueError(
+                        f"Mismatched attention lengths for {task_a} vs {task_b}: {a.size} != {b.size}"
+                    )
                 min_len = min(a.size, b.size)
                 a = a[:min_len]
                 b = b[:min_len]
@@ -314,11 +331,19 @@ def ablation_importance(
         raise TypeError("X must be a numpy ndarray")
     if not isinstance(y, np.ndarray):
         raise TypeError("y must be a numpy ndarray")
+    if X.ndim != 2:
+        raise ValueError("X must be 2D")
+    if y.ndim != 1:
+        raise ValueError("y must be 1D")
+    if X.shape[0] != y.shape[0]:
+        raise ValueError("X and y must have same number of samples")
     if len(feature_names) != X.shape[1]:
         raise ValueError(
             f"feature_names length ({len(feature_names)}) must match "
             f"X column count ({X.shape[1]})"
         )
+    if top_k is not None and top_k < 1:
+        raise ValueError("top_k must be >= 1")
 
     logger.info(
         "Running ablation importance | features=%d samples=%d",
@@ -394,11 +419,21 @@ def permutation_importance(
         raise TypeError("X must be a numpy ndarray")
     if not isinstance(y, np.ndarray):
         raise TypeError("y must be a numpy ndarray")
+    if X.ndim != 2:
+        raise ValueError("X must be 2D")
+    if y.ndim != 1:
+        raise ValueError("y must be 1D")
+    if X.shape[0] != y.shape[0]:
+        raise ValueError("X and y must have same number of samples")
     if len(feature_names) != X.shape[1]:
         raise ValueError(
             f"feature_names length ({len(feature_names)}) must match "
             f"X column count ({X.shape[1]})"
         )
+    if n_repeats < 1:
+        raise ValueError("n_repeats must be >= 1")
+    if top_k is not None and top_k < 1:
+        raise ValueError("top_k must be >= 1")
 
     logger.info(
         "Running permutation importance | features=%d samples=%d repeats=%d",
@@ -474,11 +509,17 @@ def shap_importance(
     """
     if not isinstance(X, np.ndarray):
         raise TypeError("X must be a numpy ndarray")
+    if X.ndim != 2:
+        raise ValueError("X must be 2D")
+    if max_samples is not None and max_samples < 1:
+        raise ValueError("max_samples must be >= 1")
     if len(feature_names) != X.shape[1]:
         raise ValueError(
             f"feature_names length ({len(feature_names)}) must match "
             f"X column count ({X.shape[1]})"
         )
+    if top_k is not None and top_k < 1:
+        raise ValueError("top_k must be >= 1")
 
     logger.info(
         "Running SHAP importance | features=%d samples=%d",
@@ -540,7 +581,12 @@ def feature_diagnostics(
     """
     if not texts:
         raise ValueError("texts must not be empty")
+    if any((t is None or not str(t).strip()) for t in texts):
+        raise ValueError("texts must contain non-empty strings")
 
+    from src.features.dataset_feature_generator import DatasetFeatureGenerator
+    from src.features.feature_schema_validator import FeatureSchemaValidator
+    from src.features.feature_statistics import FeatureStatistics
     from src.features.pipelines.batch_feature_pipeline import BatchFeaturePipeline
     from src.features.pipelines.feature_pipeline import FeaturePipeline
 

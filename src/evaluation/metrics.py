@@ -76,6 +76,8 @@ def compute_classification_metrics(
     y_true_arr = np.asarray(y_true)
     y_pred_arr = np.asarray(y_pred)
 
+    n_classes = np.unique(y_true_arr).size
+    average = "binary" if n_classes == 2 else "macro"
     results: Dict[str, Any] = {}
 
     try:
@@ -88,7 +90,7 @@ def compute_classification_metrics(
             precision_score(
                 y_true_arr,
                 y_pred_arr,
-                average="macro",
+                average=average,
                 zero_division=0
             )
         )
@@ -97,7 +99,7 @@ def compute_classification_metrics(
             recall_score(
                 y_true_arr,
                 y_pred_arr,
-                average="macro",
+                average=average,
                 zero_division=0
             )
         )
@@ -106,7 +108,7 @@ def compute_classification_metrics(
             f1_score(
                 y_true_arr,
                 y_pred_arr,
-                average="macro",
+                average=average,
                 zero_division=0
             )
         )
@@ -123,9 +125,14 @@ def compute_classification_metrics(
                 y_proba_arr = np.asarray(y_proba)
 
                 if y_proba_arr.ndim == 1:
-                    results["roc_auc"] = float(
-                        roc_auc_score(y_true_arr, y_proba_arr)
-                    )
+                    if n_classes != 2:
+                        logger.warning(
+                            "Skipping roc_auc: 1D probabilities provided for non-binary labels."
+                        )
+                    else:
+                        results["roc_auc"] = float(
+                            roc_auc_score(y_true_arr, y_proba_arr)
+                        )
                 else:
                     results["roc_auc_ovr"] = float(
                         roc_auc_score(
@@ -161,6 +168,9 @@ def compute_multilabel_metrics(
         raise ValueError(
             f"Shape mismatch: y_true {y_true_arr.shape} vs y_pred {y_pred_arr.shape}"
         )
+
+    if y_true_arr.shape[0] == 0:
+        raise ValueError("y_true cannot be empty.")
 
     results: Dict[str, Any] = {}
 
