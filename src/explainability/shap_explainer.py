@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 import logging
+import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, Sequence, Tuple
 
@@ -49,6 +50,19 @@ logger = logging.getLogger(__name__)
 
 _MAX_EXPLAINER_CACHE_SIZE = 8
 _EXPLAINER_CACHE: "OrderedDict[Tuple[Any, ...], Any]" = OrderedDict()
+_LOCK = threading.RLock()
+
+
+def _process_shap_values(values):
+    if isinstance(values, list):
+        values = values[0]
+
+    values = np.array(values)
+
+    if values.ndim > 1:
+        values = values.mean(axis=-1)
+
+    return values
 
 
 def _extract_fake_probability(result: Any) -> float:
@@ -141,25 +155,22 @@ def get_explainer(
         )
 
     cache_key = _cache_key_for_predict_fn(predict_fn)
+    with _LOCK:
+        if cache_key not in _EXPLAINER_CACHE:
+            logger.info("Initializing SHAP explainer")
 
-    if cache_key not in _EXPLAINER_CACHE:
+            masker = shap.maskers.Text()
 
-        logger.info("Initializing SHAP explainer")
+            explainer = shap.Explainer(
+                lambda x: shap_predict_wrapper(x, predict_fn),
+                masker,
+            )
 
-        masker = shap.maskers.Text()
+            _set_cache_entry(cache_key, explainer)
+        else:
+            _EXPLAINER_CACHE.move_to_end(cache_key)
 
-        explainer = shap.Explainer(
-            lambda x: shap_predict_wrapper(x, predict_fn),
-            masker,
-        )
-
-        _set_cache_entry(cache_key, explainer)
-
-    else:
-
-        _EXPLAINER_CACHE.move_to_end(cache_key)
-
-    return _EXPLAINER_CACHE[cache_key]
+        return _EXPLAINER_CACHE[cache_key]
 
 
 def explain_text(
@@ -176,6 +187,7 @@ def explain_text(
     explainer = get_explainer(predict_fn)
 
     shap_values = explainer([text])
+    _ = _process_shap_values(shap_values.values)
 
     logger.info("SHAP explanation generated")
 

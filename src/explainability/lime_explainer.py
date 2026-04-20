@@ -29,6 +29,7 @@ Outputs:
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Sequence
 
@@ -41,6 +42,7 @@ except ImportError:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
+_LOCK = threading.RLock()
 _explainer: LimeTextExplainer | None = None
 
 
@@ -72,12 +74,12 @@ def get_explainer() -> LimeTextExplainer:
         )
 
     global _explainer
+    with _LOCK:
+        if _explainer is None:
+            logger.info("Initializing LIME text explainer")
+            _explainer = LimeTextExplainer(class_names=["Real", "Fake"])
 
-    if _explainer is None:
-        logger.info("Initializing LIME text explainer")
-        _explainer = LimeTextExplainer(class_names=["Real", "Fake"])
-
-    return _explainer
+        return _explainer
 
 
 def _extract_fake_probabilities_from_batch(

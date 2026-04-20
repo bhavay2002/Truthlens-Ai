@@ -42,7 +42,7 @@ from src.explainability.explanation_metrics import ExplanationMetrics
 from src.explainability.explanation_visualizer import ExplanationVisualizer
 from src.explainability.model_explainer import explain_prediction_full, explain_fast
 from src.explainability.propaganda_explainer import PropagandaExplainer
-from src.explainability.token_alignment import TokenAlignment
+from src.explainability.token_alignment import align_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +96,7 @@ class ExplainabilityLayer:
 
     Holds instances of:
         - ExplanationCache      -- LRU cache for explanation results
-        - TokenAlignment        -- subword-to-word token merging
+        - align_tokens          -- subword-to-word token merging
         - AttentionRollout      -- cumulative attention-flow attribution
         - ExplanationAggregator -- weighted combination of explanation signals
         - ExplanationConsistency -- pairwise correlation between methods
@@ -119,7 +119,6 @@ class ExplainabilityLayer:
             cache_dir=config.cache_dir,
         ) if config.cache_enabled else None
 
-        self.token_alignment = TokenAlignment()
         self.attention_rollout = AttentionRollout()
         self.aggregator = ExplanationAggregator(
             weights=config.aggregation_weights
@@ -204,9 +203,9 @@ class ExplainabilityLayer:
                     attentions=attentions,
                     tokens=tokens,
                 )
-                aligned_tokens, aligned_scores = self.token_alignment.align(
-                    tokens=rollout_result["tokens"],
-                    scores=rollout_result["rollout_scores"],
+                aligned_tokens, aligned_scores = align_tokens(
+                    rollout_result["tokens"],
+                    rollout_result["rollout_scores"],
                 )
                 rollout_result["aligned_tokens"] = aligned_tokens
                 rollout_result["aligned_scores"] = aligned_scores

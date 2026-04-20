@@ -1,56 +1,18 @@
-"""
-File Name: explanation_aggregator.py
-Module: Explainability - Aggregation
-Description:
-    Aggregates multiple explanation methods into a unified token importance
-    representation for TruthLens AI.
-
-    Supported sources:
-        • SHAP explanations
-        • Integrated Gradients
-        • Attention scores
-        • LIME explanations
-
-    The module combines these signals using configurable weights and produces:
-
-        - final_token_importance
-        - confidence_score
-        - agreement_score
-
-    This aggregation helps create a single interpretable explanation signal
-    useful for dashboards, reports, and research evaluation.
-
-Dependencies:
-    logging
-    dataclasses
-    typing
-    numpy
-
-Inputs:
-    shap_importance
-    integrated_gradients
-    attention_scores
-    lime_importance
-
-Outputs:
-    Aggregated explanation dictionary
-"""
-
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+
+from src.explainability.utils_validation import validate_tokens_scores
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class AggregationWeights:
-    """Weights used for combining explanation methods."""
-
     shap: float = 0.4
     integrated_gradients: float = 0.3
     attention: float = 0.2
@@ -59,8 +21,6 @@ class AggregationWeights:
 
 @dataclass
 class AggregatedExplanation:
-    """Structured aggregated explanation result."""
-
     tokens: List[str]
     final_token_importance: List[float]
     confidence_score: float
@@ -68,77 +28,37 @@ class AggregatedExplanation:
 
 
 class ExplanationAggregator:
-    """
-    Aggregates explanations from multiple attribution methods.
-    """
-
     def __init__(self, weights: Optional[AggregationWeights] = None) -> None:
-        self.weights = weights or AggregationWeights()
-
-        total = (
-            self.weights.shap
-            + self.weights.integrated_gradients
-            + self.weights.attention
-            + self.weights.lime
-        )
-
+        w = weights or AggregationWeights()
+        total = w.shap + w.integrated_gradients + w.attention + w.lime
         if total <= 0:
             raise ValueError("Aggregation weights must sum to a positive value.")
-
-        logger.info("ExplanationAggregator initialized")
-
-    @staticmethod
-    def _tokens_and_scores(items: List[Dict], score_key: str):
-        tokens = []
-        scores = []
-
-        for item in items:
-            token = str(item.get("token"))
-            score = float(item.get(score_key, 0.0))
-            tokens.append(token)
-            scores.append(score)
-
-        return tokens, np.asarray(scores, dtype=float)
+        self.weights = AggregationWeights(
+            shap=w.shap / total,
+            integrated_gradients=w.integrated_gradients / total,
+            attention=w.attention / total,
+            lime=w.lime / total,
+        )
 
     @staticmethod
-    def _normalize(scores: np.ndarray) -> np.ndarray:
-        scores = np.asarray(scores, dtype=float)
-
-        if scores.size == 0:
-            return scores
-
-        scores = np.abs(scores)
-
-        total = float(np.sum(scores))
-
-        if total <= 0:
-            return np.zeros_like(scores)
-
-        return scores / total
+    def _normalize(v: np.ndarray) -> np.ndarray:
+        v = np.abs(np.asarray(v, dtype=float))
+        s = float(np.sum(v))
+        if s <= 0:
+            return np.zeros_like(v)
+        return v / s
 
     @staticmethod
-    def _compute_agreement(matrix: np.ndarray) -> float:
-        """
-        Compute agreement between explanation methods using average
-        pairwise correlation.
-        """
+    def _as_map(items: List[Dict], key: str) -> Dict[str, float]:
+        out: Dict[str, float] = {}
+        for it in items:
+            tok = str(it.get("token"))
+            out[tok] = float(it.get(key, 0.0))
+        return out
 
-        if matrix.shape[0] < 2:
-            return 1.0
-
-        correlations = []
-
-        for i in range(matrix.shape[0]):
-            for j in range(i + 1, matrix.shape[0]):
-                corr = np.corrcoef(matrix[i], matrix[j])[0, 1]
-
-                if not np.isnan(corr):
-                    correlations.append(corr)
-
-        if not correlations:
-            return 0.0
-
-        return float(np.mean(correlations))
+    @staticmethod
+    def _lime_map(items: List[Tuple[str, float]]) -> Dict[str, float]:
+        return {str(t): float(s) for t, s in items}
 
     def aggregate(
         self,
@@ -147,57 +67,50 @@ class ExplanationAggregator:
         attention_scores: Optional[List[Dict]] = None,
         lime_importance: Optional[List] = None,
     ) -> Dict:
-        """
-        Aggregate multiple explanation sources.
-        """
-
-        methods = []
-
-        tokens = None
+        sources: List[Tuple[Dict[str, float], float]] = []
 
         if shap_importance:
-            tokens, scores = self._tokens_and_scores(shap_importance, "importance")
-            methods.append(self._normalize(scores) * self.weights.shap)
-
+            sources.append((self._as_map(shap_importance, "importance"), self.weights.shap))
         if integrated_gradients:
-            tokens, scores = self._tokens_and_scores(
-                integrated_gradients, "importance"
-            )
-            methods.append(
-                self._normalize(scores) * self.weights.integrated_gradients
-            )
-
+            sources.append((self._as_map(integrated_gradients, "importance"), self.weights.integrated_gradients))
         if attention_scores:
-            tokens, scores = self._tokens_and_scores(attention_scores, "attention")
-            methods.append(self._normalize(scores) * self.weights.attention)
-
+            sources.append((self._as_map(attention_scores, "attention"), self.weights.attention))
         if lime_importance:
-            tokens = [token for token, _ in lime_importance]
-            scores = np.array([float(score) for _, score in lime_importance])
-            methods.append(self._normalize(scores) * self.weights.lime)
+            sources.append((self._lime_map(lime_importance), self.weights.lime))
 
-        if not methods or tokens is None:
+        if not sources:
             raise ValueError("No valid explanation sources provided.")
 
-        min_length = min(len(m) for m in methods)
-        methods = [m[:min_length] for m in methods]
-        tokens = list(tokens)[:min_length]
+        common = set(sources[0][0].keys())
+        for m, _ in sources[1:]:
+            common &= set(m.keys())
+        if not common:
+            raise ValueError("No common tokens across explanation methods.")
 
-        matrix = np.vstack(methods)
+        tokens = sorted(common)
+        weighted_rows = []
+        for m, w in sources:
+            vec = np.array([m[t] for t in tokens], dtype=float)
+            weighted_rows.append(self._normalize(vec) * w)
 
-        final_scores = matrix.sum(axis=0)
+        matrix = np.vstack(weighted_rows)
+        final_scores = self._normalize(matrix.sum(axis=0))
 
-        final_scores = self._normalize(final_scores)
+        validate_tokens_scores(tokens, final_scores.tolist())
 
-        agreement_score = self._compute_agreement(matrix)
+        corrs = []
+        if matrix.shape[0] > 1:
+            for i in range(matrix.shape[0]):
+                for j in range(i + 1, matrix.shape[0]):
+                    c = np.corrcoef(matrix[i], matrix[j])[0, 1]
+                    if not np.isnan(c):
+                        corrs.append(c)
+        agreement = float(np.mean(corrs)) if corrs else (1.0 if matrix.shape[0] == 1 else 0.0)
+        confidence = float(np.mean(np.max(matrix, axis=1)))
 
-        confidence_score = float(np.mean(np.max(matrix, axis=1)))
-
-        explanation = AggregatedExplanation(
+        return AggregatedExplanation(
             tokens=tokens,
             final_token_importance=final_scores.tolist(),
-            confidence_score=confidence_score,
-            agreement_score=agreement_score,
-        )
-
-        return explanation.__dict__
+            confidence_score=confidence,
+            agreement_score=agreement,
+        ).__dict__
