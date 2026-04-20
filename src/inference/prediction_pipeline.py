@@ -354,7 +354,7 @@ class PredictionPipeline:
                 if model is not None:
                     model.half()
 
-        if torch.cuda.is_available():
+        if self.device.type == "cuda":
             for model in [
                 self.bias_model,
                 self.ideology_model,
@@ -751,22 +751,23 @@ class PredictionPipeline:
             "credibility_explanation": explanations,
         }
 
-        if features.size(0) == 1:
-            result = {
-                "bias": bias[0] if bias else None,
-                "ideology": ideology[0] if ideology else None,
-                "propaganda_probability": (
-                    result["propaganda_probability"][0]
-                    if result["propaganda_probability"] is not None
-                    else None
-                ),
-                "emotion": emotion[0] if emotion else None,
-                "credibility_score": credibility_scores[0],
-                "credibility_explanation": explanations[0],
-            }
-
         logger.debug("Prediction result: %s", result)
         return result
+
+    def predict_single(self, features: torch.Tensor) -> Dict[str, Any]:
+        if not isinstance(features, torch.Tensor):
+            raise TypeError("Features must be a torch.Tensor")
+        if features.ndim == 1:
+            features = features.unsqueeze(0)
+        out = self.predict(features)
+        return {
+            "bias": out["bias"][0] if out.get("bias") else None,
+            "ideology": out["ideology"][0] if out.get("ideology") else None,
+            "propaganda_probability": out["propaganda_probability"][0] if out.get("propaganda_probability") else None,
+            "emotion": out["emotion"][0] if out.get("emotion") else None,
+            "credibility_score": out["credibility_score"][0] if out.get("credibility_score") else None,
+            "credibility_explanation": out["credibility_explanation"][0] if out.get("credibility_explanation") else None,
+        }
 
     def export_onnx(self, path: str) -> None:
         model = self.bias_model or self.ideology_model or self.propaganda_model or self.emotion_model

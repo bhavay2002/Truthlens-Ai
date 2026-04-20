@@ -73,6 +73,7 @@ import multiprocessing as mp
 from multiprocessing.pool import Pool
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Any
+import atexit
 
 import numpy as np
 import torch
@@ -180,6 +181,7 @@ class FeaturePreparer:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("GraphPipeline unavailable in FeaturePreparer: %s", exc)
                 self.graph_pipeline = None
+        atexit.register(self.close_pool)
 
         logger.info(
             "FeaturePreparer initialized with %d features",
@@ -409,7 +411,10 @@ class FeaturePreparer:
         matrix = self._apply_feature_selection(matrix)
 
         if self.config.return_tensor:
-            return torch.as_tensor(matrix, dtype=torch.float32).pin_memory()
+            tensor = torch.as_tensor(matrix, dtype=torch.float32)
+            if torch.cuda.is_available():
+                tensor = tensor.pin_memory()
+            return tensor
 
         return matrix
 
@@ -528,7 +533,10 @@ class FeaturePreparer:
                 matrix = selector.transform(matrix)
 
         if self.config.return_tensor:
-            return torch.from_numpy(matrix).pin_memory()
+            tensor = torch.from_numpy(matrix)
+            if torch.cuda.is_available():
+                tensor = tensor.pin_memory()
+            return tensor
 
         return matrix
 

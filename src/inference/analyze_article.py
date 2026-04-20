@@ -232,16 +232,20 @@ class ArticleAnalyzer:
                 if self.narrative_graph_builder is not None
                 else {}
             )
-            narrative_graph_features = (
-                self.narrative_graph_builder.extract_graph_features(narrative_graph).to_dict()
+            raw_narrative_features = (
+                self.narrative_graph_builder.extract_graph_features(narrative_graph)
                 if self.narrative_graph_builder is not None
                 else {}
             )
-            narrative_graph_metrics = (
-                self.graph_analyzer.analyze(narrative_graph).to_dict()
-                if narrative_graph
-                else {}
+            narrative_graph_features = (
+                self._to_dict_safe(raw_narrative_features)
             )
+            narrative_graph_metrics: Dict[str, Any] = {}
+            if narrative_graph is not None:
+                try:
+                    narrative_graph_metrics = self._to_dict_safe(self.graph_analyzer.analyze(narrative_graph))
+                except Exception:
+                    narrative_graph_metrics = {}
             graph_pipeline_output = (
                 self.graph_pipeline.run(text)
                 if self.graph_pipeline is not None
@@ -304,6 +308,9 @@ class ArticleAnalyzer:
         scores = aggregation_output.get("raw_scores")
         if not isinstance(scores, dict) or not scores:
             scores = self.score_calculator.compute_scores(profile)
+            aggregation_output.setdefault("warnings", []).append(
+                "Aggregation raw_scores unavailable; fallback score calculator used."
+            )
 
         prediction_output = self._run_prediction(text, fused_features)
 
@@ -362,6 +369,9 @@ class ArticleAnalyzer:
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Explanation report artifact generation skipped: %s", exc)
+                aggregation_output.setdefault("warnings", []).append(
+                    f"Explanation artifact generation skipped: {exc}"
+                )
 
         report: Dict[str, Any] = {
             "bias_features": feature_sections["bias"],

@@ -118,19 +118,17 @@ class ModelLoader:
                 model = torch.load(path, map_location="cpu")
 
             if not isinstance(model, torch.nn.Module):
-                if isinstance(model, dict):
-                    raise RuntimeError(f"State dict found at {path}; expected serialized torch.nn.Module")
                 raise RuntimeError(f"Unsupported model object type at {path}: {type(model)}")
 
             # 🔥 Half precision (GPU only)
-            if torch.cuda.is_available():
+            if self.device.type == "cuda":
                 model = model.half()
 
             # 🔥 Efficient transfer
             model.to(self.device, non_blocking=True)
 
             # 🔥 torch.compile (safe fallback)
-            if hasattr(torch, "compile"):
+            if hasattr(torch, "compile") and self.device.type == "cuda":
                 try:
                     model = torch.compile(model, mode="max-autotune")
                 except Exception:
@@ -268,7 +266,7 @@ class ModelLoader:
         try:
             model = ModelFactory.create_from_model_config(model_config)
 
-            if torch.cuda.is_available():
+            if self.device.type == "cuda":
                 model = model.half()
 
             model.to(self.device, non_blocking=True)

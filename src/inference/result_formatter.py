@@ -114,11 +114,19 @@ class ResultFormatter:
         if not isinstance(prediction, dict):
             raise TypeError("prediction must be a dictionary")
 
+        credibility = prediction.get("credibility_score")
+        if isinstance(credibility, list):
+            credibility = credibility[0] if credibility else None
+
+        propaganda_probability = prediction.get("propaganda_probability")
+        if isinstance(propaganda_probability, list):
+            propaganda_probability = propaganda_probability[0] if propaganda_probability else None
+
         response = TruthLensAPIResponse(
             bias=prediction.get("bias"),
             ideology=prediction.get("ideology"),
-            propaganda_probability=prediction.get("propaganda_probability"),
-            credibility_score=prediction.get("credibility_score"),
+            propaganda_probability=propaganda_probability,
+            credibility_score=credibility,
             timestamp=self._timestamp(),
         )
 

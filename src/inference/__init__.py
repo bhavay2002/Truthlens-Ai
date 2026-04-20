@@ -10,7 +10,7 @@ Description:
 
 from src.inference.inference_cache import InferenceCache, InferenceCacheConfig
 from src.inference.inference_engine import (
-    InferenceConfig as EngineConfig,
+    InferenceConfig as EngineInferenceConfig,
     InferenceEngine,
     PredictionResult,
 )
@@ -24,7 +24,7 @@ from src.inference.result_formatter import ResultFormatter
 __all__ = [
     "InferenceCache",
     "InferenceCacheConfig",
-    "EngineConfig",
+    "EngineInferenceConfig",
     "InferenceEngine",
     "PredictionResult",
     "InferenceLogEntry",

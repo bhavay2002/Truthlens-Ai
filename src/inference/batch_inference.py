@@ -134,7 +134,6 @@ class BatchInferenceEngine:
                 prep_config,
                 scaler=self.artifacts.feature_scaler,
                 selector=self.artifacts.feature_selector,
-                device=str(self.model_loader.device),
             )
 
         self.prediction_pipeline = PredictionPipeline(
@@ -201,8 +200,13 @@ class BatchInferenceEngine:
         if self.feature_preparer is None:
             raise RuntimeError("FeaturePreparer is required for batch inference")
 
-        lengths = [len(text) for text in texts]
-        features_list = [{"text_length": length} for length in lengths]
+        clean_texts: List[str] = []
+        for t in texts:
+            if t is None:
+                clean_texts.append("")
+            else:
+                clean_texts.append(str(t))
+        features_list = [{"text": t, "text_length": len(t)} for t in clean_texts]
         prepared = self.feature_preparer.prepare_batch(features_list)
 
         prepared = torch.as_tensor(prepared, dtype=torch.float32)
@@ -241,7 +245,11 @@ class BatchInferenceEngine:
             graph_outputs = graph_results[i]
 
             def _value_at(value: Any) -> Any:
-                return value[i] if isinstance(value, list) else value
+                if isinstance(value, list):
+                    return value[i]
+                if torch.is_tensor(value):
+                    return value[i].item() if value.ndim > 0 else value.item()
+                return value
 
             report = self.report_generator.generate_report(
                 article_text=text,
@@ -290,7 +298,8 @@ class BatchInferenceEngine:
 
         for start in tqdm(range(0, len(df), batch_size), desc="Batch inference"):
             batch_df = df.iloc[start:start + batch_size]
-            texts = batch_df[self.config.text_column].tolist()
+            texts = [str(t) if pd.notna(t) else "" for t in batch_df[self.config.text_column].tolist()]
+            texts = [t for t in texts if t.strip()]
 
             # Metadata columns are optional by module contract.
             has_title = "title" in batch_df.columns

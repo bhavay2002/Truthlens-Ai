@@ -39,7 +39,7 @@ Outputs:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -98,9 +98,18 @@ class InferenceConfigLoader:
             logger.exception("Failed to read configuration file")
             raise RuntimeError("Could not load inference configuration") from exc
 
-        self._validate_config(config_dict)
+        if config_dict is None:
+            config_dict = {}
+        if not isinstance(config_dict, dict):
+            raise TypeError("Configuration file must define a dictionary")
 
-        config = InferenceConfig(**config_dict)
+        self._validate_config(config_dict)
+        allowed = {f.name for f in fields(InferenceConfig)}
+        filtered = {k: v for k, v in config_dict.items() if k in allowed}
+        unknown = sorted(set(config_dict.keys()) - allowed)
+        if unknown:
+            logger.warning("Ignoring unknown inference config keys: %s", unknown)
+        config = InferenceConfig(**filtered)
 
         logger.info("Inference configuration loaded successfully")
 
@@ -114,10 +123,11 @@ class InferenceConfigLoader:
         if not isinstance(config, dict):
             raise TypeError("Configuration file must define a dictionary")
 
+        # Validate only when explicitly set; defaults live in dataclass.
         for field, expected_type in self.REQUIRED_FIELDS.items():
 
             if field not in config:
-                raise ValueError(f"Missing required configuration field: {field}")
+                continue
 
             if not isinstance(config[field], expected_type):
                 raise TypeError(

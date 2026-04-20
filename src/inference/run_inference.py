@@ -23,7 +23,7 @@ Dependencies:
     pathlib
     typing
     sys
-    src.inference.run_inference (PredictionPipeline)
+    src.inference.inference_engine (InferenceEngine)
 Inputs:
     --model_dir : Path to trained model directory
     --article : Single article text
@@ -113,7 +113,11 @@ def load_text_file(path: str | Path) -> List[str]:
 
     texts: List[str] = []
 
-    with file_path.open("r", encoding="utf-8") as f:
+    try:
+        fctx = file_path.open("r", encoding="utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"Input file is not valid UTF-8: {file_path}") from exc
+    with fctx as f:
         for line in f:
             text = line.strip()
             if text:
