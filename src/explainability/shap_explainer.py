@@ -41,6 +41,8 @@ from typing import Any, Callable, Dict, Sequence, Tuple
 
 import numpy as np
 
+from src.explainability.utils_validation import validate_tokens_scores
+
 try:
     import shap
 except ImportError:  # pragma: no cover
@@ -57,7 +59,7 @@ def _process_shap_values(values):
     if isinstance(values, list):
         values = values[0]
 
-    values = np.array(values)
+    values = np.array(values, dtype=float)
 
     if values.ndim > 1:
         values = values.mean(axis=-1)
@@ -176,22 +178,34 @@ def get_explainer(
 def explain_text(
     predict_fn: Callable[[str], Dict[str, Any]],
     text: str,
-):
+) -> Dict[str, Any]:
     """
-    Generate SHAP explanation values for one text sample.
+    Generate SHAP explanation values in a normalized, serializable schema.
     """
 
     if not isinstance(text, str) or not text.strip():
         raise ValueError("text cannot be empty.")
 
     explainer = get_explainer(predict_fn)
-
     shap_values = explainer([text])
-    _ = _process_shap_values(shap_values.values)
+    tokens = list(shap_values.data[0])
+    values = _process_shap_values(shap_values.values[0])
+    min_len = min(len(tokens), len(values))
+    tokens = tokens[:min_len]
+    values = values[:min_len]
+    validate_tokens_scores(tokens, values)
+
+    token_importance = [
+        {"token": str(tok), "importance": float(val)}
+        for tok, val in zip(tokens, values)
+    ]
 
     logger.info("SHAP explanation generated")
 
-    return shap_values
+    return {
+        "text": text,
+        "token_importance": token_importance,
+    }
 
 
 def plot_explanation(
@@ -205,7 +219,8 @@ def plot_explanation(
     if shap is None:
         raise ImportError("SHAP is not installed.")
 
-    shap_values = explain_text(predict_fn, text)
+    explainer = get_explainer(predict_fn)
+    shap_values = explainer([text])
 
     shap.plots.text(shap_values[0])
 
@@ -222,7 +237,8 @@ def save_explanation_html(
     if shap is None:
         raise ImportError("SHAP is not installed.")
 
-    shap_values = explain_text(predict_fn, text)
+    explainer = get_explainer(predict_fn)
+    shap_values = explainer([text])
 
     html = shap.plots.text(shap_values[0], display=False)
 

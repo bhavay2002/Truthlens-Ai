@@ -18,7 +18,8 @@ class AttentionRollout:
         attentions: List[torch.Tensor],
         tokens: List[str],
         sample_index: int,
-    ) -> None:
+        source_token_index: int,
+    ) -> int:
         if not attentions:
             raise ValueError("attentions list cannot be empty")
         if not isinstance(tokens, list) or not tokens:
@@ -47,8 +48,13 @@ class AttentionRollout:
 
         if batch_size is None or sample_index >= batch_size:
             raise ValueError("sample_index out of range")
+        if seq_len is None:
+            raise ValueError("invalid attention tensors")
         if len(tokens) > int(seq_len):
             raise ValueError("tokens length exceeds seq_len")
+        if not (0 <= source_token_index < int(seq_len)):
+            raise ValueError("source_token_index out of range")
+        return int(seq_len)
 
     @staticmethod
     def _aggregate_heads(attention: torch.Tensor, sample_index: int) -> torch.Tensor:
@@ -67,8 +73,9 @@ class AttentionRollout:
         attentions: List[torch.Tensor],
         tokens: List[str],
         sample_index: int = 0,
+        source_token_index: int = 0,
     ) -> Dict[str, List[float]]:
-        self._validate_inputs(attentions, tokens, sample_index)
+        self._validate_inputs(attentions, tokens, sample_index, source_token_index)
 
         try:
             processed: List[torch.Tensor] = []
@@ -81,7 +88,9 @@ class AttentionRollout:
             for layer in processed[1:]:
                 rollout = layer @ rollout
 
-            rollout_scores = rollout[0].detach().cpu().numpy()
+            rollout_scores = rollout[source_token_index].detach().cpu().numpy()
+            rollout_scores = np.asarray(rollout_scores, dtype=float)
+            rollout_scores = np.nan_to_num(rollout_scores, nan=0.0, posinf=0.0, neginf=0.0)
             rollout_scores = np.maximum(rollout_scores, 0.0)
             total = float(np.sum(rollout_scores))
             if total > 0:

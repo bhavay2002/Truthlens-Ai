@@ -150,6 +150,7 @@ class AttentionVisualizer:
     def aggregate_attention(
         self,
         attentions: List[torch.Tensor],
+        sample_index: int = 0,
     ) -> np.ndarray:
         """
         Aggregate attention across layers and heads.
@@ -180,19 +181,26 @@ class AttentionVisualizer:
                         "Each attention tensor must have shape "
                         "(batch, heads, seq_len, seq_len)"
                     )
+                b, _, s1, s2 = tensor.shape
+                if s1 != s2:
+                    raise ValueError("attention matrices must be square")
+                if "batch_size" not in locals():
+                    batch_size = b
+                elif b != batch_size:
+                    raise ValueError("all attention tensors must have same batch size")
 
                 validated_tensors.append(tensor.detach())
 
-            stacked = torch.stack(validated_tensors, dim=0)
+            if not (0 <= sample_index < batch_size):
+                raise ValueError("sample_index out of range")
 
-            # Shape: (layers, batch, heads, seq, seq)
-            avg_attention = stacked.mean(dim=0).mean(dim=1)
+            stacked = torch.stack(validated_tensors, dim=0)  # (layers,batch,heads,seq,seq)
+            avg_attention = stacked[:, sample_index].mean(dim=0).mean(dim=0)  # (seq,seq)
 
-            # Collapse batch dimension
-            if avg_attention.shape[0] == 1:
-                avg_attention = avg_attention[0]
-            else:
-                avg_attention = avg_attention.mean(dim=0)
+            if avg_attention.ndim != 2:
+                raise ValueError("aggregated attention must be 2D")
+            if avg_attention.shape[0] != avg_attention.shape[1]:
+                raise ValueError("aggregated attention must be square")
 
             return avg_attention.cpu().numpy()
 
@@ -230,6 +238,9 @@ class AttentionVisualizer:
 
         if attention_matrix.ndim != 2:
             raise ValueError("attention_matrix must be a 2D matrix")
+
+        if attention_matrix.shape[0] != attention_matrix.shape[1]:
+            raise ValueError("attention_matrix must be square")
 
         if not tokens:
             raise ValueError("tokens cannot be empty")

@@ -31,6 +31,8 @@ class ExplanationConsistency:
         va = np.array([a[t] for t in common], dtype=float)
         vb = np.array([b[t] for t in common], dtype=float)
         validate_tokens_scores(common, va.tolist())
+        if np.std(va) < 1e-12 or np.std(vb) < 1e-12:
+            return 0.0
         c = np.corrcoef(va, vb)[0, 1]
         return 0.0 if np.isnan(c) else float(c)
 

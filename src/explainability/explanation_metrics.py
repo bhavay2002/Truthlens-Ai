@@ -79,7 +79,7 @@ class ExplanationMetrics:
             slots[idx] = tokens[idx]
             text = " ".join([t for t in slots if t])
             preds.append(self._extract_fake_probability(predict_fn(text)))
-        return float(np.mean(np.asarray(preds)))
+        return float(np.trapz(preds))
 
     def evaluate(self, tokens, scores, predict_fn):
         return {

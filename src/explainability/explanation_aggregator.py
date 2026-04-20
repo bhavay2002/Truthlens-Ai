@@ -60,6 +60,15 @@ class ExplanationAggregator:
     def _lime_map(items: List[Tuple[str, float]]) -> Dict[str, float]:
         return {str(t): float(s) for t, s in items}
 
+    @staticmethod
+    def _safe_corr(a: np.ndarray, b: np.ndarray) -> float:
+        if a.size < 2 or b.size < 2:
+            return 0.0
+        if np.std(a) < 1e-12 or np.std(b) < 1e-12:
+            return 0.0
+        c = np.corrcoef(a, b)[0, 1]
+        return 0.0 if np.isnan(c) else float(c)
+
     def aggregate(
         self,
         shap_importance: Optional[List[Dict]] = None,
@@ -81,17 +90,23 @@ class ExplanationAggregator:
         if not sources:
             raise ValueError("No valid explanation sources provided.")
 
-        common = set(sources[0][0].keys())
-        for m, _ in sources[1:]:
-            common &= set(m.keys())
-        if not common:
-            raise ValueError("No common tokens across explanation methods.")
+        all_tokens = set()
+        for m, _ in sources:
+            all_tokens.update(m.keys())
+        if not all_tokens:
+            raise ValueError("No tokens found across explanation methods.")
 
-        tokens = sorted(common)
+        tokens = sorted(all_tokens)
         weighted_rows = []
         for m, w in sources:
-            vec = np.array([m[t] for t in tokens], dtype=float)
-            weighted_rows.append(self._normalize(vec) * w)
+            vec = np.array([m.get(t, 0.0) for t in tokens], dtype=float)
+            mask = np.array([t in m for t in tokens], dtype=float)
+
+            if mask.sum() > 0:
+                vec = vec * mask
+                vec = vec / mask.sum()
+
+            weighted_rows.append(vec * w)
 
         matrix = np.vstack(weighted_rows)
         final_scores = self._normalize(matrix.sum(axis=0))
@@ -102,9 +117,7 @@ class ExplanationAggregator:
         if matrix.shape[0] > 1:
             for i in range(matrix.shape[0]):
                 for j in range(i + 1, matrix.shape[0]):
-                    c = np.corrcoef(matrix[i], matrix[j])[0, 1]
-                    if not np.isnan(c):
-                        corrs.append(c)
+                    corrs.append(self._safe_corr(matrix[i], matrix[j]))
         agreement = float(np.mean(corrs)) if corrs else (1.0 if matrix.shape[0] == 1 else 0.0)
         confidence = float(np.mean(np.max(matrix, axis=1)))
 

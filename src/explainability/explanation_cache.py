@@ -96,7 +96,10 @@ class ExplanationCache:
         if key in self.memory_cache:
             logger.debug("Explanation cache hit (memory)")
             self.memory_cache.move_to_end(key)
-            return self.memory_cache[key]
+            cached = self.memory_cache[key]
+            if cached.get("__version__") != "v1":
+                return None
+            return cached
 
         disk_path = self._disk_path(key)
 
@@ -104,6 +107,9 @@ class ExplanationCache:
             try:
                 with disk_path.open("r", encoding="utf-8") as f:
                     data = json.load(f)
+
+                if data.get("__version__") != "v1":
+                    return None
 
                 self.memory_cache[key] = data
                 self.memory_cache.move_to_end(key)
@@ -127,6 +133,7 @@ class ExplanationCache:
 
         key = self._hash_text(text)
 
+        explanation["__version__"] = "v1"
         self.memory_cache[key] = explanation
         self.memory_cache.move_to_end(key)
 

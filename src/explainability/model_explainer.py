@@ -38,8 +38,10 @@ from typing import Any, Callable, Dict, Optional
 
 from src.explainability.bias_explainer import explain_bias
 from src.explainability.emotion_explainer import explain_emotion
-from src.explainability.lime_explainer import explain_prediction
-from src.explainability.shap_explainer import explain_text
+from src.explainability.lime_explainer import explain_prediction as explain_lime_prediction
+from src.explainability.shap_explainer import explain_text as explain_shap_text
+from src.explainability.token_alignment import align_tokens
+from src.explainability.utils_validation import validate_tokens_scores
 
 logger = logging.getLogger(__name__)
 
@@ -109,15 +111,51 @@ def explain_prediction_full(
     if use_shap:
         shap_explanation = _run_component(
             "SHAP",
-            lambda: explain_text(predict_fn, text),
+            lambda: explain_shap_text(predict_fn, text),
         )
+        if isinstance(shap_explanation, dict):
+            token_items = shap_explanation.get("token_importance")
+            if isinstance(token_items, list) and token_items:
+                tokens = []
+                scores = []
+                for item in token_items:
+                    if not isinstance(item, dict):
+                        continue
+                    token = item.get("token")
+                    score = item.get("importance")
+                    if isinstance(token, str) and isinstance(score, (int, float)):
+                        tokens.append(token)
+                        scores.append(score)
+                if len(tokens) == len(scores) and tokens:
+                    validate_tokens_scores(tokens, scores)
+                    tokens, scores = align_tokens(tokens, scores)
+                    shap_explanation["token_importance"] = [
+                        {"token": t, "importance": float(s)}
+                        for t, s in zip(tokens, scores)
+                    ]
 
     lime_explanation = None
     if use_lime:
         lime_explanation = _run_component(
             "LIME",
-            lambda: explain_prediction(predict_fn, text),
+            lambda: explain_lime_prediction(predict_fn, text),
         )
+        if isinstance(lime_explanation, dict):
+            items = lime_explanation.get("important_features")
+            if isinstance(items, list) and items:
+                tokens = []
+                scores = []
+                for item in items:
+                    if not isinstance(item, (list, tuple)) or len(item) < 2:
+                        continue
+                    token, score = item[0], item[1]
+                    if isinstance(token, str) and isinstance(score, (int, float)):
+                        tokens.append(token)
+                        scores.append(score)
+                if len(tokens) == len(scores) and tokens:
+                    validate_tokens_scores(tokens, scores)
+                    tokens, scores = align_tokens(tokens, scores)
+                    lime_explanation["important_features"] = list(zip(tokens, scores))
 
     results: Dict[str, Any] = {
         "prediction": prediction,
@@ -152,7 +190,7 @@ def explain_fast(
 
     prediction = predict_fn(text)
 
-    lime_explanation = explain_prediction(
+    lime_explanation = explain_lime_prediction(
         predict_fn=predict_fn,
         text=text,
     )

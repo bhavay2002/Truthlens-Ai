@@ -43,7 +43,7 @@ except ImportError:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 _LOCK = threading.RLock()
-_explainer: LimeTextExplainer | None = None
+_CACHE: Dict[str, LimeTextExplainer] = {}
 
 
 def _extract_fake_probability(result: Any) -> float:
@@ -63,7 +63,7 @@ def _extract_fake_probability(result: Any) -> float:
     return prob
 
 
-def get_explainer() -> LimeTextExplainer:
+def get_explainer(model_id: str = "default") -> LimeTextExplainer:
     """
     Lazily initialize and cache a LimeTextExplainer instance.
     """
@@ -73,13 +73,12 @@ def get_explainer() -> LimeTextExplainer:
             "src.explainability.lime_explainer."
         )
 
-    global _explainer
     with _LOCK:
-        if _explainer is None:
+        if model_id not in _CACHE:
             logger.info("Initializing LIME text explainer")
-            _explainer = LimeTextExplainer(class_names=["Real", "Fake"])
+            _CACHE[model_id] = LimeTextExplainer(class_names=["Real", "Fake"])
 
-        return _explainer
+        return _CACHE[model_id]
 
 
 def _extract_fake_probabilities_from_batch(
