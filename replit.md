@@ -93,3 +93,10 @@ python -m uvicorn api.app:app --host 0.0.0.0 --port 5000 --reload \
 
 ## Configuration
 Main config: `config/config.yaml` — model paths, training params, API settings
+
+## Replit Migration Notes
+The following files were created during Replit migration to resolve missing modules:
+- `graph_hardening_patch.py` — Graph utility helpers (normalize_graph_adjacency, to_undirected, spectral_eigen_embedding, etc.) used by all `src/graph/` modules
+- `src/models/ensemble/ensemble_model.py` — EnsembleModel / EnsembleConfig (average & majority-vote strategies)
+- `src/models/ensemble/weighted_ensemble.py` — WeightedEnsembleModel / WeightedEnsembleConfig
+- `src/models/ensemble/stacking_ensemble.py` — StackingEnsembleModel / StackingEnsembleConfig
