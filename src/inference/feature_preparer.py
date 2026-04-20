@@ -70,6 +70,7 @@ from __future__ import annotations
 
 import logging
 import multiprocessing as mp
+from multiprocessing.pool import Pool
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Any
 
@@ -160,7 +161,7 @@ class FeaturePreparer:
         self.scaler = scaler
         self.selector = selector
         self.graph_pipeline: GraphPipeline | None = None
-        self._pool: Optional[mp.pool.Pool] = None
+        self._pool: Optional[Pool] = None
 
         if not config.feature_schema:
             raise ValueError("Feature schema cannot be empty")
@@ -185,7 +186,7 @@ class FeaturePreparer:
             len(self.config.feature_schema),
         )
 
-    def _get_pool(self) -> mp.pool.Pool:
+    def _get_pool(self) -> Pool:
         if self._pool is None:
             try:
                 ctx = mp.get_context("fork")
@@ -194,13 +195,16 @@ class FeaturePreparer:
             self._pool = ctx.Pool(4)
         return self._pool
 
-    def __del__(self) -> None:
+    def close_pool(self) -> None:
+        """
+        Explicitly close worker pool. Prefer this over relying on __del__.
+        """
         if self._pool is not None:
             try:
                 self._pool.close()
                 self._pool.join()
-            except Exception:
-                pass
+            finally:
+                self._pool = None
 
     # -----------------------------------------------------------------------
     # Schema builders
@@ -405,9 +409,6 @@ class FeaturePreparer:
         matrix = self._apply_feature_selection(matrix)
 
         if self.config.return_tensor:
-            if not self.config.apply_scaling and not self.config.apply_feature_selection:
-                return torch.as_tensor(matrix, dtype=torch.float32).pin_memory()
-
             return torch.as_tensor(matrix, dtype=torch.float32).pin_memory()
 
         return matrix

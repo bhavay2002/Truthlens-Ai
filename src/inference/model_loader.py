@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import json
 import logging
-import pickle
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -112,11 +111,16 @@ class ModelLoader:
             return None
 
         try:
-            # 🔥 CPU-first load (critical)
-            model = torch.load(path, map_location="cpu", weights_only=True)
+            # CPU-first load with compatibility fallback across torch versions
+            try:
+                model = torch.load(path, map_location="cpu", weights_only=True)
+            except TypeError:
+                model = torch.load(path, map_location="cpu")
 
             if not isinstance(model, torch.nn.Module):
-                return model
+                if isinstance(model, dict):
+                    raise RuntimeError(f"State dict found at {path}; expected serialized torch.nn.Module")
+                raise RuntimeError(f"Unsupported model object type at {path}: {type(model)}")
 
             # 🔥 Half precision (GPU only)
             if torch.cuda.is_available():

@@ -191,6 +191,10 @@ def edge_count_directed(adjacency: AdjacencySet) -> int:
     return sum(len(neighbors) for neighbors in adjacency.values())
 
 
+# Backward-compatible alias; prefer edge_count_directed or edge_count_undirected.
+edge_count = edge_count_directed
+
+
 def edge_count_undirected(adjacency: AdjacencySet) -> int:
     """
     Count unique undirected edges in adjacency graph.

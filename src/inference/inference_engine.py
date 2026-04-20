@@ -262,7 +262,7 @@ class InferenceEngine:
                     calibrated_probabilities = self._apply_calibration(logits, probabilities)
                 else:
                     probabilities = None
-                    calibrated_probabilities = logits
+                    calibrated_probabilities = None
 
                 ensemble_probabilities = self._apply_ensemble(encoded)
                 if ensemble_probabilities is not None:
@@ -320,6 +320,8 @@ class InferenceEngine:
             raise RuntimeError("Model not loaded")
         if self.tokenizer is None:
             raise RuntimeError("Tokenizer not loaded")
+        if not output_path:
+            raise ValueError("output_path must be non-empty")
 
         dummy = self.tokenizer(
             ["ONNX export"],
@@ -329,15 +331,23 @@ class InferenceEngine:
             max_length=self.config.max_length,
         )
 
-        dummy = {key: value.to(self.device) for key, value in dummy.items()}
+        input_ids = dummy["input_ids"].to(self.device)
+        attention_mask = dummy.get("attention_mask")
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(self.device)
+
+        args = (input_ids,) if attention_mask is None else (input_ids, attention_mask)
 
         torch.onnx.export(
             self.model,
-            (dummy,),
-            output_path,
-            input_names=list(dummy.keys()),
+            args=args,
+            f=output_path,
+            input_names=["input_ids", "attention_mask"],
             output_names=["logits"],
-            dynamic_axes={"input_ids": {0: "batch"}},
+            dynamic_axes={
+                "input_ids": {0: "batch"},
+                "attention_mask": {0: "batch"},
+            },
             opset_version=17,
         )
 

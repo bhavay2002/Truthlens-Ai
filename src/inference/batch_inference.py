@@ -207,7 +207,8 @@ class BatchInferenceEngine:
 
         prepared = torch.as_tensor(prepared, dtype=torch.float32)
 
-        if prepared.device.type == "cpu":
+        # Pin only when CUDA transfer can benefit from it.
+        if prepared.device.type == "cpu" and torch.cuda.is_available():
             prepared = prepared.pin_memory()
 
         with torch.inference_mode(), torch.autocast(
@@ -291,7 +292,17 @@ class BatchInferenceEngine:
             batch_df = df.iloc[start:start + batch_size]
             texts = batch_df[self.config.text_column].tolist()
 
-            metadata_list = batch_df[["title", "source"]].to_dict("records")
+            # Metadata columns are optional by module contract.
+            has_title = "title" in batch_df.columns
+            has_source = "source" in batch_df.columns
+            metadata_list = []
+            for _, row in batch_df.iterrows():
+                metadata_list.append(
+                    {
+                        "title": row["title"] if has_title else None,
+                        "source": row["source"] if has_source else None,
+                    }
+                )
 
             try:
                 batch_results = self._process_batch(texts, metadata_list)

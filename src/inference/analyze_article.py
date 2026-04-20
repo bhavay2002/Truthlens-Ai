@@ -113,6 +113,18 @@ class ArticleAnalyzer:
             self.explanation_report_generator = ExplanationReportGenerator()
         logger.info("ArticleAnalyzer initialized")
 
+    @staticmethod
+    def _to_dict_safe(value: Any) -> Dict[str, Any]:
+        """
+        Convert common metric/feature container outputs to dict safely.
+        Accepts dict or objects exposing to_dict().
+        """
+        if isinstance(value, dict):
+            return value
+        if hasattr(value, "to_dict") and callable(value.to_dict):
+            return value.to_dict()
+        return {}
+
     def _extract_feature_sections(
         self, features: Dict[str, float]
     ) -> Dict[str, Dict[str, float]]:
@@ -240,14 +252,16 @@ class ArticleAnalyzer:
                 if self.analysis_runner is not None
                 else {}
             )
+            if not isinstance(analysis_modules, dict):
+                analysis_modules = {}
 
         except Exception as exc:  # noqa: BLE001
             logger.exception("Article analysis pipeline failed")
             raise RuntimeError("Article analysis failed") from exc
 
         graph_section = {
-            **graph_features.to_dict(),
-            **graph_metrics.to_dict(),
+            **self._to_dict_safe(graph_features),
+            **self._to_dict_safe(graph_metrics),
             **narrative_graph_features,
             **narrative_graph_metrics,
             **(
@@ -308,7 +322,11 @@ class ArticleAnalyzer:
                     },
                     narrative_structure={
                         "features": feature_sections["narrative"],
-                        "analysis_modules": analysis_modules.get("narrative_conflict", {}),
+                        "analysis_modules": (
+                            analysis_modules.get("narrative_conflict", {})
+                            if isinstance(analysis_modules, dict)
+                            else {}
+                        ),
                     },
                     entity_graph={
                         "entity_graph": entity_graph,

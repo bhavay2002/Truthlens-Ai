@@ -37,6 +37,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -101,6 +102,12 @@ class InferenceCache:
         Generate disk cache path.
         """
         return self.cache_dir / f"{key}.json"
+
+    def _safe_write(self, path: Path, data: str) -> None:
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(data)
+        os.replace(tmp, path)
 
     def _is_expired(self, timestamp: float) -> bool:
         """
@@ -178,8 +185,8 @@ class InferenceCache:
             path = self._cache_path(key)
 
             try:
-                with open(path, "w", encoding="utf-8") as f:
-                    json.dump(entry, f)
+                payload = json.dumps(entry)
+                self._safe_write(path, payload)
 
             except Exception as exc:
                 logger.warning("Failed to write disk cache: %s", exc)

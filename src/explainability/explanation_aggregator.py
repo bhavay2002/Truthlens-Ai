@@ -78,96 +78,83 @@ class ExplanationAggregator:
         lime_importance: Optional[List] = None,
     ) -> Dict:
         def _align_input(explanations: List[Dict], key: str) -> List[Dict]:
-            tokens = []
-            scores = []
-            for item in explanations:
-                if not isinstance(item, dict):
-                    continue
-                token = item.get("token")
-                score = item.get(key)
-                if isinstance(token, str) and isinstance(score, (int, float)):
-                    tokens.append(token)
-                    scores.append(score)
+            tokens = [e["token"] for e in explanations if isinstance(e, dict) and "token" in e and key in e]
+            scores = [e[key] for e in explanations if isinstance(e, dict) and "token" in e and key in e]
+
             if not tokens or len(tokens) != len(scores):
                 return explanations
+
             validate_tokens_scores(tokens, scores)
             tokens, scores = align_tokens(tokens, scores)
+
             return [{"token": t, key: float(s)} for t, s in zip(tokens, scores)]
 
-        def _align_lime(items: List) -> List[Tuple[str, float]]:
-            tokens = []
-            scores = []
-            for item in items:
-                if not isinstance(item, (list, tuple)) or len(item) < 2:
+        def _to_token_map(explanations: List[Dict], key: str) -> Dict[str, float]:
+            return {e["token"]: float(e[key]) for e in explanations}
+
+        def aggregate_sources(
+            sources: List[Tuple[List[Dict], str, float]],
+        ) -> Dict[str, float]:
+            aligned: List[Tuple[Dict[str, float], float]] = []
+            for exp, key, weight in sources:
+                exp = _align_input(exp, key)
+                aligned.append((_to_token_map(exp, key), weight))
+
+            token_sets = [set(m.keys()) for m, _ in aligned]
+            if not token_sets:
+                return {}
+            tokens = sorted(set.union(*token_sets))
+
+            final: Dict[str, float] = {}
+            for t in tokens:
+                score = 0.0
+                total_weight = 0.0
+                for m, w in aligned:
+                    if t in m:
+                        score += w * m[t]
+                        total_weight += w
+                if total_weight > 0:
+                    final[t] = score / total_weight
+
+            return final
+
+        sources: List[Tuple[List[Dict], str, float]] = []
+
+        if shap_importance:
+            sources.append((shap_importance, "importance", self.weights.shap))
+        if integrated_gradients:
+            sources.append((integrated_gradients, "importance", self.weights.integrated_gradients))
+        if attention_scores:
+            sources.append((attention_scores, "attention", self.weights.attention))
+
+        if not sources and lime_importance:
+            # LIME uses (token, score) tuples; keep as separate mapping.
+            lime_map = self._lime_map(lime_importance)
+            final_map = lime_map
+        else:
+            final_map = aggregate_sources(sources)
+
+        if lime_importance and sources:
+            lime_map = self._lime_map(lime_importance)
+            for token, score in lime_map.items():
+                if token in final_map:
                     continue
-                token, score = item[0], item[1]
-                if isinstance(token, str) and isinstance(score, (int, float)):
-                    tokens.append(token)
-                    scores.append(score)
-            if not tokens or len(tokens) != len(scores):
-                return items
-            validate_tokens_scores(tokens, scores)
-            tokens, scores = align_tokens(tokens, scores)
-            return list(zip(tokens, scores))
+                final_map[token] = score
 
-        if shap_importance:
-            shap_importance = _align_input(shap_importance, "importance")
-        if integrated_gradients:
-            integrated_gradients = _align_input(integrated_gradients, "importance")
-        if attention_scores:
-            attention_scores = _align_input(attention_scores, "attention")
-        if lime_importance:
-            lime_importance = _align_lime(lime_importance)
-
-        sources: List[Tuple[Dict[str, float], float]] = []
-
-        if shap_importance:
-            sources.append((self._as_map(shap_importance, "importance"), self.weights.shap))
-        if integrated_gradients:
-            sources.append((self._as_map(integrated_gradients, "importance"), self.weights.integrated_gradients))
-        if attention_scores:
-            sources.append((self._as_map(attention_scores, "attention"), self.weights.attention))
-        if lime_importance:
-            sources.append((self._lime_map(lime_importance), self.weights.lime))
-
-        if not sources:
+        if not final_map:
             raise ValueError("No valid explanation sources provided.")
 
-        all_tokens = set()
-        for m, _ in sources:
-            all_tokens.update(m.keys())
-        if not all_tokens:
-            raise ValueError("No tokens found across explanation methods.")
-
-        tokens = sorted(all_tokens)
-        weighted_rows = []
-        for m, w in sources:
-            vec = np.array([m.get(t, 0.0) for t in tokens], dtype=float)
-            present_values = np.array([m[t] for t in tokens if t in m], dtype=float)
-
-            if len(present_values) > 0:
-                norm = np.sum(np.abs(present_values))
-                if norm > 0:
-                    vec = vec / norm
-
-            weighted_rows.append(vec * w)
-
-        matrix = np.vstack(weighted_rows)
-        final_scores = self._normalize(matrix.sum(axis=0))
+        tokens = sorted(final_map.keys())
+        final_scores = np.array([final_map[t] for t in tokens], dtype=float)
+        final_scores = self._normalize(final_scores)
 
         validate_tokens_scores(tokens, final_scores.tolist())
 
-        corrs = []
-        if matrix.shape[0] > 1:
-            for i in range(matrix.shape[0]):
-                for j in range(i + 1, matrix.shape[0]):
-                    corrs.append(self._safe_corr(matrix[i], matrix[j]))
-        agreement = float(np.mean(corrs)) if corrs else (1.0 if matrix.shape[0] == 1 else 0.0)
-        confidence = float(np.mean(np.max(matrix, axis=1)))
+        confidence = float(np.mean(np.abs(final_scores))) if final_scores.size else 0.0
 
         return AggregatedExplanation(
             tokens=tokens,
             final_token_importance=final_scores.tolist(),
             confidence_score=confidence,
-            agreement_score=agreement,
+            agreement_score=0.0,
         ).__dict__
