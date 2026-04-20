@@ -230,18 +230,26 @@ def _split_train_val_test(
         (train_df, val_df, test_df)
     """
     test_ratio = 1.0 - train_ratio - val_ratio
+    labels = df[label_column] if label_column in df.columns else None
+    stratify_labels = None
+    if labels is not None and labels.nunique(dropna=True) > 1:
+        stratify_labels = labels
     train_df, temp_df = train_test_split(
         df,
         test_size=(val_ratio + test_ratio),
         random_state=random_state,
-        stratify=df[label_column] if label_column in df.columns else None,
+        stratify=stratify_labels,
     )
     relative_val = val_ratio / (val_ratio + test_ratio)
+    temp_labels = temp_df[label_column] if label_column in temp_df.columns else None
+    stratify_temp = None
+    if temp_labels is not None and temp_labels.nunique(dropna=True) > 1:
+        stratify_temp = temp_labels
     val_df, test_df = train_test_split(
         temp_df,
         test_size=(1.0 - relative_val),
         random_state=random_state,
-        stratify=temp_df[label_column] if label_column in temp_df.columns else None,
+        stratify=stratify_temp,
     )
     return train_df.reset_index(drop=True), val_df.reset_index(drop=True), test_df.reset_index(drop=True)
 
@@ -320,6 +328,13 @@ def train_model(df: pd.DataFrame, params: dict[str, Any] | None = None):
         epochs=epochs,
     )
 
+    use_cuda = torch.cuda.is_available()
+    use_bf16 = use_cuda and torch.cuda.is_bf16_supported()
+    use_fp16 = use_cuda and (not use_bf16)
+
+    num_workers = min(4, os.cpu_count() or 1)
+    use_workers = num_workers > 0
+
     training_args = TrainingArguments(
 
         output_dir=str(MODELS_DIR),
@@ -342,15 +357,15 @@ def train_model(df: pd.DataFrame, params: dict[str, Any] | None = None):
 
         load_best_model_at_end=True,
 
-        bf16=torch.cuda.is_available() and torch.cuda.is_bf16_supported(),
-        fp16=not torch.cuda.is_bf16_supported(),
+        bf16=use_bf16,
+        fp16=use_fp16,
 
-        optim="adamw_torch_fused",
+        optim="adamw_torch_fused" if use_cuda else "adamw_torch",
 
-        dataloader_num_workers=4,
-        dataloader_pin_memory=True,
-        dataloader_prefetch_factor=2,
-        dataloader_persistent_workers=True,
+        dataloader_num_workers=num_workers,
+        dataloader_pin_memory=use_cuda,
+        dataloader_prefetch_factor=2 if use_workers else None,
+        dataloader_persistent_workers=use_workers,
 
         group_by_length=True,
         length_column_name="length",

@@ -321,6 +321,12 @@ def cross_validate_model(
 
         score = _resolve_metric(metrics, effective_metric)
 
+        model_ref = getattr(trainer, "model", None)
+        del trainer
+        del eval_dataset
+        if model_ref is not None:
+            del model_ref
+
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()
@@ -337,6 +343,10 @@ def cross_validate_model(
         return score
 
     splits = list(skf.split(working_df[text_column], working_df[resolved_label_column]))
+
+    if use_parallel and torch.cuda.is_available():
+        logger.warning("CUDA detected: disabling threaded cross-validation for stability.")
+        use_parallel = False
 
     if use_parallel:
         with ThreadPoolExecutor(max_workers=min(2, os.cpu_count() or 1)) as executor:

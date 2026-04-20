@@ -101,8 +101,11 @@ def _atomic_save(data: dict, path: Path) -> None:
 def _atomic_save_compressed(data: dict, path: Path) -> None:
     """Optional compressed checkpoint."""
     cpu_data = _move_to_cpu(data)
-    with gzip.open(str(path) + ".gz", "wb") as f:
+    final_path = Path(str(path) + ".gz")
+    tmp_path = Path(str(path) + ".tmp.gz")
+    with gzip.open(tmp_path, "wb") as f:
         torch.save(cpu_data, f)
+    tmp_path.replace(final_path)
 
 
 def _copy_to_drive(local_dir: Path, drive_dir: Optional[str | Path]) -> None:
@@ -126,6 +129,30 @@ def _copy_to_drive(local_dir: Path, drive_dir: Optional[str | Path]) -> None:
 
     except Exception as exc:
         logger.warning("Drive sync failed: %s", exc)
+
+
+def _resolve_checkpoint_path(checkpoint_dir: Path) -> Path:
+    """
+    Resolve checkpoint path supporting both uncompressed and compressed formats.
+    """
+    pt = checkpoint_dir / CHECKPOINT_FILE
+    gz = checkpoint_dir / f"{CHECKPOINT_FILE}.gz"
+
+    if pt.exists():
+        return pt
+    if gz.exists():
+        return gz
+
+    candidates = list_checkpoints(checkpoint_dir)
+    if candidates:
+        last = candidates[-1]
+        pt2 = last / CHECKPOINT_FILE
+        gz2 = last / f"{CHECKPOINT_FILE}.gz"
+        if pt2.exists():
+            return pt2
+        if gz2.exists():
+            return gz2
+    raise FileNotFoundError(f"Checkpoint not found in {checkpoint_dir}")
 
 
 # ---------------------------------------------------------
@@ -169,18 +196,11 @@ def save_checkpoint(
         except AttributeError:
             logger.warning("Scheduler has no state_dict()")
 
-    def _save_async():
-        try:
-            if use_compression:
-                _atomic_save_compressed(checkpoint_data, checkpoint_path)
-            else:
-                _atomic_save(checkpoint_data, checkpoint_path)
-
-            logger.info("Checkpoint saved: %s", checkpoint_path)
-        except Exception as e:
-            logger.error("Checkpoint save failed: %s", e)
-
-    threading.Thread(target=_save_async, daemon=True).start()
+    if use_compression:
+        _atomic_save_compressed(checkpoint_data, checkpoint_path)
+    else:
+        _atomic_save(checkpoint_data, checkpoint_path)
+    logger.info("Checkpoint saved: %s", checkpoint_path)
 
     # metadata
     if metadata is not None:
@@ -221,17 +241,13 @@ def load_checkpoint(
 ) -> Dict[str, Any]:
 
     checkpoint_dir = Path(checkpoint_dir)
-    checkpoint_path = checkpoint_dir / CHECKPOINT_FILE
+    checkpoint_path = _resolve_checkpoint_path(checkpoint_dir)
 
-    if not checkpoint_path.exists():
-        candidates = list_checkpoints(checkpoint_dir)
-        if candidates:
-            checkpoint_path = candidates[-1] / CHECKPOINT_FILE
-
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-
-    checkpoint = torch.load(checkpoint_path, map_location=map_location)
+    if str(checkpoint_path).endswith(".gz"):
+        with gzip.open(checkpoint_path, "rb") as f:
+            checkpoint = torch.load(f, map_location=map_location)
+    else:
+        checkpoint = torch.load(checkpoint_path, map_location=map_location)
 
     model.load_state_dict(checkpoint["model_state_dict"], strict=False)
 

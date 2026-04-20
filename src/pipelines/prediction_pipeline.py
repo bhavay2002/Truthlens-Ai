@@ -409,67 +409,13 @@ def predict_text(text: str) -> Dict[str, Any]:
     """
     Run full prediction pipeline on a single text input.
     """
-
-    ensure_non_empty_text(text)
-
-    model, tokenizer, vectorizer = _get_assets()
-    model_text = _prepare_model_text(text, vectorizer)
-
-    inputs = tokenizer(
-        model_text,
-        truncation=True,
-        padding="max_length",
-        max_length=MAX_LENGTH,
-        return_tensors="pt",
-    )
-
-    model_inputs = move_to_device(inputs, _device)
-
-    with torch.no_grad():
-        outputs = model(**model_inputs)
-        logits = outputs.logits
-        probs = torch.softmax(logits, dim=1)
-        confidence, pred_class = torch.max(probs, dim=1)
-
-    id2label = _resolve_id2label(model)
-    prediction = _label_for_index(int(pred_class.item()), id2label)
-    confidence_value = float(confidence.item())
-
-    probabilities: Dict[str, float] = {}
-    for i in range(int(probs.shape[1])):
-        label = _label_for_index(i, id2label)
-        probabilities[label] = float(probs[0][i].item())
-
-    graph_features: Dict[str, float] = {}
-    graph_summary: Dict[str, Any] = {}
-    try:
-        if _graph_feature_extractor is not None:
-            graph_features = _graph_feature_extractor.extract_features(text)
-        if _graph_pipeline is not None:
-            pipeline_output = _graph_pipeline.run(text)
-            graph_summary = {
-                "entity_graph_metrics": pipeline_output.get("entity_graph_metrics", {}),
-                "narrative_graph_metrics": pipeline_output.get("narrative_graph_metrics", {}),
-            }
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Graph enrichment skipped during module prediction: %s", exc)
-
-    return {
-        "prediction": prediction,
-        "confidence": confidence_value,
-        "probabilities": probabilities,
-        "graph_features": graph_features,
-        "graph_summary": graph_summary,
-    }
+    predictor = Predictor()
+    return predictor.predict(text)
 
 
 def predict_batch(texts: List[str]) -> List[Dict[str, Any]]:
     """
     Run prediction pipeline for a list of texts.
     """
-
-    normalized = ensure_non_empty_text_list(texts)
-    for idx, text in enumerate(normalized):
-        ensure_non_empty_text(text, name=f"texts[{idx}]")
-
-    return [predict_text(text) for text in normalized]
+    predictor = Predictor()
+    return predictor.predict_batch(texts)

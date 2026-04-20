@@ -46,6 +46,15 @@ except ImportError:  # pragma: no cover - optional dependency
 
 logger = logging.getLogger(__name__)
 
+_NLP = None
+
+
+def _get_nlp():
+    global _NLP
+    if _NLP is None:
+        _NLP = spacy.load("en_core_web_sm")
+    return _NLP
+
 
 @dataclass
 class PreprocessingResult:
@@ -184,7 +193,7 @@ class PreprocessingPipeline:
 
         with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
             futures = {
-                executor.submit(self._process_text_static, text): idx
+                executor.submit(PreprocessingPipeline._process_text_static, text): idx
                 for idx, text in enumerate(texts)
             }
 
@@ -211,7 +220,7 @@ class PreprocessingPipeline:
         """
 
         try:
-            nlp = spacy.load("en_core_web_sm")
+            nlp = _get_nlp()
 
             normalized_text = text.strip()
             normalized_text = re.sub(r"\s+", " ", normalized_text)

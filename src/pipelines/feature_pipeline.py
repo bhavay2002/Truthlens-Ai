@@ -92,6 +92,14 @@ class FeaturePipeline:
             flat_features = self._core.extract(context)
             groups = self._split_feature_groups(flat_features)
 
+            embedding = None
+            if isinstance(flat_features, dict):
+                embedding = flat_features.get("embedding")
+            if embedding is None:
+                embedding = np.zeros(1, dtype=np.float32)
+            else:
+                embedding = np.asarray(embedding, dtype=np.float32)
+
             entity_graph = self.entity_graph_builder.build_graph(text)
             graph_features = self.entity_graph_builder.extract_graph_features(entity_graph)
             graph_metrics = self.graph_analyzer.analyze(entity_graph)
@@ -102,7 +110,7 @@ class FeaturePipeline:
 
         return FeatureBundle(
             tokens=context.tokens or self._tokenize(text),
-            embedding=np.asarray([], dtype=np.float32),
+            embedding=embedding,
             bias=groups["bias"],
             narrative=groups["narrative"],
             discourse=groups["discourse"],

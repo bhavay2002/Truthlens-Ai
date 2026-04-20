@@ -192,16 +192,24 @@ def run_optuna(
 
     df = df[df[label_column].notna()].reset_index(drop=True)
 
+    stratify_labels = df[label_column]
+    if stratify_labels.nunique(dropna=True) <= 1:
+        stratify_labels = None
+
     train_df, val_df = train_test_split(
         df,
         test_size=0.2,
-        stratify=df[label_column],
+        stratify=stratify_labels,
         random_state=seed,
     )
 
     n_trials = n_trials or SETTINGS.training.optuna_trials
     metric_name = metric_name or SETTINGS.training.optuna_metric
     direction = direction or SETTINGS.training.optuna_direction
+    if direction not in _VALID_OPTIMIZATION_DIRECTIONS:
+        raise ValueError(
+            f"direction must be one of {_VALID_OPTIMIZATION_DIRECTIONS}"
+        )
 
     try:
         import optuna

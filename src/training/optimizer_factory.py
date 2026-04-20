@@ -171,10 +171,12 @@ def create_optimizer(
 
     elif optimizer_key == "sgd":
 
+        momentum = kwargs.pop("momentum", 0.9)
+
         optimizer = optimizer_class(
             param_groups,
             lr=learning_rate,
-            momentum=kwargs.get("momentum", 0.9),
+            momentum=momentum,
             **kwargs,
         )
 
