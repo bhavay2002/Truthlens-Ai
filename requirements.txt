@@ -96,3 +96,11 @@ transformers>=4.35,<5.0
 uvicorn[standard]>=0.24,<1.0
 vaderSentiment>=3.3,<4.0
 wordcloud>=1.9,<2.0
+fastapi
+gunicorn
+joblib
+networkx
+pydantic
+pyyaml
+tqdm
+uvicorn[standard]
