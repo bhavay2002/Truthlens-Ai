@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from threading import Lock
 from typing import Any, List, Optional, Tuple
 
 import torch
@@ -13,6 +14,7 @@ DEFAULT_FAKE_INDEX = 1
 
 _cached_tokenizer: Optional[Any] = None
 _cached_model: Optional[Any] = None
+_cache_lock = Lock()
 
 
 def load_model_and_tokenizer() -> Tuple[Any, Any]:
@@ -20,6 +22,10 @@ def load_model_and_tokenizer() -> Tuple[Any, Any]:
 
     if _cached_tokenizer is not None and _cached_model is not None:
         return _cached_tokenizer, _cached_model
+
+    with _cache_lock:
+        if _cached_tokenizer is not None and _cached_model is not None:
+            return _cached_tokenizer, _cached_model
 
     from src.models.registry.model_registry import ModelRegistry
 
@@ -82,11 +88,20 @@ def _extract_probs(outputs: Any, model: Any) -> "torch.Tensor":
             logits = propaganda.get("logits")
             if logits is not None:
                 probs = torch.softmax(logits, dim=1)
+            elif "probabilities" in propaganda:
+                probs = propaganda["probabilities"]
             else:
                 raise ValueError("MultiTask model output missing propaganda probabilities")
+        if probs.ndim != 2 or probs.shape[1] < 2:
+            raise ValueError(f"Expected [batch,>=2] probabilities, got shape {tuple(probs.shape)}")
         return probs
     else:
-        return torch.softmax(outputs.logits, dim=1)
+        if not hasattr(outputs, "logits"):
+            raise ValueError("Model output missing logits")
+        probs = torch.softmax(outputs.logits, dim=1)
+        if probs.ndim != 2 or probs.shape[1] < 2:
+            raise ValueError(f"Expected [batch,>=2] probabilities, got shape {tuple(probs.shape)}")
+        return probs
 
 
 def predict_batch(texts: List[str]) -> List[List[float]]:
@@ -135,7 +150,7 @@ def predict(text: str) -> dict[str, float | str]:
         probs = _extract_probs(outputs, model)
 
     probs_cpu = probs.cpu()
-    fake_index = 1
+    fake_index = _resolve_fake_index(model)
     pred_index = int(torch.argmax(probs_cpu, dim=1).item())
 
     fake_probability = float(probs_cpu[0, fake_index].item())
