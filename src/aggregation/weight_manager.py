@@ -36,14 +36,18 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 DEFAULT_WEIGHTS: Dict[str, float] = {
-    "bias": 0.4,
-    "emotion": 0.35,
-    "narrative": 0.25,
-    "analysis_influence_manipulation": 0.15,
-    "discourse": 0.5,
-    "graph": 0.3,
-    "credibility_bias_penalty": 0.2,
+    # Manipulation group (additive, normalised to sum=1)
+    "bias": 0.40,
+    "emotion": 0.30,
+    "narrative": 0.20,
+    "analysis_influence_manipulation": 0.10,
+    # Credibility group (additive terms only; penalty excluded from normalisation)
+    "discourse": 0.55,
+    "graph": 0.35,
     "analysis_influence_credibility": 0.10,
+    # Standalone penalty — used as subtraction, not normalised with group
+    "credibility_bias_penalty": 0.20,
+    # Final composite (normalised to sum=1)
     "final_credibility": 0.5,
     "final_manipulation": 0.3,
     "final_ideology": 0.2,
@@ -53,7 +57,11 @@ ALLOWED_WEIGHT_KEYS = set(DEFAULT_WEIGHTS.keys())
 
 WEIGHT_GROUPS = {
     "manipulation": ("bias", "emotion", "narrative", "analysis_influence_manipulation"),
-    "credibility": ("discourse", "graph", "credibility_bias_penalty", "analysis_influence_credibility"),
+    # credibility_bias_penalty is used as a *subtraction* in the scoring
+    # formula; normalising it together with additive terms would corrupt the
+    # formula semantics.  Exclude it from group normalisation so it retains
+    # its absolute value.
+    "credibility": ("discourse", "graph", "analysis_influence_credibility"),
     "final": ("final_credibility", "final_manipulation", "final_ideology"),
 }
 

@@ -160,6 +160,13 @@ class AggregationPipeline:
                 normalized_profile[section] = features.copy()
                 continue
 
+            # Skip normalization for single-value sections: min-max on a
+            # scalar always yields the constant midpoint (0.5), destroying
+            # the original binary signal (e.g. bias_prediction: 1.0 → 0.5).
+            if len(numeric_keys) == 1:
+                normalized_profile[section] = features.copy()
+                continue
+
             values = [features[k] for k in numeric_keys]
             norm_values = normalize_minmax(values)
             normalized_section = dict(features)

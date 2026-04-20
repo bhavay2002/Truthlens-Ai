@@ -204,7 +204,7 @@ class PropagandaDetector(BaseModel):
             "logits": logits,
             "probabilities": probabilities,
             "predictions": predictions,
-                if not ((labels >= 0).all() and (labels < self.NUM_CLASSES).all()):
+            "confidence": confidence,
             "embeddings": pooled_output,
         }
 
@@ -219,6 +219,11 @@ class PropagandaDetector(BaseModel):
 
             if labels.dim() != 1:
                 raise ValueError("labels must be 1D tensor")
+
+            if not ((labels >= 0).all() and (labels < self.NUM_CLASSES).all()):
+                raise ValueError(
+                    f"labels contain values outside [0, {self.NUM_CLASSES})"
+                )
 
             loss = self.loss_fn(logits, labels.long())
 

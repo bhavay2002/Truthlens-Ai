@@ -209,7 +209,12 @@ class PreprocessingPipeline:
                     )
                     raise RuntimeError("Parallel preprocessing failed") from exc
 
-        return [res for res in results if res is not None]
+        # All entries in `results` are populated when we reach this point:
+        # any worker failure raises RuntimeError above before we return,
+        # so the `if res is not None` filter is dead code that would silently
+        # shorten the output list and break positional correspondence with the
+        # input `texts`.
+        return results  # type: ignore[return-value]
 
     @staticmethod
     def _process_text_static(text: str) -> PreprocessingResult:

@@ -47,20 +47,24 @@ logger = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class ScoreWeights:
-    bias: float = 0.4
-    emotion: float = 0.35
-    narrative: float = 0.25
+    # Manipulation group — additive terms must sum to 1.0
+    bias: float = 0.40
+    emotion: float = 0.30
+    narrative: float = 0.20
+    analysis_influence_manipulation: float = 0.10
 
-    discourse: float = 0.5
-    graph: float = 0.3
-    credibility_bias_penalty: float = 0.2
+    # Credibility group — additive terms must sum to 1.0
+    # credibility_bias_penalty is a standalone subtraction, not normalised
+    # with the additive terms (see BUG-9 / weight_manager.py).
+    discourse: float = 0.55
+    graph: float = 0.35
+    analysis_influence_credibility: float = 0.10
+    credibility_bias_penalty: float = 0.20
 
+    # Final composite — sum must equal 1.0
     final_credibility: float = 0.5
     final_manipulation: float = 0.3
     final_ideology: float = 0.2
-
-    analysis_influence_manipulation: float = 0.15
-    analysis_influence_credibility: float = 0.10
 
 
 SCORE_VECTOR_ORDER: tuple[str, ...] = (

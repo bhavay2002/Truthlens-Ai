@@ -202,7 +202,11 @@ class BiasClassifier(BaseModel):
                 raise ValueError("labels must be 1D tensor")
 
             if not ((labels >= 0).all() and (labels < self.NUM_CLASSES).all()):
+                raise ValueError(
+                    f"labels contain values outside [0, {self.NUM_CLASSES})"
+                )
 
+            loss = self.loss_fn(logits, labels.long())
             outputs["loss"] = loss
 
         return outputs

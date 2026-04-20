@@ -116,6 +116,9 @@ class TransformerEncoder(BaseModel):
 
         self.hidden_size: int = self.config.hidden_size
         self.gradient_checkpointing_enabled: bool = False
+        # Cached frozen-state flag; updated by freeze() / unfreeze().
+        # Avoids an O(n_params) iteration on every forward call.
+        self._encoder_frozen: bool = False
 
         if gradient_checkpointing:
             self.gradient_checkpointing_enable()
@@ -166,11 +169,9 @@ class TransformerEncoder(BaseModel):
             attention_mask = attention_mask.to(self.device, non_blocking=True)
 
         try:
-            encoder_is_frozen = not any(
-                parameter.requires_grad for parameter in self.encoder.parameters()
-            )
-
-            if encoder_is_frozen:
+            # Use the cached frozen flag instead of iterating all parameters
+            # on every forward call (O(n_params) per inference step).
+            if self._encoder_frozen:
                 with torch.no_grad():
                     outputs = self.encoder(
                         input_ids=input_ids,
@@ -249,6 +250,7 @@ class TransformerEncoder(BaseModel):
         for param in self.encoder.parameters():
             param.requires_grad = False
 
+        self._encoder_frozen = True
         logger.info("Transformer encoder parameters frozen")
 
     def unfreeze(self) -> None:
@@ -259,6 +261,7 @@ class TransformerEncoder(BaseModel):
         for param in self.encoder.parameters():
             param.requires_grad = True
 
+        self._encoder_frozen = False
         logger.info("Transformer encoder parameters unfrozen")
 
     def get_hidden_size(self) -> int:

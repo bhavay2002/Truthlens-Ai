@@ -190,9 +190,9 @@ def explain_fast(
 
     prediction = predict_fn(text)
 
-    lime_explanation = explain_lime_prediction(
-        predict_fn=predict_fn,
-        text=text,
+    lime_explanation = _run_component(
+        "LIME",
+        lambda: explain_lime_prediction(predict_fn=predict_fn, text=text),
     )
 
     return {
