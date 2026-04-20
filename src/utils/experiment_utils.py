@@ -186,6 +186,11 @@ def log_experiment(
 
         return path
 
-    except Exception as exc:
+    except (TypeError, ValueError):
+        raise
+    except OSError as exc:
+        logger.exception("Failed to write experiment log file")
+        raise RuntimeError("Experiment logging failed due to file I/O error") from exc
+    except RuntimeError as exc:
         logger.exception("Failed to log experiment")
         raise RuntimeError("Experiment logging failed") from exc

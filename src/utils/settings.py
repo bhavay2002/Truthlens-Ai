@@ -126,11 +126,6 @@ def _as_existing_or_resolved(path: Path) -> Path:
     return path.resolve()
 
 
-def _ensure_dir(path: Path):
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
 def _as_int_tuple(value: Any, fallback: tuple[int, ...]) -> tuple[int, ...]:
     if not isinstance(value, list) or not value:
         return fallback

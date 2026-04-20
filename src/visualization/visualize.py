@@ -137,6 +137,12 @@ def plot_roc_curve(
     y_true = _ensure_numpy(y_true)
     y_scores = _ensure_numpy(y_scores)
 
+    if y_true.ndim != 1 or y_scores.ndim != 1:
+        raise ValueError("y_true and y_scores must be 1D arrays")
+
+    if y_true.shape[0] != y_scores.shape[0]:
+        raise ValueError("y_true and y_scores must have same length")
+
     fpr, tpr, _ = roc_curve(y_true, y_scores)
     roc_auc = auc(fpr, tpr)
 
@@ -173,6 +179,12 @@ def plot_precision_recall_curve(
     y_true = _ensure_numpy(y_true)
     y_scores = _ensure_numpy(y_scores)
 
+    if y_true.ndim != 1 or y_scores.ndim != 1:
+        raise ValueError("y_true and y_scores must be 1D arrays")
+
+    if y_true.shape[0] != y_scores.shape[0]:
+        raise ValueError("y_true and y_scores must have same length")
+
     precision, recall, _ = precision_recall_curve(y_true, y_scores)
 
     fig, ax = plt.subplots()
@@ -206,6 +218,15 @@ def plot_calibration_curve(
 
     y_true = _ensure_numpy(y_true)
     y_prob = _ensure_numpy(y_prob)
+
+    if not isinstance(n_bins, int) or n_bins < 2:
+        raise ValueError("n_bins must be an integer >= 2")
+
+    if y_true.ndim != 1 or y_prob.ndim != 1:
+        raise ValueError("y_true and y_prob must be 1D arrays")
+
+    if y_true.shape[0] != y_prob.shape[0]:
+        raise ValueError("y_true and y_prob must have same length")
 
     prob_true, prob_pred = calibration_curve(
         y_true,
@@ -278,6 +299,12 @@ def plot_feature_importance(
 
     scores = _ensure_numpy(scores)
 
+    if not isinstance(top_k, int) or top_k < 1:
+        raise ValueError("top_k must be >= 1")
+
+    if scores.ndim != 1:
+        raise ValueError("scores must be a 1D array")
+
     if len(features) != len(scores):
         raise ValueError("features and scores length mismatch")
 
@@ -334,7 +361,12 @@ def plot_embedding_projection(
         perplexity = min(30.0, float(n_samples - 1))
         if perplexity < 1.0:
             raise ValueError("Not enough samples for t-SNE")
-        reducer = TSNE(n_components=2, perplexity=perplexity)
+        reducer = TSNE(
+            n_components=2,
+            perplexity=perplexity,
+            random_state=42,
+            init="pca",
+        )
 
     else:
         raise ValueError("method must be 'pca' or 'tsne'")

@@ -105,6 +105,7 @@ def _ensure_stream_handler(
 
     has_stream_handler = any(
         isinstance(handler, logging.StreamHandler)
+        and not isinstance(handler, logging.FileHandler)
         for handler in logger.handlers
     )
 

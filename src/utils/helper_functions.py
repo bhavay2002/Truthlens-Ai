@@ -158,6 +158,11 @@ def to_path(path: str | Path) -> Path:
     if isinstance(path, Path):
         return path
 
+    if not isinstance(path, str):
+        raise TypeError(
+            f"path must be str or Path, got {type(path).__name__}"
+        )
+
     return Path(path)
 
 

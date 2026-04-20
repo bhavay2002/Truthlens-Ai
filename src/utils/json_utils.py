@@ -42,15 +42,17 @@ from threading import Lock
 logger = logging.getLogger(__name__)
 
 _FILE_LOCKS: dict[str, Lock] = {}
+_LOCKS_GUARD = Lock()
 
 
 def _get_lock(path: Path) -> Lock:
     key = str(path.resolve())
-    lock = _FILE_LOCKS.get(key)
-    if lock is None:
-        lock = Lock()
-        _FILE_LOCKS[key] = lock
-    return lock
+    with _LOCKS_GUARD:
+        lock = _FILE_LOCKS.get(key)
+        if lock is None:
+            lock = Lock()
+            _FILE_LOCKS[key] = lock
+        return lock
 
 
 @contextmanager
@@ -203,6 +205,8 @@ def append_json(
             if path_obj.exists():
                 with path_obj.open("r", encoding="utf-8") as file:
                     data = json.load(file)
+                if data is None:
+                    data = []
                 if not isinstance(data, list):
                     raise ValueError(
                         "JSON file must contain a list in order to append entries"
@@ -217,8 +221,9 @@ def append_json(
         logger.info("Appended entry to JSON file: %s", path_obj)
         return path_obj
 
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, json.JSONDecodeError):
         raise
-    except Exception as exc:
-        logger.exception("Failed to append JSON entry")
+    except OSError as exc:
         raise RuntimeError(f"Unable to append JSON entry to {path}") from exc
+    except Exception:
+        raise

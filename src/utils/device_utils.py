@@ -258,7 +258,13 @@ def set_cuda_device(index: int):
 # =========================================================
 
 def is_primary_process() -> bool:
-    return not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
+    if not torch.distributed.is_available():
+        return True
+
+    if not torch.distributed.is_initialized():
+        return True
+
+    return torch.distributed.get_rank() == 0
 
 
 # =========================================================
