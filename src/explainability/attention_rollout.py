@@ -86,7 +86,9 @@ class AttentionRollout:
 
             rollout = processed[0]
             for layer in processed[1:]:
-                rollout = layer @ rollout
+                # Correct order: accumulate left-to-right (input → output).
+                # layer @ rollout would reverse the flow direction.
+                rollout = rollout @ layer
 
             rollout_scores = rollout[source_token_index].detach().cpu().numpy()
             rollout_scores = np.asarray(rollout_scores, dtype=float)

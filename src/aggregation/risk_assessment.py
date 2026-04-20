@@ -81,31 +81,6 @@ def assess_risk_levels(
 
 
 def assess_truthlens_risks(scores: Dict[str, float]) -> Dict[str, str]:
-    if not isinstance(scores, dict):
-        raise ValueError("scores must be a dictionary")
-
-    output: Dict[str, str] = {}
-    for score_key, risk_key in TRUTHLENS_RISK_KEY_MAP.items():
-        if score_key in scores:
-            output[risk_key] = score_to_risk_level(scores[score_key])
-
-    return output
-                raise TypeError(msg)
-            logger.warning(msg)
-            skipped.append(key)
-            continue
-
-        risk_levels[key] = score_to_risk_level(value)
-
-    logger.info("Risk assessment completed")
-
-    if return_meta:
-        return {"risk_levels": risk_levels, "skipped_keys": skipped}
-
-    return risk_levels
-
-
-def assess_truthlens_risks(scores: Dict[str, float]) -> Dict[str, str]:
     """
     Generate human-readable risk assessment for core TruthLens metrics.
     """

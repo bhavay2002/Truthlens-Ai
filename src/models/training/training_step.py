@@ -149,7 +149,7 @@ class TrainingStep:
         batch = self._move_batch_to_device(batch)
 
         with torch.autocast(
-            device_type="cuda",
+            device_type="cuda" if torch.cuda.is_available() else "cpu",
             dtype=self.autocast_dtype,
             enabled=self.use_amp,
         ):
@@ -196,11 +196,9 @@ class TrainingStep:
 
                 self.checkpoint_manager.save_checkpoint(
                     step=step + 1,
-                    model_state_dict=self.model.state_dict(),
-                    optimizer_state_dict=self.optimizer.state_dict(),
-                    scheduler_state_dict=(
-                        self.scheduler.state_dict() if self.scheduler else None
-                    ),
+                    model=self.model,
+                    optimizer=self.optimizer,
+                    scheduler=self.scheduler,
                     metadata={"step_loss": float(raw_loss.detach().item())},
                 )
 

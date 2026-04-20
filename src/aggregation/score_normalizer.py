@@ -42,7 +42,12 @@ EPS = 1e-12
 
 
 def _to_array(values: Iterable[float]) -> np.ndarray:
-    """Convert input to numpy array with validation."""
+    """Convert input to numpy array with validation.
+
+    Non-finite values (NaN / ±inf) that can originate from upstream analysis
+    modules are replaced with 0.0 and logged as a warning rather than raising
+    an exception, keeping the pipeline alive.
+    """
 
     try:
         arr = np.asarray(list(values), dtype=np.float32)
@@ -53,7 +58,10 @@ def _to_array(values: Iterable[float]) -> np.ndarray:
         raise ValueError("values cannot be empty")
 
     if not np.isfinite(arr).all():
-        raise ValueError("values contain NaN or infinite values")
+        logger.warning(
+            "Non-finite values detected in normalizer input; replacing with 0.0"
+        )
+        arr = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=0.0)
 
     return arr
 

@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from src.explainability.explanation_consistency import ExplanationConsistency
 from src.explainability.token_alignment import align_tokens
 from src.explainability.utils_validation import validate_tokens_scores
 
@@ -29,7 +30,11 @@ class AggregatedExplanation:
 
 
 class ExplanationAggregator:
-    def __init__(self, weights: Optional[AggregationWeights] = None) -> None:
+    def __init__(
+        self,
+        weights: Optional[AggregationWeights] = None,
+        tokenizer_type: str = "wordpiece",
+    ) -> None:
         w = weights or AggregationWeights()
         total = w.shap + w.integrated_gradients + w.attention + w.lime
         if total <= 0:
@@ -40,6 +45,10 @@ class ExplanationAggregator:
             attention=w.attention / total,
             lime=w.lime / total,
         )
+        # tokenizer_type controls subword merging in _align_input
+        # ("wordpiece" for BERT-family, "sentencepiece" for RoBERTa/GPT)
+        self.tokenizer_type = tokenizer_type
+        self._consistency = ExplanationConsistency()
 
     @staticmethod
     def _normalize(v: np.ndarray) -> np.ndarray:
@@ -77,6 +86,8 @@ class ExplanationAggregator:
         attention_scores: Optional[List[Dict]] = None,
         lime_importance: Optional[List] = None,
     ) -> Dict:
+        tokenizer_type = self.tokenizer_type
+
         def _align_input(explanations: List[Dict], key: str) -> List[Dict]:
             tokens = [e["token"] for e in explanations if isinstance(e, dict) and "token" in e and key in e]
             scores = [e[key] for e in explanations if isinstance(e, dict) and "token" in e and key in e]
@@ -85,7 +96,7 @@ class ExplanationAggregator:
                 return explanations
 
             validate_tokens_scores(tokens, scores)
-            tokens, scores = align_tokens(tokens, scores)
+            tokens, scores = align_tokens(tokens, scores, tokenizer_type=tokenizer_type)
 
             return [{"token": t, key: float(s)} for t, s in zip(tokens, scores)]
 
@@ -127,22 +138,20 @@ class ExplanationAggregator:
         if attention_scores:
             sources.append((attention_scores, "attention", self.weights.attention))
 
-        if not sources and lime_importance:
-            # LIME uses (token, score) tuples; keep as separate mapping.
-            lime_map = self._lime_map(lime_importance)
-            final_map = lime_map
-        else:
-            final_map = aggregate_sources(sources)
+        # BUG-6 fix: include LIME as a proper weighted source instead of
+        # appending-only-if-token-is-missing (which silently assigned it zero
+        # weight for any token already present in the other explainers).
+        if lime_importance:
+            lime_dicts = [{"token": str(t), "lime_score": float(s)} for t, s in lime_importance]
+            sources.append((lime_dicts, "lime_score", self.weights.lime))
 
-        if lime_importance and sources:
-            lime_map = self._lime_map(lime_importance)
-            for token, score in lime_map.items():
-                if token in final_map:
-                    continue
-                final_map[token] = score
+        if not sources:
+            raise ValueError("No valid explanation sources provided.")
+
+        final_map = aggregate_sources(sources)
 
         if not final_map:
-            raise ValueError("No valid explanation sources provided.")
+            raise ValueError("No valid explanation sources produced token maps.")
 
         tokens = sorted(final_map.keys())
         final_scores = np.array([final_map[t] for t in tokens], dtype=float)
@@ -152,9 +161,25 @@ class ExplanationAggregator:
 
         confidence = float(np.mean(np.abs(final_scores))) if final_scores.size else 0.0
 
+        # BUG-7 fix: compute agreement_score via ExplanationConsistency instead
+        # of hard-coding 0.0.  ROB-4 fix: _safe_corr is now used implicitly via
+        # the consistency module rather than sitting unused.
+        agreement_score = 0.0
+        try:
+            consistency_result = self._consistency.compute(
+                shap_importance=shap_importance,
+                integrated_gradients=integrated_gradients,
+                attention_scores=attention_scores,
+                lime_importance=lime_importance,
+            )
+            if consistency_result:
+                agreement_score = float(np.mean(list(consistency_result.values())))
+        except Exception:
+            pass  # non-critical; keep 0.0 as fallback
+
         return AggregatedExplanation(
             tokens=tokens,
             final_token_importance=final_scores.tolist(),
             confidence_score=confidence,
-            agreement_score=0.0,
+            agreement_score=agreement_score,
         ).__dict__

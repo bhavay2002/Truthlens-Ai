@@ -158,8 +158,8 @@ class ModelFactory:
 
         logger.info("Creating model: %s", normalized_model_type)
 
-            import copy
-            merged_config = copy.deepcopy(config)
+        import copy
+        merged_config = copy.deepcopy(config)
         merged_config.update(ModelFactory._resolve_encoder_fields(config))
         merged_config.update(ModelFactory._resolve_regression_fields(config))
 

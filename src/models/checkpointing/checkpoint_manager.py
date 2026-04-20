@@ -80,7 +80,10 @@ class AsyncCheckpointWriter:
                 self._queue.task_done()
                 self._queue.put_nowait((path, obj))
             except queue.Empty:
-                pass
+                logger.error(
+                    "Checkpoint save dropped due to race condition on full queue: %s",
+                    path,
+                )
 
     def flush(self):
         self._queue.join()
@@ -257,7 +260,7 @@ class CheckpointManager:
         if not path.exists():
             raise FileNotFoundError(path)
 
-        return torch.load(path, map_location="cpu")
+        return torch.load(path, map_location="cpu", weights_only=True)
 
     # -------------------------------------------------
     # List + Latest

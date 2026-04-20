@@ -243,11 +243,21 @@ def load_checkpoint(
 
     if str(checkpoint_path).endswith(".gz"):
         with gzip.open(checkpoint_path, "rb") as f:
-            checkpoint = torch.load(f, map_location=map_location)
+            checkpoint = torch.load(f, map_location=map_location, weights_only=True)
     else:
-        checkpoint = torch.load(checkpoint_path, map_location=map_location)
+        checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=True)
 
-    model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+    load_result = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+    if load_result.missing_keys:
+        logger.warning(
+            "load_checkpoint: missing keys in checkpoint (will be randomly initialised): %s",
+            load_result.missing_keys,
+        )
+    if load_result.unexpected_keys:
+        logger.warning(
+            "load_checkpoint: unexpected keys in checkpoint (will be ignored): %s",
+            load_result.unexpected_keys,
+        )
 
     if optimizer is not None and "optimizer_state_dict" in checkpoint:
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])

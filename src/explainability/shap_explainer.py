@@ -54,6 +54,11 @@ _MAX_EXPLAINER_CACHE_SIZE = 8
 _EXPLAINER_CACHE: "OrderedDict[Tuple[Any, ...], Any]" = OrderedDict()
 _LOCK = threading.RLock()
 
+# Cache for computed SHAP Explanation objects so plot_explanation /
+# save_explanation_html do not re-run the (expensive) perturbation loop.
+_MAX_VALUE_CACHE_SIZE = 64
+_VALUE_CACHE: "OrderedDict[Tuple[Any, ...], Any]" = OrderedDict()
+
 
 def _process_shap_values(values):
     if isinstance(values, list):
@@ -62,7 +67,10 @@ def _process_shap_values(values):
     values = np.array(values, dtype=float)
 
     if values.ndim > 1:
-        values = values.mean(axis=-1)
+        # For multi-class SHAP, take attributions for class index 1 (the
+        # "fake" / positive class).  Averaging over classes produces near-zero
+        # values for binary symmetric SHAP and destroys the attribution signal.
+        values = values[:, 1]
 
     return values
 
@@ -175,6 +183,32 @@ def get_explainer(
         return _EXPLAINER_CACHE[cache_key]
 
 
+def _get_shap_values(
+    predict_fn: Callable[[str], Dict[str, Any]],
+    text: str,
+) -> Any:
+    """
+    Return SHAP Explanation object for (predict_fn, text), using a
+    bounded LRU cache to avoid recomputing across plot/save/explain calls.
+    """
+    cache_key = _cache_key_for_predict_fn(predict_fn) + (text,)
+    with _LOCK:
+        if cache_key in _VALUE_CACHE:
+            _VALUE_CACHE.move_to_end(cache_key)
+            return _VALUE_CACHE[cache_key]
+
+    explainer = get_explainer(predict_fn)
+    shap_values = explainer([text])
+
+    with _LOCK:
+        _VALUE_CACHE[cache_key] = shap_values
+        _VALUE_CACHE.move_to_end(cache_key)
+        while len(_VALUE_CACHE) > _MAX_VALUE_CACHE_SIZE:
+            _VALUE_CACHE.popitem(last=False)
+
+    return shap_values
+
+
 def explain_text(
     predict_fn: Callable[[str], Dict[str, Any]],
     text: str,
@@ -186,8 +220,7 @@ def explain_text(
     if not isinstance(text, str) or not text.strip():
         raise ValueError("text cannot be empty.")
 
-    explainer = get_explainer(predict_fn)
-    shap_values = explainer([text])
+    shap_values = _get_shap_values(predict_fn, text)
     tokens = list(shap_values.data[0])
     values = _process_shap_values(shap_values.values[0])
     min_len = min(len(tokens), len(values))
@@ -232,8 +265,7 @@ def plot_explanation(
     if shap is None:
         raise ImportError("SHAP is not installed.")
 
-    explainer = get_explainer(predict_fn)
-    shap_values = explainer([text])
+    shap_values = _get_shap_values(predict_fn, text)
 
     shap.plots.text(shap_values[0])
 
@@ -250,8 +282,7 @@ def save_explanation_html(
     if shap is None:
         raise ImportError("SHAP is not installed.")
 
-    explainer = get_explainer(predict_fn)
-    shap_values = explainer([text])
+    shap_values = _get_shap_values(predict_fn, text)
 
     html = shap.plots.text(shap_values[0], display=False)
 
