@@ -59,7 +59,7 @@ logger = logging.getLogger(__name__)
 class RhetoricalDeviceConfig:
 
     spacy_model: str = "en_core_web_sm"
-    disable_components: tuple = ("ner",)
+    disable_components: tuple = ()
 
 
 # ------------------------------------------------------------

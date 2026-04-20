@@ -6,7 +6,8 @@ Description:
     Provides a thread-safe, in-process cache for spaCy Language pipelines so
     that each unique (model_name, disabled_components) combination is loaded
     only once per process lifetime.  All analyzer modules should obtain their
-    pipeline via :func:`get_nlp` rather than calling ``spacy.load`` directly.
+    pipeline via :func:`get_shared_nlp` (preferred) or :func:`get_nlp` rather
+    than calling ``spacy.load`` directly.
 
     Caching strategy
     ----------------
@@ -15,14 +16,22 @@ Description:
       making the cache safe for typical multi-threaded web-service usage.
     * Subsequent accesses return the shared instance without acquiring the lock.
 
+    Recommended usage (PERF-3)
+    --------------------------
+    All singleton analyzers in ``api/app.py`` should share ONE spaCy model
+    instance.  Use :func:`get_shared_nlp` which always requests the fully-enabled
+    ``en_core_web_sm`` pipeline (``disable=()``).  This means the entire process
+    loads a single spaCy model regardless of how many analyzers are instantiated,
+    avoiding the previous 4-instance proliferation.
+
 Usage
 -----
 ::
 
-    from src.analysis._nlp import get_nlp
+    from src.analysis._nlp import get_shared_nlp
 
-    nlp = get_nlp("en_core_web_sm", disable=("ner",))
-    doc  = nlp("Some text to analyse.")
+    nlp = get_shared_nlp()
+    doc = nlp("Some text to analyse.")
 """
 
 from __future__ import annotations
@@ -102,6 +111,25 @@ def get_nlp(
 
         _CACHE[key] = nlp
         return nlp
+
+
+_SHARED_MODEL = "en_core_web_sm"
+
+
+def get_shared_nlp() -> Language:
+    """Return the single shared spaCy pipeline used by all analyzers.
+
+    Equivalent to ``get_nlp("en_core_web_sm", disable=())``.  All singleton
+    analyzers in ``api/app.py`` should call this function so that exactly one
+    spaCy model is held in memory for the entire process, regardless of how
+    many analyzer classes are instantiated.
+
+    Returns
+    -------
+    Language
+        Fully-enabled ``en_core_web_sm`` pipeline shared process-wide.
+    """
+    return get_nlp(_SHARED_MODEL, disable=())
 
 
 def clear_cache() -> None:

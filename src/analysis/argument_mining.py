@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 class ArgumentMiningConfig:
 
     spacy_model: str = "en_core_web_sm"
-    disable_components: tuple[str, ...] = ("ner",)
+    disable_components: tuple[str, ...] = ()
 
 
 # ------------------------------------------------------------

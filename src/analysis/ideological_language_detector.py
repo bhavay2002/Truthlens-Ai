@@ -64,7 +64,7 @@ logger = logging.getLogger(__name__)
 class IdeologicalLanguageConfig:
 
     spacy_model: str = "en_core_web_sm"
-    disable_components: tuple = ("ner", "parser")
+    disable_components: tuple = ()
 
 
 # ------------------------------------------------------------

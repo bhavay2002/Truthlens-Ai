@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 class SourceAttributionConfig:
 
     spacy_model: str = "en_core_web_sm"
-    disable_components: tuple = ("parser",)
+    disable_components: tuple = ()
 
 
 # ------------------------------------------------------------

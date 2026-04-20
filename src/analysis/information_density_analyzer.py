@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 @dataclass(slots=True)
 class InformationDensityConfig:
     spacy_model: str = "en_core_web_sm"
-    disable_components: tuple = ("ner",)
+    disable_components: tuple = ()
 
 
 # =========================================================
@@ -32,12 +32,47 @@ class InformationDensityConfig:
 
 class InformationDensityAnalyzer:
 
-    FACTUAL_TERMS: Set[str] = {...}
-    OPINION_TERMS: Set[str] = {...}
-    CLAIM_TERMS: Set[str] = {...}
-    RHETORICAL_TERMS: Set[str] = {...}
-    EMOTIONAL_TERMS: Set[str] = {...}
-    MODAL_TERMS: Set[str] = {...}
+    FACTUAL_TERMS: Set[str] = {
+        "according", "reported", "confirmed", "stated", "announced", "revealed",
+        "showed", "demonstrated", "proved", "established", "documented", "verified",
+        "found", "concluded", "published", "researched", "studied", "measured",
+        "recorded", "observed", "evidence", "data", "statistics", "research",
+        "study", "report", "analysis", "survey", "census", "experiment",
+    }
+
+    OPINION_TERMS: Set[str] = {
+        "believe", "think", "feel", "argue", "contend", "suggest", "claim",
+        "assert", "maintain", "insist", "seem", "appear", "presumably", "probably",
+        "likely", "apparently", "supposedly", "allegedly", "arguably",
+        "in my view", "in my opinion", "it seems", "i believe", "we think",
+    }
+
+    CLAIM_TERMS: Set[str] = {
+        "claims", "alleges", "asserts", "declares", "states", "argues",
+        "contends", "maintains", "insists", "purports", "denies", "admits",
+        "acknowledges", "concedes", "charges", "accuses", "blames",
+        "according to", "sources say", "reportedly", "allegedly",
+    }
+
+    RHETORICAL_TERMS: Set[str] = {
+        "obviously", "clearly", "undeniably", "unquestionably", "certainly",
+        "absolutely", "definitely", "surely", "indeed", "of course",
+        "needless to say", "it is clear", "everyone knows", "nobody",
+        "always", "never", "every", "all", "none", "impossible", "inevitable",
+    }
+
+    EMOTIONAL_TERMS: Set[str] = {
+        "outrageous", "shocking", "disgusting", "horrifying", "terrible",
+        "devastating", "catastrophic", "alarming", "dangerous", "frightening",
+        "wonderful", "amazing", "incredible", "fantastic", "brilliant",
+        "heartbreaking", "tragic", "disastrous", "explosive", "crisis",
+        "threat", "attack", "destroy", "collapse", "panic", "fear", "rage",
+    }
+
+    MODAL_TERMS: Set[str] = {
+        "should", "would", "could", "might", "must", "may", "shall", "will",
+        "ought", "need", "dare", "used to", "had better", "would rather",
+    }
 
     RHETORICAL_PATTERN = re.compile(r"[!?]+", re.UNICODE)
 

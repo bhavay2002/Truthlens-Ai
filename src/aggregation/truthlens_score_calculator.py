@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from typing import Dict, Any
 
 import numpy as np
@@ -83,7 +83,7 @@ class TruthLensScoreCalculator:
         self.weights = self._prepare_weights(weights or self.defaults)
 
     def _default_weights_dict(self) -> Dict[str, float]:
-        return vars(ScoreWeights())
+        return asdict(ScoreWeights())
 
     # -----------------------------
     # Weight Handling
