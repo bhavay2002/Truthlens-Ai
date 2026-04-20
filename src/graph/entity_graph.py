@@ -35,6 +35,12 @@ import spacy
 from spacy.language import Language
 from spacy.tokens import Doc
 
+from graph_hardening_patch import (
+    normalize_graph_adjacency,
+    ordered_entity_graph_vector,
+    to_undirected,
+    unique_undirected_edges,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -170,54 +176,21 @@ class EntityGraphBuilder:
         if not isinstance(graph, dict):
             raise TypeError("graph must be a dictionary")
 
-        adjacency: Dict[str, Set[str]] = {}
-        all_nodes: Set[str] = set()
+        adjacency = normalize_graph_adjacency(graph)
+        undirected = to_undirected(adjacency)
 
-        for entity, neighbors in graph.items():
-            if not isinstance(entity, str):
-                raise ValueError("graph keys must be strings")
-            if not isinstance(neighbors, list):
-                raise ValueError("graph values must be lists")
+        nodes = sorted(undirected.keys())
+        node_count = len(nodes)
+        edges = unique_undirected_edges(undirected)
+        edge_count = len(edges)
 
-            entity_key = entity.strip().lower()
-
-            neighbor_set = {
-                str(neighbor).strip().lower()
-                for neighbor in neighbors
-                if isinstance(neighbor, str)
-                and neighbor.strip()
-                and str(neighbor).strip().lower() != entity_key
-            }
-
-            adjacency[entity_key] = neighbor_set
-            all_nodes.add(entity_key)
-            all_nodes.update(neighbor_set)
-
-        for node in all_nodes:
-            adjacency.setdefault(node, set())
-
-        edge_pairs = {
-            (source, target)
-            for source, neighbors in adjacency.items()
-            for target in neighbors
-            if source != target
-        }
-
-        node_count = len(all_nodes)
-        edge_count = len(edge_pairs)
-
-        degree_counts = Counter(
-            {
-                node: len(adjacency[node])
-                for node in all_nodes
-            }
-        )
+        degree_counts = Counter({node: len(undirected[node]) for node in nodes})
 
         dominant_degree = degree_counts.most_common(1)[0][1] if degree_counts else 0
 
-        avg_degree = edge_count / max(node_count, 1)
+        avg_degree = float(np.mean(list(degree_counts.values()))) if degree_counts else 0.0
 
-        density = edge_count / max(node_count * (node_count - 1), 1)
+        density = float((2 * edge_count) / (node_count * (node_count - 1))) if node_count > 1 else 0.0
 
         connectivity_variance = (
             float(np.var(list(degree_counts.values())))
@@ -257,7 +230,7 @@ def entity_graph_vector(features: Dict[str, float]) -> np.ndarray:
         raise ValueError("features must be a non-empty dictionary")
 
     try:
-        vector = np.array(list(features.values()), dtype=np.float32)
+        vector = ordered_entity_graph_vector(features)
         return vector
     except Exception as exc:  # pragma: no cover
         logger.exception("Entity graph vector conversion failed")

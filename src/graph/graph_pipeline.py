@@ -31,8 +31,9 @@ import numpy as np
 from src.graph.entity_graph import EntityGraphBuilder
 from src.graph.narrative_graph_builder import NarrativeGraphBuilder
 from src.graph.graph_analysis import GraphAnalyzer
-from src.graph.graph_features import GraphFeatureExtractor
+from src.graph.graph_features import GraphFeatureExtractor, GraphFeatureExtractorConfig
 from src.analysis.integration_runner import AnalysisIntegrationRunner
+from graph_hardening_patch import build_pipeline_feature_extractor_config
 
 
 logger = logging.getLogger(__name__)
@@ -83,7 +84,16 @@ class GraphPipeline:
         )
 
         self.graph_analyzer = GraphAnalyzer()
-        self.graph_feature_extractor = GraphFeatureExtractor()
+        extractor_cfg = build_pipeline_feature_extractor_config(
+            enable_entity_graph=config.enable_entity_graph,
+            enable_narrative_graph=config.enable_narrative_graph,
+        )
+        self.graph_feature_extractor = GraphFeatureExtractor(
+            GraphFeatureExtractorConfig(
+                enable_entity_graph=extractor_cfg.enable_entity_graph,
+                enable_narrative_graph=extractor_cfg.enable_narrative_graph,
+            )
+        )
         self.analysis_runner = AnalysisIntegrationRunner()
 
         logger.info("GraphPipeline initialized")
@@ -112,6 +122,8 @@ class GraphPipeline:
         self._validate_text(text)
 
         results: Dict[str, Any] = {}
+        entity_graph = None
+        narrative_graph = None
 
         # -------------------------------------------
         # Entity Graph
@@ -136,7 +148,10 @@ class GraphPipeline:
         # -------------------------------------------
         # Unified Graph Features
         # -------------------------------------------
-        features = self.graph_feature_extractor.extract_features(text)
+        features = self.graph_feature_extractor.extract_from_graphs(
+            entity_graph=entity_graph,
+            narrative_graph=narrative_graph,
+        )
 
         results["graph_features"] = features
         results["analysis_modules"] = self.analysis_runner.analyze_text(text)
@@ -146,7 +161,7 @@ class GraphPipeline:
         # -------------------------------------------
         if self.config.return_vector:
             try:
-                vector = np.array(list(features.values()), dtype=np.float32)
+                vector = self.graph_feature_extractor.extract_feature_vector_from_features(features)
                 results["graph_feature_vector"] = vector
             except Exception as exc:
                 logger.exception("Failed to build graph feature vector")

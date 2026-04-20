@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict
 
-import yaml
+from graph_hardening_patch import load_yaml_as_dict, parse_graph_config
 
 
 logger = logging.getLogger(__name__)
@@ -76,8 +76,7 @@ class GraphConfigLoader:
             raise FileNotFoundError(f"Config file not found: {path}")
 
         try:
-            with path.open("r", encoding="utf-8") as f:
-                config_data = yaml.safe_load(f)
+            config_data = load_yaml_as_dict(path)
         except Exception as exc:
             logger.exception("Failed to load YAML configuration")
             raise RuntimeError("YAML configuration loading failed") from exc
@@ -99,24 +98,13 @@ class GraphConfigLoader:
         Parse configuration dictionary into GraphConfig.
         """
 
-        graph_section = config_data.get("graph", {})
-
-        if not isinstance(graph_section, dict):
-            raise ValueError("graph configuration must be a dictionary")
+        hardened = parse_graph_config(config_data)
 
         config = GraphConfig(
-            enable_entity_graph=bool(
-                graph_section.get("enable_entity_graph", True)
-            ),
-            enable_narrative_graph=bool(
-                graph_section.get("enable_narrative_graph", True)
-            ),
-            min_keyword_length=int(
-                graph_section.get("min_keyword_length", 4)
-            ),
-            max_keywords_per_sentence=int(
-                graph_section.get("max_keywords_per_sentence", 4)
-            ),
+            enable_entity_graph=hardened.enable_entity_graph,
+            enable_narrative_graph=hardened.enable_narrative_graph,
+            min_keyword_length=hardened.min_keyword_length,
+            max_keywords_per_sentence=hardened.max_keywords_per_sentence,
         )
 
         self._validate_config(config)

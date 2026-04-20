@@ -28,13 +28,19 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, List
 
 import numpy as np
 
 from src.graph.entity_graph import EntityGraphBuilder
 from src.graph.graph_analysis import GraphAnalyzer
 from src.graph.narrative_graph_builder import NarrativeGraphBuilder
+from graph_hardening_patch import (
+    merge_feature_blocks_strict,
+    ordered_entity_graph_vector,
+    ordered_graph_metrics_vector,
+    ordered_narrative_graph_vector,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -101,42 +107,25 @@ class GraphFeatureExtractor:
         if not isinstance(text, str) or not text.strip():
             raise ValueError("text must be a non-empty string")
 
-        features: Dict[str, float] = {}
+        entity_graph = None
+        narrative_graph = None
 
         # -------------------------------------------------
         # Entity Graph
         # -------------------------------------------------
         if self.entity_graph_builder:
-
             entity_graph = self.entity_graph_builder.build_graph(text)
-
-            entity_features_obj = (
-                self.entity_graph_builder.extract_graph_features(entity_graph)
-            )
-
-            entity_features = entity_features_obj.to_dict()
-
-            graph_metrics_obj = self.graph_analyzer.analyze(entity_graph)
-
-            graph_metrics = graph_metrics_obj.to_dict()
-
-            features.update(entity_features)
-            features.update(graph_metrics)
 
         # -------------------------------------------------
         # Narrative Graph
         # -------------------------------------------------
         if self.narrative_graph_builder:
-
             narrative_graph = self.narrative_graph_builder.build_graph(text)
 
-            narrative_features_obj = (
-                self.narrative_graph_builder.extract_graph_features(narrative_graph)
-            )
-
-            narrative_features = narrative_features_obj.to_dict()
-
-            features.update(narrative_features)
+        features = self.extract_from_graphs(
+            entity_graph=entity_graph,
+            narrative_graph=narrative_graph,
+        )
 
         logger.debug("Graph features extracted: %d features", len(features))
 
@@ -157,8 +146,52 @@ class GraphFeatureExtractor:
 
         features = self.extract_features(text)
 
+        return self.extract_feature_vector_from_features(features)
+    def extract_from_graphs(
+        self,
+        entity_graph: Dict[str, List[str]] | None = None,
+        narrative_graph: Dict[str, List[str]] | None = None,
+    ) -> Dict[str, float]:
+        feature_blocks: List[Dict[str, float]] = []
+
+        if entity_graph is not None:
+            if self.entity_graph_builder is None:
+                raise RuntimeError("Entity graph builder is not available")
+            entity_features_obj = self.entity_graph_builder.extract_graph_features(entity_graph)
+            entity_features = entity_features_obj.to_dict()
+            graph_metrics_obj = self.graph_analyzer.analyze(entity_graph)
+            graph_metrics = graph_metrics_obj.to_dict()
+            feature_blocks.append(entity_features)
+            feature_blocks.append(graph_metrics)
+
+        if narrative_graph is not None:
+            if self.narrative_graph_builder is None:
+                raise RuntimeError("Narrative graph builder is not available")
+            narrative_features_obj = self.narrative_graph_builder.extract_graph_features(narrative_graph)
+            narrative_features = narrative_features_obj.to_dict()
+            feature_blocks.append(narrative_features)
+
+        if feature_blocks:
+            return merge_feature_blocks_strict(*feature_blocks)
+
+        return {}
+
+    def extract_feature_vector_from_features(
+        self,
+        features: Dict[str, float],
+    ) -> np.ndarray:
+        vectors: List[np.ndarray] = []
+        if self.config.enable_entity_graph:
+            vectors.append(ordered_entity_graph_vector(features))
+            vectors.append(ordered_graph_metrics_vector(features))
+        if self.config.enable_narrative_graph:
+            vectors.append(ordered_narrative_graph_vector(features))
+
+        if not vectors:
+            return np.zeros(0, dtype=np.float32)
+
         try:
-            vector = np.array(list(features.values()), dtype=np.float32)
+            vector = np.concatenate(vectors).astype(np.float32)
             return vector
         except Exception as exc:
             logger.exception("Graph feature vector conversion failed")

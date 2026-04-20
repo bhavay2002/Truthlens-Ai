@@ -193,7 +193,20 @@ def explain_text(
     min_len = min(len(tokens), len(values))
     tokens = tokens[:min_len]
     values = values[:min_len]
-    validate_tokens_scores(tokens, values)
+
+    filtered = [
+        (t, v)
+        for t, v in zip(tokens, values)
+        if t not in {"[CLS]", "[SEP]", "<s>", "</s>"}
+    ]
+
+    if filtered:
+        tokens, values = zip(*filtered)
+        tokens = list(tokens)
+        values = list(values)
+        validate_tokens_scores(tokens, values)
+    else:
+        tokens, values = [], []
 
     token_importance = [
         {"token": str(tok), "importance": float(val)}

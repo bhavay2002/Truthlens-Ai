@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from src.explainability.token_alignment import align_tokens
 from src.explainability.utils_validation import validate_tokens_scores
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,48 @@ class ExplanationAggregator:
         attention_scores: Optional[List[Dict]] = None,
         lime_importance: Optional[List] = None,
     ) -> Dict:
+        def _align_input(explanations: List[Dict], key: str) -> List[Dict]:
+            tokens = []
+            scores = []
+            for item in explanations:
+                if not isinstance(item, dict):
+                    continue
+                token = item.get("token")
+                score = item.get(key)
+                if isinstance(token, str) and isinstance(score, (int, float)):
+                    tokens.append(token)
+                    scores.append(score)
+            if not tokens or len(tokens) != len(scores):
+                return explanations
+            validate_tokens_scores(tokens, scores)
+            tokens, scores = align_tokens(tokens, scores)
+            return [{"token": t, key: float(s)} for t, s in zip(tokens, scores)]
+
+        def _align_lime(items: List) -> List[Tuple[str, float]]:
+            tokens = []
+            scores = []
+            for item in items:
+                if not isinstance(item, (list, tuple)) or len(item) < 2:
+                    continue
+                token, score = item[0], item[1]
+                if isinstance(token, str) and isinstance(score, (int, float)):
+                    tokens.append(token)
+                    scores.append(score)
+            if not tokens or len(tokens) != len(scores):
+                return items
+            validate_tokens_scores(tokens, scores)
+            tokens, scores = align_tokens(tokens, scores)
+            return list(zip(tokens, scores))
+
+        if shap_importance:
+            shap_importance = _align_input(shap_importance, "importance")
+        if integrated_gradients:
+            integrated_gradients = _align_input(integrated_gradients, "importance")
+        if attention_scores:
+            attention_scores = _align_input(attention_scores, "attention")
+        if lime_importance:
+            lime_importance = _align_lime(lime_importance)
+
         sources: List[Tuple[Dict[str, float], float]] = []
 
         if shap_importance:
@@ -100,11 +143,12 @@ class ExplanationAggregator:
         weighted_rows = []
         for m, w in sources:
             vec = np.array([m.get(t, 0.0) for t in tokens], dtype=float)
-            mask = np.array([t in m for t in tokens], dtype=float)
+            present_values = np.array([m[t] for t in tokens if t in m], dtype=float)
 
-            if mask.sum() > 0:
-                vec = vec * mask
-                vec = vec / mask.sum()
+            if len(present_values) > 0:
+                norm = np.sum(np.abs(present_values))
+                if norm > 0:
+                    vec = vec / norm
 
             weighted_rows.append(vec * w)
 

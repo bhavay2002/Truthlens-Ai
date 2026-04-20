@@ -28,6 +28,10 @@ import logging
 from pathlib import Path
 from typing import Dict, List
 
+from graph_hardening_patch import ensure_headless_matplotlib_backend
+
+ensure_headless_matplotlib_backend()
+
 import matplotlib.pyplot as plt
 import networkx as nx
 

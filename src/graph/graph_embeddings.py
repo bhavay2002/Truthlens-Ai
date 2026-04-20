@@ -32,6 +32,7 @@ from typing import Dict, List
 import numpy as np
 import networkx as nx
 
+from graph_hardening_patch import spectral_eigen_embedding
 
 logger = logging.getLogger(__name__)
 
@@ -164,20 +165,7 @@ class GraphEmbeddingGenerator:
         """
 
         A = nx.to_numpy_array(G)
-
-        if A.size == 0:
-            return np.zeros(self.config.spectral_dim, dtype=np.float32)
-
-        eigenvalues = np.linalg.eigvals(A)
-
-        eigenvalues = np.sort(np.abs(eigenvalues))[::-1]
-
-        k = min(self.config.spectral_dim, len(eigenvalues))
-
-        embedding = np.zeros(self.config.spectral_dim, dtype=np.float32)
-        embedding[:k] = eigenvalues[:k]
-
-        return embedding.astype(np.float32)
+        return spectral_eigen_embedding(A, self.config.spectral_dim)
 
 
 def graph_embedding_vector(graph: Graph) -> np.ndarray:

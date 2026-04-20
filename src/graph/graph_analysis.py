@@ -30,6 +30,7 @@ from typing import Dict, List, Set
 
 import numpy as np
 
+from graph_hardening_patch import compute_undirected_basic_metrics, ordered_graph_metrics_vector
 
 logger = logging.getLogger(__name__)
 
@@ -100,51 +101,18 @@ class GraphAnalyzer:
 
         self._validate_graph(graph)
 
-        adjacency: Dict[str, Set[str]] = {}
-        all_nodes: Set[str] = set()
-
-        for node, neighbors in graph.items():
-            node_key = node.strip().lower()
-
-            neighbor_set = {
-                str(neighbor).strip().lower()
-                for neighbor in neighbors
-                if isinstance(neighbor, str)
-                and neighbor.strip()
-                and str(neighbor).strip().lower() != node_key
-            }
-
-            adjacency[node_key] = neighbor_set
-            all_nodes.add(node_key)
-            all_nodes.update(neighbor_set)
-
-        for node in all_nodes:
-            adjacency.setdefault(node, set())
-
-        node_count = len(all_nodes)
-        edge_count = sum(len(neighbors) for neighbors in adjacency.values())
-
-        degrees = [len(adjacency[node]) for node in sorted(all_nodes)]
-
-        avg_degree = float(np.mean(degrees)) if degrees else 0.0
-        max_degree = float(max(degrees)) if degrees else 0.0
-        min_degree = float(min(degrees)) if degrees else 0.0
-        degree_variance = float(np.var(degrees)) if degrees else 0.0
-
-        density = self._compute_density(node_count, edge_count)
-        centralization = self._compute_centralization(degrees)
-        clustering = self._estimate_clustering(adjacency)
+        metrics_dict = compute_undirected_basic_metrics(graph)
 
         metrics = GraphMetrics(
-            graph_nodes=float(node_count),
-            graph_edges=float(edge_count),
-            graph_avg_degree=avg_degree,
-            graph_max_degree=max_degree,
-            graph_min_degree=min_degree,
-            graph_degree_variance=degree_variance,
-            graph_density=density,
-            graph_centralization=centralization,
-            graph_clustering_estimate=clustering,
+            graph_nodes=metrics_dict["graph_nodes"],
+            graph_edges=metrics_dict["graph_edges"],
+            graph_avg_degree=metrics_dict["graph_avg_degree"],
+            graph_max_degree=metrics_dict["graph_max_degree"],
+            graph_min_degree=metrics_dict["graph_min_degree"],
+            graph_degree_variance=metrics_dict["graph_degree_variance"],
+            graph_density=metrics_dict["graph_density"],
+            graph_centralization=metrics_dict["graph_centralization"],
+            graph_clustering_estimate=metrics_dict["graph_clustering_estimate"],
         )
 
         logger.debug("Graph metrics computed: %s", metrics)
@@ -218,7 +186,7 @@ def graph_feature_vector(features: Dict[str, float]) -> np.ndarray:
         raise ValueError("features must be a non-empty dictionary")
 
     try:
-        vector = np.array(list(features.values()), dtype=np.float32)
+        vector = ordered_graph_metrics_vector(features)
         return vector
     except Exception as exc:  # pragma: no cover
         logger.exception("Graph feature vector conversion failed")
