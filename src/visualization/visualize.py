@@ -323,11 +323,17 @@ def plot_embedding_projection(
     if embeddings.ndim != 2:
         raise ValueError("embeddings must be a 2D matrix")
 
+    if embeddings.shape[0] < 2:
+        raise ValueError("embeddings must contain at least 2 samples for projection")
+
     if method.lower() == "pca":
         reducer = PCA(n_components=2)
 
     elif method.lower() == "tsne":
-        perplexity = min(30.0, max(5.0, embeddings.shape[0] - 1))
+        n_samples = embeddings.shape[0]
+        perplexity = min(30.0, float(n_samples - 1))
+        if perplexity < 1.0:
+            raise ValueError("Not enough samples for t-SNE")
         reducer = TSNE(n_components=2, perplexity=perplexity)
 
     else:
@@ -348,6 +354,10 @@ def plot_embedding_projection(
     else:
 
         labels = _ensure_numpy(labels)
+        if labels.shape[0] != embeddings.shape[0]:
+            raise ValueError(
+                "labels length must match number of embeddings"
+            )
 
         for label in np.unique(labels):
 

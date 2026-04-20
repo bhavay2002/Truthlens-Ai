@@ -114,6 +114,18 @@ class AppSettings:
 # Helpers
 # ---------------------------------------------------------
 
+
+def ensure_runtime_directories(settings: "AppSettings") -> None:
+    """Create runtime directories explicitly (side-effectful)."""
+    settings.paths.models_dir.mkdir(parents=True, exist_ok=True)
+    settings.paths.logs_dir.mkdir(parents=True, exist_ok=True)
+    settings.paths.reports_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _as_existing_or_resolved(path: Path) -> Path:
+    return path.resolve()
+
+
 def _ensure_dir(path: Path):
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -197,8 +209,8 @@ def load_settings() -> AppSettings:
     # ---------------- DATA ----------------
 
     data = DataSettings(
-        raw_dir=_ensure_dir(get_path(config, "data", "raw_dir", default="data/raw")),
-        interim_dir=_ensure_dir(
+        raw_dir=_as_existing_or_resolved(get_path(config, "data", "raw_dir", default="data/raw")),
+        interim_dir=_as_existing_or_resolved(
             get_path(config, "data", "interim_dir", default="data/interim")
         ),
         augmentation_multiplier=float(
@@ -226,9 +238,9 @@ def load_settings() -> AppSettings:
 
     # ---------------- PATHS ----------------
 
-    models_dir = _ensure_dir(get_path(config, "paths", "models_dir", default="models"))
-    logs_dir = _ensure_dir(get_path(config, "paths", "logs_dir", default="logs"))
-    reports_dir = _ensure_dir(get_path(config, "paths", "reports_dir", default="reports"))
+    models_dir = _as_existing_or_resolved(get_path(config, "paths", "models_dir", default="models"))
+    logs_dir = _as_existing_or_resolved(get_path(config, "paths", "logs_dir", default="logs"))
+    reports_dir = _as_existing_or_resolved(get_path(config, "paths", "reports_dir", default="reports"))
 
     paths = PathsSettings(
         models_dir=models_dir,

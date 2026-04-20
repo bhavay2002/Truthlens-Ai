@@ -130,7 +130,7 @@ def ensure_file_exists(path: str | Path) -> Path:
 
     path_obj = Path(path)
 
-    if not path_obj.exists():
+    if not path_obj.exists() or not path_obj.is_file():
         logger.error("File does not exist: %s", path_obj)
         raise FileNotFoundError(f"File not found: {path_obj}")
 

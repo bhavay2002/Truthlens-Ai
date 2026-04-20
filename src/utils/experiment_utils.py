@@ -122,9 +122,10 @@ def create_experiment_record(
         Serialized experiment record.
     """
 
+    ts = timestamp()
     record = ExperimentRecord(
-        experiment_id=generate_experiment_id(),
-        timestamp=timestamp(),
+        experiment_id=f"exp_{ts}",
+        timestamp=ts,
         model=model_name,
         dataset=dataset,
         parameters=parameters,
@@ -138,6 +139,16 @@ def create_experiment_record(
 # ---------------------------------------------------------
 # Save Experiment
 # ---------------------------------------------------------
+
+_REQUIRED_EXPERIMENT_KEYS = {
+    "experiment_id",
+    "timestamp",
+    "model",
+    "dataset",
+    "parameters",
+    "metrics",
+    "runtime_seconds",
+}
 
 
 def log_experiment(
@@ -161,6 +172,11 @@ def log_experiment(
     """
 
     try:
+        missing = _REQUIRED_EXPERIMENT_KEYS - set(record.keys())
+        if missing:
+            raise ValueError(
+                f"Experiment record missing required keys: {sorted(missing)}"
+            )
         path = append_json(record, output_path)
 
         logger.info(

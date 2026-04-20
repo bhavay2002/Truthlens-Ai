@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Dict
+from contextlib import nullcontext
 
 import torch
 
@@ -66,7 +67,13 @@ def get_autocast_dtype() -> torch.dtype:
 def autocast_context():
     if torch.cuda.is_available():
         return torch.autocast("cuda", dtype=get_autocast_dtype())
-    return torch.autocast("cpu")
+    if hasattr(torch, "autocast"):
+        try:
+            return torch.autocast("cpu", dtype=torch.bfloat16)
+        except TypeError:
+            # Compatibility for older torch versions/signatures
+            return torch.autocast("cpu")
+    return nullcontext()
 
 
 # =========================================================
@@ -200,11 +207,13 @@ def move_batch(
 ) -> Dict[str, Any]:
 
     return {
-        k: move_tensor(v, device,
-                       non_blocking=non_blocking,
-                       pin_memory=pin_memory,
-                       dtype=dtype)
-        if torch.is_tensor(v) else v
+        k: move_to_device(
+            v,
+            device,
+            non_blocking=non_blocking,
+            pin_memory=pin_memory,
+            dtype=dtype,
+        )
         for k, v in batch.items()
     }
 
@@ -236,6 +245,11 @@ def get_gpu_count() -> int:
 def set_cuda_device(index: int):
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA not available")
+    count = torch.cuda.device_count()
+    if index < 0 or index >= count:
+        raise ValueError(
+            f"CUDA device index out of range: {index}, available: 0..{count - 1}"
+        )
     torch.cuda.set_device(index)
 
 

@@ -1,11 +1,15 @@
 """Public utility API for shared helpers used across TruthLens."""
 
 from .device_utils import (
+	device_summary,
 	device_name,
 	get_device,
 	get_gpu_count,
 	gpu_memory_summary,
+	is_primary_process,
+	move_batch,
 	move_to_device,
+	set_cuda_device,
 )
 from .helper_functions import (
 	create_folder,
@@ -32,6 +36,7 @@ __all__ = [
 	"configure_logging",
 	"create_folder",
 	"current_datetime",
+	"device_summary",
 	"device_name",
 	"ensure_dataframe",
 	"ensure_directories",
@@ -44,11 +49,14 @@ __all__ = [
 	"get_file_size",
 	"get_gpu_count",
 	"gpu_memory_summary",
+	"is_primary_process",
 	"load_json",
 	"load_settings",
 	"measure_runtime",
+	"move_batch",
 	"move_to_device",
 	"save_json",
+	"set_cuda_device",
 	"set_seed",
 	"timestamp",
 	"to_path",

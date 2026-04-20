@@ -68,6 +68,9 @@ def set_seed(
     if not isinstance(seed, int):
         raise TypeError("seed must be int")
 
+    if matmul_precision not in {"high", "medium", "highest"}:
+        raise ValueError("matmul_precision must be one of: 'high', 'medium', 'highest'")
+
     # -----------------------------
     # Core Seeding
     # -----------------------------
@@ -105,6 +108,9 @@ def set_seed(
 def _set_deterministic():
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+    # Recommended for stronger CUDA determinism
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
     try:
         torch.use_deterministic_algorithms(True)

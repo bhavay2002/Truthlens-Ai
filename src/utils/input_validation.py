@@ -78,6 +78,9 @@ def ensure_dataframe(
         If DataFrame is empty or missing required columns.
     """
 
+    if min_rows < 1:
+        raise ValueError("min_rows must be >= 1")
+
     if not isinstance(df, pd.DataFrame):
         logger.error("%s must be a pandas DataFrame", name)
         raise TypeError(f"{name} must be a pandas DataFrame")
@@ -305,6 +308,10 @@ def ensure_non_empty_text_list(
                 continue
         except Exception:
             pass
+
+        if isinstance(item, (bytes, bytearray)):
+            text_list.append(bytes(item).decode("utf-8", errors="ignore"))
+            continue
 
         text_list.append(str(item))
 

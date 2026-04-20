@@ -27,8 +27,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
+from contextlib import contextmanager
+from threading import Lock
 
 
 # ---------------------------------------------------------
@@ -36,6 +40,35 @@ from typing import Any
 # ---------------------------------------------------------
 
 logger = logging.getLogger(__name__)
+
+_FILE_LOCKS: dict[str, Lock] = {}
+
+
+def _get_lock(path: Path) -> Lock:
+    key = str(path.resolve())
+    lock = _FILE_LOCKS.get(key)
+    if lock is None:
+        lock = Lock()
+        _FILE_LOCKS[key] = lock
+    return lock
+
+
+@contextmanager
+def _locked_path(path: Path):
+    lock = _get_lock(path)
+    lock.acquire()
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+def _atomic_write_json(path_obj: Path, data: Any, indent: int = 2) -> None:
+    path_obj.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path_obj.parent, delete=False) as tmp:
+        json.dump(data, tmp, indent=indent, ensure_ascii=False)
+        tmp_path = Path(tmp.name)
+    os.replace(tmp_path, path_obj)
 
 
 # ---------------------------------------------------------
@@ -74,11 +107,8 @@ def save_json(
         if not isinstance(data, dict):
             raise TypeError("data must be a dictionary")
 
-        path_obj.parent.mkdir(parents=True, exist_ok=True)
-
-        with path_obj.open("w", encoding="utf-8") as file:
-            json.dump(data, file, indent=indent, ensure_ascii=False)
-
+        with _locked_path(path_obj):
+            _atomic_write_json(path_obj, data, indent=indent)
         logger.info("Saved JSON file: %s", path_obj)
 
         return path_obj
@@ -167,26 +197,24 @@ def append_json(
         if not isinstance(entry, dict):
             raise TypeError("entry must be a dictionary")
 
-        path_obj.parent.mkdir(parents=True, exist_ok=True)
+        with _locked_path(path_obj):
+            path_obj.parent.mkdir(parents=True, exist_ok=True)
 
-        if path_obj.exists():
-            with path_obj.open("r", encoding="utf-8") as file:
-                data = json.load(file)
+            if path_obj.exists():
+                with path_obj.open("r", encoding="utf-8") as file:
+                    data = json.load(file)
+                if not isinstance(data, list):
+                    raise ValueError(
+                        "JSON file must contain a list in order to append entries"
+                    )
+            else:
+                data = []
 
-            if not isinstance(data, list):
-                raise ValueError(
-                    "JSON file must contain a list in order to append entries"
-                )
-        else:
-            data = []
+            data.append(entry)
 
-        data.append(entry)
-
-        with path_obj.open("w", encoding="utf-8") as file:
-            json.dump(data, file, indent=2, ensure_ascii=False)
+            _atomic_write_json(path_obj, data, indent=2)
 
         logger.info("Appended entry to JSON file: %s", path_obj)
-
         return path_obj
 
     except (TypeError, ValueError):

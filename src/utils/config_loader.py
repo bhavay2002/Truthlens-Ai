@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from copy import deepcopy
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -163,14 +164,19 @@ def load_config(config_path: str | Path | None = None) -> Dict[str, Any]:
 
     logger.info("Loading configuration from %s", resolved_path)
 
+    config: Dict[str, Any]
     try:
         with resolved_path.open("r", encoding="utf-8") as config_file:
-            config: Dict[str, Any] = yaml.safe_load(config_file) or {}
+            config = yaml.safe_load(config_file) or {}
     except yaml.YAMLError as exc:
         logger.exception("Failed to parse YAML configuration")
         raise RuntimeError("Invalid YAML configuration file") from exc
+    except OSError as exc:
+        logger.exception("Failed to read configuration file")
+        raise RuntimeError(f"Unable to read config file: {resolved_path}") from exc
 
-    return config
+    # Defensive copy to avoid accidental mutation of cached object.
+    return deepcopy(config)
 
 
 # ---------------------------------------------------------
