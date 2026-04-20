@@ -88,6 +88,7 @@ class EncoderFactory:
             device=config.device,
             freeze_encoder=config.freeze_encoder,
             gradient_checkpointing=config.gradient_checkpointing,
+            init_from_config_only=config.init_from_config_only,
         )
 
         return encoder
@@ -162,6 +163,9 @@ class EncoderFactory:
             gradient_checkpointing=getattr(
                 model_config.encoder, "gradient_checkpointing", False
             ),
+            init_from_config_only=getattr(
+                model_config.encoder, "init_from_config_only", False
+            ),
             extra_kwargs={},
         )
         logger.info(
@@ -186,6 +190,9 @@ class EncoderFactory:
             output_hidden_states=False,
             gradient_checkpointing=getattr(
                 encoder_config, "gradient_checkpointing", False
+            ),
+            init_from_config_only=getattr(
+                encoder_config, "init_from_config_only", False
             ),
             extra_kwargs={},
         )

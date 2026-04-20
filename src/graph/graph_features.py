@@ -32,18 +32,47 @@ from typing import Dict, List
 
 import numpy as np
 
-from src.graph.entity_graph import EntityGraphBuilder
-from src.graph.graph_analysis import GraphAnalyzer
+from src.graph.entity_graph import EntityGraphBuilder, ordered_entity_graph_vector
+from src.graph.graph_analysis import GraphAnalyzer, ordered_graph_metrics_vector
 from src.graph.narrative_graph_builder import NarrativeGraphBuilder
-from graph_hardening_patch import (
-    merge_feature_blocks_strict,
-    ordered_entity_graph_vector,
-    ordered_graph_metrics_vector,
-    ordered_narrative_graph_vector,
-)
 
 
 logger = logging.getLogger(__name__)
+
+
+_NARRATIVE_GRAPH_KEYS: List[str] = [
+    "narrative_graph_nodes",
+    "narrative_graph_edges",
+    "narrative_graph_avg_degree",
+    "narrative_graph_density",
+    "narrative_graph_isolated_nodes",
+    "narrative_graph_components",
+]
+
+
+def ordered_narrative_graph_vector(features: Dict[str, float]) -> np.ndarray:
+    """
+    Return fixed-order numpy vector of narrative-graph features.
+    """
+    return np.array(
+        [float(features.get(k, 0.0)) for k in _NARRATIVE_GRAPH_KEYS],
+        dtype=np.float32,
+    )
+
+
+def merge_feature_blocks_strict(*blocks: Dict[str, float]) -> Dict[str, float]:
+    """
+    Merge feature dictionaries; error on duplicate keys.
+    """
+    merged: Dict[str, float] = {}
+    for block in blocks:
+        for key, value in block.items():
+            if key in merged:
+                raise ValueError(
+                    f"Duplicate feature key '{key}' found during merge"
+                )
+            merged[key] = value
+    return merged
 
 
 @dataclass(slots=True)

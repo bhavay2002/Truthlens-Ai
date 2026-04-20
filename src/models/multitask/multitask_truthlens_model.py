@@ -81,6 +81,7 @@ class MultiTaskTruthLensConfig:
     dropout: float = 0.1
     device: Optional[str] = None
     gradient_checkpointing: bool = False
+    init_from_config_only: bool = False
 
     bias_weight: float = 1.0
     ideology_weight: float = 1.0
@@ -146,6 +147,7 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
                 pooling=config.pooling,
                 device=config.device,
                 gradient_checkpointing=config.gradient_checkpointing,
+                init_from_config_only=config.init_from_config_only,
             )
         )
 
@@ -388,9 +390,9 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
             propaganda_logits = self.propaganda_head(pooled)
         propaganda_logits = propaganda_logits / temperature
 
-        narrative_outputs = self.narrative_head(pooled)
-        narrative_frame_outputs = self.narrative_frame_head(pooled)
-        emotion_outputs = self.emotion_head(pooled)
+        narrative_outputs = self.narrative_head(pooled) / temperature
+        narrative_frame_outputs = self.narrative_frame_head(pooled) / temperature
+        emotion_outputs = self.emotion_head(pooled) / temperature
 
         if not self.training:
             bias_probs = F.softmax(bias_logits, dim=-1)

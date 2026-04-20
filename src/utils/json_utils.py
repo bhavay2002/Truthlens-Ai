@@ -1,28 +1,3 @@
-"""
-File Name: json_utils.py
-Module: src.utils
-Description:
-    JSON utilities for TruthLens AI.
-
-    Provides robust helper functions to read, write, and append JSON files
-    used for experiment tracking, evaluation reports, configuration exports,
-    and analytical artifacts. The utilities enforce safe filesystem handling,
-    structured logging, and validation of JSON structures.
-
-Author: TruthLens Engineering
-Date: 2026-04-03
-Dependencies:
-    - Python 3.10+
-
-Inputs:
-    - Python dictionaries
-    - JSON file paths
-
-Outputs:
-    - Serialized JSON files
-    - Parsed JSON dictionaries
-"""
-
 from __future__ import annotations
 
 import json
@@ -32,122 +7,138 @@ import tempfile
 from pathlib import Path
 from typing import Any
 from contextlib import contextmanager
+from collections import OrderedDict
 from threading import Lock
-
-
-# ---------------------------------------------------------
-# Logging
-# ---------------------------------------------------------
 
 logger = logging.getLogger(__name__)
 
-_FILE_LOCKS: dict[str, Lock] = {}
+# =========================================================
+# LOCK MANAGEMENT
+# =========================================================
+
+# Max distinct file locks to retain
+_MAX_LOCKS = 1024
+
+_FILE_LOCKS: "OrderedDict[str, Lock]" = OrderedDict()
 _LOCKS_GUARD = Lock()
 
 
+def _normalize_path(path: Path) -> str:
+    return str(path.resolve())
+
+
 def _get_lock(path: Path) -> Lock:
-    key = str(path.resolve())
+    key = _normalize_path(path)
+
     with _LOCKS_GUARD:
         lock = _FILE_LOCKS.get(key)
-        if lock is None:
-            lock = Lock()
-            _FILE_LOCKS[key] = lock
+
+        if lock is not None:
+            # mark as recently used
+            _FILE_LOCKS.move_to_end(key)
+            return lock
+
+        # create new lock
+        lock = Lock()
+        _FILE_LOCKS[key] = lock
+
+        # enforce LRU cap
+        if len(_FILE_LOCKS) > _MAX_LOCKS:
+            _FILE_LOCKS.popitem(last=False)
+
         return lock
 
 
 @contextmanager
 def _locked_path(path: Path):
     lock = _get_lock(path)
-    lock.acquire()
-    try:
+    with lock:
         yield
-    finally:
-        lock.release()
 
+
+# =========================================================
+# ATOMIC WRITE
+# =========================================================
 
 def _atomic_write_json(path_obj: Path, data: Any, indent: int = 2) -> None:
     path_obj.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path_obj.parent, delete=False) as tmp:
-        json.dump(data, tmp, indent=indent, ensure_ascii=False)
-        tmp_path = Path(tmp.name)
-    os.replace(tmp_path, path_obj)
+
+    tmp_path = None
+
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path_obj.parent,
+            delete=False,
+        ) as tmp:
+            json.dump(data, tmp, indent=indent, ensure_ascii=False)
+            tmp.flush()
+            os.fsync(tmp.fileno())  # ensure durability
+            tmp_path = Path(tmp.name)
+
+        os.replace(tmp_path, path_obj)
+
+    finally:
+        if tmp_path and tmp_path.exists():
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                logger.warning("Failed to cleanup temp file: %s", tmp_path)
 
 
-# ---------------------------------------------------------
-# Save JSON
-# ---------------------------------------------------------
+# =========================================================
+# VALIDATION
+# =========================================================
 
+def _validate_json_serializable(data: Any) -> None:
+    try:
+        json.dumps(data)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Data is not JSON serializable") from exc
+
+
+# =========================================================
+# SAVE JSON
+# =========================================================
 
 def save_json(
     data: dict[str, Any],
     path: str | Path,
     indent: int = 2,
 ) -> Path:
-    """
-    Save dictionary to JSON file.
 
-    Parameters
-    ----------
-    data : dict[str, Any]
-        Data to serialize.
+    path_obj = Path(path)
 
-    path : str | Path
-        Destination JSON file.
+    if not isinstance(data, dict):
+        raise TypeError("data must be a dictionary")
 
-    indent : int
-        JSON indentation level.
-
-    Returns
-    -------
-    Path
-        Path to the saved file.
-    """
+    _validate_json_serializable(data)
 
     try:
-        path_obj = Path(path)
-
-        if not isinstance(data, dict):
-            raise TypeError("data must be a dictionary")
-
         with _locked_path(path_obj):
             _atomic_write_json(path_obj, data, indent=indent)
-        logger.info("Saved JSON file: %s", path_obj)
 
+        logger.info("Saved JSON file: %s", path_obj)
         return path_obj
 
-    except (TypeError, ValueError):
-        raise
     except Exception as exc:
         logger.exception("Failed to save JSON file")
-        raise RuntimeError(f"Unable to save JSON to {path}") from exc
+        raise RuntimeError(f"Unable to save JSON to {path_obj}") from exc
 
 
-# ---------------------------------------------------------
-# Load JSON
-# ---------------------------------------------------------
-
+# =========================================================
+# LOAD JSON
+# =========================================================
 
 def load_json(path: str | Path) -> dict[str, Any]:
-    """
-    Load JSON file.
 
-    Parameters
-    ----------
-    path : str | Path
-        Path to JSON file.
+    path_obj = Path(path)
 
-    Returns
-    -------
-    dict[str, Any]
-        Parsed JSON content.
-    """
+    if not path_obj.exists():
+        raise FileNotFoundError(f"JSON file not found: {path_obj}")
 
     try:
-        path_obj = Path(path)
-
-        if not path_obj.exists():
-            raise FileNotFoundError(f"JSON file not found: {path_obj}")
-
         with path_obj.open("r", encoding="utf-8") as file:
             data = json.load(file)
 
@@ -155,75 +146,46 @@ def load_json(path: str | Path) -> dict[str, Any]:
             raise ValueError("Loaded JSON content must be a dictionary")
 
         logger.info("Loaded JSON file: %s", path_obj)
-
         return data
 
-    except (FileNotFoundError, ValueError):
-        raise
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON format in {path_obj}") from exc
     except Exception as exc:
         logger.exception("Failed to load JSON file")
-        raise RuntimeError(f"Unable to load JSON from {path}") from exc
+        raise RuntimeError(f"Unable to load JSON from {path_obj}") from exc
 
 
-# ---------------------------------------------------------
-# Append JSON Entry
-# ---------------------------------------------------------
-
+# =========================================================
+# APPEND JSON (JSONL FORMAT)
+# =========================================================
 
 def append_json(
     entry: dict[str, Any],
     path: str | Path,
 ) -> Path:
     """
-    Append dictionary entry to JSON list file.
-
-    If file does not exist, it will be created.
-
-    Parameters
-    ----------
-    entry : dict[str, Any]
-        Entry to append.
-
-    path : str | Path
-        JSON file containing a list.
-
-    Returns
-    -------
-    Path
-        Path to updated JSON file.
+    Append entry as JSONL (one JSON object per line).
     """
 
+    path_obj = Path(path)
+
+    if not isinstance(entry, dict):
+        raise TypeError("entry must be a dictionary")
+
+    _validate_json_serializable(entry)
+
     try:
-        path_obj = Path(path)
-
-        if not isinstance(entry, dict):
-            raise TypeError("entry must be a dictionary")
-
         with _locked_path(path_obj):
             path_obj.parent.mkdir(parents=True, exist_ok=True)
 
-            if path_obj.exists():
-                with path_obj.open("r", encoding="utf-8") as file:
-                    data = json.load(file)
-                if data is None:
-                    data = []
-                if not isinstance(data, list):
-                    raise ValueError(
-                        "JSON file must contain a list in order to append entries"
-                    )
-            else:
-                data = []
+            with path_obj.open("a", encoding="utf-8") as file:
+                file.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                file.flush()
+                os.fsync(file.fileno())
 
-            data.append(entry)
-
-            _atomic_write_json(path_obj, data, indent=2)
-
-        logger.info("Appended entry to JSON file: %s", path_obj)
+        logger.info("Appended JSONL entry: %s", path_obj)
         return path_obj
 
-    except (TypeError, ValueError, json.JSONDecodeError):
-        raise
-    except OSError as exc:
-        raise RuntimeError(f"Unable to append JSON entry to {path}") from exc
-    except Exception:
-        raise
+    except Exception as exc:
+        logger.exception("Failed to append JSON entry")
+        raise RuntimeError(f"Unable to append JSON entry to {path_obj}") from exc

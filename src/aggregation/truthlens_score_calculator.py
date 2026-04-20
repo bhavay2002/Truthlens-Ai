@@ -1,36 +1,3 @@
-"""
-File Name: truthlens_score_calculator.py
-Module: TruthLens Analysis - Final Scoring Engine
-Description:
-    Computes the final TruthLens credibility and bias scores by aggregating
-    outputs from multiple analytical modules such as bias analysis, emotion
-    analysis, narrative detection, discourse analysis, and graph analysis.
-
-    The module normalizes signals from different subsystems and produces
-    interpretable scoring metrics used for ranking, reporting, and downstream
-    decision systems. Includes configurable weighting and normalization
-    safeguards suitable for research and production environments.
-
-Author:
-    TruthLens Engineering Team
-
-Date:
-    2026-04-02
-
-Dependencies:
-    logging
-    typing
-    dataclasses
-    numpy
-    src.aggregation.score_schema
-
-Inputs:
-    Aggregated analysis outputs from TruthLens modules
-
-Outputs:
-    Final TruthLens scoring dictionary and numerical score vector
-"""
-
 from __future__ import annotations
 
 import logging
@@ -44,24 +11,49 @@ from src.aggregation.score_schema import TruthLensScoreSchema
 
 logger = logging.getLogger(__name__)
 
+# =========================================================
+# FEATURE IMPORTANCE CONFIG
+# =========================================================
+
+PRIMARY_FEATURES: Dict[str, set[str]] = {
+    "bias": {"bias_prediction"},
+    "emotion": {"emotion_intensity"},
+    "narrative": {"narrative_score"},
+    "discourse": {"coherence_score"},
+    "graph": {"graph_consistency"},
+    "ideology": {"ideology_score"},
+    "analysis": {"analysis_confidence"},
+}
+
+SECTION_ALPHA: Dict[str, float] = {
+    "bias": 0.80,
+    "emotion": 0.75,
+    "narrative": 0.75,
+    "discourse": 0.70,
+    "graph": 0.70,
+    "ideology": 0.80,
+    "analysis": 0.65,
+}
+
+DEFAULT_ALPHA = 0.75
+
+
+# =========================================================
+# WEIGHTS
+# =========================================================
 
 @dataclass(slots=True)
 class ScoreWeights:
-    # Manipulation group — additive terms must sum to 1.0
     bias: float = 0.40
     emotion: float = 0.30
     narrative: float = 0.20
     analysis_influence_manipulation: float = 0.10
 
-    # Credibility group — additive terms must sum to 1.0
-    # credibility_bias_penalty is a standalone subtraction, not normalised
-    # with the additive terms (see BUG-9 / weight_manager.py).
     discourse: float = 0.55
     graph: float = 0.35
     analysis_influence_credibility: float = 0.10
     credibility_bias_penalty: float = 0.20
 
-    # Final composite — sum must equal 1.0
     final_credibility: float = 0.5
     final_manipulation: float = 0.3
     final_ideology: float = 0.2
@@ -80,39 +72,56 @@ SCORE_VECTOR_ORDER: tuple[str, ...] = (
 )
 
 
+# =========================================================
+# CORE CALCULATOR
+# =========================================================
+
 class TruthLensScoreCalculator:
-    @staticmethod
-    def _default_weights_dict() -> Dict[str, float]:
-        sw = ScoreWeights()
-        return {
-            "bias": sw.bias,
-            "emotion": sw.emotion,
-            "narrative": sw.narrative,
-            "discourse": sw.discourse,
-            "graph": sw.graph,
-            "credibility_bias_penalty": sw.credibility_bias_penalty,
-            "final_credibility": sw.final_credibility,
-            "final_manipulation": sw.final_manipulation,
-            "final_ideology": sw.final_ideology,
-            "analysis_influence_manipulation": sw.analysis_influence_manipulation,
-            "analysis_influence_credibility": sw.analysis_influence_credibility,
-        }
 
     def __init__(self, weights: Dict[str, float] | None = None) -> None:
         self.defaults = self._default_weights_dict()
-        self.weights = weights or self.defaults.copy()
-        self._validate_runtime_weights(self.weights)
-        logger.info("TruthLensScoreCalculator initialized")
+        self.weights = self._prepare_weights(weights or self.defaults)
+
+    def _default_weights_dict(self) -> Dict[str, float]:
+        return vars(ScoreWeights())
+
+    # -----------------------------
+    # Weight Handling
+    # -----------------------------
+
+    def _prepare_weights(self, w: Dict[str, float]) -> Dict[str, float]:
+        self._validate_weights(w)
+        w = w.copy()
+
+        self._normalize_group(w, ["bias", "emotion", "narrative", "analysis_influence_manipulation"])
+        self._normalize_group(w, ["discourse", "graph", "analysis_influence_credibility"])
+        self._normalize_group(w, ["final_credibility", "final_manipulation", "final_ideology"])
+
+        return w
 
     @staticmethod
-    def _validate_runtime_weights(w: Dict[str, float]) -> None:
+    def _validate_weights(w: Dict[str, float]) -> None:
         if not isinstance(w, dict):
             raise TypeError("weights must be a dictionary")
+
         for k, v in w.items():
             if isinstance(v, bool) or not isinstance(v, (int, float)):
-                raise TypeError(f"Weight '{k}' must be numeric (non-boolean)")
+                raise TypeError(f"Weight '{k}' must be numeric")
             if not np.isfinite(v) or v < 0:
                 raise ValueError(f"Invalid weight '{k}': {v}")
+
+    @staticmethod
+    def _normalize_group(w: Dict[str, float], keys: list[str]) -> None:
+        total = sum(w.get(k, 0.0) for k in keys)
+        if total <= 0:
+            raise ValueError(f"Invalid weight group: {keys}")
+
+        for k in keys:
+            w[k] = w.get(k, 0.0) / total
+
+    # -----------------------------
+    # Public API
+    # -----------------------------
 
     def compute_scores(
         self,
@@ -120,114 +129,121 @@ class TruthLensScoreCalculator:
         *,
         weights: Dict[str, float] | None = None,
     ) -> TruthLensScoreSchema:
+
         if not isinstance(profile, dict):
             raise ValueError("profile must be a dictionary")
 
-        if weights is not None:
-            self._validate_runtime_weights(weights)
+        w = self._prepare_weights(weights) if weights else self.weights
 
-        bias_score = self._aggregate_section(profile.get("bias", {}))
-        emotion_score = self._aggregate_section(profile.get("emotion", {}))
-        narrative_score = self._aggregate_section(profile.get("narrative", {}))
-        discourse_score = self._aggregate_section(profile.get("discourse", {}))
-        graph_score = self._aggregate_section(profile.get("graph", {}))
-        ideology_score = self._aggregate_section(profile.get("ideology", {}))
-        analysis_score = self._aggregate_section(profile.get("analysis", {}))
+        # ✅ FIXED CALLS
+        bias = self._aggregate("bias", profile.get("bias"))
+        emotion = self._aggregate("emotion", profile.get("emotion"))
+        narrative = self._aggregate("narrative", profile.get("narrative"))
+        discourse = self._aggregate("discourse", profile.get("discourse"))
+        graph = self._aggregate("graph", profile.get("graph"))
+        ideology = self._aggregate("ideology", profile.get("ideology"))
+        analysis = self._aggregate("analysis", profile.get("analysis"))
 
-        manipulation_risk = self._compute_manipulation_risk(
-            bias_score, emotion_score, narrative_score, analysis_score, weights
-        )
-        credibility_score = self._compute_credibility(
-            bias_score, discourse_score, graph_score, analysis_score, weights
-        )
-        truthlens_score = self._compute_final_score(
-            credibility_score, manipulation_risk, ideology_score, weights
-        )
+        manipulation = self._manipulation(bias, emotion, narrative, analysis, w)
+        credibility = self._credibility(bias, discourse, graph, analysis, w)
+        final_score = self._final(credibility, manipulation, ideology, w)
 
         return {
-            "truthlens_bias_score": float(bias_score),
-            "truthlens_emotion_score": float(emotion_score),
-            "truthlens_narrative_score": float(narrative_score),
-            "truthlens_discourse_score": float(discourse_score),
-            "truthlens_graph_score": float(graph_score),
-            "truthlens_ideology_score": float(ideology_score),
-            "truthlens_manipulation_risk": float(manipulation_risk),
-            "truthlens_credibility_score": float(credibility_score),
-            "truthlens_final_score": float(truthlens_score),
+            "truthlens_bias_score": bias,
+            "truthlens_emotion_score": emotion,
+            "truthlens_narrative_score": narrative,
+            "truthlens_discourse_score": discourse,
+            "truthlens_graph_score": graph,
+            "truthlens_ideology_score": ideology,
+            "truthlens_manipulation_risk": manipulation,
+            "truthlens_credibility_score": credibility,
+            "truthlens_final_score": final_score,
         }
 
-    def _aggregate_section(self, section: Dict[str, Any]) -> float:
+    # -----------------------------
+    # Core Computations
+    # -----------------------------
+
+    def _aggregate(self, section_name: str, section: Any) -> float:
         if not isinstance(section, dict) or not section:
             return 0.0
-        values = [
-            float(v)
-            for v in section.values()
-            if isinstance(v, (int, float)) and not isinstance(v, bool)
-        ]
-        if not values:
+
+        primary_keys = PRIMARY_FEATURES.get(section_name, set())
+        alpha = SECTION_ALPHA.get(section_name, DEFAULT_ALPHA)
+
+        primary_vals = []
+        aux_vals = []
+
+        for k, v in section.items():
+            if not isinstance(v, (int, float)) or isinstance(v, bool):
+                continue
+
+            v = float(v)
+            if not np.isfinite(v):
+                continue
+
+            if k in primary_keys:
+                primary_vals.append(v)
+            else:
+                aux_vals.append(v)
+
+        primary_mean = np.mean(primary_vals) if primary_vals else None
+        aux_mean = np.mean(aux_vals) if aux_vals else None
+
+        if primary_mean is not None and aux_mean is not None:
+            score = alpha * primary_mean + (1 - alpha) * aux_mean
+        elif primary_mean is not None:
+            score = primary_mean
+        elif aux_mean is not None:
+            score = aux_mean
+        else:
             return 0.0
-        return sum(values) / len(values)
 
-    def _compute_manipulation_risk(
-        self,
-        bias_score: float,
-        emotion_score: float,
-        narrative_score: float,
-        analysis_score: float,
-        weights: Dict[str, float] | None = None,
-    ) -> float:
-        w = weights or self.weights
-        risk = (
-            w.get("bias", self.defaults["bias"]) * bias_score
-            + w.get("emotion", self.defaults["emotion"]) * emotion_score
-            + w.get("narrative", self.defaults["narrative"]) * narrative_score
-            + w.get("analysis_influence_manipulation", self.defaults["analysis_influence_manipulation"]) * analysis_score
-        )
-        return float(np.clip(risk, 0.0, 1.0))
+        return float(np.clip(score, 0.0, 1.0))
 
-    def _compute_credibility(
-        self,
-        bias_score: float,
-        discourse_score: float,
-        graph_score: float,
-        analysis_score: float,
-        weights: Dict[str, float] | None = None,
-    ) -> float:
-        w = weights or self.weights
-        credibility = (
-            w.get("discourse", self.defaults["discourse"]) * discourse_score
-            + w.get("graph", self.defaults["graph"]) * graph_score
-            - w.get("credibility_bias_penalty", self.defaults["credibility_bias_penalty"]) * bias_score
-            + w.get("analysis_influence_credibility", self.defaults["analysis_influence_credibility"]) * analysis_score
-        )
-        return float(np.clip(credibility, 0.0, 1.0))
-
-    def _compute_final_score(
-        self,
-        credibility_score: float,
-        manipulation_risk: float,
-        ideology_score: float,
-        weights: Dict[str, float] | None = None,
-    ) -> float:
-        w = weights or self.weights
+    def _manipulation(self, b: float, e: float, n: float, a: float, w: Dict[str, float]) -> float:
         score = (
-            w.get("final_credibility", self.defaults["final_credibility"]) * credibility_score
-            + w.get("final_manipulation", self.defaults["final_manipulation"]) * (1.0 - manipulation_risk)
-            + w.get("final_ideology", self.defaults["final_ideology"]) * (1.0 - ideology_score)
+            w["bias"] * b +
+            w["emotion"] * e +
+            w["narrative"] * n +
+            w["analysis_influence_manipulation"] * a
         )
         return float(np.clip(score, 0.0, 1.0))
 
+    def _credibility(self, b: float, d: float, g: float, a: float, w: Dict[str, float]) -> float:
+        positive = (
+            w["discourse"] * d +
+            w["graph"] * g +
+            w["analysis_influence_credibility"] * a
+        )
+
+        penalty = np.clip(w["credibility_bias_penalty"] * b, 0.0, 1.0)
+        score = positive * (1.0 - penalty)
+
+        return float(np.clip(score, 0.0, 1.0))
+
+    def _final(self, c: float, m: float, i: float, w: Dict[str, float]) -> float:
+        score = (
+            w["final_credibility"] * c +
+            w["final_manipulation"] * (1.0 - m) +
+            w["final_ideology"] * (1.0 - i)
+        )
+        return float(np.clip(score, 0.0, 1.0))
+
+
+# =========================================================
+# VECTOR
+# =========================================================
 
 def truthlens_score_vector(scores: TruthLensScoreSchema) -> np.ndarray:
     if not isinstance(scores, dict) or not scores:
         raise ValueError("scores must be a non-empty dictionary")
 
-    try:
-        missing = [k for k in SCORE_VECTOR_ORDER if k not in scores]
-        if missing:
-            raise KeyError(f"Missing score keys for vector conversion: {missing}")
+    missing = [k for k in SCORE_VECTOR_ORDER if k not in scores]
+    if missing:
+        raise KeyError(f"Missing keys: {missing}")
 
-        return np.asarray([float(scores[k]) for k in SCORE_VECTOR_ORDER], dtype=np.float32)
-    except Exception as exc:
-        logger.exception("TruthLens score vector conversion failed")
-        raise RuntimeError("Failed to convert TruthLens scores") from exc
+    return np.asarray(
+        [float(scores[k]) for k in SCORE_VECTOR_ORDER],
+        dtype=np.float32,
+    )

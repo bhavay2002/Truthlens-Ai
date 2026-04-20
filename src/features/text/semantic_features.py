@@ -12,10 +12,20 @@ from typing import Dict, List, Any
 
 import numpy as np
 
-from src.features.base.base_feature import BaseFeature, FeatureContext
+from src.features.base.base_feature import  BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
 
 logger = logging.getLogger(__name__)
+
+
+# =========================================================
+# GLOBAL MODEL CACHE (PROCESS-LEVEL SINGLETON)
+# =========================================================
+
+_SEMANTIC_MODEL = None
+_SEMANTIC_TOKENIZER = None
+_SEMANTIC_TORCH = None
+_SEMANTIC_DEVICE = None
 
 
 def _fallback_embedding(text: str, dim: int = 128) -> np.ndarray:
@@ -41,27 +51,57 @@ class SemanticFeatures(BaseFeature):
     _torch: Any = field(default=None, init=False, repr=False)
     _tokenizer: Any = field(default=None, init=False, repr=False)
     _model: Any = field(default=None, init=False, repr=False)
+    _device: Any = field(default=None, init=False, repr=False)
+    _model_on_device: bool = field(default=False, init=False, repr=False)
     _transformer_available: bool = field(default=False, init=False, repr=False)
 
     def initialize(self) -> None:
-        if self._tokenizer is not None and self._model is not None:
+        global _SEMANTIC_MODEL, _SEMANTIC_TOKENIZER, _SEMANTIC_TORCH, _SEMANTIC_DEVICE
+
+        if _SEMANTIC_MODEL is not None and _SEMANTIC_TOKENIZER is not None:
+            self._model = _SEMANTIC_MODEL
+            self._tokenizer = _SEMANTIC_TOKENIZER
+            self._torch = _SEMANTIC_TORCH
+            self._device = _SEMANTIC_DEVICE
             self._transformer_available = True
+            self._model_on_device = True
             return
+
         try:
             import torch
             from transformers import AutoTokenizer, AutoModel
 
             model_name = "sentence-transformers/all-MiniLM-L6-v2"
-            self._tokenizer = AutoTokenizer.from_pretrained(model_name)
-            self._model = AutoModel.from_pretrained(model_name)
-            self._model.eval()
+
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
+            model = AutoModel.from_pretrained(model_name)
+            model.eval()
+
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            model.to(device)
+
+            _SEMANTIC_MODEL = model
+            _SEMANTIC_TOKENIZER = tokenizer
+            _SEMANTIC_TORCH = torch
+            _SEMANTIC_DEVICE = device
+
+            self._model = model
+            self._tokenizer = tokenizer
             self._torch = torch
+            self._device = device
+
             self._transformer_available = True
+            self._model_on_device = True
+
+            logger.info("Semantic transformer loaded once and cached")
+
         except Exception:  # noqa: BLE001
             self._tokenizer = None
             self._model = None
             self._torch = None
+            self._device = None
             self._transformer_available = False
+            self._model_on_device = False
             logger.warning("Transformers not available. Using fallback semantic features.")
 
     def _transformer_embedding(self, text: str) -> np.ndarray:
@@ -69,6 +109,9 @@ class SemanticFeatures(BaseFeature):
             return _fallback_embedding(text)
 
         torch = self._torch
+        if not self._model_on_device:
+            self._model.to(self._device)
+            self._model_on_device = True
         with torch.no_grad():
             inputs = self._tokenizer(
                 text,
@@ -77,22 +120,27 @@ class SemanticFeatures(BaseFeature):
                 padding=True,
                 max_length=512,
             )
+            inputs = {k: v.to(self._device) for k, v in inputs.items()}
             outputs = self._model(**inputs)
             token_embeddings = outputs.last_hidden_state
             attention_mask = inputs["attention_mask"]
-            mask = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+            mask = attention_mask.unsqueeze(-1).to(token_embeddings.dtype)
             summed = torch.sum(token_embeddings * mask, dim=1)
             counts = torch.clamp(mask.sum(dim=1), min=1e-9)
             mean_embedding = summed / counts
-            return mean_embedding.squeeze(0).cpu().numpy()
+            emb = mean_embedding.squeeze(0).detach().cpu().numpy().astype(np.float32)
+            return np.nan_to_num(emb, nan=0.0, posinf=1.0, neginf=0.0)
 
     def _transformer_embeddings(self, texts: List[str]) -> np.ndarray:
+        if not texts:
+            return np.zeros((0, 128), dtype=np.float32)
         if not self._transformer_available or self._tokenizer is None or self._model is None:
             return np.stack([_fallback_embedding(t) for t in texts], axis=0)
 
         torch = self._torch
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self._model.to(device)
+        if not self._model_on_device:
+            self._model.to(self._device)
+            self._model_on_device = True
 
         with torch.no_grad():
             inputs = self._tokenizer(
@@ -102,10 +150,9 @@ class SemanticFeatures(BaseFeature):
                 padding=True,
                 max_length=512,
             )
-            inputs = {k: v.to(device) for k, v in inputs.items()}
+            inputs = {k: v.to(self._device) for k, v in inputs.items()}
 
-            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
-                outputs = self._model(**inputs)
+            outputs = self._model(**inputs)
 
             token_embeddings = outputs.last_hidden_state
             attention_mask = inputs["attention_mask"]
@@ -115,7 +162,8 @@ class SemanticFeatures(BaseFeature):
             counts = torch.clamp(mask.sum(dim=1), min=1e-9)
             mean_embeddings = summed / counts
 
-            return mean_embeddings.detach().cpu().numpy()
+            emb = mean_embeddings.detach().cpu().numpy().astype(np.float32)
+            return np.nan_to_num(emb, nan=0.0, posinf=1.0, neginf=0.0)
 
     def _compute_embedding(self, context: FeatureContext) -> np.ndarray:
         if context.embeddings is not None:
@@ -124,7 +172,7 @@ class SemanticFeatures(BaseFeature):
         if not isinstance(context.text, str):
             raise TypeError("FeatureContext.text must be a string")
         if not context.text.strip():
-            return np.asarray([], dtype=np.float32)
+            return np.zeros(128, dtype=np.float32)
 
         self.initialize()
         if self._transformer_available:
@@ -134,6 +182,8 @@ class SemanticFeatures(BaseFeature):
 
     def extract(self, context: FeatureContext) -> Dict[str, float]:
         embedding = self._compute_embedding(context)
+
+        embedding = np.nan_to_num(embedding, nan=0.0, posinf=1.0, neginf=0.0)
 
         if embedding.size == 0:
             return {}
@@ -162,7 +212,9 @@ class SemanticFeatures(BaseFeature):
 
         self.initialize()
 
-        embeddings: List[np.ndarray] = [np.asarray([])] * len(contexts)
+        embeddings: List[np.ndarray] = [
+            np.asarray([], dtype=np.float32) for _ in contexts
+        ]
         text_contexts: List[str] = []
         text_indices: List[int] = []
 

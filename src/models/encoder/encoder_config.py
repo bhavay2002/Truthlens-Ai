@@ -57,6 +57,8 @@ class EncoderConfig:
 
     gradient_checkpointing: bool = False
 
+    init_from_config_only: bool = False
+
     extra_kwargs: Dict[str, Any] = field(default_factory=dict)
 
     def validate(self) -> None:
@@ -93,6 +95,9 @@ class EncoderConfig:
 
         if not isinstance(self.gradient_checkpointing, bool):
             raise ValueError("gradient_checkpointing must be a boolean")
+
+        if not isinstance(self.init_from_config_only, bool):
+            raise ValueError("init_from_config_only must be a boolean")
 
         if not isinstance(self.extra_kwargs, dict):
             raise ValueError("extra_kwargs must be a dictionary")
@@ -139,6 +144,7 @@ class EncoderConfig:
             "freeze_encoder": self.freeze_encoder,
             "output_hidden_states": self.output_hidden_states,
             "gradient_checkpointing": self.gradient_checkpointing,
+            "init_from_config_only": self.init_from_config_only,
             "extra_kwargs": self.extra_kwargs,
         }
 

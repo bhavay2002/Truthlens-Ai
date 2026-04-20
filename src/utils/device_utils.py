@@ -70,9 +70,8 @@ def autocast_context():
     if hasattr(torch, "autocast"):
         try:
             return torch.autocast("cpu", dtype=torch.bfloat16)
-        except TypeError:
-            # Compatibility for older torch versions/signatures
-            return torch.autocast("cpu")
+        except Exception:
+            return nullcontext()
     return nullcontext()
 
 
@@ -89,13 +88,23 @@ def move_tensor(
     dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
 
-    if tensor.device == device:
+    if not isinstance(tensor, torch.Tensor):
         return tensor
 
-    if pin_memory and tensor.device.type == "cpu":
+    if tensor.device == device and dtype is None:
+        return tensor
+
+    if pin_memory and tensor.device.type == "cpu" and device.type == "cuda":
         tensor = tensor.pin_memory()
 
-    return tensor.to(device, non_blocking=non_blocking, dtype=dtype)
+    use_non_blocking = (
+        non_blocking and tensor.device.type == "cpu" and device.type == "cuda"
+    )
+
+    if dtype is not None and torch.is_floating_point(tensor):
+        return tensor.to(device, non_blocking=use_non_blocking, dtype=dtype)
+
+    return tensor.to(device, non_blocking=use_non_blocking)
 
 
 # =========================================================
@@ -109,7 +118,6 @@ def move_to_device(
     non_blocking: bool = True,
     pin_memory: bool = False,
     dtype: torch.dtype | None = None,
-    inplace: bool = False,
 ) -> Any:
 
     if obj is None:
@@ -129,25 +137,17 @@ def move_to_device(
     if isinstance(obj, torch.nn.Module):
         obj.to(device)
         if dtype is not None:
-            obj.to(dtype=dtype)
+            for p in obj.parameters():
+                if torch.is_floating_point(p):
+                    p.data = p.data.to(dtype=dtype)
         return obj
 
     # Dict
     if isinstance(obj, dict):
-        if inplace:
-            for k in obj:
-                obj[k] = move_to_device(
-                    obj[k], device,
-                    non_blocking=non_blocking,
-                    pin_memory=pin_memory,
-                    dtype=dtype,
-                    inplace=True,
-                )
-            return obj
-
         return {
             k: move_to_device(
-                v, device,
+                v,
+                device,
                 non_blocking=non_blocking,
                 pin_memory=pin_memory,
                 dtype=dtype,
@@ -157,20 +157,10 @@ def move_to_device(
 
     # List
     if isinstance(obj, list):
-        if inplace:
-            for i in range(len(obj)):
-                obj[i] = move_to_device(
-                    obj[i], device,
-                    non_blocking=non_blocking,
-                    pin_memory=pin_memory,
-                    dtype=dtype,
-                    inplace=True,
-                )
-            return obj
-
         return [
             move_to_device(
-                v, device,
+                v,
+                device,
                 non_blocking=non_blocking,
                 pin_memory=pin_memory,
                 dtype=dtype,
@@ -182,7 +172,8 @@ def move_to_device(
     if isinstance(obj, tuple):
         return tuple(
             move_to_device(
-                v, device,
+                v,
+                device,
                 non_blocking=non_blocking,
                 pin_memory=pin_memory,
                 dtype=dtype,
@@ -222,16 +213,21 @@ def move_batch(
 # GPU Utilities
 # =========================================================
 
-def gpu_memory_summary() -> str:
+def gpu_memory_summary(device_index: int = 0) -> str:
 
     if not torch.cuda.is_available():
         return "GPU not available"
 
-    allocated = torch.cuda.memory_allocated() / 1024**3
-    reserved = torch.cuda.memory_reserved() / 1024**3
-    total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+    count = torch.cuda.device_count()
+    if device_index >= count:
+        raise ValueError(f"Invalid GPU index {device_index}")
+
+    allocated = torch.cuda.memory_allocated(device_index) / 1024**3
+    reserved = torch.cuda.memory_reserved(device_index) / 1024**3
+    total = torch.cuda.get_device_properties(device_index).total_memory / 1024**3
 
     return (
+        f"GPU {device_index} | "
         f"Allocated: {allocated:.2f}GB | "
         f"Reserved: {reserved:.2f}GB | "
         f"Total: {total:.2f}GB"
@@ -271,13 +267,13 @@ def is_primary_process() -> bool:
 # Device Summary
 # =========================================================
 
-def device_name() -> str:
+def device_name(device: torch.device | None = None) -> str:
     """Return a human-readable name for the current compute device."""
-    device = get_device()
+    device = device or get_device()
 
     if device.type == "cuda":
         try:
-            return torch.cuda.get_device_name(0)
+            return torch.cuda.get_device_name(device.index or 0)
         except Exception:
             return "CUDA GPU"
 
@@ -287,18 +283,19 @@ def device_name() -> str:
     return "CPU"
 
 
-def device_summary() -> Dict[str, Any]:
-    device = get_device()
+def device_summary(device: torch.device | None = None) -> Dict[str, Any]:
+    device = device or get_device()
 
     summary = {
-        "device": str(device),              # e.g. cuda:0
-        "device_name": device_name(),       # e.g. RTX 3060 ✅ NEW
+        "device": str(device),
+        "device_name": device_name(device),
         "gpu_count": get_gpu_count(),
         "cuda": torch.cuda.is_available(),
     }
 
-    if torch.cuda.is_available():
-        props = torch.cuda.get_device_properties(0)
+    if device.type == "cuda":
+        idx = device.index or 0
+        props = torch.cuda.get_device_properties(idx)
         summary["gpu_memory_gb"] = round(props.total_memory / 1024**3, 2)
 
     return summary

@@ -118,7 +118,7 @@ class Trainer:
         self.model.to(self.device)
 
         #  torch.compile (safe fallback)
-        if hasattr(torch, "compile")and torch.cuda.is_available():
+        if hasattr(torch, "compile"):
             try:
                 self.model = torch.compile(self.model)
                 logger.info("torch.compile enabled")
@@ -140,11 +140,17 @@ class Trainer:
                 self.autocast_dtype = _get_autocast_dtype()
         else:
             self.autocast_dtype = _get_autocast_dtype()
-        self.autocast_device_type = "cuda" if self.use_amp else "cpu"
+        if self.device.type == "cuda":
+            self.autocast_device_type = "cuda"
+        else:
+            self.autocast_device_type = "cpu"
+            self.use_amp = False
 
         self.scaler = torch.cuda.amp.GradScaler(
             enabled=self.use_amp and self.autocast_dtype == torch.float16
         )
+
+        torch.autograd.set_detect_anomaly(False)
 
         # Forward signature caching
         try:
@@ -190,6 +196,30 @@ class Trainer:
             )
 
             self.global_step = int(state.get("start_step", 0) or 0)
+
+            if self.scheduler is not None:
+
+                scheduler_state = state.get("scheduler_state_dict")
+
+                if scheduler_state:
+                    try:
+                        self.scheduler.load_state_dict(scheduler_state)
+                        logger.info("Scheduler state restored")
+                    except Exception as exc:
+                        logger.warning("Failed to load scheduler state: %s", exc)
+
+                elif "last_epoch" in state:
+                    try:
+                        self.scheduler.last_epoch = int(state["last_epoch"])
+                        logger.info(
+                            "Scheduler last_epoch restored to %d",
+                            self.scheduler.last_epoch,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to set scheduler last_epoch: %s",
+                            exc,
+                        )
             logger.info("Resumed training from %s", latest)
 
         except Exception as exc:
@@ -242,6 +272,10 @@ class Trainer:
                 raw_loss = self._extract_loss(outputs)
                 loss = raw_loss / self.config.gradient_accumulation_steps
 
+            if not torch.isfinite(raw_loss):
+                logger.error("NaN/Inf loss detected at step %d", step)
+                continue
+
             if self.scaler.is_enabled():
                 self.scaler.scale(loss).backward()
             else:
@@ -252,6 +286,9 @@ class Trainer:
             self.global_step += 1
 
             if (step + 1) % self.config.gradient_accumulation_steps == 0:
+
+                if self.scaler.is_enabled():
+                    self.scaler.unscale_(self.optimizer)
 
                 torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(),
@@ -265,10 +302,7 @@ class Trainer:
                     self.optimizer.step()
 
                 if self.scheduler:
-                    try:
-                        self.scheduler.step()
-                    except TypeError:
-                        self.scheduler.step(raw_loss)
+                    self.scheduler.step()
 
                 self.optimizer.zero_grad(set_to_none=True)
 
@@ -277,6 +311,9 @@ class Trainer:
 
         # Final step fix
         if step_count % self.config.gradient_accumulation_steps != 0:
+
+            if self.scaler.is_enabled():
+                self.scaler.unscale_(self.optimizer)
 
             torch.nn.utils.clip_grad_norm_(
                 self.model.parameters(),
@@ -335,30 +372,29 @@ class Trainer:
     def _move_batch_to_device(self, batch):
 
         if isinstance(batch, dict):
-            return move_to_device(batch, self.device, non_blocking=True)
+            return move_to_device(batch, self.device)
 
         if isinstance(batch, (list, tuple)):
-            return move_to_device({"inputs": batch}, self.device, non_blocking=True)
+            return type(batch)(
+                move_to_device(x, self.device) for x in batch
+            )
 
         raise TypeError("Unsupported batch format")
 
 
     def _prepare_model_inputs(self, batch):
 
+        if not isinstance(batch, dict):
+            return batch
+
         if self._forward_accepts_kwargs:
             return batch
 
         forward_kwargs = {}
-        label_dict = {}
 
         for key, value in batch.items():
 
             if key in self._forward_params:
                 forward_kwargs[key] = value
-            else:
-                label_dict[key] = value
-
-        if label_dict and "labels" in self._forward_params:
-            forward_kwargs["labels"] = label_dict
 
         return forward_kwargs

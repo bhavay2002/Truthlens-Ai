@@ -28,7 +28,16 @@ import logging
 from pathlib import Path
 from typing import Dict, List
 
-from graph_hardening_patch import ensure_headless_matplotlib_backend
+def ensure_headless_matplotlib_backend() -> None:
+    """
+    Switch matplotlib to 'Agg' backend for headless environments.
+    """
+    import matplotlib
+    try:
+        matplotlib.use("Agg")
+    except Exception:
+        pass
+
 
 ensure_headless_matplotlib_backend()
 

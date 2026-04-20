@@ -228,6 +228,16 @@ def _split_train_val_test(
     Returns:
         (train_df, val_df, test_df)
     """
+    text_col = "text"
+    if text_col in df.columns:
+        original_len = len(df)
+        df = df.drop_duplicates(subset=[text_col]).reset_index(drop=True)
+        if len(df) < original_len:
+            logger.warning(
+                "Removed %d duplicate rows before splitting",
+                original_len - len(df),
+            )
+
     test_ratio = 1.0 - train_ratio - val_ratio
     labels = df[label_column] if label_column in df.columns else None
     stratify_labels = None
@@ -320,10 +330,17 @@ def train_model(df: pd.DataFrame, params: dict[str, Any] | None = None):
         except Exception as e:
             logger.warning(f"compile failed: {e}")
 
+    grad_accum_steps = int(
+        params.get(
+            "gradient_accumulation_steps",
+            SETTINGS.training.gradient_accumulation_steps,
+        )
+    )
+
     save_steps = _compute_checkpoint_save_steps(
         train_examples=len(train_df),
         batch_size=batch_size,
-        gradient_accumulation_steps=2,
+        gradient_accumulation_steps=grad_accum_steps,
         epochs=epochs,
     )
 
@@ -343,7 +360,7 @@ def train_model(df: pd.DataFrame, params: dict[str, Any] | None = None):
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=batch_size,
 
-        gradient_accumulation_steps=2,
+        gradient_accumulation_steps=grad_accum_steps,
 
         num_train_epochs=epochs,
 

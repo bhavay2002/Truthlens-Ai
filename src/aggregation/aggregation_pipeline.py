@@ -95,13 +95,38 @@ class AggregationPipeline:
         except (TypeError, ValueError):
             return default
 
+    def _clip_scores(self, scores: Dict[str, Any]) -> Dict[str, float]:
+        clipped: Dict[str, float] = {}
+
+        for k, v in scores.items():
+            try:
+                fv = float(v)
+            except Exception:
+                fv = 0.0
+
+            if not (fv == fv):
+                fv = 0.0
+
+            clipped[k] = float(min(max(fv, 0.0), 1.0))
+
+        return clipped
+
     def _inject_analysis_sections(
         self,
         profile: Dict[str, Any],
         analysis_modules: Dict[str, Any],
     ) -> Dict[str, Any]:
-        enriched = copy.deepcopy(profile)
-        analysis_bucket = enriched.setdefault("analysis", {})
+        enriched = {
+            k: dict(v) if isinstance(v, dict) else v
+            for k, v in profile.items()
+        }
+
+        analysis_bucket = enriched.get("analysis")
+        if isinstance(analysis_bucket, dict):
+            analysis_bucket = dict(analysis_bucket)
+        else:
+            analysis_bucket = {}
+        enriched["analysis"] = analysis_bucket
 
         for section, prefix, module_key in self.ANALYSIS_MERGE_MAP:
             module_data = analysis_modules.get(module_key)
@@ -112,6 +137,12 @@ class AggregationPipeline:
             for key, value in module_data.items():
                 if self._is_numeric(value):
                     fv = float(value)
+                    if not (fv == fv):
+                        continue
+                    target[f"{prefix}{key}"] = fv
+                    analysis_bucket[f"{module_key}_{key}"] = fv
+                elif isinstance(value, bool):
+                    fv = float(int(value))
                     target[f"{prefix}{key}"] = fv
                     analysis_bucket[f"{module_key}_{key}"] = fv
                 elif isinstance(value, (list, tuple, set)):
@@ -164,6 +195,12 @@ class AggregationPipeline:
             # scalar always yields the constant midpoint (0.5), destroying
             # the original binary signal (e.g. bias_prediction: 1.0 → 0.5).
             if len(numeric_keys) == 1:
+                normalized_profile[section] = features.copy()
+                continue
+
+            values_check = [features[k] for k in numeric_keys]
+            if max(values_check) - min(values_check) < 1e-12:
+                # Constant section: normalization would destroy the signal.
                 normalized_profile[section] = features.copy()
                 continue
 
@@ -242,11 +279,19 @@ class AggregationPipeline:
 
         sanitized_analysis = self._sanitize_analysis_modules(resolved_analysis)
         enriched_profile = self._inject_analysis_sections(profile, sanitized_analysis)
-        normalized_profile = self.normalize_profile(enriched_profile)
+        raw_scores_unclipped = self.score_calculator.compute_scores(
+            enriched_profile,
+            weights=None,
+        )
+        raw_scores = self._clip_scores(raw_scores_unclipped)
 
-        raw_scores = self.score_calculator.compute_scores(normalized_profile, weights=None)
+        normalized_profile = self.normalize_profile(enriched_profile)
         weights = self.weight_manager.get_weights()
-        scores = self.score_calculator.compute_scores(normalized_profile, weights=weights)
+        scores_unclipped = self.score_calculator.compute_scores(
+            normalized_profile,
+            weights=weights,
+        )
+        scores = self._clip_scores(scores_unclipped)
 
         risks = assess_truthlens_risks(scores)
         explanations = self.explainer.explain_profile(normalized_profile)

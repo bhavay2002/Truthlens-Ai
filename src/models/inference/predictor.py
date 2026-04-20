@@ -37,6 +37,32 @@ from src.utils import get_device, move_to_device
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_FAKE_INDEX = 1
+FAKE_LABEL_CANDIDATES = {"fake", "false", "misleading"}
+
+_FAKE_HEAD_KEYS = (
+    "fake_logits",
+    "fakenews_logits",
+    "misinformation_logits",
+)
+
+_PROPAGANDA_KEYS = (
+    "propaganda_logits",
+    "propaganda_predictions",
+    "propaganda_probabilities",
+)
+
+
+def _find_tensor_by_keys(
+    data: Dict[str, Any],
+    keys: tuple[str, ...],
+) -> Optional[torch.Tensor]:
+    for key in keys:
+        value = data.get(key)
+        if isinstance(value, torch.Tensor):
+            return value
+    return None
+
 
 class Predictor:
     """
@@ -164,19 +190,23 @@ class Predictor:
                 if isinstance(value, torch.Tensor):
 
                     if "logits" in key:
-                        formatted[key] = value
-                        probs = torch.softmax(value, dim=-1)
+                        logits = value
+                        logits = torch.nan_to_num(
+                            logits,
+                            nan=0.0,
+                            posinf=1e6,
+                            neginf=-1e6,
+                        )
+                        probs = torch.softmax(logits, dim=-1)
                         calibrated_probs = self._calibrate_probabilities(
-                            logits=value,
+                            logits=logits,
                             probabilities=probs,
                         )
-                        preds = torch.argmax(value, dim=-1)
+                        preds = torch.argmax(probs, dim=-1)
 
+                        formatted[key] = logits
                         formatted[key.replace("logits", "predictions")] = preds
-                        formatted[key.replace("logits", "probabilities")] = probs
-                        formatted[
-                            key.replace("logits", "calibrated_probabilities")
-                        ] = calibrated_probs
+                        formatted[key.replace("logits", "probabilities")] = calibrated_probs
 
                     else:
                         formatted[key] = value
@@ -207,8 +237,11 @@ class Predictor:
 
         for key, value in results.items():
 
-            if isinstance(value, torch.Tensor) and value.size(0) == 1:
-                squeezed[key] = value.squeeze(0)
+            if isinstance(value, torch.Tensor):
+                if value.dim() > 0 and value.size(0) == 1:
+                    squeezed[key] = value.squeeze(0)
+                else:
+                    squeezed[key] = value
             else:
                 squeezed[key] = value
 
@@ -220,13 +253,16 @@ class Predictor:
         logits: torch.Tensor,
         probabilities: torch.Tensor,
     ) -> torch.Tensor:
+        logits = logits.to(self.device)
+        probabilities = probabilities.to(self.device)
+
         if self.temperature_scaler is not None:
             try:
                 logits_device = logits.to(self.temperature_scaler.device)
                 calibrated = self.temperature_scaler.predict_proba(logits_device)
-                return calibrated.to(self.device)
+                return calibrated.to(self.device, dtype=probabilities.dtype)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("Temperature scaling skipped during prediction: %s", exc)
+                logger.warning("Temperature scaling skipped: %s", exc)
 
         if self.isotonic_calibrator is not None:
             try:
@@ -235,50 +271,154 @@ class Predictor:
                 calibrated = torch.tensor(
                     calibrated_np,
                     dtype=probabilities.dtype,
-                    device=probabilities.device,
+                    device=self.device,
                 )
                 return calibrated
             except Exception as exc:  # noqa: BLE001
-                logger.warning("Isotonic calibration skipped during prediction: %s", exc)
+                logger.warning("Isotonic calibration skipped: %s", exc)
 
         return probabilities
+
+    def _resolve_fake_index(self) -> int:
+        """
+        Resolve the index corresponding to the 'FAKE' class.
+
+        Falls back to DEFAULT_FAKE_INDEX if not found, with warning.
+        """
+
+        config = getattr(self.model, "config", None)
+
+        if config is not None:
+
+            id2label = getattr(config, "id2label", None)
+            if isinstance(id2label, dict):
+                for idx, label in id2label.items():
+                    if isinstance(label, str) and label.lower() in FAKE_LABEL_CANDIDATES:
+                        return int(idx)
+
+            label2id = getattr(config, "label2id", None)
+            if isinstance(label2id, dict):
+                for label, idx in label2id.items():
+                    if isinstance(label, str) and label.lower() in FAKE_LABEL_CANDIDATES:
+                        return int(idx)
+
+        logger.warning(
+            "Could not resolve 'FAKE' index from model config; "
+            "defaulting to index %d. Verify label ordering.",
+            DEFAULT_FAKE_INDEX,
+        )
+
+        return DEFAULT_FAKE_INDEX
+
+    def _extract_fake_probs(
+        self,
+        formatted: Dict[str, Any],
+    ) -> Optional[torch.Tensor]:
+        """
+        Return Fake/Real probabilities if a dedicated head exists.
+        Never falls back to propaganda.
+        """
+
+        logits = _find_tensor_by_keys(formatted, _FAKE_HEAD_KEYS)
+
+        if isinstance(logits, torch.Tensor):
+            logits = torch.nan_to_num(
+                logits,
+                nan=0.0,
+                posinf=1e6,
+                neginf=-1e6,
+            )
+            return torch.softmax(logits, dim=-1)
+
+        return None
+
+    def _compose_fake_probability(self, formatted: Dict[str, Any]) -> float:
+        """
+        Compose Fake probability from multiple non-propaganda signals.
+        """
+
+        signals: list[float] = []
+
+        bias = formatted.get("bias_probabilities")
+        if isinstance(bias, torch.Tensor):
+            signals.append(float(bias[..., -1].mean().item()))
+
+        emotion = formatted.get("emotion_probabilities")
+        if isinstance(emotion, torch.Tensor):
+            signals.append(float(emotion[..., -1].mean().item()) * 0.5)
+
+        ideology = formatted.get("ideology_probabilities")
+        if isinstance(ideology, torch.Tensor):
+            signals.append(float(ideology[..., -1].mean().item()) * 0.5)
+
+        if not signals:
+            return 0.5
+
+        score = sum(signals) / len(signals)
+        return float(min(max(score, 0.0), 1.0))
+
+    def build_fake_real_output(self, formatted: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Build Fake/Real outputs using a dedicated head or composed fallback.
+        """
+
+        probs = self._extract_fake_probs(formatted)
+
+        if probs is not None:
+            fake_index = self._resolve_fake_index()
+            fake_prob = float(probs[..., fake_index].mean().item())
+            confidence = float(probs.max().item())
+            pred_index = int(probs.argmax(dim=-1).item())
+        else:
+            fake_prob = self._compose_fake_probability(formatted)
+            confidence = float(fake_prob)
+            pred_index = int(fake_prob >= 0.5)
+
+        label = "Fake" if pred_index == 1 else "Real"
+
+        return {
+            "label": label,
+            "fake_probability": float(min(max(fake_prob, 0.0), 1.0)),
+            "confidence": float(min(max(confidence, 0.0), 1.0)),
+        }
+
+    def _validate_binary_logits(self, logits: torch.Tensor) -> None:
+        if logits.size(-1) != 2:
+            logger.warning(
+                "Expected binary classification logits (size=2), got size=%d",
+                logits.size(-1),
+            )
 
     def _run_ensemble(self, batch: Dict[str, torch.Tensor]) -> Dict[str, Any]:
         if self.ensemble_model is None:
             raise RuntimeError("Ensemble model is not configured.")
 
-        logits: Optional[torch.Tensor] = None
-
         try:
-            maybe_outputs = self.ensemble_model(**batch)
-            if isinstance(maybe_outputs, torch.Tensor):
-                logits = maybe_outputs
-            elif isinstance(maybe_outputs, dict):
-                for key, value in maybe_outputs.items():
-                    if isinstance(value, torch.Tensor) and "logits" in key:
-                        logits = value
-                        break
-                if logits is None:
-                    for value in maybe_outputs.values():
-                        if isinstance(value, torch.Tensor):
-                            logits = value
-                            break
+            outputs = self.ensemble_model(**batch)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Ensemble model call failed: %s", exc)
-            logits = None
+            logger.error("Ensemble model failed: %s", exc)
+            raise RuntimeError("Ensemble model execution failed") from exc
 
-        if logits is None:
-            if "ensemble_input" in batch and isinstance(batch["ensemble_input"], torch.Tensor):
-                logits = self.ensemble_model(batch["ensemble_input"].to(self.device))
-            elif "input_ids" in batch and isinstance(batch["input_ids"], torch.Tensor):
-                logits = self.ensemble_model(batch["input_ids"].to(self.device))
-            else:
-                raise RuntimeError(
-                    "Unable to run ensemble model: provide 'ensemble_input' "
-                    "or compatible batch kwargs."
+        if isinstance(outputs, torch.Tensor):
+            logits = outputs
+        elif isinstance(outputs, dict):
+            logits = next(
+                (
+                    v 
+                    for k, v in outputs.items()
+                    if isinstance(v, torch.Tensor) and "logits" in k
+                ),
+                None,
+            )
+            if logits is None:
+                logits = next(
+                    (v for v in outputs.values() if isinstance(v, torch.Tensor)),
+                    None,
                 )
+        else:
+            raise RuntimeError("Invalid ensemble output format")
 
         if not isinstance(logits, torch.Tensor):
-            raise RuntimeError("Ensemble model must return logits tensor.")
+            raise RuntimeError("Ensemble model must return logits tensor")
 
         return {"ensemble_logits": logits}

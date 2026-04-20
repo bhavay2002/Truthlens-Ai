@@ -19,6 +19,7 @@ Description:
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
@@ -55,12 +56,15 @@ logger = logging.getLogger(__name__)
 class PredictionPipelineConfig:
 
     device: str = "cpu"
-    return_probabilities: bool = True
+    return_probabilities: bool = True 
 
-    credibility_weight_bias: float = 0.25
-    credibility_weight_propaganda: float = 0.35
-    credibility_weight_emotion: float = 0.15
-    credibility_weight_ideology: float = 0.25
+
+def _filter_special_tokens(token_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    special = {"[CLS]", "[SEP]", "<s>", "</s>", "<pad>", "[PAD]"}
+    return [
+        it for it in token_items
+        if str(it.get("token")) not in special
+    ]
 
 
 @dataclass
@@ -256,6 +260,7 @@ class ExplainabilityLayer:
                             rollout_result["aligned_scores"],
                         )
                     ]
+                    attention_items = _filter_special_tokens(attention_items)
                 aggregated = self.aggregator.aggregate(
                     shap_importance=shap_items,
                     attention_scores=attention_items,
@@ -286,6 +291,7 @@ class ExplainabilityLayer:
                             rollout_result["aligned_scores"],
                         )
                     ]
+                    attention_items_c = _filter_special_tokens(attention_items_c)
                 consistency_scores = self.consistency.compute(
                     shap_importance=shap_items_c,
                     attention_scores=attention_items_c,
@@ -334,46 +340,23 @@ class PredictionPipeline:
         self.explainability_layer = explainability_layer
         self.aggregation_pipeline = aggregation_pipeline or AggregationPipeline()
 
-        for model in [
-            self.bias_model,
-            self.ideology_model,
-            self.propaganda_model,
-            self.emotion_model,
-        ]:
-            if model is not None:
-                model.to(self.device)
-                model.eval()
+        for attr in ["bias_model", "ideology_model", "propaganda_model", "emotion_model"]:
+            model = getattr(self, attr)
 
-        if self.device.type == "cuda":
-            for model in [
-                self.bias_model,
-                self.ideology_model,
-                self.propaganda_model,
-                self.emotion_model,
-            ]:
-                if model is not None:
-                    model.half()
+            if model is None:
+                continue
 
-        if self.device.type == "cuda":
-            for model in [
-                self.bias_model,
-                self.ideology_model,
-                self.propaganda_model,
-                self.emotion_model,
-            ]:
-                if model is not None:
-                    try:
-                        compiled = torch.compile(model, mode="max-autotune")
-                        if model is self.bias_model:
-                            self.bias_model = compiled
-                        elif model is self.ideology_model:
-                            self.ideology_model = compiled
-                        elif model is self.propaganda_model:
-                            self.propaganda_model = compiled
-                        elif model is self.emotion_model:
-                            self.emotion_model = compiled
-                    except Exception:
-                        logger.warning("torch.compile failed")
+            model.to(self.device)
+            model.eval()
+
+            if self.device.type == "cuda" and torch.cuda.is_available():
+                model.half()
+                try:
+                    model = torch.compile(model, mode="reduce-overhead")
+                except Exception:
+                    logger.warning("torch.compile failed for %s", attr)
+
+            setattr(self, attr, model)
 
         logger.info("PredictionPipeline initialized on device: %s", self.device)
 
@@ -384,11 +367,12 @@ class PredictionPipeline:
     def _forward_all(self, features: torch.Tensor) -> Dict[str, Any]:
         outputs: Dict[str, Any] = {}
 
-        with torch.autocast(
-            device_type="cuda",
-            dtype=torch.bfloat16,
-            enabled=self.device.type == "cuda",
-        ):
+        ctx = (
+            torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+            if self.device.type == "cuda"
+            else nullcontext()
+        )
+        with ctx:
             if self.bias_model is not None:
                 outputs["bias"] = self.bias_model(features)
 
@@ -414,6 +398,9 @@ class PredictionPipeline:
         if isinstance(outputs, torch.Tensor):
             return outputs
         raise RuntimeError("Model output missing logits")
+
+    def _safe_tensor(self, t: torch.Tensor) -> torch.Tensor:
+        return torch.nan_to_num(t, nan=0.0, posinf=1.0, neginf=0.0)
 
     def _predict_logits(
         self,
@@ -492,8 +479,15 @@ class PredictionPipeline:
             return None
 
         logits = self._predict_logits(self.propaganda_model, features)
-        probs = self._softmax(logits)
-        return float(probs[:, 1].item())
+        if logits.dim() == 1:
+            logits = logits.unsqueeze(0)
+
+        probs = torch.softmax(logits, dim=-1)
+
+        if probs.size(-1) >= 2:
+            return float(probs[:, 1].item())
+
+        return float(probs[:, 0].item())
 
     # -----------------------------------------------------------------
     # Emotion Prediction
@@ -508,78 +502,17 @@ class PredictionPipeline:
             return None
 
         logits = self._predict_logits(self.emotion_model, features)
-        probs = self._sigmoid(logits).cpu().numpy()[0]
+        probs = torch.sigmoid(logits)
 
-        emotion_distribution: Dict[str, float] = {}
-        for i, emotion in enumerate(EMOTION_LABELS):
-            if i < len(probs):
-                emotion_distribution[emotion] = float(probs[i])
-            else:
-                emotion_distribution[emotion] = 0.0
+        if probs.dim() > 1:
+            probs = probs[0]
 
-        return emotion_distribution
+        probs = self._safe_tensor(probs).detach().cpu().numpy()
 
-    # -----------------------------------------------------------------
-    # Credibility Score
-    # -----------------------------------------------------------------
-
-    def _compute_credibility_score(
-        self,
-        bias: Optional[str],
-        propaganda_prob: Optional[float],
-        emotion: Optional[Dict[str, float]],
-        ideology: Optional[str],
-    ) -> tuple[float, Dict[str, float]]:
-
-        bias_score = 0.5
-        ideology_score = 0.5
-        propaganda_score = 1.0
-        emotion_score = 0.5
-
-        if bias == "non_bias":
-            bias_score = 1.0
-        elif bias == "bias":
-            bias_score = 0.5
-
-        if ideology == "center":
-            ideology_score = 1.0
-        elif ideology in {"left", "right"}:
-            ideology_score = 0.6
-
-        if propaganda_prob is not None:
-            propaganda_score = 1.0 - propaganda_prob
-
-        if emotion:
-            values = np.array(list(emotion.values()))
-            max_intensity = float(np.max(values))
-            eps = 1e-9
-            entropy = -np.sum(values * np.log(values + eps))
-            n = len(values)
-            normalized_entropy = entropy / np.log(n) if n > 1 else 0.0
-            emotion_score = (
-                0.5 * (1.0 - max_intensity) + 0.5 * normalized_entropy
-            )
-
-        score = (
-            bias_score * self.config.credibility_weight_bias
-            + propaganda_score * self.config.credibility_weight_propaganda
-            + emotion_score * self.config.credibility_weight_emotion
-            + ideology_score * self.config.credibility_weight_ideology
-        )
-
-        credibility = float(np.clip(score, 0.0, 1.0))
-        explanation = {
-            "bias_component": bias_score,
-            "propaganda_component": propaganda_score,
-            "emotion_component": emotion_score,
-            "ideology_component": ideology_score,
+        return {
+            label: float(probs[i]) if i < len(probs) else 0.0
+            for i, label in enumerate(EMOTION_LABELS)
         }
-
-        return credibility, explanation
-
-    # -----------------------------------------------------------------
-    # Main Prediction
-    # -----------------------------------------------------------------
 
     def _to_label_from_prediction_tensor(
         self,
@@ -653,20 +586,11 @@ class PredictionPipeline:
         )
         emotion = self._to_emotion_distribution_from_task(emotion_task)
 
-        credibility_score, explanation = self._compute_credibility_score(
-            bias=bias,
-            propaganda_prob=propaganda_prob,
-            emotion=emotion,
-            ideology=ideology,
-        )
-
         return {
             "bias": bias,
             "ideology": ideology,
             "propaganda_probability": propaganda_prob,
             "emotion": emotion,
-            "credibility_score": credibility_score,
-            "credibility_explanation": explanation,
             "structured_prediction": structured_output.to_dict(),
         }
 
@@ -681,8 +605,6 @@ class PredictionPipeline:
         if not isinstance(features, torch.Tensor):
             raise TypeError("Features must be a torch.Tensor")
 
-        if features.device.type == "cpu":
-            features = features.pin_memory()
         features = features.to(self.device, non_blocking=True)
 
         with torch.inference_mode():
@@ -704,41 +626,42 @@ class PredictionPipeline:
                 ideology = [mapping[p] for p in preds_cpu.tolist()]
 
             propaganda_prob = None
-            if "propaganda" in outputs:
-                if self.config.return_probabilities:
-                    logits = self._extract_logits(outputs["propaganda"])
-                    if logits.size(-1) == 2:
-                        propaganda_prob = torch.sigmoid(logits[:, 1] - logits[:, 0])
-                    else:
-                        probs = torch.softmax(logits, dim=-1)
-                        propaganda_prob = probs[:, 1]
-                    propaganda_prob = propaganda_prob.detach()
+            if "propaganda" in outputs and self.config.return_probabilities:
+                logits = self._extract_logits(outputs["propaganda"])
+
+                if logits.dim() == 1:
+                    logits = logits.unsqueeze(0)
+
+                probs = torch.softmax(logits, dim=-1)
+
+                if probs.size(-1) >= 2:
+                    propaganda_prob = probs[:, 1]
+                else:
+                    propaganda_prob = probs[:, 0]
+
+                propaganda_prob = self._safe_tensor(propaganda_prob).detach()
 
             emotion = None
-            if "emotion" in outputs:
-                if self.config.return_probabilities:
-                    logits = self._extract_logits(outputs["emotion"])
-                    probs = torch.sigmoid(logits)
-                    emotion = [
-                        dict(zip(EMOTION_LABELS, row.tolist()))
-                        for row in probs
-                    ]
+            if "emotion" in outputs and self.config.return_probabilities:
+                logits = self._extract_logits(outputs["emotion"])
+                probs = torch.sigmoid(logits)
 
-            credibility_scores: List[float] = []
-            explanations: List[Dict[str, float]] = []
+                probs = self._safe_tensor(probs)
 
-            batch_size = int(features.size(0))
-            for i in range(batch_size):
-                score, exp = self._compute_credibility_score(
-                    bias=bias[i] if bias else None,
-                    propaganda_prob=(
-                        float(propaganda_prob[i]) if propaganda_prob is not None else None
-                    ),
-                    emotion=emotion[i] if emotion else None,
-                    ideology=ideology[i] if ideology else None,
-                )
-                credibility_scores.append(score)
-                explanations.append(exp)
+                emotion = [
+                    {
+                        label: float(row[i]) if i < row.size(0) else 0.0
+                        for i, label in enumerate(EMOTION_LABELS)
+                    }
+                    for row in probs
+                ]
+
+        if bias is None:
+            bias = []
+        if ideology is None:
+            ideology = []
+        if emotion is None:
+            emotion = []
 
         result: Dict[str, Any] = {
             "bias": bias,
@@ -747,8 +670,6 @@ class PredictionPipeline:
                 propaganda_prob.cpu().tolist() if propaganda_prob is not None else None
             ),
             "emotion": emotion,
-            "credibility_score": credibility_scores,
-            "credibility_explanation": explanations,
         }
 
         logger.debug("Prediction result: %s", result)
@@ -765,8 +686,6 @@ class PredictionPipeline:
             "ideology": out["ideology"][0] if out.get("ideology") else None,
             "propaganda_probability": out["propaganda_probability"][0] if out.get("propaganda_probability") else None,
             "emotion": out["emotion"][0] if out.get("emotion") else None,
-            "credibility_score": out["credibility_score"][0] if out.get("credibility_score") else None,
-            "credibility_explanation": out["credibility_explanation"][0] if out.get("credibility_explanation") else None,
         }
 
     def export_onnx(self, path: str) -> None:
@@ -922,9 +841,24 @@ class PredictionPipeline:
         result = dict(prediction)
         result["aggregation"] = agg_result
 
+        scores = agg_result.get("scores") if isinstance(agg_result, dict) else None
+
+        if not isinstance(scores, dict):
+            scores = {}
+
+        result["credibility_score"] = float(
+            scores.get("truthlens_credibility_score", 0.0)
+        )
+        result["manipulation_risk"] = float(
+            scores.get("truthlens_manipulation_risk", 0.0)
+        )
+        result["final_score"] = float(
+            scores.get("truthlens_final_score", 0.0)
+        )
+
         logger.debug(
             "predict_with_aggregation completed | scores=%s",
-            list(agg_result.get("scores", {}).keys()),
+            list(scores.keys()) if isinstance(scores, dict) else [],
         )
         return result
 

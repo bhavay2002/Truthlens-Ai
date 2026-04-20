@@ -1,4 +1,8 @@
-Key  optimizations needed batch inference torch.no_grad() half precision inference ONNX export support async checkpoint saving save every N steps avoid saving optimizer every step AMP (fp16 / bf16) gradient accumulation gradient checkpointing dynamic padding length grouped batching pinned memory avoid repeated encoder calls remove CPU tensor conversions enable fused attention remove unnecessary softmax during training reduce intermediate tensor allocation storch.compile batch feature extraction multiprocessing avoid per-sample loops vectorization  
+check file missing not used
+check gpu optimsations
+check checkpoint+file model saved coredt then copy to drive
+
+
 
 # Install dependencies
 !pip install -q torch transformers datasets sentence-transformers scikit-learn scipy numpy pandas spacy nltk langdetect vaderSentiment contractions shap lime networkx matplotlib seaborn wordcloud joblib pyyaml tqdm tarsafe africanwhisper fastapi uvicorn[standard] pydantic gunicorn optuna
@@ -28,14 +32,3 @@ drive.mount('/content/drive')
 
 
 !ls /content/drive/MyDrive/truthlens-models
-
-src/training/train_transformer_model.py
-src/training/checkpointing.py
-src\models\checkpointing\artifact_manager.py
-src\models\checkpointing\checkpoint_manager.py
-src\models\checkpointing\model_loader.py
-src/models/training/trainer.py
-src\models\training\loss_functions.py
-src\models\training\training_step.py
-src\models\training\training_utils.py
-config\config.yaml

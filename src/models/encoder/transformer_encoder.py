@@ -73,6 +73,7 @@ class TransformerEncoder(BaseModel):
         device: Optional[str] = None,
         freeze_encoder: bool = False,
         gradient_checkpointing: bool = False,
+        init_from_config_only: bool = False,
     ) -> None:
         """
         Initialize pretrained transformer encoder.
@@ -107,7 +108,13 @@ class TransformerEncoder(BaseModel):
 
         try:
             self.config = AutoConfig.from_pretrained(model_name)
-            self.encoder = AutoModel.from_pretrained(model_name, config=self.config)
+            if init_from_config_only:
+                logger.info(
+                    "Initializing encoder from config only: %s", model_name
+                )
+                self.encoder = AutoModel.from_config(self.config)
+            else:
+                self.encoder = AutoModel.from_pretrained(model_name, config=self.config)
         except Exception as exc:
             logger.exception("Failed to initialize transformer model: %s", model_name)
             raise RuntimeError(

@@ -32,9 +32,35 @@ from typing import Dict, List
 import numpy as np
 import networkx as nx
 
-from graph_hardening_patch import spectral_eigen_embedding
-
 logger = logging.getLogger(__name__)
+
+
+def spectral_eigen_embedding(
+    adjacency_matrix: np.ndarray,
+    dim: int = 8,
+) -> np.ndarray:
+    """
+    Compute a spectral embedding from the top-`dim` eigenvalues.
+    """
+    if adjacency_matrix.size == 0:
+        return np.zeros(dim, dtype=np.float32)
+
+    try:
+        eigenvalues = np.linalg.eigvalsh(adjacency_matrix)
+        eigenvalues = np.sort(eigenvalues)[::-1]
+    except np.linalg.LinAlgError:
+        logger.warning("Eigenvalue decomposition failed; returning zeros")
+        return np.zeros(dim, dtype=np.float32)
+
+    if len(eigenvalues) >= dim:
+        result = eigenvalues[:dim].astype(np.float32)
+    else:
+        result = np.pad(
+            eigenvalues.astype(np.float32),
+            (0, dim - len(eigenvalues)),
+            mode="constant",
+        )
+    return result
 
 
 Graph = Dict[str, List[str]]

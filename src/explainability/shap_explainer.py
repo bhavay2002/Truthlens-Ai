@@ -34,6 +34,7 @@ Outputs:
 from __future__ import annotations
 
 from collections import OrderedDict
+import hashlib
 import logging
 import threading
 from pathlib import Path
@@ -59,18 +60,23 @@ _LOCK = threading.RLock()
 _MAX_VALUE_CACHE_SIZE = 64
 _VALUE_CACHE: "OrderedDict[Tuple[Any, ...], Any]" = OrderedDict()
 
+SPECIAL_TOKENS = {
+    "[CLS]", "[SEP]", "<s>", "</s>",
+    "[PAD]", "<pad>", "[UNK]", "<unk>",
+}
+
 
 def _process_shap_values(values):
     if isinstance(values, list):
         values = values[0]
 
-    values = np.array(values, dtype=float)
+    values = np.asarray(values, dtype=np.float32)
 
-    if values.ndim > 1:
-        # For multi-class SHAP, take attributions for class index 1 (the
-        # "fake" / positive class).  Averaging over classes produces near-zero
-        # values for binary symmetric SHAP and destroys the attribution signal.
-        values = values[:, 1]
+    if values.ndim == 2:
+        idx = min(values.shape[1] - 1, 1)
+        values = values[:, idx]
+
+    values = np.nan_to_num(values, nan=0.0, posinf=1.0, neginf=-1.0)
 
     return values
 
@@ -115,25 +121,37 @@ def shap_predict_wrapper(
     return np.asarray(outputs, dtype=float)
 
 
-def _cache_key_for_predict_fn(
+def _stable_predict_fn_key(
     predict_fn: Callable[[str], Dict[str, Any]],
 ) -> Tuple[Any, ...]:
     """
-    Generate stable cache key for predictor callable.
+    Generate a stable cache key for predict_fn.
+
+    Priority:
+    1. Explicit attribute (recommended)
+    2. Model metadata
+    3. Fallback to module+name
     """
+
+    stable_id = getattr(predict_fn, "__cache_key__", None)
+    if isinstance(stable_id, str):
+        return ("explicit", stable_id)
+
+    bound = getattr(predict_fn, "__self__", None)
+    if bound is not None:
+        model_name = getattr(bound, "model_name", None)
+        tokenizer_name = getattr(bound, "tokenizer_name", None)
+
+        if model_name or tokenizer_name:
+            return ("model", model_name, tokenizer_name)
 
     module_name = getattr(predict_fn, "__module__", None)
     qual_name = getattr(predict_fn, "__qualname__", None)
-    bound_instance = getattr(predict_fn, "__self__", None)
 
-    if module_name and qual_name and "<lambda>" not in qual_name:
-
-        if bound_instance is not None:
-            return ("bound_method", module_name, qual_name, id(bound_instance))
-
+    if module_name and qual_name:
         return ("function", module_name, qual_name)
 
-    return ("ephemeral", id(predict_fn))
+    return ("fallback", id(predict_fn))
 
 
 def _set_cache_entry(cache_key: Tuple[Any, ...], explainer: Any) -> None:
@@ -164,7 +182,7 @@ def get_explainer(
             "to use explainability features."
         )
 
-    cache_key = _cache_key_for_predict_fn(predict_fn)
+    cache_key = _stable_predict_fn_key(predict_fn)
     with _LOCK:
         if cache_key not in _EXPLAINER_CACHE:
             logger.info("Initializing SHAP explainer")
@@ -191,7 +209,8 @@ def _get_shap_values(
     Return SHAP Explanation object for (predict_fn, text), using a
     bounded LRU cache to avoid recomputing across plot/save/explain calls.
     """
-    cache_key = _cache_key_for_predict_fn(predict_fn) + (text,)
+    text_hash = hashlib.sha1(text.encode("utf-8")).hexdigest()
+    cache_key = _stable_predict_fn_key(predict_fn) + (text_hash,)
     with _LOCK:
         if cache_key in _VALUE_CACHE:
             _VALUE_CACHE.move_to_end(cache_key)
@@ -207,6 +226,13 @@ def _get_shap_values(
             _VALUE_CACHE.popitem(last=False)
 
     return shap_values
+
+
+def get_shap_values(
+    predict_fn: Callable[[str], Dict[str, Any]],
+    text: str,
+) -> Any:
+    return _get_shap_values(predict_fn, text)
 
 
 def explain_text(
@@ -227,10 +253,16 @@ def explain_text(
     tokens = tokens[:min_len]
     values = values[:min_len]
 
+    if len(tokens) == 0:
+        return {
+            "text": text,
+            "token_importance": [],
+        }
+
     filtered = [
         (t, v)
         for t, v in zip(tokens, values)
-        if t not in {"[CLS]", "[SEP]", "<s>", "</s>"}
+        if t not in SPECIAL_TOKENS
     ]
 
     if filtered:
@@ -240,6 +272,10 @@ def explain_text(
         validate_tokens_scores(tokens, values)
     else:
         tokens, values = [], []
+
+    if values:
+        max_abs = max(abs(v) for v in values) or 1.0
+        values = [float(v / max_abs) for v in values]
 
     token_importance = [
         {"token": str(tok), "importance": float(val)}
@@ -264,10 +300,11 @@ def plot_explanation(
 
     if shap is None:
         raise ImportError("SHAP is not installed.")
-
-    shap_values = _get_shap_values(predict_fn, text)
-
-    shap.plots.text(shap_values[0])
+    try:
+        shap_values = _get_shap_values(predict_fn, text)
+        shap.plots.text(shap_values[0])
+    except Exception as e:  # noqa: BLE001
+        logger.warning("SHAP plot failed: %s", e)
 
 
 def save_explanation_html(
@@ -285,13 +322,14 @@ def save_explanation_html(
     shap_values = _get_shap_values(predict_fn, text)
 
     html = shap.plots.text(shap_values[0], display=False)
+    html_str = str(html) if html is not None else "<p>No SHAP output</p>"
 
     output_path = Path(output_path)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with output_path.open("w", encoding="utf-8") as f:
-        f.write(str(html))
+        f.write(html_str)
 
     logger.info("Saved SHAP explanation: %s", output_path)
 

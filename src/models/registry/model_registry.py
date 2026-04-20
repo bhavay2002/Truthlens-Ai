@@ -59,8 +59,6 @@ def _load_multitask_model(model_path: Path, device: torch.device):
     download), because the weights we care about are all in pytorch_model.bin.
     This avoids a ~500 MB round-trip to HuggingFace Hub.
     """
-    import transformers
-    from transformers import AutoConfig, AutoModel
     from src.models.multitask.multitask_truthlens_model import (
         MultiTaskTruthLensConfig,
         MultiTaskTruthLensModel,
@@ -76,29 +74,10 @@ def _load_multitask_model(model_path: Path, device: torch.device):
         model_name=base_model_name,
         dropout=cfg.get("dropout", 0.1),
         pooling=cfg.get("pooling", "cls"),
+        init_from_config_only=True,
     )
 
-    # ── Config-only initialisation ────────────────────────────────────────────
-    # Temporarily replace AutoModel.from_pretrained with a from_config stub so
-    # that the TransformerEncoder inside MultiTaskTruthLensModel builds the
-    # right architecture without downloading pretrained weights (they are
-    # immediately overwritten by our own state dict anyway).
-    _original_from_pretrained = AutoModel.from_pretrained
-
-    def _from_config_stub(name_or_path, *args, **kwargs):
-        hf_cfg = AutoConfig.from_pretrained(
-            name_or_path, local_files_only=False
-        )
-        logger.info(
-            "Initialising encoder architecture from config only: %s", name_or_path
-        )
-        return AutoModel.from_config(hf_cfg)
-
-    transformers.AutoModel.from_pretrained = _from_config_stub
-    try:
-        model = MultiTaskTruthLensModel(config=model_cfg)
-    finally:
-        transformers.AutoModel.from_pretrained = _original_from_pretrained
+    model = MultiTaskTruthLensModel(config=model_cfg)
 
     # ── Load trained weights ──────────────────────────────────────────────────
     weights_path = model_path / "pytorch_model.bin"
@@ -116,10 +95,14 @@ def _load_multitask_model(model_path: Path, device: torch.device):
 # Settings
 # ---------------------------------------------------------
 
-SETTINGS = load_settings()
+_SETTINGS = None
 
-MODEL_DIR = Path(SETTINGS.model.path)
-VECTORIZER_PATH = Path(SETTINGS.paths.tfidf_vectorizer_path)
+
+def _get_settings():
+    global _SETTINGS
+    if _SETTINGS is None:
+        _SETTINGS = load_settings()
+    return _SETTINGS
 
 
 # ---------------------------------------------------------
@@ -159,12 +142,16 @@ class ModelRegistry:
 
             logger.info("Loading model from registry: %s", model_name)
 
-            model_path = MODEL_DIR
+            settings = _get_settings()
+            model_dir = Path(settings.model.path)
+            vectorizer_path = Path(settings.paths.tfidf_vectorizer_path)
+
+            model_path = model_dir
             if model_name:
-                named_model_path = MODEL_DIR / model_name
+                named_model_path = model_dir / model_name
                 if named_model_path.exists():
                     model_path = named_model_path
-                elif not MODEL_DIR.exists():
+                elif not model_dir.exists():
                     raise FileNotFoundError(f"Model path not found: {named_model_path}")
                 else:
                     raise FileNotFoundError(f"Model path not found: {named_model_path}")
@@ -188,14 +175,14 @@ class ModelRegistry:
             # Determine the base model name for tokenizer fallback:
             # 1) model_name field in config.json (most specific)
             # 2) encoder.name from settings
-            # 3) SETTINGS.model.name
+            # 3) settings.model.name
             _settings_encoder_name = getattr(
-                getattr(SETTINGS.model, "encoder", None), "name", None
+                getattr(settings.model, "encoder", None), "name", None
             )
             _base_model_name = (
                 saved_cfg.get("model_name")
                 or _settings_encoder_name
-                or SETTINGS.model.name
+                or settings.model.name
             )
 
             # -------------------------------------------------
@@ -258,10 +245,10 @@ class ModelRegistry:
 
             vectorizer = None
 
-            if VECTORIZER_PATH.exists():
+            if vectorizer_path.exists():
 
                 try:
-                    vectorizer = joblib.load(VECTORIZER_PATH)
+                    vectorizer = joblib.load(vectorizer_path)
                     logger.info("TF-IDF vectorizer loaded")
 
                 except Exception as exc:

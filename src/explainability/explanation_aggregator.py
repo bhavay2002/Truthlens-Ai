@@ -96,7 +96,9 @@ class ExplanationAggregator:
                 return explanations
 
             validate_tokens_scores(tokens, scores)
-            tokens, scores = align_tokens(tokens, scores, tokenizer_type=tokenizer_type)
+            # Only align subword-based inputs; word-level explainers should keep tokens as-is.
+            if key in {"attention", "integrated_gradients"}:
+                tokens, scores = align_tokens(tokens, scores, tokenizer_type=tokenizer_type)
 
             return [{"token": t, key: float(s)} for t, s in zip(tokens, scores)]
 

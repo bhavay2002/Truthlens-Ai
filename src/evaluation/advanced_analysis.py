@@ -533,7 +533,7 @@ def shap_importance(
         random_seed=random_seed,
     )
     scores = shap_calc.compute(X=X, feature_names=feature_names)
-    ranked = shap_calc.rank_features(scores)
+    ranked = shap_calc.rank_features(X, feature_names)
 
     result: Dict[str, Any] = {
         "scores": scores,
@@ -541,7 +541,7 @@ def shap_importance(
     }
 
     if top_k is not None:
-        result["top_k"] = shap_calc.top_k(scores, k=top_k)
+        result["top_k"] = shap_calc.top_k(X, feature_names, k=top_k)
 
     logger.info("SHAP importance complete | features_scored=%d", len(scores))
     return result

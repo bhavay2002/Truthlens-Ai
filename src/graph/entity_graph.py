@@ -28,21 +28,86 @@ from __future__ import annotations
 import logging
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from typing import ClassVar, Dict, List
+from typing import ClassVar, Dict, List, Set, Tuple
 
 import numpy as np
 import spacy
 from spacy.language import Language
 from spacy.tokens import Doc
 
-from graph_hardening_patch import (
-    normalize_graph_adjacency,
-    ordered_entity_graph_vector,
-    to_undirected,
-    unique_undirected_edges,
-)
-
 logger = logging.getLogger(__name__)
+
+
+def normalize_graph_adjacency(
+    graph: Dict[str, List[str]]
+) -> Dict[str, List[str]]:
+    """
+    Normalize adjacency list nodes and neighbors.
+    """
+    normalized: Dict[str, List[str]] = {}
+    for node, neighbors in graph.items():
+        node_key = node.strip().lower()
+        seen: Set[str] = set()
+        clean_neighbors: List[str] = []
+        for neighbor in neighbors:
+            if isinstance(neighbor, str):
+                nk = neighbor.strip().lower()
+                if nk and nk != node_key and nk not in seen:
+                    seen.add(nk)
+                    clean_neighbors.append(nk)
+        normalized[node_key] = sorted(clean_neighbors)
+    return normalized
+
+
+def to_undirected(
+    graph: Dict[str, List[str]]
+) -> Dict[str, List[str]]:
+    """
+    Convert adjacency list to undirected representation.
+    """
+    adj: Dict[str, Set[str]] = {node: set(neighbors) for node, neighbors in graph.items()}
+
+    for node, neighbors in graph.items():
+        for neighbor in neighbors:
+            if neighbor not in adj:
+                adj[neighbor] = set()
+            adj[neighbor].add(node)
+
+    return {node: sorted(neighbors) for node, neighbors in adj.items()}
+
+
+def unique_undirected_edges(
+    graph: Dict[str, List[str]]
+) -> List[Tuple[str, str]]:
+    """
+    Return unique undirected edges from adjacency list.
+    """
+    edges: Set[Tuple[str, str]] = set()
+    for node, neighbors in graph.items():
+        for neighbor in neighbors:
+            edge = (min(node, neighbor), max(node, neighbor))
+            edges.add(edge)
+    return sorted(edges)
+
+
+_ENTITY_GRAPH_KEYS: List[str] = [
+    "entity_graph_nodes",
+    "entity_graph_edges",
+    "entity_graph_avg_degree",
+    "entity_graph_density",
+    "entity_graph_dominant_degree",
+    "entity_graph_degree_variance",
+]
+
+
+def ordered_entity_graph_vector(features: Dict[str, float]) -> np.ndarray:
+    """
+    Return fixed-order numpy vector of entity-graph features.
+    """
+    return np.array(
+        [float(features.get(k, 0.0)) for k in _ENTITY_GRAPH_KEYS],
+        dtype=np.float32,
+    )
 
 
 @dataclass(slots=True)

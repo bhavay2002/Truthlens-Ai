@@ -1,37 +1,3 @@
-"""
-File Name: inference_cache.py
-Module: Inference Caching System
-Description:
-    Provides a production-grade caching layer for inference results in the
-    TruthLens system. The cache prevents redundant computations when the same
-    article or feature set is analyzed repeatedly.
-
-    Typical benefits:
-        • Reduced latency for repeated requests
-        • Lower GPU/CPU utilization
-        • Faster batch evaluation
-        • Efficient API responses
-
-    The cache uses deterministic hashing of inputs (e.g., article text or
-    feature dictionary) and supports optional disk persistence for long-lived
-    caching across sessions.
-
-Dependencies:
-    logging
-    typing
-    dataclasses
-    hashlib
-    json
-    pathlib
-    time
-
-Inputs:
-    Article text or feature dictionary.
-
-Outputs:
-    Cached prediction results retrieved by unique hash keys.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -39,8 +5,10 @@ import json
 import logging
 import os
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -55,6 +23,8 @@ class InferenceCacheConfig:
     enable_disk_cache: bool = True
     ttl_seconds: Optional[int] = None
     enable_memory_cache: bool = True
+    max_memory_items: int = 1024
+    max_disk_items: Optional[int] = None
 
 
 class InferenceCache:
@@ -69,7 +39,9 @@ class InferenceCache:
 
     def __init__(self, config: InferenceCacheConfig) -> None:
         self.config = config
-        self.memory_cache: Dict[str, Dict[str, Any]] = {}
+        self.memory_cache: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        self._lock = Lock()
+        self._inflight: Dict[str, Lock] = {}
 
         self.cache_dir = Path(config.cache_dir)
 
@@ -84,14 +56,20 @@ class InferenceCache:
         """
 
         try:
-            if isinstance(data, str):
-                payload = data
-            else:
-                payload = json.dumps(data, sort_keys=True)
+            def default(obj: Any) -> Any:
+                if hasattr(obj, "tolist"):
+                    return obj.tolist()
+                if isinstance(obj, set):
+                    return sorted(obj)
+                return repr(obj)
 
-            hash_key = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+            payload = (
+                data
+                if isinstance(data, str)
+                else json.dumps(data, sort_keys=True, default=default)
+            )
 
-            return hash_key
+            return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
         except Exception as exc:
             logger.exception("Failed to hash input")
@@ -104,10 +82,14 @@ class InferenceCache:
         return self.cache_dir / f"{key}.json"
 
     def _safe_write(self, path: Path, data: str) -> None:
-        tmp = f"{path}.tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
+        tmp_path = path.with_suffix(".tmp")
+
+        with open(tmp_path, "w", encoding="utf-8") as f:
             f.write(data)
-        os.replace(tmp, path)
+            f.flush()
+            os.fsync(f.fileno())
+
+        os.replace(tmp_path, path)
 
     def _is_expired(self, timestamp: float) -> bool:
         """
@@ -117,7 +99,20 @@ class InferenceCache:
         if self.config.ttl_seconds is None:
             return False
 
-        return (time.time() - timestamp) > self.config.ttl_seconds
+        return (time.monotonic() - timestamp) > self.config.ttl_seconds
+
+    def _update_memory_cache(self, key: str, entry: Dict[str, Any]) -> None:
+        self.memory_cache[key] = entry
+        self.memory_cache.move_to_end(key)
+
+        if len(self.memory_cache) > self.config.max_memory_items:
+            self.memory_cache.popitem(last=False)
+
+    def _get_inflight_lock(self, key: str) -> Lock:
+        with self._lock:
+            if key not in self._inflight:
+                self._inflight[key] = Lock()
+            return self._inflight[key]
 
     def get(self, data: Any) -> Optional[Dict[str, Any]]:
         """
@@ -126,42 +121,53 @@ class InferenceCache:
 
         key = self._hash_input(data)
 
-        if self.config.enable_memory_cache:
+        with self._lock:
 
-            entry = self.memory_cache.get(key)
+            if self.config.enable_memory_cache:
+                entry = self.memory_cache.get(key)
 
-            if entry:
-
-                if not self._is_expired(entry["timestamp"]):
-                    logger.debug("Memory cache hit")
-                    return entry["value"]
-
-                logger.debug("Memory cache expired")
-                del self.memory_cache[key]
-
-        if self.config.enable_disk_cache:
-
-            path = self._cache_path(key)
-
-            if path.exists():
-
-                try:
-                    with open(path, "r", encoding="utf-8") as f:
-                        entry = json.load(f)
-
+                if entry:
                     if not self._is_expired(entry["timestamp"]):
-                        logger.debug("Disk cache hit")
-
-                        if self.config.enable_memory_cache:
-                            self.memory_cache[key] = entry
-
+                        self.memory_cache.move_to_end(key)
+                        logger.debug("Memory cache hit")
                         return entry["value"]
 
-                    logger.debug("Disk cache expired")
-                    path.unlink(missing_ok=True)
+                    del self.memory_cache[key]
 
-                except Exception as exc:
-                    logger.warning("Failed to read disk cache: %s", exc)
+            if self.config.enable_disk_cache:
+                path = self._cache_path(key)
+
+                if path.exists():
+                    try:
+                        with open(path, "r", encoding="utf-8") as f:
+                            entry = json.load(f)
+
+                        if "timestamp" not in entry or "value" not in entry:
+                            raise ValueError("Invalid cache entry")
+
+                        if not self._is_expired(entry["timestamp"]):
+                            entry["timestamp"] = time.monotonic()
+                            logger.debug("Disk cache hit")
+
+                            if self.config.enable_memory_cache:
+                                self._update_memory_cache(key, entry)
+
+                            return entry["value"]
+
+                        path.unlink(missing_ok=True)
+
+                    except Exception as exc:
+                        logger.warning("Corrupt cache removed: %s", exc)
+                        path.unlink(missing_ok=True)
+
+        lock = self._get_inflight_lock(key)
+        with lock:
+            with self._lock:
+                if self.config.enable_memory_cache:
+                    entry = self.memory_cache.get(key)
+                    if entry and not self._is_expired(entry["timestamp"]):
+                        self.memory_cache.move_to_end(key)
+                        return entry["value"]
 
         return None
 
@@ -173,23 +179,31 @@ class InferenceCache:
         key = self._hash_input(data)
 
         entry = {
-            "timestamp": time.time(),
+            "timestamp": time.monotonic(),
             "value": value,
         }
 
-        if self.config.enable_memory_cache:
-            self.memory_cache[key] = entry
+        with self._lock:
 
-        if self.config.enable_disk_cache:
+            if self.config.enable_memory_cache:
+                self._update_memory_cache(key, entry)
 
-            path = self._cache_path(key)
+            if self.config.enable_disk_cache:
+                path = self._cache_path(key)
 
-            try:
-                payload = json.dumps(entry)
-                self._safe_write(path, payload)
+                try:
+                    payload = json.dumps(entry, sort_keys=True, separators=(",", ":"))
+                    self._safe_write(path, payload)
 
-            except Exception as exc:
-                logger.warning("Failed to write disk cache: %s", exc)
+                    if self.config.max_disk_items:
+                        files = sorted(
+                            self.cache_dir.glob("*.json"),
+                            key=os.path.getmtime,
+                        )
+                        while len(files) > self.config.max_disk_items:
+                            files.pop(0).unlink(missing_ok=True)
+                except Exception as exc:
+                    logger.warning("Failed to write disk cache: %s", exc)
 
     def invalidate(self, data: Any) -> None:
         """
@@ -198,15 +212,13 @@ class InferenceCache:
 
         key = self._hash_input(data)
 
-        if key in self.memory_cache:
-            del self.memory_cache[key]
+        with self._lock:
+            self.memory_cache.pop(key, None)
 
-        if self.config.enable_disk_cache:
-
-            path = self._cache_path(key)
-
-            if path.exists():
-                path.unlink(missing_ok=True)
+            if self.config.enable_disk_cache:
+                path = self._cache_path(key)
+                if path.exists():
+                    path.unlink(missing_ok=True)
 
         logger.debug("Cache invalidated")
 
@@ -215,11 +227,11 @@ class InferenceCache:
         Clear entire cache.
         """
 
-        self.memory_cache.clear()
+        with self._lock:
+            self.memory_cache.clear()
 
-        if self.config.enable_disk_cache:
-
-            for file in self.cache_dir.glob("*.json"):
-                file.unlink(missing_ok=True)
+            if self.config.enable_disk_cache:
+                for file in self.cache_dir.glob("*.json"):
+                    file.unlink(missing_ok=True)
 
         logger.info("Cache cleared")

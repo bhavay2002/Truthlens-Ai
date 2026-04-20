@@ -33,7 +33,6 @@ from src.graph.narrative_graph_builder import NarrativeGraphBuilder
 from src.graph.graph_analysis import GraphAnalyzer
 from src.graph.graph_features import GraphFeatureExtractor, GraphFeatureExtractorConfig
 from src.analysis.integration_runner import AnalysisIntegrationRunner
-from graph_hardening_patch import build_pipeline_feature_extractor_config
 
 
 logger = logging.getLogger(__name__)
@@ -49,6 +48,25 @@ class GraphPipelineConfig:
     enable_narrative_graph: bool = True
     return_vector: bool = True
     run_analysis_modules: bool = True
+
+
+@dataclass
+class _PipelineExtractorConfig:
+    enable_entity_graph: bool = True
+    enable_narrative_graph: bool = True
+
+
+def build_pipeline_feature_extractor_config(
+    enable_entity_graph: bool = True,
+    enable_narrative_graph: bool = True,
+) -> _PipelineExtractorConfig:
+    """
+    Build a feature-extractor configuration object for the graph pipeline.
+    """
+    return _PipelineExtractorConfig(
+        enable_entity_graph=enable_entity_graph,
+        enable_narrative_graph=enable_narrative_graph,
+    )
 
 
 class GraphPipeline:

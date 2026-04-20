@@ -28,10 +28,37 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict
 
-from graph_hardening_patch import load_yaml_as_dict, parse_graph_config
+import yaml
 
 
 logger = logging.getLogger(__name__)
+
+
+def load_yaml_as_dict(path: str | Path) -> Dict[str, Any]:
+    """
+    Load a YAML file and return its contents as a dictionary.
+    """
+    with open(path, "r", encoding="utf-8") as fh:
+        data = yaml.safe_load(fh)
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected a YAML mapping at {path}, got {type(data)}")
+    return data
+
+
+def parse_graph_config(config_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Extract and validate the graph subsection from a configuration dictionary.
+    Falls back to sensible defaults for missing keys.
+    """
+    graph_section = config_data.get("graph", config_data)
+
+    parsed: Dict[str, Any] = {
+        "enable_entity_graph": bool(graph_section.get("enable_entity_graph", True)),
+        "enable_narrative_graph": bool(graph_section.get("enable_narrative_graph", True)),
+        "min_keyword_length": int(graph_section.get("min_keyword_length", 4)),
+        "max_keywords_per_sentence": int(graph_section.get("max_keywords_per_sentence", 4)),
+    }
+    return parsed
 
 
 @dataclass(slots=True)
