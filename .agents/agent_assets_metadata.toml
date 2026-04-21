@@ -1,8 +1,0 @@
-uploads = []
-generated = []
-
-[[outputs]]
-id = "MbbLJ65_b9S6J7150bqsj"
-uri = "file://AUDIT_REPORT.md"
-type = "text"
-title = "TruthLens — Complete Deep Audit Report"

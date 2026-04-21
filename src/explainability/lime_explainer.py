@@ -1,49 +1,23 @@
-"""
-File Name: lime_explainer.py
-Module: Explainability - LIME
-Description:
-    Provides Local Interpretable Model-Agnostic Explanations (LIME) for
-    text classification predictions within the TruthLens AI system.
-
-    This module supports generating token-level importance explanations
-    by perturbing text inputs and observing changes in model predictions.
-    It produces both structured explanation data and interactive HTML
-    visualizations suitable for dashboards and reports.
-
-Dependencies:
-    logging
-    pathlib
-    typing
-    numpy
-    lime
-
-Inputs:
-    predict_fn : callable prediction function
-    text : str input text
-
-Outputs:
-    explanation dictionary
-    optional HTML visualization
-"""
-
 from __future__ import annotations
 
 import logging
 import threading
+from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Sequence
+from typing import Any, Callable, Dict, List, Sequence, TYPE_CHECKING
 
 import numpy as np
 
-try:
+if TYPE_CHECKING:
     from lime.lime_text import LimeTextExplainer
-except ImportError:  # pragma: no cover
-    LimeTextExplainer = None  # type: ignore
+else:
+    LimeTextExplainer = Any
 
 logger = logging.getLogger(__name__)
 
 _LOCK = threading.RLock()
-_CACHE: Dict[str, LimeTextExplainer] = {}
+_MAX_CACHE_SIZE = 4
+_CACHE: Dict[str, LimeTextExplainer] = OrderedDict()
 
 
 def _extract_fake_probability(result: Any) -> float:
@@ -65,7 +39,8 @@ def _extract_fake_probability(result: Any) -> float:
 
 def get_explainer(model_id: str = "default") -> LimeTextExplainer:
     """
-    Lazily initialize and cache a LimeTextExplainer instance.
+    Lazily initialize and cache a LimeTextExplainer instance
+    with LRU eviction to prevent unbounded growth.
     """
     if LimeTextExplainer is None:
         raise ImportError(
@@ -74,11 +49,20 @@ def get_explainer(model_id: str = "default") -> LimeTextExplainer:
         )
 
     with _LOCK:
-        if model_id not in _CACHE:
-            logger.info("Initializing LIME text explainer")
-            _CACHE[model_id] = LimeTextExplainer(class_names=["Real", "Fake"])
+        if model_id in _CACHE:
+            _CACHE.move_to_end(model_id)
+            return _CACHE[model_id]
 
-        return _CACHE[model_id]
+        logger.info("Initializing LIME text explainer (model_id=%s)", model_id)
+        explainer = LimeTextExplainer(class_names=["Real", "Fake"])
+        _CACHE[model_id] = explainer
+        _CACHE.move_to_end(model_id)
+
+        if len(_CACHE) > _MAX_CACHE_SIZE:
+            evicted_id, _ = _CACHE.popitem(last=False)
+            logger.debug("Evicted LIME explainer from cache (model_id=%s)", evicted_id)
+
+        return explainer
 
 
 def _extract_fake_probabilities_from_batch(
@@ -114,6 +98,9 @@ def _extract_fake_probabilities_from_batch(
         except Exception:
             return None
 
+    if not isinstance(probabilities, list) or len(probabilities) != expected_size:
+        return None
+
     return probabilities
 
 
@@ -122,35 +109,64 @@ def lime_predict_wrapper(
     predict_fn: Callable[[Any], Any],
 ) -> np.ndarray:
     """
-    Convert prediction outputs to LIME-compatible probability matrix.
+    Fully batch-aware LIME prediction wrapper.
     """
-    text_list = [str(text) for text in texts]
+    text_list = [str(t) for t in texts]
 
-    batch_probs: List[float] | None = None
+    batch_fn = getattr(predict_fn, "batch_predict", None)
+    if callable(batch_fn):
+        try:
+            results = batch_fn(text_list)
+            probs: List[List[float]] = []
+            for result in results:
+                fake_prob = _extract_fake_probability(result)
+                probs.append([1.0 - fake_prob, fake_prob])
+            return np.asarray(probs, dtype=float)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("batch_predict failed: %s", exc)
 
     try:
         batch_result = predict_fn(text_list)
-
         batch_probs = _extract_fake_probabilities_from_batch(
             batch_result,
             expected_size=len(text_list),
         )
-
+        if batch_probs is not None:
+            return np.asarray(
+                [[1.0 - prob, prob] for prob in batch_probs],
+                dtype=float,
+            )
     except Exception:
-        batch_probs = None
+        pass
 
-    probabilities: List[List[float]] = []
+    outputs: List[List[float]] = []
+    for text in text_list:
+        result = predict_fn(text)
+        fake_prob = _extract_fake_probability(result)
+        outputs.append([1.0 - fake_prob, fake_prob])
 
-    if batch_probs is not None:
-        for fake_prob in batch_probs:
-            probabilities.append([1.0 - fake_prob, fake_prob])
-    else:
-        for text in text_list:
-            result = predict_fn(text)
-            fake_prob = _extract_fake_probability(result)
-            probabilities.append([1.0 - fake_prob, fake_prob])
+    return np.asarray(outputs, dtype=float)
 
-    return np.asarray(probabilities, dtype=float)
+
+def _batched_predict(
+    texts: Sequence[str],
+    predict_fn: Callable[[Any], Any],
+    batch_size: int = 32,
+) -> np.ndarray:
+    results: List[np.ndarray] = []
+
+    for i in range(0, len(texts), batch_size):
+        chunk = texts[i : i + batch_size]
+        chunk_preds = lime_predict_wrapper(chunk, predict_fn)
+        results.append(chunk_preds)
+
+    return np.vstack(results) if results else np.zeros((0, 2), dtype=float)
+
+
+def _get_lime_predict_fn(
+    predict_fn: Callable[[Any], Any],
+) -> Callable[[Sequence[str]], np.ndarray]:
+    return lambda x: _batched_predict(x, predict_fn)
 
 
 def explain_prediction(
@@ -170,10 +186,11 @@ def explain_prediction(
         raise ValueError("num_samples must be greater than 0.")
 
     explainer = get_explainer()
+    predictor = _get_lime_predict_fn(predict_fn)
 
     exp = explainer.explain_instance(
         text,
-        lambda x: lime_predict_wrapper(x, predict_fn),
+        predictor,
         num_features=num_features,
         num_samples=num_samples,
     )
@@ -206,10 +223,11 @@ def save_explanation_html(
         raise ValueError("num_samples must be greater than 0.")
 
     explainer = get_explainer()
+    predictor = _get_lime_predict_fn(predict_fn)
 
     exp = explainer.explain_instance(
         text,
-        lambda x: lime_predict_wrapper(x, predict_fn),
+        predictor,
         num_features=num_features,
         num_samples=num_samples,
     )
@@ -222,3 +240,18 @@ def save_explanation_html(
     logger.info("Saved LIME explanation to %s", output_path)
 
     return output_path
+
+
+def clear_explainer_cache() -> None:
+    with _LOCK:
+        _CACHE.clear()
+        logger.info("Cleared LIME explainer cache")
+
+
+def cache_info() -> dict:
+    with _LOCK:
+        return {
+            "size": len(_CACHE),
+            "capacity": _MAX_CACHE_SIZE,
+            "keys": list(_CACHE.keys()),
+        }

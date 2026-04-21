@@ -1,27 +1,3 @@
-"""
-File Name: predictor.py
-Module: models.inference
-Description:
-    Provides a high-level prediction interface for TruthLens models.
-    The Predictor class wraps model inference logic, handles device
-    placement, batching, probability computation, and converts raw
-    model outputs into standardized prediction dictionaries.
-
-    The module is compatible with both single-task and multi-task
-    models. For multi-task models, the predictor returns task-specific
-    predictions and probabilities.
-
-Dependencies:
-    logging
-    typing
-    torch
-    torch.nn
-Inputs:
-    Tokenized model inputs (input_ids, attention_mask)
-Outputs:
-    Structured prediction dictionaries
-"""
-
 from __future__ import annotations
 
 import logging
@@ -319,6 +295,11 @@ class Predictor:
         Never falls back to propaganda.
         """
 
+        for key in _FAKE_HEAD_KEYS:
+            probs = formatted.get(key.replace("logits", "probabilities"))
+            if isinstance(probs, torch.Tensor):
+                return probs
+
         logits = _find_tensor_by_keys(formatted, _FAKE_HEAD_KEYS)
 
         if isinstance(logits, torch.Tensor):
@@ -339,17 +320,22 @@ class Predictor:
 
         signals: list[float] = []
 
+        def _safe_positive_class(tensor: torch.Tensor) -> float:
+            if tensor.dim() == 0:
+                return float(tensor.item())
+            return float(tensor[..., -1].mean().item())
+
         bias = formatted.get("bias_probabilities")
         if isinstance(bias, torch.Tensor):
-            signals.append(float(bias[..., -1].mean().item()))
+            signals.append(_safe_positive_class(bias))
 
         emotion = formatted.get("emotion_probabilities")
         if isinstance(emotion, torch.Tensor):
-            signals.append(float(emotion[..., -1].mean().item()) * 0.5)
+            signals.append(_safe_positive_class(emotion) * 0.5)
 
         ideology = formatted.get("ideology_probabilities")
         if isinstance(ideology, torch.Tensor):
-            signals.append(float(ideology[..., -1].mean().item()) * 0.5)
+            signals.append(_safe_positive_class(ideology) * 0.5)
 
         if not signals:
             return 0.5
@@ -363,13 +349,19 @@ class Predictor:
         """
 
         probs = self._extract_fake_probs(formatted)
+        fake_index = self._resolve_fake_index()
 
         if probs is not None:
-            fake_index = self._resolve_fake_index()
-            fake_prob = float(probs[..., fake_index].mean().item())
-            # Collapse batch dimension before taking max / argmax so that
-            # build_fake_real_output is safe for any batch size, not just 1.
-            mean_probs = probs.mean(dim=0) if probs.dim() > 1 else probs
+            if probs.dim() > 1:
+                if probs.size(0) > 1:
+                    logger.warning(
+                        "build_fake_real_output received batch size > 1; "
+                        "aggregating via mean (consider per-sample handling upstream)"
+                    )
+                mean_probs = probs.mean(dim=0)
+            else:
+                mean_probs = probs
+            fake_prob = float(mean_probs[fake_index].item())
             confidence = float(mean_probs.max().item())
             pred_index = int(mean_probs.argmax().item())
         else:
@@ -377,13 +369,64 @@ class Predictor:
             confidence = float(fake_prob)
             pred_index = int(fake_prob >= 0.5)
 
-        label = "Fake" if pred_index == 1 else "Real"
+        label = "Fake" if pred_index == fake_index else "Real"
 
         return {
             "label": label,
             "fake_probability": float(min(max(fake_prob, 0.0), 1.0)),
             "confidence": float(min(max(confidence, 0.0), 1.0)),
         }
+
+    @torch.no_grad()
+    def predict_batch_pairs(
+        self,
+        batch: Dict[str, torch.Tensor],
+    ) -> list[list[float]]:
+        """
+        Return per-sample [real_prob, fake_prob] pairs for a batch.
+
+        - Runs one forward pass
+        - Splits outputs per sample safely
+        - Uses build_fake_real_output per sample (no cross-sample averaging)
+        """
+
+        batch = self._move_to_device(batch)
+
+        if self.ensemble_model is not None:
+            outputs = self._run_ensemble(batch)
+        else:
+            outputs = self.model(**batch)
+
+        formatted = self._format_outputs(outputs)
+
+        n = None
+        for value in formatted.values():
+            if isinstance(value, torch.Tensor) and value.dim() > 0:
+                n = value.size(0)
+                break
+        if n is None:
+            raise RuntimeError("Cannot infer batch size from outputs")
+
+        results: list[list[float]] = []
+        for i in range(n):
+            sample = {
+                key: (
+                    value[i : i + 1]
+                    if isinstance(value, torch.Tensor)
+                    and value.dim() > 0
+                    and value.size(0) == n
+                    else value
+                )
+                for key, value in formatted.items()
+            }
+
+            output = self.build_fake_real_output(sample)
+            fake_prob = float(output["fake_probability"])
+            real_prob = float(1.0 - fake_prob)
+
+            results.append([round(real_prob, 6), round(fake_prob, 6)])
+
+        return results
 
     def _validate_binary_logits(self, logits: torch.Tensor) -> None:
         if logits.size(-1) != 2:

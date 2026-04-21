@@ -1,36 +1,3 @@
-"""
-File Name: shap_explainer.py
-Module: Explainability - SHAP
-Description:
-    Provides SHAP-based explanations for model predictions in the TruthLens AI
-    system. SHAP (SHapley Additive exPlanations) computes token-level Shapley
-    values, revealing how each word contributes to prediction outcomes.
-
-    The module supports:
-        • SHAP value computation
-        • Token-level importance
-        • Interactive visualization
-        • HTML report generation
-        • Explainer caching for performance
-
-
-Dependencies:
-    collections
-    logging
-    pathlib
-    typing
-    numpy
-    shap
-
-Inputs:
-    predict_fn : Callable[[str], Dict[str, Any]]
-    text : str
-
-Outputs:
-    SHAP explanation object
-    HTML visualization (optional)
-"""
-
 from __future__ import annotations
 
 from collections import OrderedDict
@@ -72,9 +39,11 @@ def _process_shap_values(values):
 
     values = np.asarray(values, dtype=np.float32)
 
-    if values.ndim == 2:
-        idx = min(values.shape[1] - 1, 1)
-        values = values[:, idx]
+    if values.ndim == 3:
+        values = values[:, :, -1]
+    elif values.ndim == 2:
+        if values.shape[1] == 1:
+            values = values[:, 0]
 
     values = np.nan_to_num(values, nan=0.0, posinf=1.0, neginf=-1.0)
 
@@ -106,6 +75,18 @@ def shap_predict_wrapper(
     """
     Convert predictor output into probability matrix required by SHAP.
     """
+
+    batch_fn = getattr(predict_fn, "batch_predict", None)
+    if callable(batch_fn):
+        try:
+            results = batch_fn(list(texts))
+            outputs = []
+            for result in results:
+                fake_prob = _extract_fake_probability(result)
+                outputs.append([1.0 - fake_prob, fake_prob])
+            return np.asarray(outputs, dtype=float)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Batch prediction failed, falling back: %s", exc)
 
     outputs: list[list[float]] = []
 
@@ -151,7 +132,7 @@ def _stable_predict_fn_key(
     if module_name and qual_name:
         return ("function", module_name, qual_name)
 
-    return ("fallback", id(predict_fn))
+    return ("fallback", repr(predict_fn))
 
 
 def _set_cache_entry(cache_key: Tuple[Any, ...], explainer: Any) -> None:
@@ -247,13 +228,27 @@ def explain_text(
         raise ValueError("text cannot be empty.")
 
     shap_values = _get_shap_values(predict_fn, text)
-    tokens = list(shap_values.data[0])
+    data = getattr(shap_values, "data", None)
+    if data is None or len(data) == 0:
+        return {
+            "text": text,
+            "token_importance": [],
+        }
+
+    tokens = list(data[0])
     values = _process_shap_values(shap_values.values[0])
+
+    if len(tokens) == 0 or len(values) == 0:
+        return {
+            "text": text,
+            "token_importance": [],
+        }
+
     min_len = min(len(tokens), len(values))
     tokens = tokens[:min_len]
     values = values[:min_len]
 
-    if len(tokens) == 0:
+    if min_len == 0:
         return {
             "text": text,
             "token_importance": [],
@@ -274,7 +269,9 @@ def explain_text(
         tokens, values = [], []
 
     if values:
-        max_abs = max(abs(v) for v in values) or 1.0
+        max_abs = max((abs(v) for v in values), default=1.0)
+        if max_abs == 0:
+            max_abs = 1.0
         values = [float(v / max_abs) for v in values]
 
     token_importance = [

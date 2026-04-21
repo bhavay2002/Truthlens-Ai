@@ -78,27 +78,37 @@ class AttentionRollout:
         self._validate_inputs(attentions, tokens, sample_index, source_token_index)
 
         try:
-            processed: List[torch.Tensor] = []
-            for layer_attention in attentions:
-                attn = self._aggregate_heads(layer_attention, sample_index)
-                attn = self._add_residual_connection(attn)
-                processed.append(attn)
+            with torch.no_grad():
+                processed: List[torch.Tensor] = []
+                for layer_attention in attentions:
+                    attn = self._aggregate_heads(layer_attention, sample_index)
 
-            rollout = processed[0]
-            for layer in processed[1:]:
-                # Correct order: accumulate left-to-right (input → output).
-                # layer @ rollout would reverse the flow direction.
-                rollout = rollout @ layer
+                    if attn.dtype in (torch.float16, torch.bfloat16):
+                        attn = attn.to(torch.float32)
 
-            rollout_scores = rollout[source_token_index].detach().cpu().numpy()
-            rollout_scores = np.asarray(rollout_scores, dtype=float)
-            rollout_scores = np.nan_to_num(rollout_scores, nan=0.0, posinf=0.0, neginf=0.0)
-            rollout_scores = np.maximum(rollout_scores, 0.0)
-            total = float(np.sum(rollout_scores))
-            if total > 0:
-                rollout_scores = rollout_scores / total
+                    attn = self._add_residual_connection(attn)
+                    processed.append(attn)
 
-            return {"tokens": tokens, "rollout_scores": rollout_scores.tolist()[: len(tokens)]}
+                if len(processed) == 1:
+                    rollout = processed[0]
+                else:
+                    rollout = torch.linalg.multi_dot(processed[::-1])
+
+                rollout_scores = rollout[source_token_index]
+                rollout_scores = rollout_scores.detach().cpu().numpy()
+                rollout_scores = np.asarray(rollout_scores, dtype=np.float32)
+                rollout_scores = np.nan_to_num(
+                    rollout_scores, nan=0.0, posinf=0.0, neginf=0.0
+                )
+                rollout_scores = np.maximum(rollout_scores, 0.0)
+                total = float(np.sum(rollout_scores))
+                if total > 0:
+                    rollout_scores /= total
+
+                return {
+                    "tokens": tokens,
+                    "rollout_scores": rollout_scores.tolist(),
+                }
 
         except Exception as exc:
             logger.exception("Attention rollout computation failed")
