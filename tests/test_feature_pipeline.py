@@ -1,4 +1,4 @@
-from features.pipelines.feature_pipeline import apply_feature_engineering
+from src.features.pipelines.feature_pipeline import apply_feature_engineering
 
 
 def test_apply_feature_engineering_adds_engineered_text(feature_dataset):

@@ -9,7 +9,7 @@ import torch
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, ConfigDict
 
-from models.inference.predictor import predict, predict_batch
+from src.inference.predict_api import predict, predict_batch
 from src.analysis.argument_mining import ArgumentMiningAnalyzer
 from src.analysis.bias_profile_builder import BiasProfileBuilder
 from src.graph.graph_pipeline import GraphPipeline

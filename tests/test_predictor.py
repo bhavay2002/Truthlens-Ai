@@ -3,7 +3,7 @@ import types
 import pytest
 import torch
 
-from models.inference import predictor
+from src.inference import predict_api as predictor
 
 
 class DummyModel:

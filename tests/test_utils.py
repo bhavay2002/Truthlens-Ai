@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 import torch
 
-from models.utils.model_utils import load_model, save_model
+from src.models.utils.model_utils import load_model, save_model
 from src.utils.device_utils import (
     device_summary,
     get_device,

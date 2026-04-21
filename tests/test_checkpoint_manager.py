@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from models.checkpointing.checkpoint_manager import CheckpointManager, get_last_checkpoint
+from src.models.checkpointing.checkpoint_manager import CheckpointManager, get_last_checkpoint
 
 
 def _mkdir(path: Path) -> None:

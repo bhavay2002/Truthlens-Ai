@@ -1,12 +1,27 @@
-from typing import Any, List, Dict
+"""
+File Name: predict_api.py
+Module: src.inference
 
-import torch 
+Singleton-style functional inference API.
+
+This module is the canonical location for the function-based ``predict``,
+``predict_batch``, and ``batch_predict`` entry-points used by the FastAPI
+service and by tests.
+
+It wraps :class:`src.models.inference.predictor.Predictor` (the class-based
+predictor) with lazy, process-wide singleton state so callers do not have to
+manage model loading themselves.
+"""
+
+from typing import Any, Dict, List
+
+import torch
 
 from src.models.inference.predictor import Predictor
 from src.models.registry.model_registry import ModelRegistry
+from src.utils.device_utils import autocast_context, get_device, move_to_device
 from src.utils.input_validation import ensure_non_empty_text
 from src.utils.settings import load_settings
-from src.utils.device_utils import get_device, move_to_device, autocast_context
 
 _SETTINGS = load_settings()
 
@@ -37,17 +52,13 @@ def _prepare_inputs(texts: List[str]):
     inputs = tokenizer(
         texts,
         truncation=True,
-        padding=True,  # dynamic padding (better for performance)
+        padding=True,
         max_length=_SETTINGS.model.max_length,
         return_tensors="pt",
     )
 
     return move_to_device(inputs, _device)
 
-
-# =========================================================
-# Single Prediction
-# =========================================================
 
 def predict(text: str) -> Dict[str, Any]:
     ensure_non_empty_text(text)
@@ -61,10 +72,6 @@ def predict(text: str) -> Dict[str, Any]:
 
     return predictor.build_fake_real_output(outputs)
 
-
-# =========================================================
-# Batch Prediction (raw pairs)
-# =========================================================
 
 def predict_batch(texts: List[str]) -> List[List[float]]:
     if not isinstance(texts, list) or not texts:
@@ -81,10 +88,6 @@ def predict_batch(texts: List[str]) -> List[List[float]]:
             return predictor.predict_batch_pairs(inputs)
 
 
-# =========================================================
-# Batch Prediction (formatted output)
-# =========================================================
-
 def batch_predict(texts: List[str]) -> List[Dict[str, Any]]:
     probs = predict_batch(texts)
 
@@ -100,5 +103,5 @@ def batch_predict(texts: List[str]) -> List[Dict[str, Any]]:
     return results
 
 
-# Alias
+# Backwards-compatible alias
 predict.batch_predict = batch_predict

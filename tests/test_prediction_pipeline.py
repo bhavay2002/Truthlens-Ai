@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from models.inference import predictor as predict_module
+from src.inference import predict_api as predict_module
 
 
 class _DummyTokenizer:
