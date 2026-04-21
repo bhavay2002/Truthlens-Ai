@@ -26,6 +26,24 @@ CHECKPOINT_FILE = "checkpoint.pt"
 METADATA_FILE = "metadata.json"
 
 
+def list_checkpoints(checkpoint_root: Path | str) -> list[Path]:
+    """Return a sorted list of checkpoint directories under ``checkpoint_root``.
+
+    A checkpoint directory is one that contains either ``checkpoint.pt`` or
+    ``checkpoint.pt.gz``. Missing or empty roots yield an empty list.
+    """
+    root = Path(checkpoint_root)
+    if not root.exists() or not root.is_dir():
+        return []
+    found: list[Path] = []
+    for entry in sorted(root.iterdir()):
+        if not entry.is_dir():
+            continue
+        if (entry / CHECKPOINT_FILE).exists() or (entry / f"{CHECKPOINT_FILE}.gz").exists():
+            found.append(entry)
+    return found
+
+
 # =========================================================
 #  UTILITIES
 # =========================================================

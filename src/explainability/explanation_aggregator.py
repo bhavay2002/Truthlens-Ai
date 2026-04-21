@@ -70,15 +70,6 @@ class ExplanationAggregator:
     def _lime_map(items: List[Tuple[str, float]]) -> Dict[str, float]:
         return {str(t): float(s) for t, s in items}
 
-    @staticmethod
-    def _safe_corr(a: np.ndarray, b: np.ndarray) -> float:
-        if a.size < 2 or b.size < 2:
-            return 0.0
-        if np.std(a) < 1e-12 or np.std(b) < 1e-12:
-            return 0.0
-        c = np.corrcoef(a, b)[0, 1]
-        return 0.0 if np.isnan(c) else float(c)
-
     def aggregate(
         self,
         shap_importance: Optional[List[Dict]] = None,
@@ -164,8 +155,7 @@ class ExplanationAggregator:
         confidence = float(np.mean(np.abs(final_scores))) if final_scores.size else 0.0
 
         # BUG-7 fix: compute agreement_score via ExplanationConsistency instead
-        # of hard-coding 0.0.  ROB-4 fix: _safe_corr is now used implicitly via
-        # the consistency module rather than sitting unused.
+        # of hard-coding 0.0.
         agreement_score = 0.0
         try:
             consistency_result = self._consistency.compute(

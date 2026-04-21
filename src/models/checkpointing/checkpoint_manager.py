@@ -133,23 +133,37 @@ class CheckpointManager:
 
     @staticmethod
     def _to_cpu(state: Dict[str, Any]) -> Dict[str, Any]:
+        # Tensors are destined for `torch.save` -> disk. Do NOT pin memory here:
+        # pinned memory is a scarce OS resource reserved for async H2D transfers
+        # and is wasted (and can cause OOM on large models) when the target is disk.
         new_state: Dict[str, Any] = {}
         for k, v in state.items():
             if torch.is_tensor(v):
-                t = v.detach().to("cpu", non_blocking=True)
-                new_state[k] = t.pin_memory()
+                new_state[k] = v.detach().to("cpu", copy=False)
             else:
                 new_state[k] = v
         return new_state
 
     @staticmethod
     def _hash_state(state: Dict[str, Any]) -> str:
+        # Dedup hash: sample a small head+tail slice per tensor plus shape/dtype
+        # so that tensors of the same shape with different tail values do not
+        # collide (head-only hashing was collision-prone for fine-tunes).
         h = hashlib.md5()
         for k, v in state.items():
             h.update(k.encode())
             if torch.is_tensor(v):
-                sample = v.detach().cpu().flatten()[:10].contiguous()
-                h.update(sample.numpy().tobytes())
+                h.update(str(tuple(v.shape)).encode())
+                h.update(str(v.dtype).encode())
+                flat = v.detach().cpu().flatten()
+                n = flat.numel()
+                if n == 0:
+                    continue
+                head = flat[: min(16, n)].contiguous()
+                h.update(head.numpy().tobytes())
+                if n > 16:
+                    tail = flat[-min(16, n - 16):].contiguous()
+                    h.update(tail.numpy().tobytes())
         return h.hexdigest()
 
     @staticmethod
@@ -298,7 +312,9 @@ class CheckpointManager:
                 f"max_checkpoints must be a positive integer, got {max_checkpoints}"
             )
 
-        self._writer.close()
+        # Flush (not close!) so we don't delete a checkpoint still being written.
+        # Closing here permanently kills the writer and breaks subsequent saves.
+        self._writer.flush()
 
         checkpoints = self.list_checkpoints()
 

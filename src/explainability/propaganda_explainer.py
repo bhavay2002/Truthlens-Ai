@@ -44,13 +44,11 @@ class PropagandaExplainer:
         validate_tokens_scores(tokens, normalized)
         merged_tokens, merged_scores = align_tokens(tokens, normalized)
 
+        # Accumulate scores for duplicate merged tokens rather than
+        # appending suffixes like "the_1" which pollute the output space.
         explanation: Dict[str, float] = {}
-        token_count: Dict[str, int] = {}
         for token, score in zip(merged_tokens, merged_scores):
-            idx = token_count.get(token, 0)
-            key = token if idx == 0 else f"{token}_{idx}"
-            explanation[key] = float(score)
-            token_count[token] = idx + 1
+            explanation[token] = explanation.get(token, 0.0) + float(score)
         return explanation
 
     def _gradient_importance(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> np.ndarray:
@@ -59,12 +57,28 @@ class PropagandaExplainer:
             input_ids = input_ids.to(device)
             attention_mask = attention_mask.to(device)
 
-        self.model.zero_grad(set_to_none=True)
-        emb = self.model.get_input_embeddings()(input_ids).detach().requires_grad_(True)
-        outputs = self.model(inputs_embeds=emb, attention_mask=attention_mask)
-        logits = outputs.logits if hasattr(outputs, "logits") else outputs["logits"]
-        logits.max().backward()
-        grads = emb.grad
+        was_training = self.model.training
+        self.model.eval()
+        try:
+            emb = self.model.get_input_embeddings()(input_ids).detach().requires_grad_(True)
+            outputs = self.model(inputs_embeds=emb, attention_mask=attention_mask)
+            logits = outputs.logits if hasattr(outputs, "logits") else outputs["logits"]
+
+            # Per-sample softmax sum → stable, shared-model-safe target.
+            probs = torch.softmax(logits, dim=-1)
+            target = probs.max(dim=-1).values.sum()
+
+            (grads,) = torch.autograd.grad(
+                outputs=target,
+                inputs=emb,
+                retain_graph=False,
+                create_graph=False,
+                allow_unused=False,
+            )
+        finally:
+            if was_training:
+                self.model.train()
+
         return torch.abs(grads).sum(dim=-1).detach().cpu().numpy()[0]
 
     def _normalize_scores(self, scores: np.ndarray, tokens: List[str]) -> np.ndarray:

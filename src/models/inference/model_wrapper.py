@@ -49,6 +49,9 @@ class ModelWrapper:
         temperature_scaler: Optional[TemperatureScaler] = None,
         isotonic_calibrator: Optional[IsotonicCalibrator] = None,
         ensemble_model: Optional[nn.Module] = None,
+        *,
+        use_half_precision: bool = False,
+        compile_mode: Optional[str] = None,
     ) -> None:
         """
         Initialize model wrapper.
@@ -80,14 +83,14 @@ class ModelWrapper:
         self.compute_probabilities = False
         self.return_logits_only = False
 
-        if self.device.type == "cuda":
+        if use_half_precision and self.device.type == "cuda":
             self.model.half()
             if self.ensemble_model is not None:
                 self.ensemble_model.half()
 
-        if hasattr(torch, "compile"):
+        if compile_mode and hasattr(torch, "compile"):
             try:
-                self.model = torch.compile(self.model, mode="max-autotune")
+                self.model = torch.compile(self.model, mode=compile_mode)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Model compilation skipped: %s", exc)
 
@@ -95,7 +98,7 @@ class ModelWrapper:
                 try:
                     self.ensemble_model = torch.compile(
                         self.ensemble_model,
-                        mode="max-autotune",
+                        mode=compile_mode,
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Ensemble model compilation skipped: %s", exc)
@@ -131,10 +134,17 @@ class ModelWrapper:
 
         batch = self._move_to_device(batch)
 
+        if self.device.type == "cuda":
+            autocast_dtype = (
+                torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+            )
+        else:
+            autocast_dtype = torch.float32
+
         with torch.inference_mode():
             with torch.autocast(
-                device_type="cuda",
-                dtype=torch.bfloat16,
+                device_type=self.device.type,
+                dtype=autocast_dtype,
                 enabled=self.device.type == "cuda",
             ):
                 if self.ensemble_model is not None:
@@ -215,15 +225,27 @@ class ModelWrapper:
     ) -> Dict[str, torch.Tensor]:
         """
         Move batch tensors to device.
+
+        Pinned memory + non_blocking=True is only meaningful for CPU->CUDA
+        transfers; it's pure overhead (and wasted pinned-pool pages) for
+        CPU->CPU. Gate it on the actual target device type.
         """
 
+        target_is_cuda = self.device.type == "cuda"
         moved_batch: Dict[str, torch.Tensor] = {}
 
         for key, value in batch.items():
             if isinstance(value, torch.Tensor):
-                if value.device.type == "cpu":
-                    value = value.pin_memory()
-                moved_batch[key] = value.to(self.device, non_blocking=True)
+                if target_is_cuda and value.device.type == "cpu" and not value.is_pinned():
+                    try:
+                        value = value.pin_memory()
+                    except RuntimeError:
+                        # pin_memory can fail under pressure; fall back silently.
+                        pass
+                moved_batch[key] = value.to(
+                    self.device,
+                    non_blocking=target_is_cuda,
+                )
             else:
                 moved_batch[key] = value
 
@@ -247,7 +269,11 @@ class ModelWrapper:
 
             for key, value in outputs.items():
                 if isinstance(value, torch.Tensor):
-                    if "logits" in key:
+                    # Match only real logits keys, not e.g. "logits_norm" or
+                    # "per_sample_logits_aux". Exact equality or an "_logits"
+                    # suffix is what our heads actually produce.
+                    is_logits = key == "logits" or key.endswith("_logits")
+                    if is_logits:
                         logits = value
                         if self.compute_probabilities:
                             probs = softmax(logits, dim=-1)
@@ -260,7 +286,12 @@ class ModelWrapper:
                             calibrated_probs = None
 
                         preds = argmax(logits, dim=-1)
-                        base = key.replace("logits", "")
+                        # Strip the suffix precisely; avoids mangling keys
+                        # where "logits" appears as a substring elsewhere.
+                        if key == "logits":
+                            base = ""
+                        else:
+                            base = key[: -len("_logits")] + "_"
                         results[f"{base}predictions"] = preds
 
                         if probs is not None:

@@ -52,14 +52,18 @@ def align_tokens(
 
     def agg(values: List[float]) -> float:
         arr = np.array(values, dtype=np.float32)
-        arr = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=0.0)
+        # Neutralize only non-finite values. Do NOT clip magnitude here:
+        # SHAP / IG / LIME scores may legitimately be signed and exceed [0, 1].
+        arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
 
         if aggregation == "mean":
             return float(np.mean(arr))
         elif aggregation == "sum":
             return float(np.sum(arr))
         elif aggregation == "max":
-            return float(np.max(arr))
+            # Absolute-max preserves the largest-magnitude signal (and its sign).
+            idx = int(np.argmax(np.abs(arr)))
+            return float(arr[idx])
 
         return float(np.mean(arr))  # fallback
 
@@ -145,12 +149,9 @@ def align_tokens(
         merged_tokens.append("".join(current_token_parts))
         merged_scores.append(agg(current_scores))
 
-    # --------------------------------------------------
-    # FINAL SAFETY CLIP
-    # --------------------------------------------------
-
+    # Final NaN/Inf safety only — preserve sign and magnitude.
     merged_scores = [
-        float(np.clip(s, 0.0, 1.0)) for s in merged_scores
+        float(s) if np.isfinite(s) else 0.0 for s in merged_scores
     ]
 
     return merged_tokens, merged_scores
