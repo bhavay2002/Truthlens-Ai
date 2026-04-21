@@ -1,0 +1,114 @@
+You are a senior ML systems engineer and code auditor.
+
+Your task is to perform a COMPLETE and DEEP audit of the entire TruthLens repository.
+
+Analyze ALL files and folders, including but not limited to:
+- src/models/
+- src/training/
+- src/evaluation/
+- src/aggregation/
+- src/features/
+- src/utils/
+- src/visualization/
+
+--------------------------------------------------
+🔍 OBJECTIVES
+--------------------------------------------------
+
+1. Detect ALL types of issues:
+   - Runtime errors
+   - Logical bugs
+   - Silent failures (VERY IMPORTANT)
+   - Incorrect assumptions
+   - Broken data flow between modules
+   - Missing or unused files/functions
+   - Dead code / redundant code
+   - Inconsistent naming or structure
+
+2. Model-specific validation:
+   - Check encoder + all heads:
+     (bias_head, ideology_head, propaganda_head, narrative_head, emotion_head)
+   - Ensure outputs, losses, and labels align correctly
+   - Detect shape mismatches across forward pass
+   - Verify multitask loss correctness
+   - Check for missing gradients or detached tensors
+
+3. Checkpointing system:
+   - Validate save/load consistency
+   - Ensure compatibility between checkpoints and model architecture
+   - Detect silent partial loading (strict=False issues)
+   - Verify checkpoint validator coverage
+
+4. Training pipeline:
+   - Data loading correctness
+   - Batch handling and edge cases
+   - Loss computation correctness
+   - Optimizer + scheduler correctness
+   - Gradient flow and accumulation issues
+   - Mixed precision (AMP) safety
+   - Device placement bugs (CPU/GPU mismatch)
+
+5. Inference pipeline:
+   - Predictor correctness
+   - Output formatting consistency
+   - Post-processing issues
+   - Batch vs single inference mismatch
+
+6. Performance & GPU optimization:
+   - Inefficient tensor operations
+   - CPU-GPU transfer bottlenecks
+   - Missing torch.no_grad() in inference
+   - DataLoader inefficiencies
+   - Memory leaks / unnecessary copies
+   - Missing pin_memory / num_workers tuning
+
+7. Configuration system:
+   - Broken or unused config fields
+   - Hardcoded values that should be configurable
+   - Inconsistent config usage across modules
+
+8. Error handling & logging:
+   - Missing try/except where needed
+   - Silent failures instead of explicit errors
+   - Poor debugging visibility
+
+--------------------------------------------------
+📊 OUTPUT FORMAT (STRICT)
+--------------------------------------------------
+
+For EACH issue found, provide:
+
+1. File path
+2. Issue type (Bug / Risk / Performance / Design flaw)
+3. Severity (Critical / High / Medium / Low)
+4. Exact code snippet (if applicable)
+5. Root cause explanation
+6. Real-world impact (what breaks or degrades)
+7. Precise fix (code-level suggestion)
+
+--------------------------------------------------
+🎯 EXTRA REQUIREMENTS
+--------------------------------------------------
+
+- DO NOT give generic advice
+- DO NOT skip small issues — include EVERYTHING
+- Prioritize silent bugs and training correctness
+- Be brutally honest and critical
+- Assume this system is going to production
+
+--------------------------------------------------
+⚠️ SPECIAL FOCUS
+--------------------------------------------------
+
+Pay EXTRA attention to:
+- multitask_loss.py
+- predictor.py
+- aggregation_pipeline.py
+- checkpointing.py
+- model_wrapper.py
+
+--------------------------------------------------
+FINAL OUTPUT:
+- Summary of top 10 critical issues
+- List of files that MUST be changed
+- Suggested refactoring plan (step-by-step)
