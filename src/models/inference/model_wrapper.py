@@ -49,6 +49,9 @@ class ModelWrapper:
         temperature_scaler: Optional[TemperatureScaler] = None,
         isotonic_calibrator: Optional[IsotonicCalibrator] = None,
         ensemble_model: Optional[nn.Module] = None,
+        *,
+        use_half_precision: bool = False,
+        compile_mode: Optional[str] = None,
     ) -> None:
         """
         Initialize model wrapper.
@@ -80,14 +83,14 @@ class ModelWrapper:
         self.compute_probabilities = False
         self.return_logits_only = False
 
-        if self.device.type == "cuda":
+        if use_half_precision and self.device.type == "cuda":
             self.model.half()
             if self.ensemble_model is not None:
                 self.ensemble_model.half()
 
-        if hasattr(torch, "compile"):
+        if compile_mode and hasattr(torch, "compile"):
             try:
-                self.model = torch.compile(self.model, mode="max-autotune")
+                self.model = torch.compile(self.model, mode=compile_mode)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Model compilation skipped: %s", exc)
 
@@ -95,7 +98,7 @@ class ModelWrapper:
                 try:
                     self.ensemble_model = torch.compile(
                         self.ensemble_model,
-                        mode="max-autotune",
+                        mode=compile_mode,
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Ensemble model compilation skipped: %s", exc)
@@ -131,10 +134,17 @@ class ModelWrapper:
 
         batch = self._move_to_device(batch)
 
+        if self.device.type == "cuda":
+            autocast_dtype = (
+                torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+            )
+        else:
+            autocast_dtype = torch.float32
+
         with torch.inference_mode():
             with torch.autocast(
-                device_type="cuda",
-                dtype=torch.bfloat16,
+                device_type=self.device.type,
+                dtype=autocast_dtype,
                 enabled=self.device.type == "cuda",
             ):
                 if self.ensemble_model is not None:

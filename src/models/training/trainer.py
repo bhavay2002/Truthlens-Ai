@@ -48,13 +48,17 @@ from src.utils import get_device, move_to_device
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------
-# GPU PERFORMANCE SETTINGS
-# ---------------------------------------------------------
 
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
-torch.set_float32_matmul_precision("high")
+def _configure_tf32() -> None:
+    """Enable TF32 matmul/cudnn paths when CUDA is available.
+
+    Invoked inside Trainer.__init__ so importing this module has no global
+    side effects on numerical precision.
+    """
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
 
 
 # ---------------------------------------------------------
@@ -103,6 +107,8 @@ class Trainer:
         if not isinstance(model, nn.Module):
             raise TypeError("model must be torch.nn.Module")
 
+        _configure_tf32()
+
         self.model = model
         self.optimizer = optimizer
         self.scheduler = scheduler
@@ -149,8 +155,6 @@ class Trainer:
         self.scaler = torch.cuda.amp.GradScaler(
             enabled=self.use_amp and self.autocast_dtype == torch.float16
         )
-
-        torch.autograd.set_detect_anomaly(False)
 
         # Forward signature caching
         try:
@@ -254,7 +258,8 @@ class Trainer:
 
         self.model.train()
 
-        total_loss = 0.0
+        # Accumulate loss on-device to avoid per-step GPU→CPU sync.
+        loss_accum = torch.zeros((), device=self.device, dtype=torch.float32)
         step_count = 0
 
         self.optimizer.zero_grad(set_to_none=True)
@@ -281,7 +286,7 @@ class Trainer:
             else:
                 loss.backward()
 
-            total_loss += raw_loss.item()
+            loss_accum = loss_accum + raw_loss.detach().to(loss_accum.dtype)
             step_count += 1
             self.global_step += 1
 
@@ -307,7 +312,7 @@ class Trainer:
                 self.optimizer.zero_grad(set_to_none=True)
 
             if (step + 1) % self.config.log_every_steps == 0:
-                logger.info("step %d | loss %.6f", step + 1, raw_loss.item())
+                logger.info("step %d | loss %.6f", step + 1, float(raw_loss.detach().item()))
 
         # Final step fix
         if step_count % self.config.gradient_accumulation_steps != 0:
@@ -331,14 +336,15 @@ class Trainer:
 
             self.optimizer.zero_grad(set_to_none=True)
 
-        return total_loss / max(step_count, 1)
+        mean_loss = (loss_accum / max(step_count, 1)).detach().item()
+        return float(mean_loss)
 
 
     def _validate_epoch(self, dataloader: DataLoader) -> float:
 
         self.model.eval()
 
-        total_loss = 0.0
+        loss_accum = torch.zeros((), device=self.device, dtype=torch.float32)
         step_count = 0
 
         with torch.no_grad():
@@ -350,10 +356,11 @@ class Trainer:
                 outputs = self.model(**self._prepare_model_inputs(batch))
                 loss = self._extract_loss(outputs)
 
-                total_loss += loss.item()
+                loss_accum = loss_accum + loss.detach().to(loss_accum.dtype)
                 step_count += 1
 
-        return total_loss / max(step_count, 1)
+        mean_loss = (loss_accum / max(step_count, 1)).detach().item()
+        return float(mean_loss)
 
 
     def _extract_loss(self, outputs):

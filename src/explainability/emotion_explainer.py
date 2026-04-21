@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import logging
 import re
 from dataclasses import dataclass
@@ -157,12 +158,20 @@ def compute_integrated_gradients(
     - Model runs in eval() (restored afterward)
     """
 
-    was_training = model.training
-    model.eval()
+    # Use a local deepcopy so integrated-gradients computation never
+    # mutates (eval/train state, buffers) a singleton model shared with
+    # the serving path.
+    try:
+        ig_model = copy.deepcopy(model)
+    except Exception as exc:
+        logger.warning("Deepcopy for IG failed, falling back to shared model: %s", exc)
+        ig_model = model
+
+    ig_model.eval()
 
     try:
         try:
-            device = next(model.parameters()).device
+            device = next(ig_model.parameters()).device
         except Exception:
             device = torch.device("cpu")
 
@@ -173,7 +182,7 @@ def compute_integrated_gradients(
         input_ids = inputs["input_ids"]
         attention_mask = inputs.get("attention_mask", None)
 
-        embedding_layer = model.get_input_embeddings()
+        embedding_layer = ig_model.get_input_embeddings()
 
         with torch.no_grad():
             input_emb = embedding_layer(input_ids)
@@ -187,7 +196,7 @@ def compute_integrated_gradients(
             emb = (base_emb + alpha * (input_emb - base_emb)).detach()
             emb.requires_grad_(True)
 
-            outputs = model(
+            outputs = ig_model(
                 inputs_embeds=emb,
                 attention_mask=attention_mask,
             )
@@ -222,8 +231,9 @@ def compute_integrated_gradients(
         ]
 
     finally:
-        if was_training:
-            model.train()
+        # No restoration needed: ig_model is either a private copy or the
+        # caller-owned model which we never mutated into train mode.
+        del ig_model
 
 
 # -------------------------------------------------------------

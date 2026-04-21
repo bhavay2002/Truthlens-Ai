@@ -13,6 +13,7 @@ predictor) with lazy, process-wide singleton state so callers do not have to
 manage model loading themselves.
 """
 
+import threading
 from typing import Any, Dict, List
 
 import torch
@@ -28,20 +29,27 @@ _SETTINGS = load_settings()
 _predictor: Predictor | None = None
 _tokenizer = None
 _device = get_device()
+_load_lock = threading.Lock()
 
 
 def _load_assets():
     global _predictor, _tokenizer
 
-    if _predictor is None or _tokenizer is None:
-        assets = ModelRegistry.load_model()
+    # Double-checked locking: fast path when already loaded, serialized
+    # load otherwise to avoid duplicate model initialization under threads.
+    if _predictor is not None and _tokenizer is not None:
+        return _predictor, _tokenizer
 
-        model = assets["model"]
-        _tokenizer = assets["tokenizer"]
+    with _load_lock:
+        if _predictor is None or _tokenizer is None:
+            assets = ModelRegistry.load_model()
 
-        model = move_to_device(model, _device)
+            model = assets["model"]
+            _tokenizer = assets["tokenizer"]
 
-        _predictor = Predictor(model=model)
+            model = move_to_device(model, _device)
+
+            _predictor = Predictor(model=model)
 
     return _predictor, _tokenizer
 
@@ -101,7 +109,3 @@ def batch_predict(texts: List[str]) -> List[Dict[str, Any]]:
         )
 
     return results
-
-
-# Backwards-compatible alias
-predict.batch_predict = batch_predict

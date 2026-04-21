@@ -206,7 +206,7 @@ class Predictor:
 
                 if (
                     isinstance(value, torch.Tensor)
-                    and "logits" in key
+                    and key.endswith("_logits")
                     and value.dim() >= 2
                     and value.size(-1) >= 2
                 ):

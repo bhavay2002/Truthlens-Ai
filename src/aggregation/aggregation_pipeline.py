@@ -107,6 +107,15 @@ class AggregationPipeline:
             if not (fv == fv):
                 fv = 0.0
 
+            # Warn when saturation occurs before clipping so callers
+            # can spot upstream scale bugs (e.g. un-normalized sums).
+            if fv < 0.0 or fv > 1.0:
+                logger.warning(
+                    "Score '%s'=%.6f outside [0,1]; clipping",
+                    k,
+                    fv,
+                )
+
             clipped[k] = float(min(max(fv, 0.0), 1.0))
 
         return clipped
@@ -279,19 +288,21 @@ class AggregationPipeline:
 
         sanitized_analysis = self._sanitize_analysis_modules(resolved_analysis)
         enriched_profile = self._inject_analysis_sections(profile, sanitized_analysis)
-        raw_scores_unclipped = self.score_calculator.compute_scores(
-            enriched_profile,
-            weights=None,
-        )
-        raw_scores = self._clip_scores(raw_scores_unclipped)
 
         normalized_profile = self.normalize_profile(enriched_profile)
         weights = self.weight_manager.get_weights()
-        scores_unclipped = self.score_calculator.compute_scores(
-            normalized_profile,
-            weights=weights,
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Applied aggregation weights: %s", weights)
+
+        # Single compute_scores call: raw is the unweighted pass on the
+        # enriched profile, weighted is the normalized + weighted pass.
+        raw_scores = self._clip_scores(
+            self.score_calculator.compute_scores(enriched_profile, weights=None)
         )
-        scores = self._clip_scores(scores_unclipped)
+        scores = self._clip_scores(
+            self.score_calculator.compute_scores(normalized_profile, weights=weights)
+        )
 
         risks = assess_truthlens_risks(scores)
         explanations = self.explainer.explain_profile(normalized_profile)
