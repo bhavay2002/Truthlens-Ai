@@ -92,7 +92,7 @@ from src.features.pipelines.feature_pipeline import ALL_BIAS_MODULE_FEATURE_NAME
 logger = logging.getLogger(__name__)
 
 
-def _prepare_flat_features_batch(features: Dict[str, Any]) -> Dict[str, float]:
+def _prepare_flat_features_worker(features: Dict[str, Any]) -> Dict[str, float]:
     if all(isinstance(value, (int, float)) for value in features.values()):
         return {
             key: float(value)
@@ -101,10 +101,8 @@ def _prepare_flat_features_batch(features: Dict[str, Any]) -> Dict[str, float]:
         }
 
     flat: Dict[str, float] = {}
-    stack = list(features.items())
-    pop = stack.pop
-    while stack:
-        key, value = pop()
+
+    for key, value in features.items():
         if key == "text":
             continue
         if isinstance(value, (int, float)):
@@ -112,10 +110,18 @@ def _prepare_flat_features_batch(features: Dict[str, Any]) -> Dict[str, float]:
         elif isinstance(value, (list, tuple, set)):
             flat[f"{key}_count"] = float(len(value))
         elif isinstance(value, dict):
-            for sub_key, sub_value in value.items():
-                clean_key = str(sub_key).strip().replace(" ", "_")
-                next_prefix = f"{key}_{clean_key}" if key else clean_key
-                stack.append((next_prefix, sub_value))
+            stack = [(key, value)]
+            while stack:
+                prefix, nested = stack.pop()
+                if isinstance(nested, (int, float)):
+                    flat[prefix] = float(nested)
+                elif isinstance(nested, (list, tuple, set)):
+                    flat[f"{prefix}_count"] = float(len(nested))
+                elif isinstance(nested, dict):
+                    for sub_key, sub_value in nested.items():
+                        clean_key = str(sub_key).strip().replace(" ", "_")
+                        next_prefix = f"{prefix}_{clean_key}" if prefix else clean_key
+                        stack.append((next_prefix, sub_value))
 
     return flat
 
@@ -191,10 +197,12 @@ class FeaturePreparer:
     def _get_pool(self) -> Pool:
         if self._pool is None:
             try:
-                ctx = mp.get_context("fork")
-            except ValueError:
                 ctx = mp.get_context("spawn")
-            self._pool = ctx.Pool(4)
+            except Exception as exc:
+                logger.warning("Falling back to default multiprocessing context: %s", exc)
+                ctx = mp.get_context()
+            workers = max(1, mp.cpu_count() - 1)
+            self._pool = ctx.Pool(workers)
         return self._pool
 
     def close_pool(self) -> None:
@@ -320,15 +328,15 @@ class FeaturePreparer:
                     if isinstance(entity_metrics, dict):
                         for k, v in entity_metrics.items():
                             if isinstance(v, (int, float)):
-                                flat.setdefault(f"graph_pipeline_{k}", float(v))
+                                flat.setdefault(f"graph_entity_{k}", float(v))
 
                     narrative_metrics = graph_output.get("narrative_graph_metrics", {})
                     if isinstance(narrative_metrics, dict):
                         for k, v in narrative_metrics.items():
                             if isinstance(v, (int, float)):
-                                flat.setdefault(f"graph_pipeline_{k}", float(v))
-                except Exception:
-                    pass
+                                flat.setdefault(f"graph_narrative_{k}", float(v))
+                except Exception as exc:
+                    logger.debug("Graph feature extraction failed: %s", exc)
 
         for key in list(flat.keys()):
             flat[key] = float(flat[key])
@@ -399,9 +407,12 @@ class FeaturePreparer:
         and logged rather than raised as errors.
         """
         flat_features = self._prepare_flat_features(features, batch_mode=False)
-        vector = np.zeros(self.feature_dim, dtype=np.float32)
+        dtype = np.float32 if self.config.dtype == "float32" else np.float16
+        vector = np.zeros(self.feature_dim, dtype=dtype)
         feature_index = self.feature_index
         for key, value in flat_features.items():
+            if not isinstance(value, (int, float)):
+                continue
             idx = feature_index.get(key)
             if idx is not None:
                 vector[idx] = value
@@ -412,7 +423,7 @@ class FeaturePreparer:
 
         if self.config.return_tensor:
             tensor = torch.as_tensor(matrix, dtype=torch.float32)
-            if torch.cuda.is_available():
+            if torch.cuda.is_available() and tensor.device.type == "cpu":
                 tensor = tensor.pin_memory()
             return tensor
 
@@ -506,13 +517,25 @@ class FeaturePreparer:
         get_idx = feature_index.get
 
         if rows < 32:
-            flat_list = [_prepare_flat_features_batch(item) for item in feature_dicts]
+            flat_list = [
+                self._prepare_flat_features(item, batch_mode=True)
+                for item in feature_dicts
+            ]
         else:
-            pool = self._get_pool()
-            flat_list = pool.map(_prepare_flat_features_batch, feature_dicts)
+            use_mp = not torch.cuda.is_available()
+            if use_mp:
+                pool = self._get_pool()
+                flat_list = pool.map(_prepare_flat_features_worker, feature_dicts)
+            else:
+                flat_list = [
+                    self._prepare_flat_features(item, batch_mode=True)
+                    for item in feature_dicts
+                ]
 
         for i, flat_features in enumerate(flat_list):
             for key, value in flat_features.items():
+                if not isinstance(value, (int, float)):
+                    continue
                 idx = get_idx(key)
                 if idx is not None:
                     matrix[i, idx] = value
@@ -520,13 +543,13 @@ class FeaturePreparer:
         scaler = self.scaler
         selector = self.selector
 
-        if scaler is not None:
+        if self.config.apply_scaling and scaler is not None:
             try:
                 matrix = scaler.transform(matrix, copy=False)
             except TypeError:
                 matrix = scaler.transform(matrix)
 
-        if selector is not None:
+        if self.config.apply_feature_selection and selector is not None:
             try:
                 matrix = selector.transform(matrix, copy=False)
             except TypeError:
@@ -534,7 +557,7 @@ class FeaturePreparer:
 
         if self.config.return_tensor:
             tensor = torch.from_numpy(matrix)
-            if torch.cuda.is_available():
+            if torch.cuda.is_available() and tensor.device.type == "cpu":
                 tensor = tensor.pin_memory()
             return tensor
 

@@ -99,7 +99,7 @@ class PredictionPipeline:
                 try:
                     model = torch.compile(model, mode="reduce-overhead")
                 except Exception:
-                    logger.warning("torch.compile failed for %s", attr)
+                    logger.debug("torch.compile skipped for %s", attr)
 
             setattr(self, attr, model)
 
@@ -113,7 +113,7 @@ class PredictionPipeline:
         outputs: Dict[str, Any] = {}
 
         ctx = (
-            torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+            torch.autocast(device_type="cuda", dtype=torch.float16)
             if self.device.type == "cuda"
             else nullcontext()
         )
@@ -137,7 +137,7 @@ class PredictionPipeline:
             if "logits" in outputs:
                 return outputs["logits"]
             if "probabilities" in outputs:
-                return torch.log(outputs["probabilities"] + 1e-9)
+                return outputs["probabilities"]
         if hasattr(outputs, "logits"):
             return outputs.logits
         if isinstance(outputs, torch.Tensor):
@@ -239,69 +239,76 @@ class PredictionPipeline:
             raise TypeError("Features must be a torch.Tensor")
 
         features = features.to(self.device, non_blocking=True)
+        if self.device.type == "cuda" and features.dtype != torch.float16:
+            features = features.to(dtype=torch.float16)
 
         with torch.inference_mode():
             outputs = self._forward_all(features)
 
-            bias = None
+            bias_preds = None
+            ideology_preds = None
+            propaganda_prob = None
+            emotion_probs = None
+
             if "bias" in outputs:
                 logits = self._extract_logits(outputs["bias"])
-                preds = torch.argmax(logits, dim=-1)
-                preds_cpu = preds.detach().cpu().numpy()
-                bias = ["non_bias" if p == 0 else "bias" for p in preds_cpu.tolist()]
+                bias_preds = torch.argmax(logits, dim=-1)
 
-            ideology = None
             if "ideology" in outputs:
                 logits = self._extract_logits(outputs["ideology"])
-                preds = torch.argmax(logits, dim=-1)
-                mapping = ["left", "center", "right"]
-                preds_cpu = preds.detach().cpu().numpy()
-                ideology = [mapping[p] for p in preds_cpu.tolist()]
+                ideology_preds = torch.argmax(logits, dim=-1)
 
-            propaganda_prob = None
             if "propaganda" in outputs and self.config.return_probabilities:
-                logits = self._extract_logits(outputs["propaganda"])
+                raw = self._extract_logits(outputs["propaganda"])
+                if raw.dim() == 1:
+                    raw = raw.unsqueeze(0)
 
-                if logits.dim() == 1:
-                    logits = logits.unsqueeze(0)
-
-                probs = torch.softmax(logits, dim=-1)
+                probs = raw if raw.max() <= 1.0 else torch.softmax(raw, dim=-1)
 
                 if probs.size(-1) >= 2:
                     propaganda_prob = probs[:, 1]
                 else:
                     propaganda_prob = probs[:, 0]
 
-                propaganda_prob = self._safe_tensor(propaganda_prob).detach()
+                propaganda_prob = self._safe_tensor(propaganda_prob)
 
-            emotion = None
             if "emotion" in outputs and self.config.return_probabilities:
                 logits = self._extract_logits(outputs["emotion"])
                 probs = torch.sigmoid(logits)
-
                 probs = self._safe_tensor(probs)
+                emotion_probs = probs.reshape(-1, probs.size(-1))
 
-                emotion = [
-                    {
-                        label: float(row[i]) if i < row.size(0) else 0.0
-                        for i, label in enumerate(EMOTION_LABELS)
-                    }
-                    for row in probs
-                ]
+        bias: List[str] = []
+        ideology: List[str] = []
+        emotion: List[Dict[str, float]] = []
+        propaganda_list = None
 
-        if bias is None:
-            bias = []
-        if ideology is None:
-            ideology = []
-        if emotion is None:
-            emotion = []
+        if bias_preds is not None:
+            bias_list = bias_preds.detach().cpu().tolist()
+            bias = ["non_bias" if p == 0 else "bias" for p in bias_list]
+
+        if ideology_preds is not None:
+            ideology_list = ideology_preds.detach().cpu().tolist()
+            mapping = ["left", "center", "right"]
+            ideology = [mapping[p] for p in ideology_list]
+
+        if propaganda_prob is not None:
+            propaganda_list = propaganda_prob.detach().cpu().tolist()
+
+        if emotion_probs is not None:
+            probs_list = emotion_probs.detach().cpu().tolist()
+            emotion = [
+                {
+                    label: float(row[i]) if i < len(row) else 0.0
+                    for i, label in enumerate(EMOTION_LABELS)
+                }
+                for row in probs_list
+            ]
 
         result: Dict[str, Any] = {
             "bias": bias,
             "ideology": ideology,
-            "propaganda_probability": (
-                propaganda_prob.cpu().tolist() if propaganda_prob is not None else None
-            ),
+            "propaganda_probability": propaganda_list,
             "emotion": emotion,
         }
 
@@ -326,7 +333,8 @@ class PredictionPipeline:
         if model is None:
             raise RuntimeError("No model available for ONNX export")
 
-        dummy = torch.randn(1, 768, device=self.device)
+        input_dim = next(model.parameters()).shape[-1]
+        dummy = torch.randn(1, input_dim, device=self.device)
 
         torch.onnx.export(
             model,

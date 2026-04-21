@@ -1,29 +1,7 @@
-"""
-File Name: training_utils.py
-Module: models.training
-Description:
-    Provides reusable training utilities used across the TruthLens ML training
-    pipeline. The module contains helper functions for gradient clipping,
-    device management, metric tracking, optimizer stepping, mixed precision
-    handling, and reproducible training workflows.
-
-    These utilities help keep trainer implementations clean and reduce
-    duplication of common training logic across different training pipelines.
-
-Dependencies:
-    logging
-    typing
-    dataclasses
-    torch
-    torch.nn
-Inputs:
-    Model parameters, tensors, metrics, optimizer states
-Outputs:
-    Utility outputs such as clipped gradients, moved tensors, tracked metrics
-"""
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, Optional, Any
 
@@ -32,13 +10,54 @@ import torch.nn as nn
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------
-# GPU PERFORMANCE SETTINGS
-# ---------------------------------------------------------
+def configure_training_precision(
+    *,
+    allow_tf32: bool = True,
+    matmul_precision: str = "high",
+) -> None:
+    """
+    Configure precision settings for training.
 
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
-torch.set_float32_matmul_precision("high")
+    This function must be called explicitly at the start of a training run.
+    It does not execute on import to avoid global side effects in inference.
+    """
+    if torch.cuda.is_available():
+        try:
+            torch.backends.cuda.matmul.allow_tf32 = bool(allow_tf32)
+            torch.backends.cudnn.allow_tf32 = bool(allow_tf32)
+        except Exception as exc:
+            logger.debug("TF32 configuration skipped: %s", exc)
+
+    try:
+        torch.set_float32_matmul_precision(matmul_precision)
+    except Exception as exc:
+        logger.debug("Matmul precision configuration skipped: %s", exc)
+
+
+@contextmanager
+def training_precision(
+    *,
+    allow_tf32: bool = True,
+    matmul_precision: str = "high",
+):
+    prev_tf32_matmul = None
+    prev_tf32_cudnn = None
+
+    if torch.cuda.is_available():
+        prev_tf32_matmul = torch.backends.cuda.matmul.allow_tf32
+        prev_tf32_cudnn = torch.backends.cudnn.allow_tf32
+
+    configure_training_precision(
+        allow_tf32=allow_tf32,
+        matmul_precision=matmul_precision,
+    )
+
+    try:
+        yield
+    finally:
+        if torch.cuda.is_available() and prev_tf32_matmul is not None:
+            torch.backends.cuda.matmul.allow_tf32 = prev_tf32_matmul
+            torch.backends.cudnn.allow_tf32 = prev_tf32_cudnn
 
 
 # ---------------------------------------------------------
@@ -86,7 +105,13 @@ def move_batch_to_device(
     """
 
     if isinstance(batch, torch.Tensor):
-        return batch.to(device, non_blocking=non_blocking)
+        use_non_blocking = (
+            non_blocking
+            and batch.device.type == "cpu"
+            and device.type == "cuda"
+            and batch.is_pinned()
+        )
+        return batch.to(device, non_blocking=use_non_blocking)
 
     if isinstance(batch, dict):
         return {
@@ -110,6 +135,7 @@ def move_batch_to_device(
 def clip_gradients(
     parameters: Iterable[nn.Parameter],
     max_norm: Optional[float],
+    scaler: Optional[torch.cuda.amp.GradScaler] = None,
 ) -> float:
 
     if max_norm is None:
@@ -117,6 +143,9 @@ def clip_gradients(
 
     if max_norm <= 0:
         raise ValueError("max_norm must be positive")
+
+    if scaler is not None:
+        scaler.unscale_(parameters)
 
     total_norm = torch.nn.utils.clip_grad_norm_(parameters, max_norm)
     return float(total_norm)
@@ -136,7 +165,9 @@ def zero_gradients(optimizer: torch.optim.Optimizer) -> None:
 def compute_batch_size(batch: Any) -> int:
 
     if isinstance(batch, torch.Tensor):
-        return 1 if batch.ndim == 0 else batch.size(0)
+        if batch.ndim == 0:
+            return 1
+        return batch.shape[0]
 
     if isinstance(batch, dict):
         for value in batch.values():
@@ -157,10 +188,11 @@ def compute_batch_size(batch: Any) -> int:
 # TENSOR UTILITIES
 # ---------------------------------------------------------
 
-def detach_tensor_dict(tensor_dict: Any) -> Any:
+def detach_tensor_dict(tensor_dict: Any, to_cpu: bool = True) -> Any:
 
     if isinstance(tensor_dict, torch.Tensor):
-        return tensor_dict.detach().cpu()
+        detached = tensor_dict.detach()
+        return detached.cpu() if to_cpu else detached
 
     if isinstance(tensor_dict, dict):
         return {k: detach_tensor_dict(v) for k, v in tensor_dict.items()}
@@ -181,3 +213,9 @@ def enable_model_eval(model: nn.Module) -> None:
 
 def enable_model_train(model: nn.Module) -> None:
     model.train()
+
+
+@contextmanager
+def inference_mode():
+    with torch.inference_mode():
+        yield

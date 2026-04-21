@@ -1,29 +1,3 @@
-"""
-File Name: emotion_explainer.py
-Module: Explainability - Emotion Analysis
-Description:
-    Provides utilities for explaining emotional manipulation signals in text.
-    Includes lexical emotion detection, token-level emotion heatmaps,
-    sentence-level intensity scoring, gradient-based attribution using
-    transformer models, and visualization-ready matrices for dashboards
-    and UI highlighting.
-
-Dependencies:
-    logging
-    re
-    dataclasses
-    typing
-    torch
-
-Inputs:
-    text (str)
-    optional transformer model and tokenizer
-
-Outputs:
-    structured explanation dictionary containing emotion attribution
-    data and visualization-ready artifacts
-"""
-
 from __future__ import annotations
 
 import logging
@@ -32,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import torch
+import numpy as np
 
 from src.features.emotion.emotion_schema import (
     EMOTION_LABELS,
@@ -42,87 +17,31 @@ logger = logging.getLogger(__name__)
 
 
 # -------------------------------------------------------------
-# Reverse lookup for fast emotion detection
+# Reverse lookup (case-normalized)
 # -------------------------------------------------------------
 
 WORD_TO_EMOTION: Dict[str, str] = {}
 
 for emotion, words in EMOTION_TERMS.items():
     for word in words:
-        WORD_TO_EMOTION[word] = emotion
+        WORD_TO_EMOTION[word.lower()] = emotion
 
 
 # -------------------------------------------------------------
-# Intensifier vocabulary
+# Intensifier vocabulary (deduplicated)
 # -------------------------------------------------------------
 
-INTENSIFIER_ADVERBS = {
+INTENSIFIER_ADVERBS = set({
+    "very","extremely","highly","incredibly","remarkably","exceptionally",
+    "unbelievably","extraordinarily","immensely","intensely","profoundly","dramatically",
+    "really","so","too","quite","pretty","fairly","rather","especially","particularly",
+    "notably","significantly",
+    "totally","absolutely","completely","entirely","fully","perfectly","truly","genuinely","seriously",
+    "deeply","strongly","wildly","terribly","awfully","desperately","badly",
+    "massively","hugely","greatly","vastly","considerably","substantially","overwhelmingly",
+    "utterly","decidedly","undeniably","indisputably","unquestionably",
+})
 
-    # strong intensity amplifiers
-    "very",
-    "extremely",
-    "highly",
-    "incredibly",
-    "remarkably",
-    "exceptionally",
-    "unbelievably",
-    "extraordinarily",
-    "immensely",
-    "intensely",
-    "profoundly",
-    "dramatically",
-
-    # common sentiment amplifiers
-    "really",
-    "so",
-    "too",
-    "quite",
-    "pretty",
-    "fairly",
-    "rather",
-    "especially",
-    "particularly",
-    "notably",
-    "significantly",
-
-    # conversational amplifiers
-    "totally",
-    "absolutely",
-    "completely",
-    "entirely",
-    "fully",
-    "perfectly",
-    "truly",
-    "genuinely",
-    "seriously",
-
-    # emotional amplification
-    "deeply",
-    "strongly",
-    "wildly",
-    "terribly",
-    "awfully",
-    "desperately",
-    "badly",
-
-    # narrative emphasis (news rhetoric)
-    "massively",
-    "hugely",
-    "greatly",
-    "vastly",
-    "considerably",
-    "substantially",
-    "overwhelmingly",
-
-    # dramatic rhetoric indicators
-    "utterly",
-    "absolutely",
-    "decidedly",
-    "undeniably",
-    "indisputably",
-    "unquestionably",
-
-}
 
 # -------------------------------------------------------------
 # Data container
@@ -130,7 +49,6 @@ INTENSIFIER_ADVERBS = {
 
 @dataclass
 class EmotionExplanation:
-
     emotion_tokens: List[Dict[str, Any]]
     emotion_heatmap: List[Dict[str, Any]]
     sentence_heatmap: List[Dict[str, Any]]
@@ -148,62 +66,43 @@ def tokenize_words(text: str) -> List[str]:
 
 
 def tokenize_sentences(text: str) -> List[str]:
-
     sentences = re.split(r"[.!?]+", text)
-
     return [s.strip() for s in sentences if s.strip()]
 
 
 # -------------------------------------------------------------
-# Emotion token detection
+# Emotion detection
 # -------------------------------------------------------------
 
 def detect_emotion_tokens(tokens: List[str]) -> List[Dict[str, Any]]:
-
-    emotion_tokens: List[Dict[str, Any]] = []
-
-    for idx, token in enumerate(tokens):
-
-        emotion = WORD_TO_EMOTION.get(token)
-
-        if emotion:
-
-            emotion_tokens.append(
-                {
-                    "token": token,
-                    "emotion": emotion,
-                    "position": idx,
-                }
-            )
-
-    return emotion_tokens
+    return [
+        {"token": t, "emotion": WORD_TO_EMOTION[t], "position": i}
+        for i, t in enumerate(tokens)
+        if t in WORD_TO_EMOTION
+    ]
 
 
 # -------------------------------------------------------------
-# Token-level intensity heatmap
+# Token intensity
 # -------------------------------------------------------------
 
 def compute_token_intensity(tokens: List[str]) -> List[Dict[str, Any]]:
+    heatmap = []
 
-    heatmap: List[Dict[str, Any]] = []
-
-    for idx, token in enumerate(tokens):
-
+    for i, t in enumerate(tokens):
         intensity = 0.0
 
-        if token in WORD_TO_EMOTION:
+        if t in WORD_TO_EMOTION:
             intensity += 1.0
 
-        if token in INTENSIFIER_ADVERBS:
+        if t in INTENSIFIER_ADVERBS:
             intensity += 0.5
 
-        heatmap.append(
-            {
-                "token": token,
-                "intensity": round(intensity, 3),
-                "position": idx,
-            }
-        )
+        heatmap.append({
+            "token": t,
+            "intensity": round(float(intensity), 3),
+            "position": i,
+        })
 
     return heatmap
 
@@ -213,119 +112,137 @@ def compute_token_intensity(tokens: List[str]) -> List[Dict[str, Any]]:
 # -------------------------------------------------------------
 
 def compute_sentence_heatmap(text: str) -> List[Dict[str, Any]]:
+    results = []
 
-    sentences = tokenize_sentences(text)
-
-    results: List[Dict[str, Any]] = []
-
-    for sentence in sentences:
-
+    for sentence in tokenize_sentences(text):
         tokens = tokenize_words(sentence)
+        scores = compute_token_intensity(tokens)
 
-        token_scores = compute_token_intensity(tokens)
+        total = sum(x["intensity"] for x in scores)
+        normalized = total / max(len(tokens), 1)
 
-        total_intensity = sum(item["intensity"] for item in token_scores)
-
-        normalized = round(total_intensity / max(len(tokens), 1), 4)
-
-        results.append(
-            {
-                "sentence": sentence,
-                "emotion_intensity": normalized,
-            }
-        )
+        results.append({
+            "sentence": sentence,
+            "emotion_intensity": round(float(normalized), 4),
+        })
 
     return results
 
 
 # -------------------------------------------------------------
-# Gradient attribution
+# Device helper
 # -------------------------------------------------------------
 
 def _resolve_device(model: Any) -> Optional[torch.device]:
-
     try:
         return next(model.parameters()).device
     except Exception:
         return None
 
 
+# -------------------------------------------------------------
+# Proper Integrated Gradients (multi-step)
+# -------------------------------------------------------------
+
 def compute_integrated_gradients(
     model: Any,
     tokenizer: Any,
     text: str,
+    steps: int = 16,
 ) -> List[Dict[str, Any]]:
+    """
+    Safe Integrated Gradients:
+    - No model.zero_grad()
+    - No parameter grad accumulation (uses autograd.grad)
+    - Model runs in eval() (restored afterward)
+    """
 
-    device = _resolve_device(model)
+    was_training = model.training
+    model.eval()
 
-    inputs = tokenizer(
-        text,
-        return_tensors="pt",
-        truncation=True,
-    )
+    try:
+        try:
+            device = next(model.parameters()).device
+        except Exception:
+            device = torch.device("cpu")
 
-    if device is not None:
-        inputs = {k: v.to(device) for k, v in inputs.items()}
+        inputs = tokenizer(text, return_tensors="pt", truncation=True)
+        if device is not None:
+            inputs = {k: v.to(device) for k, v in inputs.items()}
 
-    model.zero_grad(set_to_none=True)
+        input_ids = inputs["input_ids"]
+        attention_mask = inputs.get("attention_mask", None)
 
-    embedding_layer = model.get_input_embeddings()
+        embedding_layer = model.get_input_embeddings()
 
-    input_ids = inputs["input_ids"]
+        with torch.no_grad():
+            input_emb = embedding_layer(input_ids)
+            base_emb = torch.zeros_like(input_emb)
 
-    embeddings = embedding_layer(input_ids).detach().requires_grad_(True)
+        total_grads = torch.zeros_like(input_emb)
 
-    outputs = model(
-        inputs_embeds=embeddings,
-        attention_mask=inputs.get("attention_mask"),
-    )
+        alphas = torch.linspace(0.0, 1.0, steps, device=input_emb.device)
 
-    target = outputs.logits.max()
+        for alpha in alphas:
+            emb = (base_emb + alpha * (input_emb - base_emb)).detach()
+            emb.requires_grad_(True)
 
-    target.backward()
+            outputs = model(
+                inputs_embeds=emb,
+                attention_mask=attention_mask,
+            )
 
-    gradients = embeddings.grad
+            target = outputs.logits.max()
 
-    scores = gradients.abs().sum(dim=-1).detach().cpu().numpy()[0]
+            (grad,) = torch.autograd.grad(
+                outputs=target,
+                inputs=emb,
+                retain_graph=False,
+                create_graph=False,
+                allow_unused=False,
+            )
 
-    tokens = tokenizer.convert_ids_to_tokens(input_ids[0].detach().cpu())
+            total_grads += grad
 
-    return [
-        {"token": token, "importance": float(score)}
-        for token, score in zip(tokens, scores)
-    ]
+        avg_grads = total_grads / max(steps, 1)
+        attributions = (input_emb - base_emb) * avg_grads
+
+        scores = attributions.abs().sum(dim=-1)[0].detach().cpu().numpy()
+        scores = np.nan_to_num(scores, nan=0.0, posinf=0.0, neginf=0.0)
+        scores = np.maximum(scores, 0.0)
+        total = float(scores.sum())
+        if total > 0:
+            scores /= total
+
+        tokens = tokenizer.convert_ids_to_tokens(input_ids[0].detach().cpu())
+
+        return [
+            {"token": tok, "importance": float(score)}
+            for tok, score in zip(tokens, scores)
+        ]
+
+    finally:
+        if was_training:
+            model.train()
 
 
 # -------------------------------------------------------------
 # Visualization helpers
 # -------------------------------------------------------------
 
-def generate_heatmap_matrix(
-    tokens: List[str],
-    heatmap: List[Dict[str, Any]],
-) -> List[List[float]]:
-
-    _ = tokens
-
-    return [[float(item["intensity"])] for item in heatmap]
+def generate_heatmap_matrix(tokens, heatmap):
+    return [[float(x["intensity"])] for x in heatmap]
 
 
-def generate_ui_highlights(
-    heatmap: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-
+def generate_ui_highlights(heatmap):
     return [
-        {
-            "token": item["token"],
-            "strength": item["intensity"],
-        }
-        for item in heatmap
-        if item["intensity"] > 0
+        {"token": x["token"], "strength": x["intensity"]}
+        for x in heatmap if x["intensity"] > 0
     ]
 
 
 # -------------------------------------------------------------
-# Main explanation pipeline
+# Main pipeline
 # -------------------------------------------------------------
 
 def explain_emotion(
@@ -340,37 +257,24 @@ def explain_emotion(
     tokens = tokenize_words(text)
 
     emotion_tokens = detect_emotion_tokens(tokens)
-
     emotion_heatmap = compute_token_intensity(tokens)
-
     sentence_heatmap = compute_sentence_heatmap(text)
 
     gradient_attr: List[Dict[str, Any]] = []
 
-    if model is not None and tokenizer is not None:
-
+    if model and tokenizer:
         try:
-
-            gradient_attr = compute_integrated_gradients(
-                model,
-                tokenizer,
-                text,
-            )
-
+            gradient_attr = compute_integrated_gradients(model, tokenizer, text)
         except Exception as exc:
             logger.warning("Gradient attribution failed: %s", exc)
-
-    heatmap_matrix = generate_heatmap_matrix(tokens, emotion_heatmap)
-
-    ui_highlights = generate_ui_highlights(emotion_heatmap)
 
     explanation = EmotionExplanation(
         emotion_tokens=emotion_tokens,
         emotion_heatmap=emotion_heatmap,
         sentence_heatmap=sentence_heatmap,
         gradient_attribution=gradient_attr,
-        heatmap_matrix=heatmap_matrix,
-        ui_highlights=ui_highlights,
+        heatmap_matrix=generate_heatmap_matrix(tokens, emotion_heatmap),
+        ui_highlights=generate_ui_highlights(emotion_heatmap),
     )
 
     return explanation.__dict__

@@ -1,6 +1,6 @@
 check file missing not used
 check gpu optimsations
-check checkpoint+file model saved coredt then copy to drive
+check checkpoint+file model saved LOCAL then copy to drive
 
 
 

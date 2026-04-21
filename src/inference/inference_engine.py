@@ -61,6 +61,7 @@ class InferenceConfig:
     max_length: int = 512
     batch_size: int = 8
     return_probabilities: bool = True
+    use_amp: bool = True
 
 
 @dataclass
@@ -102,8 +103,13 @@ class InferenceEngine:
     ) -> None:
         self.config = config
         self.device = self._resolve_device(config.device)
-        self.use_amp = True
-        self.amp_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+        self.use_amp = (self.device.type == "cuda") and getattr(config, "use_amp", True)
+        if self.device.type == "cuda":
+            self.amp_dtype = (
+                torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+            )
+        else:
+            self.amp_dtype = torch.float32
         self.use_compile = True
         self.model = None
         self.tokenizer = None
@@ -168,9 +174,9 @@ class InferenceEngine:
 
             if self.use_compile:
                 try:
-                    self.model = torch.compile(self.model, mode="max-autotune")
+                    self.model = torch.compile(self.model, mode="reduce-overhead")
                 except Exception:
-                    logger.warning("torch.compile failed")
+                    logger.debug("torch.compile skipped")
             self.model.eval()
 
             self._load_label_map(model_path)
@@ -241,13 +247,17 @@ class InferenceEngine:
                             non_blocking=True,
                         )
                 else:
-                    encoded = move_to_device(encoded, self.device)
+                    for key in encoded:
+                        encoded[key] = encoded[key].to(self.device)
 
-                with torch.autocast(
-                    device_type="cuda",
-                    dtype=self.amp_dtype,
-                    enabled=self.use_amp and self.device.type == "cuda",
-                ):
+                if self.use_amp:
+                    with torch.autocast(
+                        device_type=self.device.type,
+                        dtype=self.amp_dtype,
+                        enabled=True,
+                    ):
+                        logits = self._compute_logits(encoded)
+                else:
                     logits = self._compute_logits(encoded)
 
                 needs_probs = (
@@ -272,8 +282,25 @@ class InferenceEngine:
                 else:
                     predicted_indices = torch.argmax(logits, dim=-1)
 
+                batch_logits_cpu = logits.detach().cpu()
+                batch_preds_cpu = predicted_indices.detach().cpu()
+
+                batch_probs_cpu = (
+                    probabilities.detach().cpu() if probabilities is not None else None
+                )
+                batch_calibrated_cpu = (
+                    calibrated_probabilities.detach().cpu()
+                    if calibrated_probabilities is not None
+                    else None
+                )
+                batch_ensemble_cpu = (
+                    ensemble_probabilities.detach().cpu()
+                    if ensemble_probabilities is not None
+                    else None
+                )
+
                 for i, text in enumerate(batch):
-                    label_idx = predicted_indices[i].item()
+                    label_idx = int(batch_preds_cpu[i].item())
 
                     label = (
                         self.label_map[label_idx]
@@ -282,21 +309,21 @@ class InferenceEngine:
                     )
 
                     probs = (
-                        probabilities[i].tolist()
-                        if probabilities is not None and self.config.return_probabilities
+                        batch_probs_cpu[i].tolist()
+                        if batch_probs_cpu is not None and self.config.return_probabilities
                         else None
                     )
                     calibrated_probs = (
-                        calibrated_probabilities[i].tolist()
-                        if needs_probs and self.config.return_probabilities
+                        batch_calibrated_cpu[i].tolist()
+                        if batch_calibrated_cpu is not None and self.config.return_probabilities
                         else None
                     )
                     ensemble_probs = (
-                        ensemble_probabilities[i].tolist()
-                        if ensemble_probabilities is not None and self.config.return_probabilities
+                        batch_ensemble_cpu[i].tolist()
+                        if batch_ensemble_cpu is not None and self.config.return_probabilities
                         else None
                     )
-                    logit_values = logits[i].tolist()
+                    logit_values = batch_logits_cpu[i].tolist()
 
                     result = PredictionResult(
                         text=text,

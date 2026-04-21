@@ -65,9 +65,12 @@ from ..training.trainer import Trainer, TrainerConfig
 logger = logging.getLogger(__name__)
 
 if torch.cuda.is_available():
-    torch.backends.cuda.enable_flash_sdp(True)
-    torch.backends.cuda.enable_mem_efficient_sdp(True)
-    torch.backends.cuda.enable_math_sdp(False)
+    try:
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(False)
+        torch.backends.cuda.enable_math_sdp(False)
+    except Exception:
+        logger.warning("Flash SDP not supported, falling back safely")
 
 # ------------------------------------------------------------
 # Configuration
@@ -307,7 +310,8 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
         if not base_models:
             return None
 
-        device_str = self.config.device or ("cuda" if torch.cuda.is_available() else "cpu")
+        device = next(self.parameters()).device
+        device_str = str(device)
 
         if strategy == "weighted_average":
             return WeightedEnsembleModel(
@@ -364,7 +368,7 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
         pooled = self.encode(input_ids=input_ids, attention_mask=attention_mask)
 
         # stabilize temperature
-        temperature = torch.clamp(self.temperature, 0.5, 5.0)
+        temperature = torch.clamp(self.temperature.exp(), 0.5, 5.0)
 
         # ----------------------------------------------------
         # Task heads
@@ -390,21 +394,33 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
             propaganda_logits = self.propaganda_head(pooled)
         propaganda_logits = propaganda_logits / temperature
 
-        narrative_outputs = self.narrative_head(pooled) / temperature
-        narrative_frame_outputs = self.narrative_frame_head(pooled) / temperature
-        emotion_outputs = self.emotion_head(pooled) / temperature
+        narrative_outputs = self.narrative_head(pooled)
+        narrative_outputs["logits"] = narrative_outputs["logits"] / temperature
 
-        if not self.training:
+        narrative_frame_outputs = self.narrative_frame_head(pooled)
+        narrative_frame_outputs["logits"] = narrative_frame_outputs["logits"] / temperature
+
+        emotion_outputs = self.emotion_head(pooled)
+        emotion_outputs["logits"] = emotion_outputs["logits"] / temperature
+
+        with torch.no_grad():
             bias_probs = F.softmax(bias_logits, dim=-1)
             ideology_probs = F.softmax(ideology_logits, dim=-1)
             propaganda_probs = F.softmax(propaganda_logits, dim=-1)
-        
+
             bias_preds = bias_probs.argmax(dim=-1)
             ideology_preds = ideology_probs.argmax(dim=-1)
             propaganda_preds = propaganda_probs.argmax(dim=-1)
-        else:
-            bias_probs = ideology_probs = propaganda_probs = None
-            bias_preds = ideology_preds = propaganda_preds = None
+
+            narrative_outputs["probabilities"] = torch.sigmoid(
+                narrative_outputs["logits"]
+            )
+            narrative_frame_outputs["probabilities"] = torch.sigmoid(
+                narrative_frame_outputs["logits"]
+            )
+            emotion_outputs["probabilities"] = torch.sigmoid(
+                emotion_outputs["logits"]
+            )
         
 
 
@@ -498,7 +514,9 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
                 "emotion": emotion_outputs["logits"],
             }
             available_labels = {
-                key: value for key, value in labels.items() if key in logits_for_loss
+                key: value.to(pooled.device)
+                for key, value in labels.items()
+                if key in logits_for_loss
             }
 
             if available_labels:
