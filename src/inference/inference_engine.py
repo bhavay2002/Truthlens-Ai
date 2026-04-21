@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import torch
-torch.backends.cudnn.benchmark = True
+
+# cudnn.benchmark speeds up convolutions with fixed input shapes on CUDA.
+# Only enable it when CUDA is actually available — setting it unconditionally
+# at import time mutates global PyTorch state on CPU-only environments.
+if torch.cuda.is_available():
+    torch.backends.cudnn.benchmark = True
 
 import logging
 from dataclasses import dataclass

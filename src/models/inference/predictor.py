@@ -212,8 +212,9 @@ class Predictor:
                 ):
                     logits = torch.nan_to_num(value, nan=0.0, posinf=1e6, neginf=-1e6)
 
-                    # ✅ Stable softmax
-                    logits = logits - logits.max(dim=-1, keepdim=True).values
+                    # torch.softmax is already numerically stable (internally
+                    # subtracts the per-row max), so an explicit max-subtract
+                    # here is redundant work on every batch.
                     probs = torch.softmax(logits, dim=-1)
 
                     calibrated = self._calibrate_probabilities(
@@ -223,9 +224,12 @@ class Predictor:
 
                     preds = torch.argmax(probs, dim=-1)
 
+                    # Precise suffix strip: since key endswith("_logits"),
+                    # removesuffix is safe and cannot mangle other substrings.
+                    base = key[: -len("_logits")]
                     formatted[key] = logits
-                    formatted[key.replace("logits", "probabilities")] = calibrated
-                    formatted[key.replace("logits", "predictions")] = preds
+                    formatted[f"{base}_probabilities"] = calibrated
+                    formatted[f"{base}_predictions"] = preds
 
                 else:
                     formatted[key] = value
@@ -312,8 +316,10 @@ class Predictor:
 
     def _extract_fake_probs(self, formatted: Dict[str, Any]) -> Optional[torch.Tensor]:
 
+        # 1) Named multi-task heads (fake_logits / fakenews_logits / ...)
         for key in _FAKE_HEAD_KEYS:
-            probs = formatted.get(key.replace("logits", "probabilities"))
+            probs_key = key[: -len("_logits")] + "_probabilities"
+            probs = formatted.get(probs_key)
             if isinstance(probs, torch.Tensor):
                 if probs.numel() == 0:
                     raise RuntimeError("Empty probability tensor from fake head")
@@ -325,8 +331,26 @@ class Predictor:
             logits = torch.nan_to_num(logits, nan=0.0, posinf=1e6, neginf=-1e6)
             if logits.numel() == 0:
                 raise RuntimeError("Empty probability tensor from fake head")
-            logits = logits - logits.max(dim=-1, keepdim=True).values
+            # torch.softmax is numerically stable; redundant max-subtract removed.
             return torch.softmax(logits, dim=-1)
+
+        # 2) Plain HuggingFace-style single-head classifier: the model emits
+        #    a single "logits" tensor and its config.id2label declares a
+        #    Fake/Real (or equivalent) mapping. Use it directly instead of
+        #    refusing — this honors the actual model config, not a fabricated
+        #    head. Guarded by config inspection so we do NOT coerce unrelated
+        #    classifiers into fake/real semantics.
+        plain_logits = formatted.get("logits")
+        if isinstance(plain_logits, torch.Tensor) and plain_logits.dim() >= 2 and plain_logits.size(-1) >= 2:
+            config = getattr(self.model, "config", None)
+            id2label = getattr(config, "id2label", None) if config is not None else None
+            if isinstance(id2label, dict):
+                labels_lower = {str(v).lower() for v in id2label.values()}
+                if labels_lower & FAKE_LABEL_CANDIDATES:
+                    logits = torch.nan_to_num(
+                        plain_logits, nan=0.0, posinf=1e6, neginf=-1e6
+                    )
+                    return torch.softmax(logits, dim=-1)
 
         return None
 

@@ -225,15 +225,27 @@ class ModelWrapper:
     ) -> Dict[str, torch.Tensor]:
         """
         Move batch tensors to device.
+
+        Pinned memory + non_blocking=True is only meaningful for CPU->CUDA
+        transfers; it's pure overhead (and wasted pinned-pool pages) for
+        CPU->CPU. Gate it on the actual target device type.
         """
 
+        target_is_cuda = self.device.type == "cuda"
         moved_batch: Dict[str, torch.Tensor] = {}
 
         for key, value in batch.items():
             if isinstance(value, torch.Tensor):
-                if value.device.type == "cpu":
-                    value = value.pin_memory()
-                moved_batch[key] = value.to(self.device, non_blocking=True)
+                if target_is_cuda and value.device.type == "cpu" and not value.is_pinned():
+                    try:
+                        value = value.pin_memory()
+                    except RuntimeError:
+                        # pin_memory can fail under pressure; fall back silently.
+                        pass
+                moved_batch[key] = value.to(
+                    self.device,
+                    non_blocking=target_is_cuda,
+                )
             else:
                 moved_batch[key] = value
 
@@ -257,7 +269,11 @@ class ModelWrapper:
 
             for key, value in outputs.items():
                 if isinstance(value, torch.Tensor):
-                    if "logits" in key:
+                    # Match only real logits keys, not e.g. "logits_norm" or
+                    # "per_sample_logits_aux". Exact equality or an "_logits"
+                    # suffix is what our heads actually produce.
+                    is_logits = key == "logits" or key.endswith("_logits")
+                    if is_logits:
                         logits = value
                         if self.compute_probabilities:
                             probs = softmax(logits, dim=-1)
@@ -270,7 +286,12 @@ class ModelWrapper:
                             calibrated_probs = None
 
                         preds = argmax(logits, dim=-1)
-                        base = key.replace("logits", "")
+                        # Strip the suffix precisely; avoids mangling keys
+                        # where "logits" appears as a substring elsewhere.
+                        if key == "logits":
+                            base = ""
+                        else:
+                            base = key[: -len("_logits")] + "_"
                         results[f"{base}predictions"] = preds
 
                         if probs is not None:

@@ -146,15 +146,28 @@ class ModelRegistry:
             model_dir = Path(settings.model.path)
             vectorizer_path = Path(settings.paths.tfidf_vectorizer_path)
 
+            # Resolve the on-disk model directory. We accept either:
+            #   (a) settings.model.path already points at the model dir
+            #       (e.g. "models/truthlens_model") — use it as-is, even when
+            #       model_name is supplied as a label.
+            #   (b) settings.model.path is a registry root containing one
+            #       subdir per model — in that case model_name picks the subdir.
+            # Previously, supplying model_name always forced path/model_name,
+            # which produced the spurious "models/truthlens_model/truthlens_model"
+            # FileNotFoundError whenever (a) held.
             model_path = model_dir
             if model_name:
                 named_model_path = model_dir / model_name
                 if named_model_path.exists():
                     model_path = named_model_path
-                elif not model_dir.exists():
-                    raise FileNotFoundError(f"Model path not found: {named_model_path}")
+                elif model_dir.exists() and (model_dir / "config.json").exists():
+                    # Case (a): settings.model.path IS the model dir.
+                    model_path = model_dir
                 else:
-                    raise FileNotFoundError(f"Model path not found: {named_model_path}")
+                    raise FileNotFoundError(
+                        f"Model path not found: neither {named_model_path} "
+                        f"nor a config.json under {model_dir}"
+                    )
 
             device_obj = torch.device(
                 device if device else ("cuda" if torch.cuda.is_available() else "cpu")
