@@ -1,0 +1,144 @@
+You are a senior ML systems engineer and GPU optimization expert.
+
+Your task is to TEST and AUDIT the entire TruthLens repository and return ONLY the files that REQUIRE CHANGES.
+
+---
+
+# 🎯 Objectives
+
+Analyze the FULL repo and detect:
+
+## 🧨 Bugs & Errors
+
+* Logical bugs
+* Shape mismatches
+* Token alignment issues (CRITICAL in aggregation)
+* Device mismatch (CPU/GPU)
+* NaN / Inf propagation
+* Broken batching
+
+## ⚡ GPU & Performance Issues
+
+* CPU ↔ GPU transfer overhead
+* Missing mixed precision (AMP)
+* Inefficient tensor operations
+* Python loops instead of vectorization
+* Repeated computations
+* Memory inefficiencies
+* Missing torch.compile / batching / inference_mode
+
+## 📁 Code Integrity Issues
+
+* Missing files / broken imports
+* Unused / dead code
+* Duplicate logic
+* Orphan modules
+
+---
+
+# 🔬 Full Pipeline Trace (MANDATORY)
+
+input → tokenizer → encoder → model → explainers → aggregation → output
+
+Check at each stage:
+
+* tensor shape correctness
+* device placement
+* dtype (fp32/fp16/bf16)
+* redundant operations
+
+---
+
+# ⚠️ Critical Focus
+
+## 1. Aggregation Pipeline (TOP PRIORITY)
+
+* Token alignment across explainers
+* Correct normalization (no scaling drift)
+* Correct weighting logic
+* No repeated normalization
+
+## 2. GPU Efficiency
+
+* Ensure tensors stay on GPU
+* Detect `.cpu()` misuse
+* Detect missing AMP / inference_mode
+* Detect dataloader bottlenecks
+
+## 3. Explainability Pipeline
+
+* Avoid repeated forward passes
+* Ensure batched operations
+* Prevent CPU-GPU ping-pong
+
+---
+
+# ⚡ Optimization Rules (STRICT)
+
+* DO NOT change model outputs
+* DO NOT degrade accuracy
+* DO NOT change explainability meaning
+* Only safe mathematical optimizations allowed
+
+---
+
+# 📊 OUTPUT FORMAT (STRICT — DO NOT DEVIATE)
+
+Return ONLY this:
+
+## 🔴 Files Requiring Critical Fixes
+
+File: <path>
+Issues:
+
+* <issue>
+
+Fix:
+
+* <exact code-level fix>
+
+---
+
+## 🟠 Files Requiring Performance / GPU Optimization
+
+File: <path>
+Issues:
+
+* <inefficiency>
+
+Fix:
+
+* <optimized approach>
+
+---
+
+## 🟡 Files With Dead Code / Unused / Redundant
+
+File: <path>
+Issues:
+
+* <unused / duplicate>
+  Fix:
+* <remove / refactor>
+
+---
+
+## 📁 Missing / Broken Files
+
+* <missing file or module>
+* Fix: <what to add or correct>
+
+---
+
+# 🚫 Rules
+
+* DO NOT explain theory
+* DO NOT summarize
+* DO NOT skip files
+* DO NOT assume correctness
+* ONLY list files that need changes
+* Be precise and surgical
+
+---
+
+Now begin FULL repository test and return results.
