@@ -1,40 +1,3 @@
-"""
-File Name: model_factory.py
-Module: models.factory
-Description:
-    Implements a centralized factory responsible for constructing TruthLens
-    model instances. The factory enables clean model instantiation based on
-    configuration parameters and ensures that model creation is consistent
-    across training, evaluation, and inference pipelines.
-
-    Supported model types include:
-        • bias_classifier
-        • ideology_classifier
-        • propaganda_detector
-        • narrative_detector
-        • emotion_classifier
-        • multitask_truthlens
-
-    The factory follows dependency injection principles and ensures that
-    model configuration is validated before instantiation.
-
-Dependencies:
-    logging
-    typing
-    dataclasses
-    torch.nn
-    models.tasks.bias_classifier
-    models.tasks.ideology_classifier
-    models.tasks.propaganda_detector
-    models.tasks.narrative_detector
-    models.tasks.emotion_classifier
-    models.multitask.multitask_truthlens_model
-Inputs:
-    Model configuration dictionary
-Outputs:
-    Instantiated PyTorch model
-"""
-
 from __future__ import annotations
 
 import logging
@@ -45,7 +8,6 @@ import torch.nn as nn
 
 from ..config import ModelConfigLoader, MultiTaskModelConfig
 from ..encoder.encoder_config import EncoderConfig
-from src.utils import ensure_non_empty_text
 
 from ..tasks.bias.bias_classifier import BiasClassifier, BiasClassifierConfig
 from ..tasks.ideology.ideology_classifier import (
@@ -148,7 +110,10 @@ class ModelFactory:
             Instantiated PyTorch model.
         """
 
-        normalized_model_type = ensure_non_empty_text(model_type, name="model_type")
+        if not isinstance(model_type, str) or not model_type.strip():
+            raise ValueError("model_type must be a non-empty string")
+
+        normalized_model_type = model_type.strip().lower()
 
         if normalized_model_type not in ModelFactory.SUPPORTED_MODELS:
             raise ValueError(
@@ -156,38 +121,56 @@ class ModelFactory:
                 f"Supported models: {ModelFactory.SUPPORTED_MODELS}"
             )
 
-        logger.info("Creating model: %s", normalized_model_type)
+        logger.info(
+            "Creating model: %s | keys=%s",
+            normalized_model_type,
+            list(config.keys()) if isinstance(config, dict) else [],
+        )
 
         import copy
         merged_config = copy.deepcopy(config)
-        merged_config.update(ModelFactory._resolve_encoder_fields(config))
-        merged_config.update(ModelFactory._resolve_regression_fields(config))
+        for key, value in ModelFactory._resolve_encoder_fields(config).items():
+            merged_config.setdefault(key, value)
+        for key, value in ModelFactory._resolve_regression_fields(config).items():
+            merged_config.setdefault(key, value)
 
-        if normalized_model_type == "bias_classifier":
-            cfg = BiasClassifierConfig(**merged_config)
-            return BiasClassifier(cfg)
+        try:
+            if normalized_model_type == "bias_classifier":
+                cfg = BiasClassifierConfig(**merged_config)
+                model = BiasClassifier(cfg)
 
-        if normalized_model_type == "ideology_classifier":
-            cfg = IdeologyClassifierConfig(**merged_config)
-            return IdeologyClassifier(cfg)
+            elif normalized_model_type == "ideology_classifier":
+                cfg = IdeologyClassifierConfig(**merged_config)
+                model = IdeologyClassifier(cfg)
 
-        if normalized_model_type == "propaganda_detector":
-            cfg = PropagandaDetectorConfig(**merged_config)
-            return PropagandaDetector(cfg)
+            elif normalized_model_type == "propaganda_detector":
+                cfg = PropagandaDetectorConfig(**merged_config)
+                model = PropagandaDetector(cfg)
 
-        if normalized_model_type == "narrative_detector":
-            cfg = NarrativeDetectorConfig(**merged_config)
-            return NarrativeDetector(cfg)
+            elif normalized_model_type == "narrative_detector":
+                cfg = NarrativeDetectorConfig(**merged_config)
+                model = NarrativeDetector(cfg)
 
-        if normalized_model_type == "emotion_classifier":
-            cfg = EmotionClassifierConfig(**merged_config)
-            return EmotionClassifier(cfg)
+            elif normalized_model_type == "emotion_classifier":
+                cfg = EmotionClassifierConfig(**merged_config)
+                model = EmotionClassifier(cfg)
 
-        if normalized_model_type == "multitask_truthlens":
-            cfg = MultiTaskTruthLensConfig(**merged_config)
-            return MultiTaskTruthLensModel(cfg)
+            elif normalized_model_type == "multitask_truthlens":
+                cfg = MultiTaskTruthLensConfig(**merged_config)
+                model = MultiTaskTruthLensModel(cfg)
 
-        raise RuntimeError("Model creation failed unexpectedly")
+            else:
+                raise RuntimeError("Model creation failed unexpectedly")
+        except TypeError as exc:
+            raise ValueError(
+                f"Invalid config for {normalized_model_type}: {exc}"
+            ) from exc
+
+        device = merged_config.get("device") if isinstance(merged_config, dict) else None
+        if device:
+            model.to(device)
+
+        return model
 
     @staticmethod
     def create_wrapper(
@@ -283,6 +266,9 @@ class ModelFactory:
         -------
         nn.Module
         """
+        yaml_path = Path(yaml_path)
+        if not yaml_path.exists():
+            raise FileNotFoundError(f"Config file not found: {yaml_path}")
         model_config = ModelConfigLoader.load_multitask_config(yaml_path)
         logger.info("ModelFactory.create_from_yaml | path=%s", yaml_path)
         return ModelFactory.create_from_model_config(model_config)

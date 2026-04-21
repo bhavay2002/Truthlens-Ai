@@ -1,31 +1,7 @@
-"""
-File Name: inference_engine.py
-Module: Inference Engine
-Description:
-    Production-grade inference engine responsible for loading trained models,
-    executing predictions, managing device placement, validating inputs,
-    and returning structured prediction outputs for downstream systems.
-
-    Designed for scalable ML systems similar to those used in large-scale
-    research and production environments.
-
-Dependencies:
-    logging
-    typing
-    dataclasses
-    torch
-    transformers
-    pathlib
-    json
-
-Inputs:
-    Raw text or batch of texts for prediction
-
-Outputs:
-    Structured prediction results including probabilities and predicted labels
-"""
-
 from __future__ import annotations
+
+import torch
+torch.backends.cudnn.benchmark = True
 
 import logging
 from dataclasses import dataclass
@@ -44,7 +20,6 @@ from src.utils import (
     ensure_non_empty_text_list,
     get_device,
     load_json,
-    move_to_device,
 )
 
 logger = logging.getLogger(__name__)
@@ -110,7 +85,7 @@ class InferenceEngine:
             )
         else:
             self.amp_dtype = torch.float32
-        self.use_compile = True
+        self.use_compile = self.device.type == "cuda"
         self.model = None
         self.tokenizer = None
         self.label_map: Optional[Dict[int, str]] = None
@@ -156,6 +131,8 @@ class InferenceEngine:
         try:
             logger.info("Loading tokenizer from %s", tokenizer_path)
             self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast=True)
+            if self.tokenizer is None:
+                raise RuntimeError("Tokenizer failed to load")
 
             logger.info("Loading model from %s", model_path)
             self.model = AutoModelForSequenceClassification.from_pretrained(
@@ -163,12 +140,6 @@ class InferenceEngine:
                 torch_dtype=self.amp_dtype if self.device.type == "cuda" else None,
                 low_cpu_mem_usage=True,
             )
-
-            if self.device.type == "cuda":
-                if hasattr(torch.backends.cuda, "enable_flash_sdp"):
-                    torch.backends.cuda.enable_flash_sdp(True)
-                if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
-                    torch.backends.cuda.enable_mem_efficient_sdp(True)
 
             self.model.to(self.device, non_blocking=True)
 
@@ -240,21 +211,19 @@ class InferenceEngine:
                     return_tensors="pt",
                 )
 
-                if self.device.type == "cuda":
-                    for key in encoded:
+                for key in encoded:
+                    if self.device.type == "cuda" and encoded[key].device.type == "cpu":
                         encoded[key] = encoded[key].pin_memory().to(
                             self.device,
                             non_blocking=True,
                         )
-                else:
-                    for key in encoded:
+                    else:
                         encoded[key] = encoded[key].to(self.device)
 
                 if self.use_amp:
                     with torch.autocast(
                         device_type=self.device.type,
                         dtype=self.amp_dtype,
-                        enabled=True,
                     ):
                         logits = self._compute_logits(encoded)
                 else:
@@ -372,8 +341,8 @@ class InferenceEngine:
             input_names=["input_ids", "attention_mask"],
             output_names=["logits"],
             dynamic_axes={
-                "input_ids": {0: "batch"},
-                "attention_mask": {0: "batch"},
+                "input_ids": {0: "batch", 1: "sequence"},
+                "attention_mask": {0: "batch", 1: "sequence"},
             },
             opset_version=17,
         )
@@ -514,7 +483,8 @@ class InferenceEngine:
 
         if self.isotonic_calibrator is not None:
             try:
-                probs_np = probabilities.detach().cpu().numpy().astype(np.float64)
+                probs_cpu = probabilities.detach().cpu()
+                probs_np = probs_cpu.numpy().astype(np.float64)
                 calibrated_np = self.isotonic_calibrator.predict_proba(probs_np)
                 return torch.tensor(
                     calibrated_np,
@@ -553,11 +523,8 @@ class InferenceEngine:
             logits = None
 
         if logits is None:
-            if "input_ids" in encoded and isinstance(encoded["input_ids"], torch.Tensor):
-                logits = self.ensemble_model(encoded["input_ids"])
-            else:
-                logger.warning("Ensemble model skipped: incompatible input signature.")
-                return None
+            logger.warning("Ensemble fallback skipped: incompatible signature")
+            return None
 
         if not isinstance(logits, torch.Tensor):
             logger.warning("Ensemble model output is not a tensor. Skipping ensemble.")

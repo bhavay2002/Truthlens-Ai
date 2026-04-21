@@ -1,43 +1,9 @@
-"""
-File Name: multitask_truthlens_model.py
-Module: models.multitask
-Description:
-    Defines the core multi-task neural architecture used in the TruthLens AI
-    system. The model uses a shared transformer encoder and multiple task-
-    specific heads for tasks including:
-
-        - bias detection (binary)
-        - ideology classification (left/center/right)
-        - propaganda detection (binary)
-        - narrative role detection (hero/villain/victim)
-        - narrative frame detection (RE/HI/CO/MO/EC)
-        - emotion classification (20-label multi-label)
-
-    The architecture follows modern multi-task NLP research practices where
-    a shared contextual encoder learns a universal representation while
-    task-specific heads specialize for downstream objectives.
-
-Dependencies:
-    logging
-    typing
-    dataclasses
-    torch
-    torch.nn
-    models.encoder.transformer_encoder
-    models.heads.classification_head
-    models.heads.multilabel_head
-Inputs:
-    input_ids: Tensor (batch_size, sequence_length)
-    attention_mask: Tensor (batch_size, sequence_length)
-    labels (optional): Dict[str, Tensor]
-Outputs:
-    Dictionary containing logits, probabilities, predictions, and optional loss
-"""
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Optional, Any, List
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -62,15 +28,24 @@ from ..config import (
 from ..training.loss_functions import LossConfig, LossFactory
 from ..training.trainer import Trainer, TrainerConfig
 
+
+
 logger = logging.getLogger(__name__)
 
-if torch.cuda.is_available():
-    try:
-        torch.backends.cuda.enable_flash_sdp(True)
-        torch.backends.cuda.enable_mem_efficient_sdp(False)
-        torch.backends.cuda.enable_math_sdp(False)
-    except Exception:
-        logger.warning("Flash SDP not supported, falling back safely")
+def configure_cuda_kernels() -> None:
+    """Configure optional CUDA kernel/backends.
+
+    This intentionally does NOT run at import time to avoid global process
+    side-effects for callers that import this module.
+    """
+
+    if torch.cuda.is_available():
+        try:
+            torch.backends.cuda.enable_flash_sdp(True)
+            torch.backends.cuda.enable_mem_efficient_sdp(False)
+            torch.backends.cuda.enable_math_sdp(False)
+        except Exception:
+            logger.warning("Flash SDP not supported, falling back safely")
 
 # ------------------------------------------------------------
 # Configuration
@@ -97,6 +72,17 @@ class MultiTaskTruthLensConfig:
     regression_output_dim: int = 1
     regression_hidden_dim: Optional[int] = None
     regression_activation: str = "gelu"
+
+    enabled_tasks: List[str] = field(
+        default_factory=lambda: [
+            "bias",
+            "ideology",
+            "propaganda",
+            "narrative",
+            "narrative_frame",
+            "emotion",
+        ]
+    )
 
 
 # ------------------------------------------------------------
@@ -165,29 +151,72 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
         # Task Heads
         # ----------------------------------------------------
 
-        self.bias_head = ClassificationHead(
-            ClassificationHeadConfig(hidden, self.NUM_BIAS, dropout=config.dropout)
+        enabled = set(getattr(config, "enabled_tasks", []) or [])
+
+        def _on(name: str) -> bool:
+            if enabled:
+                return name in enabled
+            return bool(getattr(config, f"use_{name}_head", True))
+
+        self.bias_head = (
+            ClassificationHead(
+                ClassificationHeadConfig(hidden, self.NUM_BIAS, dropout=config.dropout)
+            )
+            if _on("bias")
+            else None
         )
 
-        self.ideology_head = ClassificationHead(
-            ClassificationHeadConfig(hidden, self.NUM_IDEOLOGY, dropout=config.dropout)
+        self.ideology_head = (
+            ClassificationHead(
+                ClassificationHeadConfig(hidden, self.NUM_IDEOLOGY, dropout=config.dropout)
+            )
+            if _on("ideology")
+            else None
         )
 
-        self.propaganda_head = ClassificationHead(
-            ClassificationHeadConfig(hidden, self.NUM_PROPAGANDA, dropout=config.dropout)
+        self.propaganda_head = (
+            ClassificationHead(
+                ClassificationHeadConfig(hidden, self.NUM_PROPAGANDA, dropout=config.dropout)
+            )
+            if _on("propaganda")
+            else None
         )
 
-        self.narrative_head = MultiLabelHead(
-            MultiLabelHeadConfig(hidden, self.NUM_NARRATIVE, dropout=config.dropout)
+        self.narrative_head = (
+            MultiLabelHead(
+                MultiLabelHeadConfig(hidden, self.NUM_NARRATIVE, dropout=config.dropout)
+            )
+            if _on("narrative")
+            else None
         )
 
-        self.narrative_frame_head = MultiLabelHead(
-            MultiLabelHeadConfig(hidden, self.NUM_NARRATIVE_FRAMES, dropout=config.dropout)
+        self.narrative_frame_head = (
+            MultiLabelHead(
+                MultiLabelHeadConfig(hidden, self.NUM_NARRATIVE_FRAMES, dropout=config.dropout)
+            )
+            if _on("narrative_frame")
+            else None
         )
 
-        self.emotion_head = MultiLabelHead(
-            MultiLabelHeadConfig(hidden, self.NUM_EMOTIONS, dropout=config.dropout)
+        self.emotion_head = (
+            MultiLabelHead(
+                MultiLabelHeadConfig(hidden, self.NUM_EMOTIONS, dropout=config.dropout)
+            )
+            if _on("emotion")
+            else None
         )
+
+        if not any(
+            [
+                self.bias_head,
+                self.ideology_head,
+                self.propaganda_head,
+                self.narrative_head,
+                self.narrative_frame_head,
+                self.emotion_head,
+            ]
+        ):
+            raise ValueError("At least one task head must be enabled")
 
         self.bias_regression_head: Optional[RegressionHead] = None
         self.ideology_regression_head: Optional[RegressionHead] = None
@@ -354,6 +383,17 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
                     return value
         raise RuntimeError("Unsupported ensemble output format.")
 
+    @staticmethod
+    def _extract_logits_safe(outputs: Any) -> torch.Tensor:
+        if isinstance(outputs, torch.Tensor):
+            return outputs
+        if isinstance(outputs, dict):
+            logits = outputs.get("logits")
+            if isinstance(logits, torch.Tensor):
+                return logits
+            raise RuntimeError("Missing logits in head output")
+        raise RuntimeError("Invalid head output format")
+
     # ------------------------------------------------------------
     # Forward
     # ------------------------------------------------------------
@@ -374,150 +414,206 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
         # Task heads
         # ----------------------------------------------------
 
-        if self.bias_ensemble is not None:
-            bias_logits = self._extract_ensemble_logits(self.bias_ensemble(pooled))
+        bias_logits = None
+        ideology_logits = None
+        propaganda_logits = None
+        narrative_outputs = None
+        narrative_frame_outputs = None
+        emotion_outputs = None
+
+        bias_probs = None
+        ideology_probs = None
+        propaganda_probs = None
+        bias_preds = None
+        ideology_preds = None
+        propaganda_preds = None
+
+        if self.bias_head is not None:
+            if self.bias_ensemble is not None:
+                bias_logits = self._extract_ensemble_logits(self.bias_ensemble(pooled))
+            else:
+                bias_logits = self._extract_logits_safe(self.bias_head(pooled))
+            bias_logits = bias_logits / temperature
+
+        if self.ideology_head is not None:
+            if self.ideology_ensemble is not None:
+                ideology_logits = self._extract_ensemble_logits(
+                    self.ideology_ensemble(pooled)
+                )
+            else:
+                ideology_logits = self._extract_logits_safe(self.ideology_head(pooled))
+            ideology_logits = ideology_logits / temperature
+
+        if self.propaganda_head is not None:
+            if self.propaganda_ensemble is not None:
+                propaganda_logits = self._extract_ensemble_logits(
+                    self.propaganda_ensemble(pooled)
+                )
+            else:
+                propaganda_logits = self._extract_logits_safe(self.propaganda_head(pooled))
+            propaganda_logits = propaganda_logits / temperature
+
+        if self.narrative_head is not None:
+            narrative_outputs = self.narrative_head(pooled)
+            narrative_outputs["logits"] = narrative_outputs["logits"] / temperature
+
+        if self.narrative_frame_head is not None:
+            narrative_frame_outputs = self.narrative_frame_head(pooled)
+            narrative_frame_outputs["logits"] = (
+                narrative_frame_outputs["logits"] / temperature
+            )
+
+        if self.emotion_head is not None:
+            emotion_outputs = self.emotion_head(pooled)
+            emotion_outputs["logits"] = emotion_outputs["logits"] / temperature
+
+        def _compute_probs_and_preds() -> None:
+            nonlocal bias_probs, ideology_probs, propaganda_probs
+            nonlocal bias_preds, ideology_preds, propaganda_preds
+
+            if bias_logits is not None:
+                bias_probs = F.softmax(bias_logits, dim=-1)
+                bias_preds = bias_probs.argmax(dim=-1)
+
+            if ideology_logits is not None:
+                ideology_probs = F.softmax(ideology_logits, dim=-1)
+                ideology_preds = ideology_probs.argmax(dim=-1)
+
+            if propaganda_logits is not None:
+                propaganda_probs = F.softmax(propaganda_logits, dim=-1)
+                propaganda_preds = propaganda_probs.argmax(dim=-1)
+
+            if narrative_outputs is not None:
+                probs = torch.sigmoid(narrative_outputs["logits"])
+                narrative_outputs["probabilities"] = probs
+                narrative_outputs["predictions"] = (probs > 0.5).int()
+
+            if narrative_frame_outputs is not None:
+                probs = torch.sigmoid(narrative_frame_outputs["logits"])
+                narrative_frame_outputs["probabilities"] = probs
+                narrative_frame_outputs["predictions"] = (probs > 0.5).int()
+
+            if emotion_outputs is not None:
+                probs = torch.sigmoid(emotion_outputs["logits"])
+                emotion_outputs["probabilities"] = probs
+                emotion_outputs["predictions"] = (probs > 0.5).int()
+
+        if not self.training:
+            with torch.no_grad():
+                _compute_probs_and_preds()
         else:
-            bias_logits = self.bias_head(pooled)
-        bias_logits = bias_logits / temperature
-
-        if self.ideology_ensemble is not None:
-            ideology_logits = self._extract_ensemble_logits(self.ideology_ensemble(pooled))
-        else:
-            ideology_logits = self.ideology_head(pooled)
-        ideology_logits = ideology_logits / temperature
-
-        if self.propaganda_ensemble is not None:
-            propaganda_logits = self._extract_ensemble_logits(
-                self.propaganda_ensemble(pooled)
-            )
-        else:
-            propaganda_logits = self.propaganda_head(pooled)
-        propaganda_logits = propaganda_logits / temperature
-
-        narrative_outputs = self.narrative_head(pooled)
-        narrative_outputs["logits"] = narrative_outputs["logits"] / temperature
-
-        narrative_frame_outputs = self.narrative_frame_head(pooled)
-        narrative_frame_outputs["logits"] = narrative_frame_outputs["logits"] / temperature
-
-        emotion_outputs = self.emotion_head(pooled)
-        emotion_outputs["logits"] = emotion_outputs["logits"] / temperature
-
-        with torch.no_grad():
-            bias_probs = F.softmax(bias_logits, dim=-1)
-            ideology_probs = F.softmax(ideology_logits, dim=-1)
-            propaganda_probs = F.softmax(propaganda_logits, dim=-1)
-
-            bias_preds = bias_probs.argmax(dim=-1)
-            ideology_preds = ideology_probs.argmax(dim=-1)
-            propaganda_preds = propaganda_probs.argmax(dim=-1)
-
-            narrative_outputs["probabilities"] = torch.sigmoid(
-                narrative_outputs["logits"]
-            )
-            narrative_frame_outputs["probabilities"] = torch.sigmoid(
-                narrative_frame_outputs["logits"]
-            )
-            emotion_outputs["probabilities"] = torch.sigmoid(
-                emotion_outputs["logits"]
-            )
+            _compute_probs_and_preds()
         
-
-
         outputs: Dict[str, Any] = {
-
             "embeddings": pooled,
-            
-            "bias": {
+        }
+
+        if bias_logits is not None:
+            outputs["bias"] = {
                 "logits": bias_logits,
                 "probabilities": bias_probs,
                 "predictions": bias_preds,
-            },
-            
-            "ideology": {
+            }
+
+        if ideology_logits is not None:
+            outputs["ideology"] = {
                 "logits": ideology_logits,
                 "probabilities": ideology_probs,
                 "predictions": ideology_preds,
-            },
+            }
 
-            "propaganda": {
+        if propaganda_logits is not None:
+            outputs["propaganda"] = {
                 "logits": propaganda_logits,
                 "probabilities": propaganda_probs,
                 "predictions": propaganda_preds,
-            },
+            }
 
-            "narrative": narrative_outputs,
+        if narrative_outputs is not None:
+            outputs["narrative"] = narrative_outputs
 
-            "narrative_frame": narrative_frame_outputs,
+        if narrative_frame_outputs is not None:
+            outputs["narrative_frame"] = narrative_frame_outputs
 
-            "emotion": emotion_outputs,
-        }
+        if emotion_outputs is not None:
+            outputs["emotion"] = emotion_outputs
 
-        if self.bias_regression_head is not None:
+        if self.bias_regression_head is not None and "bias" in outputs:
             outputs["bias"]["regression"] = self.bias_regression_head(pooled)
-        if self.ideology_regression_head is not None:
+        if self.ideology_regression_head is not None and "ideology" in outputs:
             outputs["ideology"]["regression"] = self.ideology_regression_head(pooled)
-        if self.propaganda_regression_head is not None:
+        if self.propaganda_regression_head is not None and "propaganda" in outputs:
             outputs["propaganda"]["regression"] = self.propaganda_regression_head(pooled)
-        if self.narrative_regression_head is not None:
+        if self.narrative_regression_head is not None and "narrative" in outputs:
             outputs["narrative"]["regression"] = self.narrative_regression_head(pooled)
 
         multitask_output = MultiTaskOutput()
-        multitask_output.add_task_output(
-            task_name="bias",
-            logits=bias_logits,
-            probabilities=bias_probs,
-            predictions=bias_preds,
-        )
-        multitask_output.add_task_output(
-            task_name="ideology",
-            logits=ideology_logits,
-            probabilities=ideology_probs,
-            predictions=ideology_preds,
-        )
-        multitask_output.add_task_output(
-            task_name="propaganda",
-            logits=propaganda_logits,
-            probabilities=propaganda_probs,
-            predictions=propaganda_preds,
-        )
-        multitask_output.add_task_output(
-            task_name="narrative",
-            logits=narrative_outputs["logits"],
-            probabilities=narrative_outputs.get("probabilities"),
-            predictions=narrative_outputs.get("predictions"),
-        )
-        multitask_output.add_task_output(
-            task_name="narrative_frame",
-            logits=narrative_frame_outputs["logits"],
-            probabilities=narrative_frame_outputs.get("probabilities"),
-            predictions=narrative_frame_outputs.get("predictions"),
-        )
-        multitask_output.add_task_output(
-            task_name="emotion",
-            logits=emotion_outputs["logits"],
-            probabilities=emotion_outputs.get("probabilities"),
-            predictions=emotion_outputs.get("predictions"),
-        )
+        if bias_logits is not None:
+            multitask_output.add_task_output(
+                task_name="bias",
+                logits=bias_logits,
+                probabilities=bias_probs,
+                predictions=bias_preds,
+            )
+        if ideology_logits is not None:
+            multitask_output.add_task_output(
+                task_name="ideology",
+                logits=ideology_logits,
+                probabilities=ideology_probs,
+                predictions=ideology_preds,
+            )
+        if propaganda_logits is not None:
+            multitask_output.add_task_output(
+                task_name="propaganda",
+                logits=propaganda_logits,
+                probabilities=propaganda_probs,
+                predictions=propaganda_preds,
+            )
+        if narrative_outputs is not None:
+            multitask_output.add_task_output(
+                task_name="narrative",
+                logits=narrative_outputs["logits"],
+                probabilities=narrative_outputs.get("probabilities"),
+                predictions=narrative_outputs.get("predictions"),
+            )
+        if narrative_frame_outputs is not None:
+            multitask_output.add_task_output(
+                task_name="narrative_frame",
+                logits=narrative_frame_outputs["logits"],
+                probabilities=narrative_frame_outputs.get("probabilities"),
+                predictions=narrative_frame_outputs.get("predictions"),
+            )
+        if emotion_outputs is not None:
+            multitask_output.add_task_output(
+                task_name="emotion",
+                logits=emotion_outputs["logits"],
+                probabilities=emotion_outputs.get("probabilities"),
+                predictions=emotion_outputs.get("predictions"),
+            )
 
         # ----------------------------------------------------
         # Loss
         # ----------------------------------------------------
 
         if labels is not None:
-            logits_for_loss: Dict[str, torch.Tensor] = {
-                "bias": bias_logits,
-                "ideology": ideology_logits,
-                "propaganda": propaganda_logits,
-                "narrative": narrative_outputs["logits"],
-                "narrative_frame": narrative_frame_outputs["logits"],
-                "emotion": emotion_outputs["logits"],
-            }
-            available_labels = {
-                key: value.to(pooled.device)
-                for key, value in labels.items()
-                if key in logits_for_loss
-            }
+            logits_for_loss: Dict[str, torch.Tensor] = {}
+            if bias_logits is not None and "bias" in labels:
+                logits_for_loss["bias"] = bias_logits
+            if ideology_logits is not None and "ideology" in labels:
+                logits_for_loss["ideology"] = ideology_logits
+            if propaganda_logits is not None and "propaganda" in labels:
+                logits_for_loss["propaganda"] = propaganda_logits
+            if narrative_outputs is not None and "narrative" in labels:
+                logits_for_loss["narrative"] = narrative_outputs["logits"]
+            if narrative_frame_outputs is not None and "narrative_frame" in labels:
+                logits_for_loss["narrative_frame"] = narrative_frame_outputs["logits"]
+            if emotion_outputs is not None and "emotion" in labels:
+                logits_for_loss["emotion"] = emotion_outputs["logits"]
+
+            available_labels: Dict[str, torch.Tensor] = {}
+            for key in logits_for_loss:
+                if key in labels:
+                    available_labels[key] = labels[key].to(pooled.device)
 
             if available_labels:
                 total_loss, task_losses = self.multitask_loss(
@@ -605,7 +701,7 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
     @classmethod
     def load_from_yaml(
         cls,
-        yaml_path: "str | Path",
+        yaml_path: str | Path,
     ) -> "MultiTaskTruthLensModel":
         """
         Load a ``MultiTaskModelConfig`` from a YAML file and instantiate the

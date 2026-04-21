@@ -1,33 +1,3 @@
-"""
-File Name: model_loader.py
-Module: Model Loading and Artifact Management
-Description:
-    Provides a production-grade model loading utility responsible for loading
-    trained ML models and associated artifacts such as tokenizers, feature
-    scalers, feature selectors, and metadata schemas.
-
-    The loader centralizes artifact management and ensures that inference
-    pipelines remain clean and decoupled from model storage details.
-
-    Designed for scalable ML systems supporting PyTorch and HuggingFace models.
-
-Dependencies:
-    logging
-    pathlib
-    typing
-    dataclasses
-    json
-    pickle
-    torch
-    transformers
-    joblib
-
-Inputs:
-    Model directory containing trained artifacts.
-
-Outputs:
-    Loaded models, tokenizers, preprocessing pipelines, and schemas.
-"""
 from __future__ import annotations
 
 import json
@@ -112,25 +82,32 @@ class ModelLoader:
 
         try:
             # CPU-first load with compatibility fallback across torch versions
-            try:
-                model = torch.load(path, map_location="cpu", weights_only=True)
-            except TypeError:
-                model = torch.load(path, map_location="cpu")
+            obj = torch.load(path, map_location="cpu")
 
-            if not isinstance(model, torch.nn.Module):
-                raise RuntimeError(f"Unsupported model object type at {path}: {type(model)}")
+            if isinstance(obj, dict) and "state_dict" in obj:
+                raise RuntimeError(
+                    f"{path} contains state_dict, not full model. Use ModelFactory to rebuild."
+                )
 
-            # 🔥 Half precision (GPU only)
+            if not isinstance(obj, torch.nn.Module):
+                raise RuntimeError(f"Unsupported model object at {path}: {type(obj)}")
+
+            model = obj
+
+            #  Half precision (GPU only)
             if self.device.type == "cuda":
-                model = model.half()
+                try:
+                    model = model.to(dtype=torch.float16)
+                except Exception:
+                    logger.debug("FP16 conversion skipped")
 
-            # 🔥 Efficient transfer
-            model.to(self.device, non_blocking=True)
+            #  Efficient transfer
+            model.to(self.device)
 
-            # 🔥 torch.compile (safe fallback)
+            #  torch.compile (safe fallback)
             if hasattr(torch, "compile") and self.device.type == "cuda":
                 try:
-                    model = torch.compile(model, mode="max-autotune")
+                    model = torch.compile(model, mode="reduce-overhead")
                 except Exception:
                     logger.debug("torch.compile skipped")
 
@@ -199,9 +176,11 @@ class ModelLoader:
 
         # ---------------- Tokenizer ----------------
 
-        artifacts.tokenizer = self._load_tokenizer(
-            self.models_dir / "roberta_model"
-        )
+        tokenizer_path = self.models_dir / "tokenizer"
+        if not tokenizer_path.exists():
+            tokenizer_path = self.models_dir
+
+        artifacts.tokenizer = self._load_tokenizer(tokenizer_path)
 
         # ---------------- Feature Artifacts ----------------
 
@@ -249,7 +228,7 @@ class ModelLoader:
     def _build_predictor(self, model: Optional[torch.nn.Module]) -> Optional[Predictor]:
         if model is None:
             return None
-        return Predictor(model=model, device=str(self.device))
+        return Predictor(model=model, device=self.device)
 
     # -------------------------------------------------
     # Multitask
@@ -266,16 +245,30 @@ class ModelLoader:
         try:
             model = ModelFactory.create_from_model_config(model_config)
 
+            weights_path = self.models_dir / "multitask_model.pt"
+            if weights_path.exists():
+                state = torch.load(weights_path, map_location="cpu")
+                if isinstance(state, dict) and "state_dict" in state:
+                    state = state["state_dict"]
+                if not isinstance(state, dict):
+                    raise RuntimeError(
+                        f"Unsupported multitask checkpoint format at {weights_path}: {type(state)}"
+                    )
+                model.load_state_dict(state)
+
             if self.device.type == "cuda":
-                model = model.half()
-
-            model.to(self.device, non_blocking=True)
-
-            if hasattr(torch, "compile"):
                 try:
-                    model = torch.compile(model, mode="max-autotune")
+                    model = model.to(dtype=torch.float16)
                 except Exception:
-                    pass
+                    logger.debug("FP16 conversion skipped for multitask model")
+
+            model.to(self.device)
+
+            if hasattr(torch, "compile") and self.device.type == "cuda":
+                try:
+                    model = torch.compile(model, mode="reduce-overhead")
+                except Exception:
+                    logger.debug("torch.compile skipped for multitask model")
 
             model.eval()
             return model
@@ -297,7 +290,8 @@ class ModelLoader:
 
         try:
             return ModelMetadata.load_json(path)
-        except Exception:
+        except Exception as exc:
+            logger.warning("Failed to load metadata: %s", exc)
             return None
 
     def load_model_config(self) -> Optional[MultiTaskModelConfig]:
@@ -307,7 +301,8 @@ class ModelLoader:
             if path.exists():
                 try:
                     return ModelConfigLoader.load_multitask_config(path)
-                except Exception:
+                except Exception as exc:
+                    logger.warning("Failed to load config: %s", exc)
                     return None
 
         return None
@@ -323,15 +318,30 @@ class ModelLoader:
         if model is None:
             raise ValueError(f"Model not found: {model_name}")
 
-        dummy = torch.randn(1, 10).to(self.device)
+        dummy = {
+            "input_ids": torch.ones(1, 16, dtype=torch.long).to(self.device),
+            "attention_mask": torch.ones(1, 16, dtype=torch.long).to(self.device),
+        }
+
+        class _OnnxWrapper(torch.nn.Module):
+            def __init__(self, wrapped: torch.nn.Module) -> None:
+                super().__init__()
+                self.wrapped = wrapped
+
+            def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> Any:
+                outputs = self.wrapped(input_ids=input_ids, attention_mask=attention_mask)
+                return outputs.logits if hasattr(outputs, "logits") else outputs
 
         torch.onnx.export(
-            model,
-            dummy,
+            _OnnxWrapper(model),
+            (dummy["input_ids"], dummy["attention_mask"]),
             output_path,
-            input_names=["input"],
+            input_names=["input_ids", "attention_mask"],
             output_names=["logits"],
-            dynamic_axes={"input": {0: "batch"}},
+            dynamic_axes={
+                "input_ids": {0: "batch", 1: "sequence"},
+                "attention_mask": {0: "batch", 1: "sequence"},
+            },
             opset_version=17,
         )
 

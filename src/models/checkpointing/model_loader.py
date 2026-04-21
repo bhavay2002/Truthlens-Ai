@@ -1,29 +1,3 @@
-"""
-File Name: model_loader.py
-Module: models.inference
-Description:
-    Provides a standardized model loading utility for the TruthLens AI system.
-    The module is responsible for reconstructing trained models, loading
-    checkpoints, restoring tokenizer artifacts, and preparing models for
-    inference or evaluation.
-
-    It supports both HuggingFace transformer models and internal TruthLens
-    PyTorch architectures created through the ModelFactory. The loader also
-    ensures correct device placement and evaluation mode initialization.
-    
-Dependencies:
-    logging
-    pathlib
-    typing
-    torch
-    transformers
-    src.models.factory.model_factory
-Inputs:
-    model_dir : Path
-Outputs:
-    dict containing model, tokenizer, and device
-"""
-
 from __future__ import annotations
 
 import json
@@ -33,6 +7,8 @@ from typing import Dict, Any, Optional
 
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
+
+from src.models.checkpointing.validator import validate_checkpoint
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +150,8 @@ class ModelLoader:
                     else checkpoint
                 )
 
+                validate_checkpoint(state_dict)
+
                 # Remove unnecessary keys
                 if "_orig_mod" in str(type(model)):
                     model = model._orig_mod
@@ -201,6 +179,7 @@ class ModelLoader:
                     if state_dict is None:
                         raise RuntimeError("Invalid checkpoint format")
 
+                    validate_checkpoint(state_dict)
                     model.load_state_dict(state_dict, strict=False)
 
             return model

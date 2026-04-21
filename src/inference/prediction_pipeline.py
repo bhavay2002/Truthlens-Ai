@@ -1,21 +1,3 @@
-"""
-File Name: prediction_pipeline.py
-Module: Prediction Pipeline
-Description:
-    Executes trained ML models to produce structured predictions for
-    TruthLens analytical tasks including:
-
-    - bias detection
-    - ideology classification
-    - propaganda detection
-    - emotion analysis
-    - credibility estimation
-
-    Integrates with the explainability subsystem to enrich predictions
-    with token-level attribution, attention rollout, explanation
-    aggregation, consistency metrics, and optional caching.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -77,6 +59,8 @@ class PredictionPipeline:
 
         self.config = config
         self.device = torch.device(config.device)
+        if self.device.type == "cuda":
+            torch.backends.cudnn.benchmark = True
 
         self.bias_model = bias_model
         self.ideology_model = ideology_model
@@ -91,13 +75,14 @@ class PredictionPipeline:
             if model is None:
                 continue
 
-            model.to(self.device)
+            model = model.to(self.device)
             model.eval()
 
             if self.device.type == "cuda" and torch.cuda.is_available():
-                model.half()
+                model = model.half()
                 try:
-                    model = torch.compile(model, mode="reduce-overhead")
+                    compiled_model = torch.compile(model, mode="reduce-overhead")
+                    model = compiled_model
                 except Exception:
                     logger.debug("torch.compile skipped for %s", attr)
 
@@ -117,18 +102,19 @@ class PredictionPipeline:
             if self.device.type == "cuda"
             else nullcontext()
         )
-        with ctx:
-            if self.bias_model is not None:
-                outputs["bias"] = self.bias_model(features)
+        with torch.no_grad():
+            with ctx:
+                if self.bias_model is not None:
+                    outputs["bias"] = self.bias_model(features)
 
-            if self.ideology_model is not None:
-                outputs["ideology"] = self.ideology_model(features)
+                if self.ideology_model is not None:
+                    outputs["ideology"] = self.ideology_model(features)
 
-            if self.propaganda_model is not None:
-                outputs["propaganda"] = self.propaganda_model(features)
+                if self.propaganda_model is not None:
+                    outputs["propaganda"] = self.propaganda_model(features)
 
-            if self.emotion_model is not None:
-                outputs["emotion"] = self.emotion_model(features)
+                if self.emotion_model is not None:
+                    outputs["emotion"] = self.emotion_model(features)
 
         return outputs
 
@@ -239,8 +225,10 @@ class PredictionPipeline:
             raise TypeError("Features must be a torch.Tensor")
 
         features = features.to(self.device, non_blocking=True)
-        if self.device.type == "cuda" and features.dtype != torch.float16:
-            features = features.to(dtype=torch.float16)
+        if self.device.type == "cuda":
+            features = features.to(dtype=torch.float16, non_blocking=True)
+        else:
+            features = features.to(dtype=torch.float32)
 
         with torch.inference_mode():
             outputs = self._forward_all(features)
@@ -263,7 +251,7 @@ class PredictionPipeline:
                 if raw.dim() == 1:
                     raw = raw.unsqueeze(0)
 
-                probs = raw if raw.max() <= 1.0 else torch.softmax(raw, dim=-1)
+                probs = torch.softmax(raw, dim=-1)
 
                 if probs.size(-1) >= 2:
                     propaganda_prob = probs[:, 1]
@@ -278,22 +266,36 @@ class PredictionPipeline:
                 probs = self._safe_tensor(probs)
                 emotion_probs = probs.reshape(-1, probs.size(-1))
 
+            batch_size = int(features.shape[0])
+
+            def _check(t: Optional[torch.Tensor]) -> None:
+                if t is not None and t.shape[0] != batch_size:
+                    raise RuntimeError("Batch size mismatch in model outputs")
+
+            _check(bias_preds)
+            _check(ideology_preds)
+            _check(propaganda_prob)
+            _check(emotion_probs)
+
         bias: List[str] = []
         ideology: List[str] = []
         emotion: List[Dict[str, float]] = []
         propaganda_list = None
 
         if bias_preds is not None:
-            bias_list = bias_preds.detach().cpu().tolist()
+            bias_list = bias_preds.detach().cpu().numpy().reshape(-1)
             bias = ["non_bias" if p == 0 else "bias" for p in bias_list]
 
         if ideology_preds is not None:
-            ideology_list = ideology_preds.detach().cpu().tolist()
+            ideology_list = ideology_preds.detach().cpu().numpy().reshape(-1)
             mapping = ["left", "center", "right"]
-            ideology = [mapping[p] for p in ideology_list]
+            ideology = [
+                mapping[p] if 0 <= int(p) < len(mapping) else "unknown"
+                for p in ideology_list
+            ]
 
         if propaganda_prob is not None:
-            propaganda_list = propaganda_prob.detach().cpu().tolist()
+            propaganda_list = propaganda_prob.detach().cpu().numpy().reshape(-1).tolist()
 
         if emotion_probs is not None:
             probs_list = emotion_probs.detach().cpu().tolist()
@@ -327,6 +329,25 @@ class PredictionPipeline:
             "propaganda_probability": out["propaganda_probability"][0] if out.get("propaganda_probability") else None,
             "emotion": out["emotion"][0] if out.get("emotion") else None,
         }
+
+    def predict_batch_safe(
+        self,
+        features: torch.Tensor,
+        batch_size: int = 32,
+    ) -> List[Dict[str, Any]]:
+        if not isinstance(features, torch.Tensor):
+            raise TypeError("Features must be a torch.Tensor")
+        if batch_size <= 0:
+            raise ValueError("batch_size must be > 0")
+        if features.ndim == 1:
+            features = features.unsqueeze(0)
+
+        outputs: List[Dict[str, Any]] = []
+        total = int(features.shape[0])
+        for i in range(0, total, batch_size):
+            batch = features[i : i + batch_size]
+            outputs.append(self.predict(batch))
+        return outputs
 
     def export_onnx(self, path: str) -> None:
         model = self.bias_model or self.ideology_model or self.propaganda_model or self.emotion_model

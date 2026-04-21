@@ -2,6 +2,7 @@ check file missing not used
 check gpu optimsations
 check checkpoint+file model saved LOCAL then copy to drive
 
+6 7 8 12 17
 
 
 # Install dependencies
