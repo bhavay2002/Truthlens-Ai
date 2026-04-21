@@ -206,11 +206,12 @@ class Predictor:
 
                 if (
                     isinstance(value, torch.Tensor)
-                    and "logits" in key
+                    and key.endswith("_logits")
                     and value.dim() >= 2
                     and value.size(-1) >= 2
                 ):
                     logits = torch.nan_to_num(value, nan=0.0, posinf=1e6, neginf=-1e6)
+                    base = key[: -len("_logits")]
 
                     # ✅ Stable softmax
                     logits = logits - logits.max(dim=-1, keepdim=True).values
@@ -224,8 +225,8 @@ class Predictor:
                     preds = torch.argmax(probs, dim=-1)
 
                     formatted[key] = logits
-                    formatted[key.replace("logits", "probabilities")] = calibrated
-                    formatted[key.replace("logits", "predictions")] = preds
+                    formatted[f"{base}_probabilities"] = calibrated
+                    formatted[f"{base}_predictions"] = preds
 
                 else:
                     formatted[key] = value
@@ -281,33 +282,21 @@ class Predictor:
 
         if probs is None:
             raise RuntimeError(
-                "Model returned no fake/misinformation head; refusing to fabricate.\n"
-                f"Available outputs: {list(formatted.keys())}"
+                "No fake/misinformation head found. Available: "
+                + ",".join(formatted.keys())
             )
 
         fake_index = self._resolve_fake_index()
 
-        if probs.dim() > 1:
-            mean_probs = probs.mean(dim=0)
-        else:
-            mean_probs = probs
+        mean_probs = probs.mean(dim=0) if probs.dim() > 1 else probs
 
         fake_prob = float(mean_probs[fake_index].item())
-        confidence = float(mean_probs.max().item())
-
-        num_classes = mean_probs.size(-1)
-
-        if num_classes == 2:
-            pred_index = fake_index if fake_prob >= 0.5 else (1 - fake_index)
-        else:
-            pred_index = int(mean_probs.argmax().item())
-
-        label = "Fake" if pred_index == fake_index else "Real"
+        pred_index = int(mean_probs.argmax().item())
 
         return {
-            "label": label,
+            "label": "Fake" if pred_index == fake_index else "Real",
             "fake_probability": float(min(max(fake_prob, 0.0), 1.0)),
-            "confidence": float(min(max(confidence, 0.0), 1.0)),
+            "confidence": float(mean_probs.max().item()),
         }
 
     def _extract_fake_probs(self, formatted: Dict[str, Any]) -> Optional[torch.Tensor]:
