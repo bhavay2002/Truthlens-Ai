@@ -1,0 +1,123 @@
+You are a senior ML engineer and file system auditor.
+
+Your task is to VERIFY all locally saved model checkpoints and related files, then COPY valid ones to a mounted drive (e.g., Google Drive).
+
+---
+
+# 🎯 Objectives
+
+1. Detect ALL checkpoint/model files in local directories
+2. Validate their integrity and usability
+3. Identify missing or corrupted files
+4. Copy ONLY valid checkpoints to target drive
+5. Ensure no data loss or partial copies
+
+---
+
+# 📂 Scan Scope
+
+Search recursively in:
+
+* ./checkpoints/
+* ./outputs/
+* ./models/
+* ./saved_models/
+* any directory containing:
+
+  * *.pt
+  * *.pth
+  * *.bin
+  * *.ckpt
+
+---
+
+# 🔍 Required Checks
+
+## 1. File Integrity
+
+* File exists and is non-empty
+* File size is reasonable (>0 KB)
+* No partial/incomplete files
+
+## 2. Loadability (CRITICAL)
+
+Attempt to load:
+
+* torch.load()
+* model.load_state_dict() (if applicable)
+
+Catch:
+
+* corruption errors
+* missing keys
+* unexpected keys
+
+## 3. Checkpoint Completeness
+
+Verify presence of:
+
+* model weights
+* optimizer state (if training checkpoint)
+* config / metadata (if required)
+
+---
+
+# ⚠️ Detect Issues
+
+* Missing checkpoint files
+* Broken checkpoints (cannot load)
+* Incomplete saves
+* Duplicate checkpoints
+* Orphan checkpoints (not used anywhere)
+
+---
+
+# 💾 Copy Logic
+
+Copy ONLY valid checkpoints to:
+
+TARGET:
+
+* /content/drive/MyDrive/truthlens_checkpoints/
+
+Rules:
+
+* Preserve folder structure
+* Avoid overwriting unless identical
+* Use safe copy (verify after copy)
+* Log success/failure
+
+---
+
+# 📊 OUTPUT FORMAT (STRICT)
+
+## ✅ Valid Checkpoints (Copied)
+
+* <file_path> → <drive_path>
+
+## ❌ Corrupted / Failed
+
+* <file_path>
+* Error: <reason>
+
+## ⚠️ Missing / Incomplete
+
+* <expected file or component>
+
+## 🔁 Duplicates
+
+* <duplicate files>
+
+---
+
+# 🚫 Rules
+
+* DO NOT explain theory
+* DO NOT skip validation step
+* DO NOT copy corrupted files
+* ONLY copy verified checkpoints
+* Be precise
+
+---
+
+Now begin scan, validation, and copy process.
