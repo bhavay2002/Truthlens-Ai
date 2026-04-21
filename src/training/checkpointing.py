@@ -1,37 +1,11 @@
-"""
-File Name: checkpointing.py
-Module: TruthLens AI - Training Checkpoint Manager
-Description:
-    Central checkpoint management utilities for TruthLens AI training pipelines.
-    Provides standardized interfaces for saving model checkpoints, loading
-    checkpoints, resuming training, and maintaining versioned checkpoints.
-
-Dependencies:
-    logging
-    pathlib
-    typing
-    json
-    torch
-
-Inputs:
-    model: torch.nn.Module
-    optimizer: torch.optim.Optimizer 
-    scheduler: learning rate scheduler 
-    epoch: current training epoch
-    step: training step
-    metadata: additional training metadata
-
-Outputs:
-    saved checkpoint files
-    restored model/optimizer/scheduler states
-"""
 from __future__ import annotations
 
 import json
 import logging
 import shutil
-import threading
 import gzip
+import os
+import copy
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -51,33 +25,23 @@ logger = logging.getLogger(__name__)
 CHECKPOINT_FILE = "checkpoint.pt"
 METADATA_FILE = "metadata.json"
 
-# GPU performance boost (guarded; avoid unsafe import-time behavior on non-CUDA envs)
-if torch.cuda.is_available():
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
 
+# =========================================================
+#  UTILITIES
+# =========================================================
 
-# ---------------------------------------------------------
-# Utilities
-# ---------------------------------------------------------
+def configure_training_precision():
+    """Call ONLY in training entrypoint."""
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+
 
 def _ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def _quant_backend() -> str:
-    supported = list(torch.backends.quantized.supported_engines)
-
-    if "fbgemm" in supported:
-        return "fbgemm"
-    if "qnnpack" in supported:
-        return "qnnpack"
-
-    return supported[0] if supported else "qnnpack"
-
-
 def _move_to_cpu(obj):
-    """Recursively move tensors to CPU (prevents GPU memory spikes)."""
     if isinstance(obj, dict):
         return {k: _move_to_cpu(v) for k, v in obj.items()}
     if isinstance(obj, torch.Tensor):
@@ -86,56 +50,27 @@ def _move_to_cpu(obj):
 
 
 def _atomic_save(data: dict, path: Path) -> None:
-    """
-    Safe + memory-efficient save.
-    """
-
     tmp_path = path.with_suffix(".tmp")
-
     cpu_data = _move_to_cpu(data)
-
     torch.save(cpu_data, tmp_path)
-
-    tmp_path.replace(path)
+    os.replace(tmp_path, path)
 
 
 def _atomic_save_compressed(data: dict, path: Path) -> None:
-    """Optional compressed checkpoint."""
     cpu_data = _move_to_cpu(data)
     final_path = Path(str(path) + ".gz")
     tmp_path = Path(str(path) + ".tmp.gz")
-    with gzip.open(tmp_path, "wb") as f:
-        torch.save(cpu_data, f)
-    tmp_path.replace(final_path)
-
-
-def _copy_to_drive(local_dir: Path, drive_dir: Optional[str | Path]) -> None:
-
-    if drive_dir is None:
-        return
-
-    drive_dir = Path(drive_dir)
 
     try:
-        drive_dir.mkdir(parents=True, exist_ok=True)
-
-        dest = drive_dir / local_dir.name
-
-        if dest.exists():
-            shutil.rmtree(dest)
-
-        shutil.copytree(local_dir, dest)
-
-        logger.info("Checkpoint copied to Drive: %s", dest)
-
+        with gzip.open(tmp_path, "wb") as f:
+            torch.save(cpu_data, f)
+        os.replace(tmp_path, final_path)
     except Exception as exc:
-        logger.warning("Drive sync failed: %s", exc)
+        logger.exception("Compressed save failed")
+        raise
 
 
 def _resolve_checkpoint_path(checkpoint_dir: Path) -> Path:
-    """
-    Resolve checkpoint path supporting both uncompressed and compressed formats.
-    """
     pt = checkpoint_dir / CHECKPOINT_FILE
     gz = checkpoint_dir / f"{CHECKPOINT_FILE}.gz"
 
@@ -144,21 +79,42 @@ def _resolve_checkpoint_path(checkpoint_dir: Path) -> Path:
     if gz.exists():
         return gz
 
-    candidates = list_checkpoints(checkpoint_dir)
-    if candidates:
-        last = candidates[-1]
-        pt2 = last / CHECKPOINT_FILE
-        gz2 = last / f"{CHECKPOINT_FILE}.gz"
-        if pt2.exists():
-            return pt2
-        if gz2.exists():
-            return gz2
-    raise FileNotFoundError(f"Checkpoint not found in {checkpoint_dir}")
+    raise FileNotFoundError(
+        f"No checkpoint found in {checkpoint_dir}. "
+        f"Expected {CHECKPOINT_FILE} or compressed variant."
+    )
 
 
-# ---------------------------------------------------------
-# Save Checkpoint
-# ---------------------------------------------------------
+def _safe_torch_load(path, map_location):
+    try:
+        return torch.load(path, map_location=map_location, weights_only=True)
+    except TypeError:
+        return torch.load(path, map_location=map_location)
+
+
+def _copy_to_drive(local_dir: Path, drive_dir: Optional[str | Path]) -> None:
+    if drive_dir is None:
+        return
+
+    try:
+        drive_dir = Path(drive_dir)
+        drive_dir.mkdir(parents=True, exist_ok=True)
+
+        dest = drive_dir / local_dir.name
+
+        if dest.exists():
+            shutil.rmtree(dest)
+
+        shutil.copytree(local_dir, dest)
+        logger.info("Checkpoint copied to Drive: %s", dest)
+
+    except Exception as exc:
+        logger.warning("Drive sync failed: %s", exc)
+
+
+# =========================================================
+#  SAVE CHECKPOINT
+# =========================================================
 
 def save_checkpoint(
     model: torch.nn.Module,
@@ -170,10 +126,9 @@ def save_checkpoint(
     step: Optional[int] = None,
     metadata: Optional[Dict[str, Any]] = None,
     export_formats: Optional[list[str]] = None,
-    export_model: Optional[torch.nn.Module] = None,
     export_example_input: Optional[torch.Tensor] = None,
     drive_checkpoint_dir: Optional[str | Path] = None,
-    use_compression: bool = False,  # 🔥 NEW
+    use_compression: bool = False,
 ) -> Path:
 
     checkpoint_dir = Path(checkpoint_dir)
@@ -194,27 +149,25 @@ def save_checkpoint(
     if scheduler is not None:
         try:
             checkpoint_data["scheduler_state_dict"] = scheduler.state_dict()
-        except AttributeError:
-            logger.warning("Scheduler has no state_dict()")
+        except Exception as exc:
+            logger.warning("Scheduler save failed: %s", exc)
 
-    saved_path = checkpoint_path
     if use_compression:
         _atomic_save_compressed(checkpoint_data, checkpoint_path)
         saved_path = Path(str(checkpoint_path) + ".gz")
     else:
         _atomic_save(checkpoint_data, checkpoint_path)
+        saved_path = checkpoint_path
+
     logger.info("Checkpoint saved: %s", saved_path)
 
-    # metadata
-    if metadata is not None:
-        metadata_path = checkpoint_dir / METADATA_FILE
-        with metadata_path.open("w", encoding="utf-8") as f:
+    if metadata:
+        with (checkpoint_dir / METADATA_FILE).open("w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2)
 
     if export_formats:
-        target_model = export_model if export_model else model
         _export_artifacts(
-            model=target_model,
+            model=model,
             checkpoint_dir=checkpoint_dir,
             export_formats=export_formats,
             example_input=export_example_input,
@@ -225,9 +178,9 @@ def save_checkpoint(
     return saved_path
 
 
-# ---------------------------------------------------------
-# Load Checkpoint
-# ---------------------------------------------------------
+# =========================================================
+#  LOAD CHECKPOINT (STRICT + SAFE)
+# =========================================================
 
 def load_checkpoint(
     model: torch.nn.Module,
@@ -236,6 +189,8 @@ def load_checkpoint(
     optimizer: Optional[torch.optim.Optimizer] = None,
     scheduler: Optional[Any] = None,
     map_location: Optional[str | torch.device] = None,
+    strict: bool = True,
+    allow_missing: tuple[str, ...] = (),
 ) -> Dict[str, Any]:
 
     checkpoint_dir = Path(checkpoint_dir)
@@ -243,30 +198,64 @@ def load_checkpoint(
 
     if str(checkpoint_path).endswith(".gz"):
         with gzip.open(checkpoint_path, "rb") as f:
-            checkpoint = torch.load(f, map_location=map_location, weights_only=True)
+            checkpoint = _safe_torch_load(f, map_location)
     else:
-        checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=True)
+        checkpoint = _safe_torch_load(checkpoint_path, map_location)
 
-    load_result = model.load_state_dict(checkpoint["model_state_dict"], strict=False)
-    if load_result.missing_keys:
-        logger.warning(
-            "load_checkpoint: missing keys in checkpoint (will be randomly initialised): %s",
-            load_result.missing_keys,
-        )
-    if load_result.unexpected_keys:
-        logger.warning(
-            "load_checkpoint: unexpected keys in checkpoint (will be ignored): %s",
-            load_result.unexpected_keys,
+    if not isinstance(checkpoint, dict):
+        raise RuntimeError("Invalid checkpoint format")
+
+    if "model_state_dict" not in checkpoint:
+        raise RuntimeError("Checkpoint missing 'model_state_dict'")
+
+    state_dict = checkpoint["model_state_dict"]
+
+    load_result = model.load_state_dict(state_dict, strict=False)
+
+    missing = [
+        k for k in load_result.missing_keys
+        if not any(k.startswith(p) for p in allow_missing)
+    ]
+
+    unexpected = load_result.unexpected_keys
+
+    if strict and (missing or unexpected):
+        raise RuntimeError(
+            "Strict checkpoint load failed:\n"
+            f"Missing keys: {missing}\n"
+            f"Unexpected keys: {unexpected}"
         )
 
+    if missing:
+        logger.warning("Missing keys (ignored): %s", missing)
+
+    if unexpected:
+        logger.warning("Unexpected keys (ignored): %s", unexpected)
+
+    #  optimizer restore (device safe)
     if optimizer is not None and "optimizer_state_dict" in checkpoint:
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        try:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
+            device = next(model.parameters()).device
+            for state in optimizer.state.values():
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor):
+                        state[k] = v.to(device)
+
+        except Exception as exc:
+            if strict:
+                raise RuntimeError(f"Optimizer restore failed: {exc}") from exc
+            logger.warning("Optimizer restore failed: %s", exc)
+
+    #  scheduler restore (strict-aware)
     if scheduler is not None and "scheduler_state_dict" in checkpoint:
         try:
             scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-        except Exception:
-            logger.warning("Scheduler restore failed")
+        except Exception as exc:
+            if strict:
+                raise RuntimeError(f"Scheduler restore failed: {exc}") from exc
+            logger.warning("Scheduler restore failed: %s", exc)
 
     logger.info("Checkpoint loaded: %s", checkpoint_path)
 
@@ -276,9 +265,9 @@ def load_checkpoint(
     }
 
 
-# ---------------------------------------------------------
-# Resume Training
-# ---------------------------------------------------------
+# =========================================================
+#  RESUME
+# =========================================================
 
 def resume_training(
     model: torch.nn.Module,
@@ -295,6 +284,7 @@ def resume_training(
         optimizer=optimizer,
         scheduler=scheduler,
         map_location=map_location,
+        strict=True,
     )
 
     epoch = state.get("epoch") or 0
@@ -308,38 +298,9 @@ def resume_training(
     }
 
 
-# ---------------------------------------------------------
-# List Checkpoints
-# ---------------------------------------------------------
-
-def list_checkpoints(checkpoint_root: str | Path) -> list[Path]:
-
-    checkpoint_root = Path(checkpoint_root)
-
-    if not checkpoint_root.exists():
-        return []
-
-    checkpoints = [
-        p for p in checkpoint_root.iterdir()
-        if p.is_dir() and (
-            (p / CHECKPOINT_FILE).exists()
-            or (p / f"{CHECKPOINT_FILE}.gz").exists()
-        )
-    ]
-
-    def sort_key(p: Path):
-        if p.name.startswith("checkpoint-"):
-            suffix = p.name.split("-", 1)[-1]
-            if suffix.isdigit():
-                return int(suffix)
-        return float("inf")
-
-    return sorted(checkpoints, key=sort_key)
-
-
-# ---------------------------------------------------------
-# Export Artifacts
-# ---------------------------------------------------------
+# =========================================================
+#  EXPORT (SAFE COPY)
+# =========================================================
 
 def _export_artifacts(
     *,
@@ -352,9 +313,9 @@ def _export_artifacts(
     export_dir = checkpoint_dir / "exports"
     _ensure_dir(export_dir)
 
-    requested = {fmt.lower() for fmt in export_formats}
+    model_copy = copy.deepcopy(model).cpu().eval()
 
-    model.eval()
+    requested = {fmt.lower() for fmt in export_formats}
 
     if "torchscript" in requested and example_input is not None:
         try:
@@ -362,7 +323,7 @@ def _export_artifacts(
                 TorchScriptExportConfig(device="cpu", verify_export=False)
             )
             exporter.export(
-                model=model,
+                model=model_copy,
                 example_input=example_input.detach().cpu(),
                 output_path=export_dir / "model.ts.pt",
             )
@@ -375,7 +336,7 @@ def _export_artifacts(
                 ONNXExportConfig(device="cpu", verify_export=False)
             )
             exporter.export(
-                model=model,
+                model=model_copy,
                 example_input=example_input.detach().cpu(),
                 output_path=export_dir / "model.onnx",
             )
@@ -385,12 +346,14 @@ def _export_artifacts(
     if "quantized" in requested:
         try:
             engine = QuantizationEngine(
-                QuantizationConfig(method="dynamic", device="cpu", backend=_quant_backend())
+                QuantizationConfig(method="dynamic", device="cpu", backend="fbgemm")
             )
-            quant_model = engine.apply(model)
+            quant_model = engine.apply(copy.deepcopy(model).cpu())
+
             torch.save(
                 quant_model.state_dict(),
                 export_dir / "model.quantized.pt",
             )
+
         except Exception as exc:
             logger.warning("Quantized export failed: %s", exc)
