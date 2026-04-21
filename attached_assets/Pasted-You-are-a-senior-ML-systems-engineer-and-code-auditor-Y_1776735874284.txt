@@ -1,0 +1,167 @@
+You are a senior ML systems engineer and code auditor.
+
+Your task is to perform a COMPLETE, DEEP audit of the entire TruthLens repository.
+
+## 🎯 Objectives
+
+Identify ALL issues including:
+
+* Bugs (logical, runtime, silent failures)
+* Broken pipelines (especially aggregation & explanation flow)
+* Tokenization mismatches across explainers
+* Missing files / missing imports
+* Unused / dead code
+* Redundant or duplicate logic
+* Incorrect abstractions or poor architecture
+* Performance bottlenecks
+* Inconsistent configs or schema mismatches
+* Data leakage or ML anti-patterns
+* Incorrect normalization / weighting logic
+* Edge case failures (empty inputs, NaNs, device mismatch, etc.)
+
+---
+
+## 🔬 Scope of Audit
+
+Analyze ALL folders and files, especially:
+
+* src/aggregation/
+* src/models/
+* src/features/
+* src/evaluation/
+* src/training/
+* src/utils/
+* src/visualization/
+
+Trace full pipeline:
+input → encoding → model → explanation → aggregation → output
+
+---
+
+## ⚠️ Critical Focus Areas
+
+### 1. Aggregation Pipeline (HIGHEST PRIORITY)
+
+* Check token alignment across explainers (SHAP, attention, gradients, etc.)
+* Ensure consistent token mapping before merging scores
+* Verify normalization correctness (sum-to-one, scaling issues)
+* Detect weighting bugs or bias amplification
+* Identify incorrect merging logic
+
+### 2. Explainability Consistency
+
+* Are all explainers operating on SAME token space?
+* Any mismatch between tokenizer vs model tokens?
+* Any loss of attribution fidelity?
+
+### 3. Model + Inference
+
+* Device mismatches (CPU/GPU)
+* Batch handling issues
+* Improper tensor shapes
+* Silent broadcasting bugs
+
+### 4. Feature + Dataset Pipeline
+
+* Schema mismatch between training and inference
+* Feature leakage
+* Missing validation
+
+### 5. Training + Checkpointing
+
+* Broken checkpoint loading
+* Inconsistent config restoration
+* Missing optimizer states
+
+---
+
+## 🧪 Required Checks
+
+### Code Quality
+
+* Detect unused functions, classes, imports
+* Identify duplicate logic
+* Flag overly complex functions (>50 lines)
+
+### File Integrity
+
+* Missing modules referenced in imports
+* Broken relative imports
+* Orphan files (never used anywhere)
+
+### Runtime Safety
+
+* Null/None handling
+* NaN propagation
+* Division by zero
+* Index errors
+
+### Performance
+
+* Repeated recomputation (e.g., normalization, weights)
+* Inefficient loops vs vectorization
+* Unnecessary numpy ↔ torch conversions
+
+---
+
+## 📊 Output Format (STRICT)
+
+Return results in structured format:
+
+### 🔴 Critical Issues (Must Fix)
+
+* [File:line]
+* Problem
+* Root Cause
+* Exact Fix (code snippet)
+
+### 🟠 Major Issues
+
+* Same format
+
+### 🟡 Minor Issues
+
+* Same format
+
+### ⚙️ Performance Improvements
+
+* Issue
+* Optimization suggestion
+
+### 🧹 Dead Code / Unused
+
+* File / function
+* Why unused
+
+### 📁 Missing / Broken Files
+
+* Missing import/module
+* Suggested fix
+
+### 🧠 Architectural Problems
+
+* Problem
+* Why it matters
+* Refactor suggestion
+
+---
+
+## 🚫 Rules
+
+* Do NOT give generic advice
+* Do NOT skip files
+* Do NOT assume correctness
+* Be brutally critical
+* Prefer precise fixes over explanations
+
+---
+
+## ✅ Bonus (if possible)
+
+* Suggest minimal patch to reach "production-grade stability"
+* Highlight top 5 highest-risk bugs
+* Suggest test cases for each critical issue
+
+---
+
+Now begin full repository audit.
