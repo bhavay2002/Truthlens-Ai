@@ -1,0 +1,218 @@
+You are a senior ML systems engineer, GPU optimization expert, and code auditor.
+
+Your task is to perform a COMPLETE audit + performance optimization review of the entire TruthLens repository.
+
+Your goal is to:
+
+1. Detect ALL bugs, errors, and broken logic
+2. Identify GPU inefficiencies and bottlenecks
+3. Optimize performance WITHOUT degrading model accuracy or explainability fidelity
+4. Ensure production-grade robustness
+
+---
+
+# 🎯 Objectives
+
+Find and FIX:
+
+## 🧨 Bugs & Errors
+
+* Logical bugs (especially aggregation + explanation pipeline)
+* Silent tensor shape mismatches
+* Incorrect broadcasting
+* Device mismatch (CPU ↔ GPU)
+* NaN / Inf propagation
+* Broken batching
+
+## 📉 Performance Issues
+
+* GPU underutilization
+* CPU bottlenecks blocking GPU
+* Repeated computations
+* Inefficient tensor ops
+* Unnecessary data transfers (CPU ↔ GPU)
+* Memory inefficiencies (fragmentation, leaks)
+
+## 🧠 ML-Specific Risks
+
+* Token misalignment across explainers
+* Incorrect normalization affecting attribution
+* Precision loss (fp16 misuse)
+* Data leakage
+* Inconsistent preprocessing
+
+---
+
+# 🔬 Full Pipeline Analysis (MANDATORY)
+
+Trace FULL flow:
+input → tokenizer → encoder → model → explainers → aggregation → output
+
+At EACH stage:
+
+* Validate tensor shapes
+* Validate device placement
+* Track dtype (fp32/fp16/bf16)
+* Detect redundant operations
+
+---
+
+# ⚠️ Critical Focus Areas
+
+## 1. Aggregation Pipeline (TOP PRIORITY)
+
+* Verify token alignment across explainers (SHAP, gradients, attention)
+* Ensure SAME token index space before merging
+* Detect incorrect weighting logic
+* Check normalization correctness (sum-to-one, scaling drift)
+* Identify repeated normalization calls
+
+## 2. GPU Utilization
+
+* Ensure model + tensors stay on GPU consistently
+* Detect CPU fallbacks
+* Check dataloader bottlenecks
+* Identify sync points (torch.cuda.synchronize misuse)
+
+## 3. Tensor Efficiency
+
+* Replace Python loops with vectorized ops
+* Detect small tensor ops causing overhead
+* Eliminate redundant `.cpu().numpy()` conversions
+
+## 4. Mixed Precision (IMPORTANT)
+
+* Verify safe use of torch.cuda.amp
+* Ensure NO accuracy degradation
+* Detect unstable ops in fp16 (softmax, division, normalization)
+
+## 5. Memory Optimization
+
+* Detect unnecessary tensor copies
+* Check for inplace operations where safe
+* Identify large intermediate tensors
+* Suggest gradient checkpointing (if training)
+
+---
+
+# 🧪 Required Checks
+
+## Code Quality
+
+* Unused imports, functions, classes
+* Duplicate logic across modules
+* Overly complex functions
+
+## File Integrity
+
+* Missing modules / broken imports
+* Orphan files (never used)
+
+## Runtime Safety
+
+* Division by zero
+* Index errors
+* None handling
+* NaN propagation
+
+---
+
+# ⚡ Performance Optimization Rules (STRICT)
+
+* DO NOT change model outputs
+* DO NOT degrade accuracy
+* DO NOT change explainability semantics
+* Prefer mathematically equivalent optimizations only
+
+Allowed:
+
+* Vectorization
+* Caching
+* Memory reuse
+* Kernel fusion opportunities
+* Efficient batching
+
+---
+
+# 📊 Output Format (STRICT)
+
+## 🔴 Critical Bugs (Must Fix)
+
+* File:line
+* Problem
+* Root Cause
+* Exact Fix (code)
+
+## 🟠 Major Issues
+
+(same format)
+
+## 🟡 Minor Issues
+
+(same format)
+
+## ⚡ GPU Optimization Opportunities
+
+* Location
+* Current inefficiency
+* Optimized approach
+* Expected speedup
+
+## 🧠 Accuracy Risk Checks
+
+* Risk
+* Why it may degrade accuracy
+* Safe alternative
+
+## 🧹 Dead Code / Unused
+
+* File / function
+* Why unused
+
+## 📁 Missing / Broken Files
+
+* Import/module issue
+* Fix
+
+## 🧱 Architectural Issues
+
+* Problem
+* Impact
+* Refactor suggestion
+
+---
+
+# 🧪 Bonus Tasks (MANDATORY)
+
+## 1. Minimal High-Impact Patch
+
+Provide a SMALL patch that:
+
+* Fixes top 5 critical bugs
+* Improves GPU utilization significantly
+
+## 2. Micro-benchmark Plan
+
+* How to measure speedup
+* What metrics to track (latency, throughput, GPU util)
+
+## 3. Test Coverage Gaps
+
+* Missing tests for:
+
+  * aggregation correctness
+  * token alignment
+  * GPU vs CPU consistency
+
+---
+
+# 🚫 Rules
+
+* NO generic advice
+* NO assumptions of correctness
+* Be extremely critical
+* Prefer concrete fixes over explanations
+
+---
+
+Now begin FULL repository audit + GPU optimization analysis.

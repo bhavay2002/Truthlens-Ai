@@ -367,8 +367,11 @@ class Predictor:
         if probs is not None:
             fake_index = self._resolve_fake_index()
             fake_prob = float(probs[..., fake_index].mean().item())
-            confidence = float(probs.max().item())
-            pred_index = int(probs.argmax(dim=-1).item())
+            # Collapse batch dimension before taking max / argmax so that
+            # build_fake_real_output is safe for any batch size, not just 1.
+            mean_probs = probs.mean(dim=0) if probs.dim() > 1 else probs
+            confidence = float(mean_probs.max().item())
+            pred_index = int(mean_probs.argmax().item())
         else:
             fake_prob = self._compose_fake_probability(formatted)
             confidence = float(fake_prob)

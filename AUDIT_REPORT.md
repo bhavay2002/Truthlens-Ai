@@ -726,3 +726,154 @@ Apply in this order:
 9. **Add** `reportlab` and `mlflow` to requirements or remove the dependent files  
 
 These 9 actions move the system from "runs but has critical correctness/safety bugs" to "production-safe for CPU inference."
+
+---
+
+---
+
+# Second-Pass Audit — GPU/ML Deep-Dive
+
+**Auditor:** Senior ML Systems Engineer  
+**Date:** 2026-04-21  
+**Scope:** GPU tensor efficiency, ML correctness, dead code, architectural risks  
+**Status of previous 25 items:** All confirmed fixed prior to this pass.
+
+---
+
+## 🔴 Critical Issues (Second Pass)
+
+### CRIT-P2-1 — `predict_batch` collapses N texts → 1 result; fallback path crashes  
+**File:** `models/inference/predictor.py` — `predict_batch()`  
+**Severity:** CRITICAL — silent data loss + runtime crash
+
+**Root cause (two defects in one function):**
+
+Defect A — **Wrong count**: the function ran all N texts through the model as a single batch (correct), then called `build_fake_real_output(outputs)` once on the entire (N, 2) logit tensor. `build_fake_real_output` averages all rows together via `.mean()`, producing **one dict** for N texts. The result was then wrapped in a single-element list: `return [predictor.build_fake_real_output(outputs)]`.
+
+Defect B — **Wrong type**: `app.py`'s `/batch-predict` fallback loop (line 610) expects `predict_batch` to return a list of `[real_prob, fake_prob]` float pairs:
+```python
+for idx, probs, text in zip(uncached_indices, batch_probs, uncached_texts):
+    prob_real, prob_fake = float(probs[0]), float(probs[1])   # expects list pair
+```
+But `predict_batch` was returning `[{"label": ..., "fake_probability": ..., "confidence": ...}]` — a list containing one dict. `probs[0]` on a dict raises `KeyError: 0` immediately.
+
+Combined effect: submitting N > 1 texts via `/batch-predict` when InferenceEngine is unavailable would (a) silently discard N-1 results via `zip` truncation, then (b) crash with `KeyError` on the surviving first item.
+
+**Fix applied:** Iterate per-sample after the batch forward pass; slice each tensor from (N, …) to (1, …) before calling `build_fake_real_output`; return `[real_prob, fake_prob]` float pairs — the format `app.py` expects.
+
+```python
+# models/inference/predictor.py — predict_batch (after fix)
+outputs = predictor.predict_batch(inputs)   # runs full batch in one GPU pass
+
+import torch as _torch
+n = len(texts)
+results: list = []
+for i in range(n):
+    sample = {
+        k: (v[i : i + 1] if isinstance(v, _torch.Tensor) and v.dim() > 0 and v.size(0) == n else v)
+        for k, v in outputs.items()
+    }
+    r = predictor.build_fake_real_output(sample)
+    fake_prob = float(r["fake_probability"])
+    results.append([round(1.0 - fake_prob, 6), round(fake_prob, 6)])
+return results
+```
+
+---
+
+### CRIT-P2-2 — `build_fake_real_output` raises RuntimeError when batch_size > 1  
+**File:** `src/models/inference/predictor.py` — `build_fake_real_output()`  
+**Severity:** CRITICAL (defensive) — crashes any caller that passes a multi-row tensor
+
+`probs.argmax(dim=-1)` on a (N, 2) tensor returns a (N,) tensor. Calling `.item()` on it raises:
+```
+RuntimeError: only one element tensors can be converted to Python scalars
+```
+
+Additionally, `probs.max().item()` returns the global maximum across the entire (N, 2) matrix, not the max probability of the representative sample — a silently wrong value.
+
+**Fix applied:** Collapse the batch dimension first using `.mean(dim=0)`, producing a (2,) vector, then take `max()` and `argmax()` on it.
+
+```python
+# Before
+confidence = float(probs.max().item())
+pred_index = int(probs.argmax(dim=-1).item())
+
+# After
+mean_probs = probs.mean(dim=0) if probs.dim() > 1 else probs
+confidence = float(mean_probs.max().item())
+pred_index = int(mean_probs.argmax().item())
+```
+
+---
+
+## 🟡 Major Issues (Second Pass)
+
+### MAJOR-P2-1 — `shap_predict_wrapper` runs N sequential single-text inferences  
+**File:** `src/explainability/shap_explainer.py` — `shap_predict_wrapper()`  
+**Severity:** MAJOR performance — prevents practical SHAP use
+
+SHAP's `Text` masker generates hundreds of perturbed texts per call (default 2000+). `shap_predict_wrapper` loops over them one by one:
+```python
+for text in texts:
+    result = predict_fn(text)   # N sequential calls instead of 1 batched call
+```
+Each call invokes the tokenizer + model forward pass independently. On GPU this is catastrophically inefficient — the kernel launch overhead alone dominates. A batch-aware `predict_fn` accepting a list of texts would reduce latency by 50–200× on GPU.
+
+**No fix applied** — requires callers to pass a batch-capable `predict_fn`. Document as a known limitation.
+
+### MAJOR-P2-2 — LIME `_CACHE` has no size cap (unbounded growth)  
+**File:** `src/explainability/lime_explainer.py` — `_CACHE`  
+**Severity:** MAJOR (low practical risk — always keyed `"default"`)
+
+`_CACHE: Dict[str, LimeTextExplainer] = {}` has no LRU eviction. In current usage `model_id` is always `"default"` so the cache holds exactly one entry. If `model_id` were ever varied across callers, the cache would grow unbounded.
+
+**No fix applied** — practical risk is zero with current call sites.
+
+---
+
+## 🔵 GPU / Tensor Efficiency Observations
+
+### GPU-OPT-1 — `autocast_context()` always enabled on CPU (bfloat16 on CPU)  
+**File:** `src/utils/device_utils.py` — `autocast_context()`
+
+When no CUDA/MPS is available the function unconditionally wraps inference in `torch.autocast("cpu", dtype=torch.bfloat16)`. On Replit's CPU, bfloat16 autocast may slow inference (extra cast overhead) rather than accelerate it, since x86 bfloat16 acceleration requires AVX-512-BF16 (rare on Replit). The `nullcontext()` fallback only fires on old PyTorch (<= 1.9). **No correctness risk.**
+
+### GPU-OPT-2 — Attention rollout intermediate tensors not fused  
+**File:** `src/explainability/attention_rollout.py` — `compute_rollout()`
+
+```python
+for layer in processed[1:]:
+    rollout = rollout @ layer   # creates L-1 intermediate (seq, seq) tensors
+```
+`torch.linalg.multi_dot` would eliminate intermediate allocations for long encoder stacks. Low priority on CPU.
+
+### GPU-OPT-3 — Per-call `ModelRegistry.load_model()` in inference shims  
+**File:** `models/inference/predictor.py` — `predict()` and `predict_batch()`
+
+Both functions call `ModelRegistry.load_model()` to fetch the tokenizer on every request. `load_model()` may deserialize or check disk on each call depending on its implementation. The tokenizer should be cached at module level alongside `_predictor` to eliminate the per-call overhead.
+
+---
+
+## ✅ Second-Pass Items Confirmed Clean
+
+| Area | Verdict |
+|---|---|
+| `attention_rollout.py` — matmul order (`rollout @ layer`) | Correct (left-to-right accumulation) |
+| `shap_explainer.py` — LRU caches (explainer=8, values=64) | Correct |
+| `transformer_encoder.py` — mean pooling mask | Correct (pads zeroed before sum, counts real tokens) |
+| `transformer_encoder.py` — `_encoder_frozen` cache flag | Correct (avoids O(n_params) iter on each call) |
+| `multitask_truthlens_model.py` — temperature scaling all 6 heads | Confirmed fixed |
+| `prediction_pipeline.py` — nullcontext autocast guard | Confirmed present |
+| `aggregation_pipeline.py` — constant-section check | Confirmed present |
+| `inference_cache.py` — full SHA-256 cache key | Confirmed |
+| `src/models/multitask/multitask_model.py` | Exists (compat shim → MultiTaskTruthLensModel) |
+
+---
+
+## Summary of Second-Pass Fixes
+
+| ID | File | Change | Impact |
+|---|---|---|---|
+| CRIT-P2-1 | `models/inference/predictor.py` | Per-sample slice loop; return `[real, fake]` pairs | `/batch-predict` fallback now correct for N > 1 |
+| CRIT-P2-2 | `src/models/inference/predictor.py` | `mean_probs = probs.mean(dim=0)` before argmax/max | `build_fake_real_output` safe for any batch size |
