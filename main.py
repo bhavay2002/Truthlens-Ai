@@ -68,14 +68,49 @@ _cfg = load_config()
 # Data + save paths (env-overridable; m2)
 # -----------------------------------------------------
 
-_DEFAULT_DRIVE_DATA = Path("/content/drive/MyDrive/truthlens unified data")
-DRIVE_DATA_PATH = Path(os.environ.get("TRUTHLENS_DATA_DIR", str(_DEFAULT_DRIVE_DATA)))
+# Candidate dataset locations, checked in order. The first directory that
+# contains ``unified_dataset_train.csv`` wins. Override unconditionally
+# with ``TRUTHLENS_DATA_DIR=/some/path``.
+_DATA_CANDIDATES = [
+    # Lightning AI Studios working dir
+    Path("/teamspace/studios/this_studio/data"),
+    Path("/teamspace/studios/this_studio/Truthlens-Ai/data"),
+    # Repo-local
+    Path(__file__).resolve().parent / "data",
+    # Google Colab + Drive mount
+    Path("/content/drive/MyDrive/truthlens unified data"),
+    Path("/content/data"),
+]
 
-TRAIN_PATH = DRIVE_DATA_PATH / "unified_dataset_train.csv"
+_TRAIN_FILE = "unified_dataset_train.csv"
+
+
+def _resolve_data_dir() -> Path:
+    env = os.environ.get("TRUTHLENS_DATA_DIR")
+    if env:
+        return Path(env).expanduser()
+    for cand in _DATA_CANDIDATES:
+        if (cand / _TRAIN_FILE).is_file():
+            return cand
+    # Nothing found — return the first repo-local candidate so the
+    # FileNotFoundError below is actionable (path printed in the error).
+    return Path(__file__).resolve().parent / "data"
+
+
+DRIVE_DATA_PATH = _resolve_data_dir()
+
+TRAIN_PATH = DRIVE_DATA_PATH / _TRAIN_FILE
 VAL_PATH = DRIVE_DATA_PATH / "unified_dataset_validation.csv"
 TEST_PATH = DRIVE_DATA_PATH / "unified_dataset_test.csv"
 
-_DEFAULT_LOCAL_SAVE = Path("/content/truthlens_model")
+# Local save dir: prefer a writable, platform-appropriate default.
+if Path("/teamspace/studios/this_studio").is_dir():
+    _DEFAULT_LOCAL_SAVE = Path("/teamspace/studios/this_studio/truthlens_model")
+elif Path("/content").is_dir():
+    _DEFAULT_LOCAL_SAVE = Path("/content/truthlens_model")
+else:
+    _DEFAULT_LOCAL_SAVE = Path(__file__).resolve().parent / "artifacts" / "model"
+
 LOCAL_SAVE_PATH = Path(os.environ.get("TRUTHLENS_LOCAL_SAVE", str(_DEFAULT_LOCAL_SAVE)))
 DRIVE_SAVE_PATH = Path(os.environ.get("TRUTHLENS_DRIVE_SAVE", str(SETTINGS.model.path)))
 
@@ -323,6 +358,19 @@ class BucketSampler(Sampler):
 # -----------------------------------------------------
 
 def load_data():
+
+    missing = [p for p in (TRAIN_PATH, VAL_PATH, TEST_PATH) if not p.is_file()]
+    if missing:
+        searched = "\n  ".join(str(c) for c in _DATA_CANDIDATES)
+        raise FileNotFoundError(
+            "TruthLens dataset CSV(s) not found:\n  "
+            + "\n  ".join(str(p) for p in missing)
+            + f"\n\nResolved data dir: {DRIVE_DATA_PATH}"
+            + f"\nSearched candidates (first match wins):\n  {searched}"
+            + "\n\nFix: either place the CSVs in one of the candidate"
+              " directories, or set TRUTHLENS_DATA_DIR=/path/to/your/data"
+              " before running."
+        )
 
     # low_memory=False forces a single-pass type inference pass and
     # eliminates the "Columns (...) have mixed types" DtypeWarning that
