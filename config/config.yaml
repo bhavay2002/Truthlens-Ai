@@ -7,7 +7,7 @@ model:
   encoder:
     name: roberta-base
     tokenizer_name: roberta-base
-    max_length: 384
+    max_length: 512
     cache_dir: models/cache
 
     # memory optimization
