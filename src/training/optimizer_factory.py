@@ -7,7 +7,7 @@ Description:
     optimizer logic in training scripts. Supports common optimizers
     including AdamW, Adam, SGD, and Lion (if available).
 
-Dependencies:
+Dependencies: 
     logging
     typing
     torch
@@ -53,6 +53,7 @@ LION_OPTIMIZER = _try_import_lion()
 SUPPORTED_OPTIMIZERS = {
     "adam": Adam,
     "adamw": AdamW,
+    "adamw_fused": AdamW,  # alias for fused AdamW
     "sgd": SGD,
 }
 
@@ -116,7 +117,13 @@ def create_optimizer(
     if not isinstance(optimizer_name, str):
         raise TypeError("optimizer_name must be a string")
 
+
     optimizer_key = optimizer_name.lower()
+
+    # Special handling for adamw_fused alias
+    if optimizer_key == "adamw_fused":
+        use_fused = True
+        optimizer_key = "adamw"
 
     if optimizer_key not in SUPPORTED_OPTIMIZERS:
         raise ValueError(

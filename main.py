@@ -487,14 +487,15 @@ def main():
 
         try:
             optimizer = create_optimizer(
-                model.parameters(),
-                optimizer_name="adamw_fused",
+                model,
+                optimizer_name="adamw",
                 learning_rate=learning_rate,
                 weight_decay=weight_decay,
             )
-        except Exception:
+        except ValueError as e:
+            logger.warning(f"{e} → Falling back to AdamW")
             optimizer = create_optimizer(
-                model.parameters(),
+                model,
                 optimizer_name="adamw",
                 learning_rate=learning_rate,
                 weight_decay=weight_decay,
