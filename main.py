@@ -1,5 +1,5 @@
 """
-TruthLens Multi-Task Training Pipeline
+TruthLens Multi-Task Training Pipeline 
 
 Trains a shared RoBERTa encoder with 6 task-specific prediction heads:
   1. Bias detection
@@ -407,11 +407,6 @@ def main():
                     batched_labels[key] = torch.tensor(values, dtype=torch.long)
 
             enc["labels"] = batched_labels
-            if _pin:
-                return {
-                    key: (value.pin_memory() if isinstance(value, torch.Tensor) else value)
-                    for key, value in enc.items()
-                }
             return dict(enc)
 
         train_dataset = TruthLensMultiTaskDataset(
@@ -432,7 +427,7 @@ def main():
             text_column=TEXT_COLUMN,
         )
 
-        _num_workers = 4 if _pin else 0
+        _num_workers = 2 if _pin else 0
         _persistent = bool(_num_workers)
 
         train_loader = DataLoader(

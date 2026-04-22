@@ -160,7 +160,8 @@ class Trainer:
             self.autocast_device_type = "cpu"
             self.use_amp = False
 
-        self.scaler = torch.cuda.amp.GradScaler(
+        self.scaler = torch.amp.GradScaler(
+            "cuda",
             enabled=self.use_amp and self.autocast_dtype == torch.float16
         )
 
@@ -376,7 +377,7 @@ class Trainer:
         loss_accum = torch.zeros((), device=self.device, dtype=torch.float32)
         step_count = 0
 
-        with torch.no_grad():
+        with torch.no_grad(): 
 
             for batch in dataloader:
 
