@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader, Dataset, Sampler
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, DataCollatorWithPadding
 
 from src.evaluation.evaluate_model import evaluate
 from src.evaluation.report_writer import save_report
@@ -594,17 +594,24 @@ def main():
             "labels_emotion",
         )
 
+        # Dynamic padding via the canonical HF collator. This is the
+        # warning-free fast-tokenizer path: transformers detects __call__-style
+        # pre-tokenization + DataCollatorWithPadding as the optimal pattern
+        # and skips the "use __call__" warning that fires for manual
+        # tokenizer.pad() usage.
+        _hf_padder = DataCollatorWithPadding(
+            tokenizer=tokenizer,
+            padding=True,
+            pad_to_multiple_of=8,
+            return_tensors="pt",
+        )
+
         def collate_fn(batch):
             features = [
                 {"input_ids": b["input_ids"], "attention_mask": b["attention_mask"]}
                 for b in batch
             ]
-            enc = tokenizer.pad(
-                features,
-                padding=True,
-                pad_to_multiple_of=8,
-                return_tensors="pt",
-            )
+            enc = _hf_padder(features)
             labels = {
                 "bias": torch.stack([b["labels_bias"] for b in batch]),
                 "ideology": torch.stack([b["labels_ideology"] for b in batch]),
