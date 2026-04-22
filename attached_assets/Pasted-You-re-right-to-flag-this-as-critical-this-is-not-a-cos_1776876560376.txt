@@ -1,0 +1,305 @@
+You’re right to flag this as **critical**—this is not a cosmetic issue, it’s a **contract violation between your model and evaluation pipeline**. Right now, your system is silently *lying about coverage*, because one task head (bias) is not participating in inference.
+
+Let’s fix this properly, not patch it.
+
+---
+
+# 🔴 Root Cause (What’s Actually Broken)
+
+The warning:
+
+```
+WARNING: Test evaluation skipped: no bias logits returned by model
+```
+
+means:
+
+### Your forward pass does NOT guarantee:
+
+```python
+outputs["bias_logits"]
+```
+
+This usually happens due to one of these:
+
+### 1. Head not wired into forward()
+
+```python
+if self.use_bias_head:
+    bias_logits = self.bias_head(x)
+```
+
+→ but `use_bias_head=False` during eval OR never set
+
+---
+
+### 2. Conditional return
+
+```python
+if return_bias:
+    outputs["bias_logits"] = bias_logits
+```
+
+→ evaluator never sets `return_bias=True`
+
+---
+
+### 3. Missing head initialization
+
+```python
+self.bias_head = None
+```
+
+→ or not loaded from checkpoint
+
+---
+
+### 4. Checkpoint mismatch (VERY COMMON)
+
+You load with:
+
+```python
+model.load_state_dict(..., strict=False)
+```
+
+→ bias head weights missing
+→ head exists but produces garbage or is skipped
+
+---
+
+### 5. Multi-task config drift
+
+Train config:
+
+```yaml
+tasks: ["toxicity", "bias"]
+```
+
+Eval config:
+
+```yaml
+tasks: ["toxicity"]
+```
+
+→ bias head never activated
+
+---
+
+# 🧠 The Real Problem (Architecture-Level)
+
+You currently have:
+
+> ❌ *Implicit outputs depending on flags/config*
+
+What you need:
+
+> ✅ *Deterministic output contract*
+
+---
+
+# ✅ FIX — Enforce a Strict Output Contract
+
+## Step 1: Make outputs NON-OPTIONAL
+
+In your model:
+
+```python
+def forward(self, input_ids, attention_mask=None):
+    x = self.encoder(input_ids, attention_mask)
+
+    outputs = {}
+
+    # ALWAYS compute if head exists
+    if self.bias_head is not None:
+        outputs["bias_logits"] = self.bias_head(x)
+    else:
+        raise RuntimeError("Bias head is missing but expected")
+
+    return outputs
+```
+
+⚠️ Do NOT hide this behind flags.
+
+---
+
+## Step 2: Add HARD assertions in evaluation
+
+In evaluator:
+
+```python
+required_keys = ["bias_logits"]
+
+for key in required_keys:
+    if key not in outputs:
+        raise RuntimeError(f"Model missing required output: {key}")
+```
+
+👉 Kill silent failures permanently.
+
+---
+
+## Step 3: Validate model AFTER loading checkpoint
+
+Right after loading:
+
+```python
+missing, unexpected = model.load_state_dict(..., strict=False)
+
+if any("bias_head" in k for k in missing):
+    raise RuntimeError("Checkpoint missing bias head weights")
+```
+
+---
+
+## Step 4: Add a forward smoke test (MANDATORY)
+
+Run immediately after model init:
+
+```python
+def validate_model_outputs(model, tokenizer):
+    dummy = tokenizer("test input", return_tensors="pt")
+
+    outputs = model(**dummy)
+
+    assert "bias_logits" in outputs, "Missing bias logits"
+    assert outputs["bias_logits"].shape[-1] > 0, "Invalid bias output"
+```
+
+👉 This alone prevents 80% of pipeline failures.
+
+---
+
+## Step 5: Remove ALL conditional output flags
+
+Search and destroy patterns like:
+
+```python
+return_bias=False
+output_bias=False
+if task == "bias"
+```
+
+Replace with:
+
+```python
+# Always compute if head exists
+```
+
+---
+
+## Step 6: Align training + eval configs
+
+Enforce:
+
+```python
+assert set(train_tasks) == set(eval_tasks)
+```
+
+or better:
+
+```python
+model.config.tasks  # single source of truth
+```
+
+---
+
+## Step 7: Fix aggregator assumptions
+
+Your aggregator probably does:
+
+```python
+if "bias_logits" in outputs:
+    ...
+```
+
+Replace with:
+
+```python
+bias_logits = outputs["bias_logits"]  # hard requirement
+```
+
+---
+
+# 🔬 Debug Checklist (Run This Now)
+
+Execute in order:
+
+### ✔️ 1. Print model structure
+
+```python
+print(model)
+```
+
+→ confirm `bias_head` exists
+
+---
+
+### ✔️ 2. Check forward output manually
+
+```python
+outputs = model(**dummy_batch)
+print(outputs.keys())
+```
+
+---
+
+### ✔️ 3. Check checkpoint integrity
+
+```python
+for k in checkpoint.keys():
+    print(k)
+```
+
+→ ensure `bias_head.*` present
+
+---
+
+### ✔️ 4. Log inside forward()
+
+```python
+print("Bias head active:", self.bias_head is not None)
+```
+
+---
+
+# 🚫 What NOT to Do
+
+* ❌ Don’t “skip” the task in evaluation
+* ❌ Don’t downgrade warning
+* ❌ Don’t keep `strict=False` without validation
+* ❌ Don’t add fallback defaults like zeros
+
+That hides the failure instead of fixing it.
+
+---
+
+# ✅ Final State (What “Correct” Looks Like)
+
+Your system should guarantee:
+
+* Every declared task → always produces logits
+* Missing head → crash immediately
+* Checkpoint mismatch → crash immediately
+* Evaluator → never skips tasks
+
+---
+
+# 💡 Bottom Line
+
+Right now your system is:
+
+> ⚠️ *Silently under-evaluating*
+
+After fixes, it becomes:
+
+> ✅ *Deterministic, verifiable, and fail-fast*
+
+---
+
+If you want, I can next:
+
+* Audit your **exact `forward()` implementation**
+* Check your **checkpoint structure**
+* Or give you a **drop-in validator module** to eliminate these issues repo-wide
+
+Just paste the relevant files.
