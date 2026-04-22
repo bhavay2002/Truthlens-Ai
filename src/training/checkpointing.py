@@ -67,15 +67,42 @@ def _move_to_cpu(obj):
     return obj
 
 
+def _fsync_dir(d: Path) -> None:
+    """fsync the parent directory so the rename is durable (M8)."""
+    try:
+        fd = os.open(str(d), os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except (OSError, AttributeError):
+        # Some filesystems / platforms don't support directory fsync.
+        pass
+
+
+def _validate_finite(state: dict) -> None:
+    """Refuse to serialize NaN/Inf weights (C6)."""
+    for k, v in state.items():
+        if torch.is_tensor(v) and v.is_floating_point() and not torch.isfinite(v).all():
+            raise RuntimeError(f"Refusing to save: non-finite values in '{k}'")
+        if isinstance(v, dict):
+            _validate_finite(v)
+
+
 def _atomic_save(data: dict, path: Path) -> None:
     tmp_path = path.with_suffix(".tmp")
     cpu_data = _move_to_cpu(data)
+    if isinstance(cpu_data, dict) and "model_state_dict" in cpu_data:
+        _validate_finite(cpu_data["model_state_dict"])
     torch.save(cpu_data, tmp_path)
     os.replace(tmp_path, path)
+    _fsync_dir(path.parent)
 
 
 def _atomic_save_compressed(data: dict, path: Path) -> None:
     cpu_data = _move_to_cpu(data)
+    if isinstance(cpu_data, dict) and "model_state_dict" in cpu_data:
+        _validate_finite(cpu_data["model_state_dict"])
     final_path = Path(str(path) + ".gz")
     tmp_path = Path(str(path) + ".tmp.gz")
 
@@ -83,7 +110,8 @@ def _atomic_save_compressed(data: dict, path: Path) -> None:
         with gzip.open(tmp_path, "wb") as f:
             torch.save(cpu_data, f)
         os.replace(tmp_path, final_path)
-    except Exception as exc:
+        _fsync_dir(final_path.parent)
+    except Exception:
         logger.exception("Compressed save failed")
         raise
 
@@ -104,30 +132,77 @@ def _resolve_checkpoint_path(checkpoint_dir: Path) -> Path:
 
 
 def _safe_torch_load(path, map_location):
+    # PyTorch 2.6+ defaults weights_only=True and refuses non-tensor metadata
+    # (e.g. pytorch_version, config dicts). Our checkpoints intentionally carry
+    # such fields, so fall back to a full load when the safe load rejects them.
     try:
         return torch.load(path, map_location=map_location, weights_only=True)
     except TypeError:
         return torch.load(path, map_location=map_location)
+    except Exception:
+        return torch.load(path, map_location=map_location, weights_only=False)
 
 
-def _copy_to_drive(local_dir: Path, drive_dir: Optional[str | Path]) -> None:
+def _copy_to_drive(
+    local_dir: Path,
+    drive_dir: Optional[str | Path],
+    retries: int = 3,
+) -> None:
+    """Atomic, retried, size-validated drive sync (C7, m4).
+
+    Strategy: copytree → temp dir → atomic rename. Failure raises so the
+    trainer can react, instead of being silently downgraded to a warning.
+    """
     if drive_dir is None:
         return
 
-    try:
-        drive_dir = Path(drive_dir)
-        drive_dir.mkdir(parents=True, exist_ok=True)
+    drive_dir = Path(drive_dir)
+    drive_dir.mkdir(parents=True, exist_ok=True)
 
-        dest = drive_dir / local_dir.name
+    dest = drive_dir / local_dir.name
+    staging = drive_dir / f".{local_dir.name}.tmp"
+    backup = drive_dir / f".{local_dir.name}.bak"
 
-        if dest.exists():
-            shutil.rmtree(dest)
+    last_exc: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            if staging.exists():
+                shutil.rmtree(staging)
+            shutil.copytree(local_dir, staging)
 
-        shutil.copytree(local_dir, dest)
-        logger.info("Checkpoint copied to Drive: %s", dest)
+            # Validate file sizes match
+            for src in local_dir.rglob("*"):
+                if not src.is_file():
+                    continue
+                rel = src.relative_to(local_dir)
+                tgt = staging / rel
+                if not tgt.exists() or tgt.stat().st_size != src.stat().st_size:
+                    raise IOError(f"Size mismatch / missing in copy: {rel}")
 
-    except Exception as exc:
-        logger.warning("Drive sync failed: %s", exc)
+            # Atomic swap: existing → backup → staging → final
+            if dest.exists():
+                if backup.exists():
+                    shutil.rmtree(backup)
+                os.replace(dest, backup)
+            os.replace(staging, dest)
+            if backup.exists():
+                shutil.rmtree(backup, ignore_errors=True)
+
+            logger.info("Checkpoint copied to Drive: %s", dest)
+            return
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(
+                "Drive sync attempt %d/%d failed for %s: %s",
+                attempt, retries, dest, exc,
+            )
+            try:
+                if staging.exists():
+                    shutil.rmtree(staging)
+            except Exception:
+                pass
+
+    raise RuntimeError(f"Drive sync failed for {dest}") from last_exc
 
 
 # =========================================================
@@ -154,10 +229,14 @@ def save_checkpoint(
 
     checkpoint_path = checkpoint_dir / CHECKPOINT_FILE
 
+    # C5: include audit-mandated keys (loss + config)
+    _meta = metadata or {}
     checkpoint_data: Dict[str, Any] = {
         "model_state_dict": model.state_dict(),
         "epoch": epoch,
         "step": step,
+        "loss": _meta.get("val_loss") or _meta.get("train_loss") or _meta.get("loss"),
+        "config": _meta.get("config"),
         "pytorch_version": torch.__version__,
     }
 
@@ -277,9 +356,16 @@ def load_checkpoint(
 
     logger.info("Checkpoint loaded: %s", checkpoint_path)
 
+    # C4: surface full payload so callers (Trainer._attempt_resume) can
+    # introspect scheduler/optimizer/loss/config without reaching back into
+    # the raw checkpoint file.
     return {
         "epoch": checkpoint.get("epoch"),
         "step": checkpoint.get("step"),
+        "loss": checkpoint.get("loss"),
+        "config": checkpoint.get("config"),
+        "scheduler_state_dict": checkpoint.get("scheduler_state_dict"),
+        "optimizer_state_dict": checkpoint.get("optimizer_state_dict"),
     }
 
 

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
 
@@ -148,7 +149,15 @@ def _ensure_file_handler(
     )
 
     if not has_matching_file_handler:
-        file_handler = logging.FileHandler(log_path, encoding="utf-8")
+        # m3: rotate to bound disk usage; delay=True so the file isn't created
+        # until the first record is written.
+        file_handler = RotatingFileHandler(
+            log_path,
+            maxBytes=50 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+            delay=True,
+        )
         file_handler.setFormatter(formatter)
 
         logger.addHandler(file_handler)

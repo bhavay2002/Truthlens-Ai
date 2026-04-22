@@ -48,9 +48,24 @@ class AsyncCheckpointWriter:
         self._queue: queue.Queue = queue.Queue(maxsize=max_queue_size)
         self._thread = threading.Thread(target=self._worker, daemon=True)
         self._closed = False
+        # m8: surface the most recent worker exception so callers can poll/halt.
+        self.last_error: Optional[Exception] = None
         self._thread.start()
 
+    @staticmethod
+    def _fsync_dir(d) -> None:
+        try:
+            import os as _os
+            fd = _os.open(str(d), _os.O_RDONLY)
+            try:
+                _os.fsync(fd)
+            finally:
+                _os.close(fd)
+        except (OSError, AttributeError):
+            pass
+
     def _worker(self):
+        import os as _os
         while True:
             item = self._queue.get()
             if item is None:
@@ -62,9 +77,11 @@ class AsyncCheckpointWriter:
 
             try:
                 torch.save(obj, tmp_path, _use_new_zipfile_serialization=True)
-                tmp_path.replace(path)
+                _os.replace(tmp_path, path)
+                self._fsync_dir(path.parent)  # M8
             except Exception as e:
-                logger.error("Checkpoint save failed: %s", e)
+                self.last_error = e
+                logger.error("Checkpoint save failed: %s", e, exc_info=True)
             finally:
                 self._queue.task_done()
 
@@ -145,6 +162,13 @@ class CheckpointManager:
         return new_state
 
     @staticmethod
+    def _validate_finite(state: Dict[str, Any]) -> None:
+        """Refuse to serialize NaN/Inf weights (C6)."""
+        for k, v in state.items():
+            if torch.is_tensor(v) and v.is_floating_point() and not torch.isfinite(v).all():
+                raise RuntimeError(f"Refusing to save: non-finite values in '{k}'")
+
+    @staticmethod
     def _hash_state(state: Dict[str, Any]) -> str:
         # Dedup hash: sample a small head+tail slice per tensor plus shape/dtype
         # so that tensors of the same shape with different tail values do not
@@ -208,6 +232,9 @@ class CheckpointManager:
         state_dict = self._extract_state(model)
         state_dict = self._to_cpu(state_dict)
 
+        # C6: NaN/Inf guard before queueing for serialization
+        self._validate_finite(state_dict)
+
         # Deduplication
         if deduplicate:
             h = self._hash_state(state_dict)
@@ -216,19 +243,34 @@ class CheckpointManager:
                 return None
             self._last_hash = h
 
+        # C5: full audit-required payload
+        _meta = metadata or {}
         payload: Dict[str, Any] = {
             "step": step,
+            "epoch": _meta.get("epoch"),
+            "loss": _meta.get("val_loss") or _meta.get("train_loss") or _meta.get("loss"),
+            "config": _meta.get("config"),
             "model": state_dict,
+            "pytorch_version": torch.__version__,
         }
 
         if save_optimizer and optimizer is not None:
             payload["optimizer"] = optimizer.state_dict()
 
         if scheduler is not None:
-            payload["scheduler"] = scheduler.state_dict()
+            try:
+                payload["scheduler"] = scheduler.state_dict()
+            except Exception as exc:
+                logger.warning("Scheduler state_dict() failed: %s", exc)
 
         if metadata:
             payload["metadata"] = metadata
+
+        # m8: surface any prior async-write failures
+        if self._writer.last_error is not None:
+            err = self._writer.last_error
+            self._writer.last_error = None
+            raise RuntimeError(f"Previous async checkpoint write failed: {err}")
 
         # Async save
         self._writer.save(checkpoint_file, payload)
@@ -274,7 +316,14 @@ class CheckpointManager:
         if not path.exists():
             raise FileNotFoundError(path)
 
-        return torch.load(path, map_location="cpu", weights_only=True)
+        # m9: weights_only=True rejects non-tensor metadata in newer torch builds.
+        try:
+            return torch.load(path, map_location="cpu", weights_only=True)
+        except TypeError:
+            return torch.load(path, map_location="cpu")
+        except Exception as exc:
+            logger.debug("weights_only load failed (%s); retrying full load", exc)
+            return torch.load(path, map_location="cpu", weights_only=False)
 
     # -------------------------------------------------
     # List + Latest
@@ -318,10 +367,28 @@ class CheckpointManager:
 
         checkpoints = self.list_checkpoints()
 
-        if len(checkpoints) <= max_checkpoints:
+        # m7: never delete a checkpoint marked as "best".
+        def _is_best(p: Path) -> bool:
+            try:
+                step = self._extract_step(p)
+                # Convention used by Trainer.train: best checkpoints use step >= 1e9
+                if step is not None and step >= 10**9:
+                    return True
+                # Also honor an explicit marker in metadata.json if present.
+                meta = p / "metadata.json"
+                if meta.exists():
+                    import json as _json
+                    with meta.open() as fh:
+                        return _json.load(fh).get("marker") == "best"
+            except Exception:
+                pass
+            return False
+
+        prunable = [p for p in checkpoints if not _is_best(p)]
+        if len(prunable) <= max_checkpoints:
             return
 
-        for p in checkpoints[:-max_checkpoints]:
+        for p in prunable[:-max_checkpoints]:
             try:
                 shutil.rmtree(p)
                 logger.info("Deleted checkpoint: %s", p)

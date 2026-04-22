@@ -41,12 +41,15 @@ from src.utils import move_to_device
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------
-# GPU PERFORMANCE SETTINGS
+# GPU PERFORMANCE SETTINGS  (M5: opt-in, called from training entrypoint)
 # ---------------------------------------------------------
 
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
-torch.set_float32_matmul_precision("high")
+def configure_training_precision() -> None:
+    """Enable TF32 matmul/cudnn paths. Call ONLY from training entrypoint."""
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
 
 
 # ---------------------------------------------------------
@@ -182,7 +185,8 @@ class TrainingStep:
                 try:
                     self.scheduler.step()
                 except TypeError:
-                    self.scheduler.step(raw_loss)
+                    # ReduceLROnPlateau requires a Python float metric (M4).
+                    self.scheduler.step(float(raw_loss.detach().item()))
 
             #  faster zero_grad
             self.optimizer.zero_grad(set_to_none=True)

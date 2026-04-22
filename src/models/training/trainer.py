@@ -123,10 +123,18 @@ class Trainer:
 
         self.model.to(self.device)
 
-        #  torch.compile (safe fallback)
-        if hasattr(torch, "compile"):
+        #  torch.compile (CUDA-only, idempotent — C2)
+        if (
+            hasattr(torch, "compile")
+            and self.device.type == "cuda"
+            and not getattr(self.model, "_dynamo_compiled", False)
+        ):
             try:
                 self.model = torch.compile(self.model)
+                try:
+                    self.model._dynamo_compiled = True
+                except Exception:
+                    pass
                 logger.info("torch.compile enabled")
             except Exception as e:
                 logger.warning(f"torch.compile failed: {e}")
@@ -200,30 +208,9 @@ class Trainer:
             )
 
             self.global_step = int(state.get("start_step", 0) or 0)
-
-            if self.scheduler is not None:
-
-                scheduler_state = state.get("scheduler_state_dict")
-
-                if scheduler_state:
-                    try:
-                        self.scheduler.load_state_dict(scheduler_state)
-                        logger.info("Scheduler state restored")
-                    except Exception as exc:
-                        logger.warning("Failed to load scheduler state: %s", exc)
-
-                elif "last_epoch" in state:
-                    try:
-                        self.scheduler.last_epoch = int(state["last_epoch"])
-                        logger.info(
-                            "Scheduler last_epoch restored to %d",
-                            self.scheduler.last_epoch,
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "Failed to set scheduler last_epoch: %s",
-                            exc,
-                        )
+            # C4: scheduler state is restored inside resume_training_checkpoint.
+            # The previously-duplicated branch here read keys that resume_training
+            # never returned and was dead code — removed.
             logger.info("Resumed training from %s", latest)
 
         except Exception as exc:
@@ -237,7 +224,8 @@ class Trainer:
         val_loader: Optional[DataLoader] = None,
     ) -> Dict[str, List[float]]:
 
-        history = {"train_loss": [], "val_loss": []}
+        history: Dict[str, List[float]] = {"train_loss": [], "val_loss": []}
+        best_val = float("inf")
 
         for epoch in range(self.config.epochs):
 
@@ -246,9 +234,44 @@ class Trainer:
             train_loss = self._train_epoch(train_loader)
             history["train_loss"].append(train_loss)
 
+            val_loss: Optional[float] = None
             if val_loader:
                 val_loss = self._validate_epoch(val_loader)
                 history["val_loss"].append(val_loss)
+
+            # C3: epoch-level checkpointing + best-model marker
+            if self.checkpoint_manager is not None:
+                metadata = {
+                    "epoch": epoch + 1,
+                    "train_loss": train_loss,
+                    "val_loss": val_loss,
+                }
+                try:
+                    self.checkpoint_manager.save_checkpoint(
+                        step=self.global_step,
+                        model=self.model,
+                        optimizer=self.optimizer,
+                        scheduler=self.scheduler,
+                        metadata=metadata,
+                        save_optimizer=True,
+                        save_every=1,
+                        deduplicate=False,
+                    )
+                    if val_loss is not None and val_loss < best_val:
+                        best_val = val_loss
+                        self.checkpoint_manager.save_checkpoint(
+                            step=10**9 + epoch,
+                            model=self.model,
+                            metadata={**metadata, "marker": "best"},
+                            save_every=1,
+                            deduplicate=False,
+                        )
+                    self.checkpoint_manager.cleanup_old_checkpoints(max_checkpoints=3)
+                except Exception as exc:
+                    logger.error(
+                        "Checkpoint save failed at epoch %d: %s",
+                        epoch + 1, exc, exc_info=True,
+                    )
 
         return history
 
@@ -264,6 +287,7 @@ class Trainer:
 
         self.optimizer.zero_grad(set_to_none=True)
 
+        step = -1  # M3: bind step in case dataloader is empty
         for step, batch in enumerate(dataloader):
 
             batch = self._move_batch_to_device(batch)
@@ -278,7 +302,12 @@ class Trainer:
                 loss = raw_loss / self.config.gradient_accumulation_steps
 
             if not torch.isfinite(raw_loss):
-                logger.error("NaN/Inf loss detected at step %d", step)
+                # M6: poisoned grads from the in-progress accumulation window
+                # would otherwise leak into the next optimizer.step. Reset.
+                logger.error(
+                    "NaN/Inf loss at step %d — resetting accumulation", step
+                )
+                self.optimizer.zero_grad(set_to_none=True)
                 continue
 
             if self.scaler.is_enabled():
@@ -314,8 +343,8 @@ class Trainer:
             if (step + 1) % self.config.log_every_steps == 0:
                 logger.info("step %d | loss %.6f", step + 1, float(raw_loss.detach().item()))
 
-        # Final step fix
-        if step_count % self.config.gradient_accumulation_steps != 0:
+        # Final step fix — flush any partial accumulation window (M3)
+        if step >= 0 and (step + 1) % self.config.gradient_accumulation_steps != 0:
 
             if self.scaler.is_enabled():
                 self.scaler.unscale_(self.optimizer)

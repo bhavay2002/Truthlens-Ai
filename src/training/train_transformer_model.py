@@ -74,14 +74,16 @@ from src.models.training.training_utils import get_device
 logger = logging.getLogger(__name__)
 
 # -------------------------------------------------------
-# GPU PERFORMANCE SETTINGS
+# GPU PERFORMANCE SETTINGS  (M5: opt-in, called only from training entrypoint)
 # -------------------------------------------------------
 
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
-torch.set_float32_matmul_precision("high")
-
-if torch.cuda.is_available():
+def configure_training_precision() -> None:
+    """Enable TF32 + flash/mem-efficient SDP. Call from training entrypoint only."""
+    if not torch.cuda.is_available():
+        return
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.set_float32_matmul_precision("high")
     if hasattr(torch.backends.cuda, "enable_flash_sdp"):
         torch.backends.cuda.enable_flash_sdp(True)
     if hasattr(torch.backends.cuda, "enable_mem_efficient_sdp"):
@@ -115,6 +117,10 @@ TOKENIZED_DATASET_CACHE_DIR = MODELS_DIR / "tokenized_dataset"
 
 GOOGLE_DRIVE_REPORTS_DIR = SETTINGS.paths.reports_dir
 GOOGLE_DRIVE_CHECKPOINTS_DIR = MODELS_DIR / "checkpoints"
+
+# M7: HF Trainer checkpoint discovery requires its own dedicated subdir.
+HF_OUTPUT_DIR = MODELS_DIR / "hf_trainer"
+HF_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -353,7 +359,7 @@ def train_model(df: pd.DataFrame, params: dict[str, Any] | None = None):
 
     training_args = TrainingArguments(
 
-        output_dir=str(MODELS_DIR),
+        output_dir=str(HF_OUTPUT_DIR),
 
         learning_rate=learning_rate,
 
@@ -400,7 +406,7 @@ def train_model(df: pd.DataFrame, params: dict[str, Any] | None = None):
         callbacks=[EarlyStoppingCallback(early_stopping_patience=2)],
     )
 
-    trainer.train(resume_from_checkpoint=get_last_checkpoint(MODELS_DIR))
+    trainer.train(resume_from_checkpoint=get_last_checkpoint(HF_OUTPUT_DIR))
 
     trainer.save_model(str(MODEL_PATH))
     tokenizer.save_pretrained(str(MODEL_PATH))

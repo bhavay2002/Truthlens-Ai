@@ -10,12 +10,12 @@ Trains a shared RoBERTa encoder with 6 task-specific prediction heads:
   6. Emotion classification
 """
 
+import hashlib
 import logging
 import os
 import math
 import shutil
 import sys
-import threading
 from pathlib import Path
 
 import pandas as pd
@@ -23,6 +23,8 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer
 
+from src.evaluation.evaluate_model import evaluate
+from src.evaluation.report_writer import save_report
 from src.features.emotion.emotion_schema import EMOTION_LABELS
 from src.models.multitask.multitask_truthlens_model import (
     MultiTaskTruthLensConfig,
@@ -47,7 +49,9 @@ from src.utils.device_utils import get_device
 SETTINGS = load_settings()
 configure_logging(log_file=SETTINGS.paths.training_log_path)
 logger = logging.getLogger(__name__)
-os.environ["TOKENIZERS_PARALLELISM"] = "true"
+
+# m1: tokenizers + DataLoader workers can deadlock; disable parallelism in tokenizer.
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 
 # -----------------------------------------------------
@@ -58,17 +62,19 @@ _cfg = load_config()
 
 
 # -----------------------------------------------------
-# Google Drive dataset paths
+# Data + save paths (env-overridable; m2)
 # -----------------------------------------------------
 
-DRIVE_DATA_PATH = Path("/content/drive/MyDrive/truthlens unified data")
+_DEFAULT_DRIVE_DATA = Path("/content/drive/MyDrive/truthlens unified data")
+DRIVE_DATA_PATH = Path(os.environ.get("TRUTHLENS_DATA_DIR", str(_DEFAULT_DRIVE_DATA)))
 
 TRAIN_PATH = DRIVE_DATA_PATH / "unified_dataset_train.csv"
 VAL_PATH = DRIVE_DATA_PATH / "unified_dataset_validation.csv"
 TEST_PATH = DRIVE_DATA_PATH / "unified_dataset_test.csv"
 
-LOCAL_SAVE_PATH = Path("/content/truthlens_model")
-DRIVE_SAVE_PATH = Path(SETTINGS.model.path)
+_DEFAULT_LOCAL_SAVE = Path("/content/truthlens_model")
+LOCAL_SAVE_PATH = Path(os.environ.get("TRUTHLENS_LOCAL_SAVE", str(_DEFAULT_LOCAL_SAVE)))
+DRIVE_SAVE_PATH = Path(os.environ.get("TRUTHLENS_DRIVE_SAVE", str(SETTINGS.model.path)))
 
 
 # -----------------------------------------------------
@@ -201,47 +207,131 @@ def load_data():
 
 
 # -----------------------------------------------------
-# Save Model
+# Save Model — synchronous, atomic, ordered, verified  (C1, C6, C7)
 # -----------------------------------------------------
+
+def _md5(p: Path) -> str:
+    h = hashlib.md5()
+    with p.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _sync_to_drive(src: Path, dst: Path, retries: int = 3) -> None:
+    create_folder(dst)
+    for f in src.iterdir():
+        if not f.is_file():
+            continue
+        target = dst / f.name
+        last_exc: Exception | None = None
+        for attempt in range(1, retries + 1):
+            try:
+                tmp = target.with_suffix(target.suffix + ".tmp")
+                shutil.copy2(f, tmp)
+                os.replace(tmp, target)
+                if target.stat().st_size != f.stat().st_size:
+                    raise IOError(f"Size mismatch after copy: {target}")
+                if _md5(target) != _md5(f):
+                    raise IOError(f"Checksum mismatch after copy: {target}")
+                last_exc = None
+                break
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "Drive copy attempt %d/%d failed for %s: %s",
+                    attempt, retries, f.name, exc,
+                )
+        if last_exc is not None:
+            raise RuntimeError(f"Drive sync failed for {f.name}") from last_exc
+
 
 def save_model(model, tokenizer):
 
     create_folder(LOCAL_SAVE_PATH)
 
+    # NaN/Inf guard before serialization (C6)
+    raw_model = getattr(model, "_orig_mod", model)
+    state = {k: v.detach().cpu() for k, v in raw_model.state_dict().items()}
+    for k, v in state.items():
+        if torch.is_tensor(v) and v.is_floating_point() and not torch.isfinite(v).all():
+            raise RuntimeError(f"Refusing to save: non-finite values in {k}")
+
+    # Atomic write of model weights
+    final = LOCAL_SAVE_PATH / "pytorch_model.bin"
+    tmp = LOCAL_SAVE_PATH / "pytorch_model.bin.tmp"
+    torch.save(state, tmp)
+    os.replace(tmp, final)
+
+    # Tokenizer + config (synchronous so Drive sync sees a complete tree)
     tokenizer.save_pretrained(str(LOCAL_SAVE_PATH))
-
-    def _save_local(m):
-        torch.save(
-            m.state_dict(),
-            LOCAL_SAVE_PATH / "pytorch_model.bin"
-        )
-
-    save_thread = threading.Thread(target=_save_local, args=(model,), daemon=True)
-    save_thread.start()
-
-    def _copy_to_drive():
-        create_folder(DRIVE_SAVE_PATH)
-        for file in LOCAL_SAVE_PATH.iterdir():
-            shutil.copy2(file, DRIVE_SAVE_PATH / file.name)
-
-    copy_thread = threading.Thread(target=_copy_to_drive, daemon=True)
-    copy_thread.start()
-
-    config_data = {
-        "model_type": "multitask_truthlens",
-        "architectures": ["MultiTaskTruthLensModel"],
-    }
-
     save_json(
-        config_data,
+        {
+            "model_type": "multitask_truthlens",
+            "architectures": ["MultiTaskTruthLensModel"],
+        },
         LOCAL_SAVE_PATH / "config.json",
-        indent=2
+        indent=2,
     )
 
-    save_thread.join(timeout=10)
-    copy_thread.join(timeout=10)
+    logger.info("Local save complete: %s", final)
 
-    logger.info("Model saved locally and copying to Drive async")
+    # Drive sync only AFTER local save is durable
+    if DRIVE_SAVE_PATH.parent.exists() or DRIVE_SAVE_PATH.exists():
+        try:
+            _sync_to_drive(LOCAL_SAVE_PATH, DRIVE_SAVE_PATH)
+            logger.info("Drive sync complete: %s", DRIVE_SAVE_PATH)
+        except Exception as exc:
+            logger.error("Drive sync failed: %s", exc)
+            raise
+
+
+# -----------------------------------------------------
+# Final Test Evaluation (M2)
+# -----------------------------------------------------
+
+def _evaluate_on_test(model, test_loader, device) -> None:
+    model.eval()
+    y_true: list[int] = []
+    y_pred: list[int] = []
+    y_proba: list[float] = []
+
+    raw = getattr(model, "_orig_mod", model)
+    with torch.no_grad():
+        for batch in test_loader:
+            inputs = {
+                k: (v.to(device) if isinstance(v, torch.Tensor) else v)
+                for k, v in batch.items() if k != "labels"
+            }
+            labels = batch.get("labels", {})
+            outputs = raw(**inputs)
+
+            logits = None
+            if isinstance(outputs, dict):
+                heads = outputs.get("heads") or outputs.get("logits") or {}
+                if isinstance(heads, dict):
+                    logits = heads.get("bias")
+                elif torch.is_tensor(heads):
+                    logits = heads
+            if logits is None:
+                continue
+
+            probs = torch.softmax(logits.float(), dim=-1)
+            preds = probs.argmax(dim=-1)
+
+            y_true.extend(labels["bias"].cpu().tolist())
+            y_pred.extend(preds.cpu().tolist())
+            y_proba.extend(probs[:, 1].cpu().tolist() if probs.shape[-1] > 1 else probs.squeeze(-1).cpu().tolist())
+
+    if not y_true:
+        logger.warning("Test evaluation skipped: no bias logits returned by model")
+        return
+
+    summary = evaluate(y_true, y_pred, y_proba)
+    report = {"summary": summary, "tasks": {"bias": summary}}
+    out = SETTINGS.paths.evaluation_results_path
+    save_report(report, out, generate_plots=False)
+    logger.info("Test report saved: %s", out)
 
 
 # -----------------------------------------------------
@@ -279,13 +369,18 @@ def main():
 
         logger.info("Training device: %s", device)
 
-        torch.backends.cudnn.benchmark = True
+        # C8: cudnn.benchmark only meaningful on CUDA + cuDNN
+        if torch.cuda.is_available() and torch.backends.cudnn.is_available():
+            torch.backends.cudnn.benchmark = True
+
+        # M1: gate pin_memory on CUDA availability
+        _pin = torch.cuda.is_available()
 
         # --------------------------------------------------
         # Data
         # --------------------------------------------------
 
-        train_df, val_df, _ = load_data()
+        train_df, val_df, test_df = load_data()
 
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         tok = tokenizer
@@ -303,8 +398,7 @@ def main():
             batched_labels = {}
             label_keys = list(batch[0]["labels"])
             for key in label_keys:
-                get_labels = lambda item: item["labels"][key]
-                values = list(map(get_labels, batch))
+                values = [item["labels"][key] for item in batch]
                 if isinstance(values[0], (list, tuple)):
                     batched_labels[key] = torch.tensor(values, dtype=torch.float)
                 elif isinstance(values[0], float):
@@ -313,10 +407,12 @@ def main():
                     batched_labels[key] = torch.tensor(values, dtype=torch.long)
 
             enc["labels"] = batched_labels
-            return {
-                key: value.pin_memory() if isinstance(value, torch.Tensor) else value
-                for key, value in enc.items()
-            }
+            if _pin:
+                return {
+                    key: (value.pin_memory() if isinstance(value, torch.Tensor) else value)
+                    for key, value in enc.items()
+                }
+            return dict(enc)
 
         train_dataset = TruthLensMultiTaskDataset(
             train_df,
@@ -330,25 +426,42 @@ def main():
             text_column=TEXT_COLUMN,
         )
 
+        test_dataset = TruthLensMultiTaskDataset(
+            test_df,
+            max_length=max_length,
+            text_column=TEXT_COLUMN,
+        )
+
+        _num_workers = 4 if _pin else 0
+        _persistent = bool(_num_workers)
+
         train_loader = DataLoader(
             train_dataset,
             batch_size=batch_size,
             shuffle=True,
             collate_fn=collate_fn,
-            num_workers=4,
-            pin_memory=True,
-            persistent_workers=True,
-            prefetch_factor=2,
+            num_workers=_num_workers,
+            pin_memory=_pin,
+            persistent_workers=_persistent,
+            prefetch_factor=2 if _persistent else None,
         )
 
         val_loader = DataLoader(
             val_dataset,
             batch_size=batch_size,
             collate_fn=collate_fn,
-            num_workers=4,
-            pin_memory=True,
-            persistent_workers=True,
-            prefetch_factor=2,
+            num_workers=_num_workers,
+            pin_memory=_pin,
+            persistent_workers=_persistent,
+            prefetch_factor=2 if _persistent else None,
+        )
+
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=batch_size,
+            collate_fn=collate_fn,
+            num_workers=_num_workers,
+            pin_memory=_pin,
         )
 
         # --------------------------------------------------
@@ -366,8 +479,7 @@ def main():
         if hasattr(model, "config") and hasattr(model.config, "use_flash_attention"):
             model.config.use_flash_attention = True
 
-        if hasattr(torch, "compile"):
-            model = torch.compile(model, mode="max-autotune")
+        # C2: torch.compile is owned by Trainer.__init__ — do not double-compile.
 
         # --------------------------------------------------
         # Optimizer
@@ -405,15 +517,17 @@ def main():
         )
 
         # --------------------------------------------------
-        # Trainer
+        # Trainer  (C3: wire checkpoint_dir; gate AMP on CUDA)
         # --------------------------------------------------
 
         trainer_config = TrainerConfig(
             epochs=epochs,
             gradient_accumulation_steps=gradient_accumulation_steps,
             device=str(device),
-            use_amp=True,
+            use_amp=(device.type == "cuda"),
             amp_dtype="bf16",
+            checkpoint_dir=str(SETTINGS.paths.models_dir / "checkpoints"),
+            checkpoint_every_steps=0,  # epoch-based saves handled in Trainer.train
         )
 
         trainer = Trainer(
@@ -430,12 +544,17 @@ def main():
         logger.info("Training complete")
 
         # --------------------------------------------------
-        # Save
+        # Save + final test evaluation (M2)
         # --------------------------------------------------
 
-        save_model(model, tokenizer)
+        save_model(trainer.model, tokenizer)
 
-        logger.info("Pipeline finished")
+        try:
+            _evaluate_on_test(trainer.model, test_loader, device)
+        except Exception as exc:
+            logger.error("Final test evaluation failed: %s", exc, exc_info=True)
+
+        logger.info("Pipeline finished | history=%s", history)
 
     except Exception as e:
 
