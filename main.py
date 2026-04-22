@@ -16,6 +16,7 @@ import os
 import math
 import random
 import shutil
+import signal
 import sys
 from pathlib import Path
 
@@ -634,6 +635,47 @@ def main():
             scheduler=scheduler,
             config=trainer_config,
         )
+
+        # --------------------------------------------------
+        # Resume from latest checkpoint (Lightning-style explicit)
+        # Trainer.__init__ already attempts a resume; this block just
+        # surfaces it in the launcher and acts as a fallback if the
+        # internal resume was skipped for any reason.
+        # --------------------------------------------------
+        if (
+            trainer.checkpoint_manager is not None
+            and trainer.global_step == 0
+        ):
+            latest_ckpt = trainer.checkpoint_manager.get_latest_checkpoint()
+            if latest_ckpt is not None:
+                try:
+                    logger.info("Resuming from %s", latest_ckpt)
+                    trainer.load_checkpoint(str(latest_ckpt), strict=True)
+                except Exception as exc:
+                    logger.warning("Explicit resume failed (%s); starting fresh", exc)
+
+        # --------------------------------------------------
+        # Launcher-level interrupt handler (SIGINT / SIGTERM)
+        # Trainer.train() also installs its own scoped handler; this
+        # one covers the pre-train setup window and any post-train
+        # cleanup so a Ctrl-C never loses progress.
+        # --------------------------------------------------
+        def _handle_launcher_interrupt(signum, _frame):
+            logger.warning(
+                "Launcher interrupt %s — saving checkpoint at step %d",
+                signum, trainer.global_step,
+            )
+            try:
+                trainer.save_checkpoint(tag="interrupt")
+            except Exception as exc:
+                logger.error("Launcher checkpoint save failed: %s", exc)
+            sys.exit(0)
+
+        for _sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                signal.signal(_sig, _handle_launcher_interrupt)
+            except (ValueError, OSError):
+                pass
 
         logger.info("Starting training")
 
