@@ -109,6 +109,83 @@ EMOTION_COLUMNS = [f"emotion_{i}" for i in range(len(EMOTION_LABELS))]
 # -----------------------------------------------------
 # Dataset (pre-tokenized, tensor-ready, length-aware)
 # -----------------------------------------------------
+def _check_label_leakage(train_df, val_df, text_column: str, sample: int = 10000) -> None:
+    """Warn if train/val share identical input texts (label-leakage smell)."""
+    if text_column not in train_df.columns or text_column not in val_df.columns:
+        return
+    train_texts = set(train_df[text_column].fillna("").astype(str).head(sample))
+    val_texts = set(val_df[text_column].fillna("").astype(str).head(sample))
+    overlap = len(train_texts & val_texts)
+    if overlap:
+        logger.warning(
+            "Label-leakage check: %d / %d sampled val rows have identical text "
+            "in train (text_column=%r). This will inflate validation metrics.",
+            overlap, len(val_texts), text_column,
+        )
+    else:
+        logger.info(
+            "Label-leakage check: 0 overlap on %d sampled val rows (text_column=%r).",
+            len(val_texts), text_column,
+        )
+
+
+def _sanity_batch_test(model, dataloader, device) -> None:
+    """Forward one batch and assert per-task losses are sane before training.
+
+    Catches obvious failures (NaN/Inf loss, dead head with loss==0, exploded
+    head with loss > 50) BEFORE we burn hours on a broken run.
+    """
+    try:
+        batch = next(iter(dataloader))
+    except StopIteration:
+        logger.warning("Sanity batch test: dataloader is empty; skipping.")
+        return
+
+    if isinstance(batch, dict):
+        batch = {
+            k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()
+        }
+
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            outputs = model(**batch)
+    finally:
+        if was_training:
+            model.train()
+
+    task_losses = None
+    if isinstance(outputs, dict):
+        task_losses = outputs.get("task_losses") or outputs.get("loss_breakdown")
+    else:
+        task_losses = getattr(outputs, "task_losses", None)
+
+    if not isinstance(task_losses, dict) or not task_losses:
+        logger.warning("Sanity batch test: model returned no task_losses; skipping checks.")
+        return
+
+    issues = []
+    parts = []
+    for name, val in task_losses.items():
+        if not torch.is_tensor(val):
+            continue
+        v = float(val.detach().item())
+        parts.append(f"{name}={v:.4f}")
+        if not math.isfinite(v):
+            issues.append(f"{name} is non-finite ({v})")
+        elif v == 0.0:
+            issues.append(f"{name} is exactly 0.0 (dead head?)")
+        elif v > 50.0:
+            issues.append(f"{name} is exploded ({v:.2f})")
+
+    logger.info("Sanity batch test: %s", " ".join(parts))
+    if issues:
+        raise RuntimeError(
+            "Sanity batch test failed before training: " + "; ".join(issues)
+        )
+
+
 def _safe_int_series(s, default=0):
     return pd.to_numeric(s, errors="coerce").fillna(default).astype(np.int64)
 
@@ -448,6 +525,14 @@ def main():
 
         train_df, val_df, test_df = load_data()
 
+        # Cheap label-leakage probe: identical input texts in train+val
+        # silently inflate validation metrics. Warn early so the user knows
+        # before trusting any val numbers.
+        try:
+            _check_label_leakage(train_df, val_df, text_column=TEXT_COLUMN)
+        except Exception as exc:
+            logger.warning("Label-leakage check failed: %s", exc)
+
         tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
 
         # Vectorized collate: pad input_ids/attention_mask to multiple of 8
@@ -680,6 +765,16 @@ def main():
                 signal.signal(_sig, _handle_launcher_interrupt)
             except (ValueError, OSError):
                 pass
+
+        # Sanity batch test — forward one batch and assert per-task losses
+        # are finite, non-zero, and not exploded. Aborts fast on a broken
+        # data/model wiring before we burn hours of GPU time.
+        try:
+            _sanity_batch_test(trainer.model, train_loader, device)
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            logger.warning("Sanity batch test skipped: %s", exc)
 
         logger.info("Starting training")
 

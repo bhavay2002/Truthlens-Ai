@@ -540,10 +540,27 @@ class Trainer:
                 if self.scaler.is_enabled():
                     self.scaler.unscale_(self.optimizer)
 
-                torch.nn.utils.clip_grad_norm_(
+                # clip_grad_norm_ returns the pre-clip total norm; checking
+                # its finiteness is an O(1) gradient-sanity probe that catches
+                # the spike pattern the diagnostic flagged (3.5 → 0.02 swings)
+                # without paying the cost of scanning every named parameter.
+                total_norm = torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(),
                     self.config.max_grad_norm,
                 )
+
+                if not torch.isfinite(total_norm):
+                    logger.warning(
+                        "Non-finite grad norm at step %d (norm=%s) — "
+                        "skipping optimizer step",
+                        self.global_step, total_norm,
+                    )
+                    if self.scaler.is_enabled():
+                        # Tell the scaler the step was skipped so its scale
+                        # factor is adjusted instead of left in a stale state.
+                        self.scaler.update()
+                    self.optimizer.zero_grad(set_to_none=True)
+                    continue
 
                 if self.scaler.is_enabled():
                     self.scaler.step(self.optimizer)
@@ -608,6 +625,19 @@ class Trainer:
         return float(mean_loss)
 
 
+    # Validation per-task spec: which label key corresponds to which output
+    # head and how predictions are derived from logits. Multi-class heads use
+    # argmax; multi-label heads use sigmoid > 0.5.
+    _VAL_TASKS = (
+        # (task_name, label_key, prediction_kind)
+        ("bias",            "labels_bias",            "multiclass"),
+        ("ideology",        "labels_ideology",        "multiclass"),
+        ("propaganda",      "labels_propaganda",      "multiclass"),
+        ("narrative",       "labels_narrative",       "multilabel"),
+        ("narrative_frame", "labels_narrative_frame", "multilabel"),
+        ("emotion",         "labels_emotion",         "multilabel"),
+    )
+
     def _validate_epoch(self, dataloader: DataLoader) -> float:
 
         self.model.eval()
@@ -615,7 +645,11 @@ class Trainer:
         loss_accum = torch.zeros((), device=self.device, dtype=torch.float32)
         step_count = 0
 
-        with torch.no_grad(): 
+        # Per-task buffers (kept on CPU as numpy to bound GPU memory).
+        preds: Dict[str, list] = {name: [] for name, _, _ in self._VAL_TASKS}
+        gts:   Dict[str, list] = {name: [] for name, _, _ in self._VAL_TASKS}
+
+        with torch.no_grad():
 
             for batch in dataloader:
 
@@ -627,7 +661,58 @@ class Trainer:
                 loss_accum = loss_accum + loss.detach().to(loss_accum.dtype)
                 step_count += 1
 
+                # Collect per-task predictions + ground truth for F1.
+                if isinstance(outputs, dict):
+                    for task_name, label_key, kind in self._VAL_TASKS:
+                        head_out = outputs.get(task_name)
+                        if not isinstance(head_out, dict):
+                            continue
+                        logits = head_out.get("logits")
+                        labels = batch.get(label_key) if isinstance(batch, dict) else None
+                        if logits is None or labels is None:
+                            continue
+                        if kind == "multiclass":
+                            pred = logits.argmax(dim=-1)
+                            preds[task_name].append(pred.detach().cpu().numpy())
+                            gts[task_name].append(labels.detach().cpu().numpy())
+                        else:  # multilabel
+                            pred = (torch.sigmoid(logits) > 0.5).int()
+                            preds[task_name].append(pred.detach().cpu().numpy())
+                            gts[task_name].append(
+                                (labels > 0.5).int().detach().cpu().numpy()
+                            )
+
         mean_loss = (loss_accum / max(step_count, 1)).detach().item()
+
+        # Compute and log per-task macro F1.
+        try:
+            import numpy as _np
+            from sklearn.metrics import f1_score as _f1
+
+            metric_parts = []
+            for task_name, _label_key, kind in self._VAL_TASKS:
+                if not preds[task_name]:
+                    continue
+                y_pred = _np.concatenate(preds[task_name], axis=0)
+                y_true = _np.concatenate(gts[task_name], axis=0)
+                try:
+                    score = _f1(
+                        y_true, y_pred,
+                        average="macro",
+                        zero_division=0,
+                    )
+                except Exception as exc:
+                    logger.warning("F1 failed for %s: %s", task_name, exc)
+                    continue
+                metric_parts.append(f"{task_name}_f1={score:.4f}")
+
+            if metric_parts:
+                logger.info("VAL | loss=%.6f | %s", mean_loss, " ".join(metric_parts))
+            else:
+                logger.info("VAL | loss=%.6f", mean_loss)
+        except Exception as exc:
+            logger.warning("Per-task validation metrics skipped: %s", exc)
+
         return float(mean_loss)
 
 
