@@ -131,10 +131,10 @@ class Trainer:
         self.model.to(self.device)
 
         #  torch.compile (CUDA-only, idempotent — C2)
-        # Disabled by default: on T4 the compile cost outweighs the gains and
-        # can be unstable. Opt in with TRUTHLENS_TORCH_COMPILE=1 on Ampere+.
+        # Enabled by default on CUDA: pays off ~10-20% on Ampere+ (A100/L4/H100).
+        # Disable on T4 (or for debugging) with TRUTHLENS_TORCH_COMPILE=0.
         if (
-            os.environ.get("TRUTHLENS_TORCH_COMPILE", "0") == "1"
+            os.environ.get("TRUTHLENS_TORCH_COMPILE", "1") == "1"
             and hasattr(torch, "compile")
             and self.device.type == "cuda"
             and not getattr(self.model, "_dynamo_compiled", False)
@@ -336,6 +336,37 @@ class Trainer:
             loss_accum = loss_accum + raw_loss.detach().to(loss_accum.dtype)
             step_count += 1
             self.global_step += 1
+
+            # -------------------------------------------------
+            # STEP CHECKPOINTING (every N global steps)
+            # -------------------------------------------------
+            if (
+                self.checkpoint_manager is not None
+                and self.config.checkpoint_every_steps > 0
+                and self.global_step % self.config.checkpoint_every_steps == 0
+            ):
+                try:
+                    self.checkpoint_manager.save_checkpoint(
+                        step=self.global_step,
+                        model=self.model,
+                        optimizer=self.optimizer,
+                        scheduler=self.scheduler,
+                        metadata={
+                            "step": self.global_step,
+                            "epoch": None,
+                            "type": "step",
+                        },
+                        save_optimizer=True,
+                        save_every=1,
+                        deduplicate=False,
+                    )
+                    logger.info("[Checkpoint] Saved at step %d", self.global_step)
+                    self.checkpoint_manager.cleanup_old_checkpoints(max_checkpoints=3)
+                except Exception as exc:
+                    logger.error(
+                        "[Checkpoint] Failed at step %d: %s",
+                        self.global_step, exc,
+                    )
 
             if (step + 1) % self.config.gradient_accumulation_steps == 0:
 

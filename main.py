@@ -502,8 +502,10 @@ def main():
             text_column=TEXT_COLUMN,
         )
 
-        _num_workers = 2 if _pin else 0
+        # A100-tuned dataloader throughput
+        _num_workers = 4 if _pin else 0
         _persistent = bool(_num_workers)
+        _prefetch = 4 if _persistent else None
 
         # Length-bucketed sampler eliminates padding waste on the train loader.
         train_sampler = BucketSampler(
@@ -520,7 +522,7 @@ def main():
             num_workers=_num_workers,
             pin_memory=_pin,
             persistent_workers=_persistent,
-            prefetch_factor=2 if _persistent else None,
+            prefetch_factor=_prefetch,
         )
 
         val_loader = DataLoader(
@@ -530,7 +532,7 @@ def main():
             num_workers=_num_workers,
             pin_memory=_pin,
             persistent_workers=_persistent,
-            prefetch_factor=2 if _persistent else None,
+            prefetch_factor=_prefetch,
         )
 
         test_loader = DataLoader(
@@ -603,16 +605,25 @@ def main():
         # Trainer  (C3: wire checkpoint_dir; gate AMP on CUDA)
         # --------------------------------------------------
 
+        # AMP dtype: prefer bf16 on Ampere+ (A100/L4/H100) for native Tensor
+        # Core support and numerical stability; fall back to fp16 on T4.
+        if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+            _default_amp_dtype = "bf16"
+        else:
+            _default_amp_dtype = "fp16"
+
         trainer_config = TrainerConfig(
             epochs=epochs,
             gradient_accumulation_steps=gradient_accumulation_steps,
             device=str(device),
             use_amp=(device.type == "cuda"),
-            # fp16 enables Tensor Core matmul on T4; bf16 has no Tensor Core
-            # acceleration on T4. Override via TRUTHLENS_AMP_DTYPE=bf16 on Ampere+.
-            amp_dtype=os.environ.get("TRUTHLENS_AMP_DTYPE", "fp16"),
+            amp_dtype=os.environ.get("TRUTHLENS_AMP_DTYPE", _default_amp_dtype),
             checkpoint_dir=str(SETTINGS.paths.models_dir / "checkpoints"),
-            checkpoint_every_steps=0,  # epoch-based saves handled in Trainer.train
+            # Save a step-checkpoint every 4000 optimizer-loop steps in addition
+            # to the epoch-end checkpoints handled inside Trainer.train.
+            checkpoint_every_steps=int(
+                os.environ.get("TRUTHLENS_CHECKPOINT_EVERY_STEPS", "4000")
+            ),
             log_every_steps=100,
             validate_every_n_epochs=int(os.environ.get("TRUTHLENS_VALIDATE_EVERY", "2")),
         )

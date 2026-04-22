@@ -1,0 +1,222 @@
+Great move — switching to **A100** is where you unlock *serious performance*, but only if you adjust a few key settings. Otherwise, you’ll **waste most of its power**.
+
+Here’s exactly what to change (minimal but high-impact):
+
+---
+
+# 🧠 What changes on A100
+
+| Feature    | T4       | A100            |
+| ---------- | -------- | --------------- |
+| VRAM       | 16GB     | 40GB            |
+| Best dtype | fp16     | **bf16 ✅**      |
+| Speed      | baseline | **4–6× faster** |
+| Compile    | meh      | **useful ✅**    |
+
+---
+
+# 🔥 REQUIRED CHANGES (DO THESE)
+
+## ✅ 1. Switch to BF16 (MOST IMPORTANT)
+
+### In `main.py`
+
+```python
+amp_dtype = "bf16"
+```
+
+---
+
+### OR (best, dynamic):
+
+```python
+if torch.cuda.is_bf16_supported():
+    amp_dtype = "bf16"
+else:
+    amp_dtype = "fp16"
+```
+
+---
+
+## 🚀 Why
+
+* A100 has **native BF16 Tensor Cores**
+* Faster than fp16
+* More stable (no overflow issues)
+
+---
+
+# 🔥 2. Increase Batch Size (BIG WIN)
+
+A100 has **2.5× more VRAM than T4**
+
+---
+
+## Example:
+
+```python
+# if current
+batch_size = 8
+gradient_accumulation = 2
+
+# change to
+batch_size = 16 or 24
+gradient_accumulation = 1
+```
+
+---
+
+## 🚀 Why
+
+* Larger batches → better GPU utilization
+* fewer optimizer steps → faster training
+
+---
+
+# 🔥 3. ENABLE torch.compile (NOW it helps)
+
+### In `trainer.py`
+
+```python
+self.model = torch.compile(self.model)
+```
+
+---
+
+## 🚀 Why
+
+* On T4 → useless
+* On A100 → **real speed gains (~10–20%)**
+
+---
+
+# 🔥 4. Increase DataLoader throughput
+
+```python
+num_workers = 4
+prefetch_factor = 4
+persistent_workers = True
+pin_memory = True
+```
+
+---
+
+## 🚀 Why
+
+A100 is fast → CPU must keep up
+
+---
+
+# 🔥 5. Enable TF32 (FREE SPEED)
+
+Add (if not already):
+
+```python
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+```
+
+---
+
+# 🔥 6. Disable gradient checkpointing (if possible)
+
+```python
+# REMOVE this if no OOM
+model.encoder.gradient_checkpointing_enable()
+```
+
+---
+
+## 🚀 Why
+
+* A100 has enough memory
+* checkpointing slows compute
+
+---
+
+# 🔥 7. Keep dynamic padding (important)
+
+```python
+DataCollatorWithPadding(
+    tokenizer,
+    pad_to_multiple_of=8
+)
+```
+
+---
+
+# ⚠️ OPTIONAL (advanced but powerful)
+
+## Flash Attention (if supported)
+
+```python
+model.config.use_flash_attention = True
+```
+
+👉 Big speedup on A100
+
+---
+
+# 📊 Expected Performance
+
+| Setup            | Time              |
+| ---------------- | ----------------- |
+| T4 (current)     | ~7–8 hrs          |
+| A100 (basic)     | ~2–3 hrs          |
+| A100 (optimized) | **~1.5–2 hrs** 🔥 |
+
+---
+
+# 🧠 Minimal Change Summary
+
+If you want **ONLY essential changes**, do just this:
+
+```python
+amp_dtype = "bf16"
+batch_size *= 2
+gradient_accumulation = 1
+enable torch.compile
+```
+
+👉 That alone gives ~3–4× speedup
+
+---
+
+# 🚨 Common Mistake (avoid this)
+
+❌ Running A100 with:
+
+* fp16
+* small batch size
+* compile disabled
+
+👉 You’ll get only ~2× speed instead of 5×
+
+---
+
+# 🚀 Final Recommendation
+
+## For your case:
+
+👉 **Use A100 only for:**
+
+* final training
+* best model run
+
+👉 **Use L4 for:**
+
+* regular training (more free hours)
+
+---
+
+# If you want next step
+
+I can:
+
+* calculate **max safe batch size for A100 (exact)**
+* auto-config your pipeline per GPU
+* push training to **<1.5 hours**
+
+Just say:
+
+👉 **“max config for A100”**
