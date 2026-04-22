@@ -414,6 +414,26 @@ class Trainer:
             logger.warning(
                 "load_checkpoint: missing=%d unexpected=%d", len(missing), len(unexpected),
             )
+            # Output-contract audit (Doc 1, root cause #4): silent absence
+            # of a task-head's weights is exactly what produced the
+            # "no bias logits returned by model" warning in eval. Treat
+            # any missing task-head weights as fatal — never let a
+            # silent-load scenario reach training/eval.
+            _task_head_prefixes = (
+                "bias_head", "ideology_head", "propaganda_head",
+                "narrative_head", "narrative_frame_head", "emotion_head",
+            )
+            _missing_heads = sorted({
+                k.split(".", 1)[0]
+                for k in missing
+                if k.split(".", 1)[0] in _task_head_prefixes
+            })
+            if _missing_heads:
+                raise RuntimeError(
+                    f"Checkpoint missing task-head weights: {_missing_heads}. "
+                    f"Resuming would silently disable these heads. "
+                    f"Path: {path}"
+                )
 
         opt_state = state.get("optimizer_state_dict") or state.get("optimizer")
         if opt_state is not None and self.optimizer is not None:
@@ -550,10 +570,30 @@ class Trainer:
                 _running_mean = float((loss_accum / step_count).detach().item())
                 _raw = float(raw_loss.detach().item())
                 if _running_mean > 0 and _raw > _spike_ratio * _running_mean:
+                    # Per-task breakdown + sample input identifier so we can
+                    # actually find which head and which batch is causing
+                    # the spike (loss-stability audit §10).
+                    _per_task = ""
+                    if isinstance(outputs, dict):
+                        _tl = outputs.get("task_losses") or outputs.get("loss_breakdown")
+                        if isinstance(_tl, dict) and _tl:
+                            _per_task = " | " + " ".join(
+                                f"{n}={float(v.detach().item()):.3f}"
+                                for n, v in _tl.items()
+                                if torch.is_tensor(v)
+                            )
+                    _ids = batch.get("input_ids") if isinstance(batch, dict) else None
+                    _sample_id = (
+                        int(_ids[0, :8].sum().item())
+                        if torch.is_tensor(_ids) and _ids.numel() > 0
+                        else "?"
+                    )
                     logger.warning(
-                        "Loss spike at step %d: raw=%.4f vs running_mean=%.4f (ratio=%.1fx)",
+                        "Loss spike at step %d: raw=%.4f vs running_mean=%.4f "
+                        "(ratio=%.1fx) batch_sig=%s%s",
                         self.global_step, _raw, _running_mean,
                         _raw / max(_running_mean, 1e-9),
+                        _sample_id, _per_task,
                     )
 
             # -------------------------------------------------

@@ -433,6 +433,28 @@ def load_data():
                 sep=" ",
             )
 
+    # Empty-text guard (data-contract audit): an all-empty text row
+    # tokenizes to padding only and produces a meaningless gradient
+    # signal — exactly the "garbled batch" pattern the loss-spike
+    # audit flagged. Drop them and log; only fail if a split is
+    # entirely empty.
+    for split_name, df in (("train", train_df), ("val", val_df), ("test", test_df)):
+        if TEXT_COLUMN not in df.columns:
+            continue
+        empty_mask = df[TEXT_COLUMN].fillna("").astype(str).str.strip().eq("")
+        n_empty = int(empty_mask.sum())
+        if n_empty:
+            logger.warning(
+                "Dropping %d empty-text rows from %s (%.2f%%)",
+                n_empty, split_name, 100.0 * n_empty / max(1, len(df)),
+            )
+            df.drop(df.index[empty_mask], inplace=True)
+        if len(df) == 0:
+            raise RuntimeError(
+                f"Split '{split_name}' is empty after dropping empty-text rows; "
+                f"check the input CSV's text column ('{TEXT_COLUMN}')."
+            )
+
     logger.info(
         "Dataset loaded — train: %d  val: %d  test: %d",
         len(train_df),
