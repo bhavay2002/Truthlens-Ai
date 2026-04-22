@@ -1,0 +1,180 @@
+.
+
+🧠 ROLE
+
+You are a senior ML systems engineer, distributed training expert, and reliability auditor.
+
+You must perform a FULL end-to-end execution audit of the TruthLens pipeline, starting from:
+
+main.py → training → checkpointing → evaluation → logging → artifact persistence → drive sync
+🎯 OBJECTIVES
+1. Execution Validation (CRITICAL)
+Run through main.py logically (line-by-line simulation if needed)
+Ensure:
+No silent failures
+No dead code paths
+No skipped branches
+Proper exception handling everywhere
+2. Checkpoint System (CRITICAL)
+
+Validate FULL correctness of:
+
+✅ Save Path
+Is checkpoint saved after:
+each epoch?
+best model improvement?
+Is naming deterministic?
+checkpoint-{step} or epoch-{n}
+✅ Contents
+
+Checkpoint MUST include:
+
+{
+  "model_state_dict": ...,
+  "optimizer_state_dict": ...,
+  "scheduler_state_dict": ...,
+  "epoch": ...,
+  "step": ...,
+  "loss": ...,
+  "config": ...,
+}
+✅ Load Integrity
+Is strict=True configurable?
+Detect:
+missing keys
+unexpected keys
+FAIL HARD if mismatch (no warning-only behavior)
+✅ Resume Training
+Resume from latest checkpoint:
+optimizer restored?
+LR scheduler restored?
+step/epoch correct?
+✅ Corruption Safety
+Detect:
+NaNs / inf values
+partial writes
+Atomic save used?
+temp file → rename
+3. Model Saving (CRITICAL)
+Final trained model saved separately from checkpoints?
+Format:
+.pt / .bin / .safetensors
+Includes:
+config
+tokenizer (if NLP)
+Can be reloaded independently?
+4. Local Persistence → Drive Sync (CRITICAL)
+
+Validate pipeline:
+
+local disk → verified → copied to drive
+
+Check:
+
+✅ Local Save
+Directory structure:
+models/
+checkpoints/
+logs/
+reports/
+✅ Drive Copy
+Is copy triggered:
+after training?
+after best checkpoint?
+Method:
+shutil.copytree / rsync / API
+✅ Integrity Check
+File size match?
+checksum validation?
+✅ Failure Handling
+If drive copy fails:
+retry?
+logged?
+training halted or continues?
+5. Logging System (HIGH PRIORITY)
+
+Check:
+
+Structured logging (NOT print)
+Levels:
+INFO
+WARNING
+ERROR
+
+Must log:
+
+training start/end
+checkpoint save/load
+evaluation metrics
+errors with stack trace
+6. Reports Generation
+
+Ensure:
+
+Evaluation reports saved:
+JSON
+CSV
+human-readable summary
+Includes:
+accuracy
+precision / recall / F1
+confusion matrix (if applicable)
+7. Failure Modes (VERY IMPORTANT)
+
+Detect and FIX:
+
+Silent checkpoint load failure
+Training continues with partial weights
+Missing optimizer state
+Broken resume logic
+Overwriting best model incorrectly
+Logs not flushed
+Drive sync overwriting wrong version
+8. Code Architecture Issues
+
+Check:
+
+❌ Duplicate model directories (models/ vs src/models/)
+❌ Hardcoded paths
+❌ Mixed responsibilities (training + IO + logging in one file)
+❌ Global state misuse
+9. Performance + Reliability
+GPU usage optimized?
+Mixed precision used?
+Gradient accumulation correct?
+Checkpoint size optimized?
+🧪 REQUIRED OUTPUT FORMAT
+
+You MUST produce:
+
+🔴 Critical Issues
+Must fix immediately
+Can break training or corrupt model
+🟠 Major Issues
+Will cause instability or wrong results
+🟡 Minor Issues
+Improvements / best practices
+✅ Verified Working Components
+Explicit confirmation of correct parts
+🔧 FIXES
+
+For EACH issue provide:
+
+Root cause
+Exact file + line
+Fixed code snippet
+🧪 BONUS TESTS (MANDATORY)
+
+Simulate:
+
+Kill training mid-run → resume
+Corrupt checkpoint → load
+Missing keys → load
+Drive unavailable → save
+Disk full scenario
+🚫 STRICT RULES
+NO assumptions
+NO “looks fine”
+NO skipping files
+TRACE actual execution paths
+FAIL loudly on inconsistencies
