@@ -239,6 +239,7 @@ def save_checkpoint(
     checkpoint_dir: str | Path,
     optimizer: Optional[torch.optim.Optimizer] = None,
     scheduler: Optional[Any] = None,
+    scaler: Optional[Any] = None,
     epoch: Optional[int] = None,
     step: Optional[int] = None,
     metadata: Optional[Dict[str, Any]] = None,
@@ -253,12 +254,13 @@ def save_checkpoint(
 
     checkpoint_path = checkpoint_dir / CHECKPOINT_FILE
 
-    # C5: include audit-mandated keys (loss + config)
+    # Canonical payload (fail-fast load expects this schema).
     _meta = metadata or {}
     checkpoint_data: Dict[str, Any] = {
         "model_state_dict": model.state_dict(),
         "epoch": epoch,
         "step": step,
+        "metrics": _meta.get("metrics") or {},
         "loss": _meta.get("val_loss") or _meta.get("train_loss") or _meta.get("loss"),
         "config": _meta.get("config"),
         "pytorch_version": torch.__version__,
@@ -272,6 +274,12 @@ def save_checkpoint(
             checkpoint_data["scheduler_state_dict"] = scheduler.state_dict()
         except Exception as exc:
             logger.warning("Scheduler save failed: %s", exc)
+
+    if scaler is not None:
+        try:
+            checkpoint_data["scaler_state_dict"] = scaler.state_dict()
+        except Exception as exc:
+            logger.warning("Scaler save failed: %s", exc)
 
     if use_compression:
         _atomic_save_compressed(checkpoint_data, checkpoint_path)
@@ -309,6 +317,7 @@ def load_checkpoint(
     checkpoint_dir: str | Path,
     optimizer: Optional[torch.optim.Optimizer] = None,
     scheduler: Optional[Any] = None,
+    scaler: Optional[Any] = None,
     map_location: Optional[str | torch.device] = None,
     strict: bool = True,
     allow_missing: tuple[str, ...] = (),
@@ -326,11 +335,11 @@ def load_checkpoint(
     if not isinstance(checkpoint, dict):
         raise RuntimeError("Invalid checkpoint format")
 
-    if "model_state_dict" not in checkpoint:
-        # KeyError is the audit-mandated signal: callers (e.g. Trainer
-        # ._attempt_resume) distinguish "schema drift" from generic load
-        # failures by catching this specifically.
-        raise KeyError("Checkpoint missing 'model_state_dict'")
+    # Hard schema validation: never resume from partial/ambiguous payloads.
+    required_keys = ("model_state_dict", "step", "epoch")
+    for key in required_keys:
+        if key not in checkpoint:
+            raise RuntimeError(f"Checkpoint missing required key: {key}")
 
     state_dict = checkpoint["model_state_dict"]
 
@@ -381,6 +390,15 @@ def load_checkpoint(
                 raise RuntimeError(f"Scheduler restore failed: {exc}") from exc
             logger.warning("Scheduler restore failed: %s", exc)
 
+    # AMP scaler restore (strict-aware)
+    if scaler is not None and "scaler_state_dict" in checkpoint:
+        try:
+            scaler.load_state_dict(checkpoint["scaler_state_dict"])
+        except Exception as exc:
+            if strict:
+                raise RuntimeError(f"Scaler restore failed: {exc}") from exc
+            logger.warning("Scaler restore failed: %s", exc)
+
     logger.info("Checkpoint loaded: %s", checkpoint_path)
 
     # C4: surface full payload so callers (Trainer._attempt_resume) can
@@ -389,8 +407,10 @@ def load_checkpoint(
     return {
         "epoch": checkpoint.get("epoch"),
         "step": checkpoint.get("step"),
+        "metrics": checkpoint.get("metrics"),
         "loss": checkpoint.get("loss"),
         "config": checkpoint.get("config"),
+        "scaler_state_dict": checkpoint.get("scaler_state_dict"),
         "scheduler_state_dict": checkpoint.get("scheduler_state_dict"),
         "optimizer_state_dict": checkpoint.get("optimizer_state_dict"),
     }

@@ -203,6 +203,77 @@ class Trainer:
 
     # ---------------------------------------------------------
 
+    def _validate_batch_labels(self, batch: Dict[str, Any]) -> None:
+        """Fail fast on out-of-range multiclass labels before forward/loss."""
+        if not isinstance(batch, dict):
+            return
+
+        # Default to known TruthLens ranges; model attributes override when present.
+        label_specs = (
+            ("labels_bias", int(getattr(self.model, "NUM_BIAS", 2))),
+            ("labels_ideology", int(getattr(self.model, "NUM_IDEOLOGY", 5))),
+            ("labels_propaganda", int(getattr(self.model, "NUM_PROPAGANDA", 2))),
+        )
+        for key, num_classes in label_specs:
+            labels = batch.get(key)
+            if not torch.is_tensor(labels):
+                continue
+            if labels.numel() == 0:
+                continue
+            lo = int(labels.min().item())
+            hi = int(labels.max().item())
+            if lo < 0 or hi >= num_classes:
+                raise RuntimeError(
+                    f"Invalid label range for {key}: min={lo} max={hi} "
+                    f"(expected [0,{num_classes - 1}])."
+                )
+
+    # ---------------------------------------------------------
+
+    @staticmethod
+    def _label_distribution_summary(batch: Dict[str, Any]) -> str:
+        """Compact per-batch label distribution for diagnostics."""
+        if not isinstance(batch, dict):
+            return "labels=unavailable"
+        parts: List[str] = []
+        for key in ("labels_bias", "labels_ideology", "labels_propaganda"):
+            labels = batch.get(key)
+            if not torch.is_tensor(labels) or labels.numel() == 0:
+                continue
+            uniq, counts = torch.unique(labels.detach().cpu(), return_counts=True)
+            items = ",".join(
+                f"{int(u.item())}:{int(c.item())}" for u, c in zip(uniq, counts)
+            )
+            parts.append(f"{key}[{items}]")
+        return " ".join(parts) if parts else "labels=unavailable"
+
+    # ---------------------------------------------------------
+
+    @staticmethod
+    def _task_loss_dominance_summary(task_losses: Dict[str, Any]) -> Optional[str]:
+        """Return summary when one task dominates weighted loss."""
+        if not isinstance(task_losses, dict) or not task_losses:
+            return None
+        vals = {
+            name: float(loss.detach().item())
+            for name, loss in task_losses.items()
+            if torch.is_tensor(loss)
+        }
+        if len(vals) < 2:
+            return None
+        total = sum(abs(v) for v in vals.values())
+        if total <= 1e-12:
+            return None
+        top_name, top_value = max(vals.items(), key=lambda kv: abs(kv[1]))
+        ratio = abs(top_value) / total
+        threshold = float(os.environ.get("TRUTHLENS_TASK_DOMINANCE_RATIO", "0.8"))
+        if ratio >= threshold:
+            parts = " ".join(f"{k}={v:.4f}" for k, v in vals.items())
+            return f"dominant={top_name} share={ratio:.2f} threshold={threshold:.2f} | {parts}"
+        return None
+
+    # ---------------------------------------------------------
+
     def _attempt_resume(self):
 
         checkpoint_root = Path(self.config.checkpoint_dir)
@@ -529,6 +600,11 @@ class Trainer:
         # 5x the running mean. Surfaces the "calm → spike → calm" pattern
         # the loss-stability audit asked us to instrument.
         _spike_ratio = float(os.environ.get("TRUTHLENS_SPIKE_RATIO", "5.0"))
+        _hard_loss_cap = float(os.environ.get("TRUTHLENS_HARD_LOSS_CAP", "0"))
+        _low_loss_floor = float(os.environ.get("TRUTHLENS_LOW_LOSS_FLOOR", "0.001"))
+        _low_loss_tripwire = int(os.environ.get("TRUTHLENS_LOW_LOSS_TRIPWIRE", "8"))
+        _single_class_warn_every = int(os.environ.get("TRUTHLENS_SINGLE_CLASS_WARN_EVERY", "20"))
+        low_loss_streak = 0
 
         self.optimizer.zero_grad(set_to_none=True)
 
@@ -536,6 +612,18 @@ class Trainer:
         for step, batch in enumerate(dataloader):
 
             batch = self._move_batch_to_device(batch)
+            self._validate_batch_labels(batch)
+            if _single_class_warn_every > 0 and self.global_step % _single_class_warn_every == 0:
+                for key in ("labels_bias", "labels_ideology", "labels_propaganda"):
+                    labels = batch.get(key) if isinstance(batch, dict) else None
+                    if torch.is_tensor(labels) and labels.numel() > 0:
+                        if torch.unique(labels).numel() == 1:
+                            logger.warning(
+                                "Single-class batch detected at step %d | %s",
+                                self.global_step,
+                                self._label_distribution_summary(batch),
+                            )
+                            break
 
             with torch.autocast(
                 device_type=self.autocast_device_type,
@@ -554,6 +642,52 @@ class Trainer:
                 )
                 self.optimizer.zero_grad(set_to_none=True)
                 continue
+
+            # Optional hard fuse for finite-but-abnormal losses.
+            # Disabled by default (0). Enable via TRUTHLENS_HARD_LOSS_CAP.
+            if _hard_loss_cap > 0.0 and float(raw_loss.detach().item()) > _hard_loss_cap:
+                _sig = "?"
+                _ids = batch.get("input_ids") if isinstance(batch, dict) else None
+                if torch.is_tensor(_ids) and _ids.numel() > 0:
+                    _sig = int(_ids[0, :8].sum().item())
+                logger.error(
+                    "Abnormal loss guard triggered at step %d: raw_loss=%.4f > cap=%.4f "
+                    "(batch_sig=%s). Skipping batch.",
+                    self.global_step, float(raw_loss.detach().item()), _hard_loss_cap, _sig,
+                )
+                self.optimizer.zero_grad(set_to_none=True)
+                continue
+
+            raw_loss_value = float(raw_loss.detach().item())
+            if _low_loss_floor > 0.0 and raw_loss_value <= _low_loss_floor:
+                low_loss_streak += 1
+                _task_snapshot = ""
+                if isinstance(outputs, dict):
+                    _tl = outputs.get("task_losses") or outputs.get("loss_breakdown")
+                    if isinstance(_tl, dict) and _tl:
+                        _task_snapshot = " | " + " ".join(
+                            f"{n}={float(v.detach().item()):.6f}"
+                            for n, v in _tl.items()
+                            if torch.is_tensor(v)
+                        )
+                logger.warning(
+                    "Near-zero loss detected at step %d: raw_loss=%.6f "
+                    "(streak=%d floor=%.6f) | %s%s",
+                    self.global_step,
+                    raw_loss_value,
+                    low_loss_streak,
+                    _low_loss_floor,
+                    self._label_distribution_summary(batch),
+                    _task_snapshot,
+                )
+                if _low_loss_tripwire > 0 and low_loss_streak >= _low_loss_tripwire:
+                    raise RuntimeError(
+                        "Consecutive near-zero losses exceeded tripwire "
+                        f"({low_loss_streak} >= {_low_loss_tripwire}). "
+                        "Potential data leakage, degenerate labels, or loss bypass."
+                    )
+            else:
+                low_loss_streak = 0
 
             if self.scaler.is_enabled():
                 self.scaler.scale(loss).backward()
@@ -595,6 +729,15 @@ class Trainer:
                         _raw / max(_running_mean, 1e-9),
                         _sample_id, _per_task,
                     )
+                if isinstance(outputs, dict):
+                    _tl_dom = outputs.get("task_losses") or outputs.get("loss_breakdown")
+                    _dom_msg = self._task_loss_dominance_summary(_tl_dom)
+                    if _dom_msg is not None:
+                        logger.warning(
+                            "Task loss domination at step %d | %s",
+                            self.global_step,
+                            _dom_msg,
+                        )
 
             # -------------------------------------------------
             # STEP CHECKPOINTING (every N global steps)
@@ -749,9 +892,9 @@ class Trainer:
         loss_accum = torch.zeros((), device=self.device, dtype=torch.float32)
         step_count = 0
 
-        # Per-task buffers (kept on CPU as numpy to bound GPU memory).
-        preds: Dict[str, list] = {name: [] for name, _, _ in self._VAL_TASKS}
-        gts:   Dict[str, list] = {name: [] for name, _, _ in self._VAL_TASKS}
+        # Per-task buffers (kept on CPU).
+        logits_buf: Dict[str, list] = {name: [] for name, _, _ in self._VAL_TASKS}
+        labels_buf: Dict[str, list] = {name: [] for name, _, _ in self._VAL_TASKS}
 
         with torch.no_grad():
 
@@ -765,7 +908,7 @@ class Trainer:
                 loss_accum = loss_accum + loss.detach().to(loss_accum.dtype)
                 step_count += 1
 
-                # Collect per-task predictions + ground truth for F1.
+                # Collect full-epoch logits + labels (never batch-average metrics).
                 if isinstance(outputs, dict):
                     for task_name, label_key, kind in self._VAL_TASKS:
                         head_out = outputs.get(task_name)
@@ -775,40 +918,80 @@ class Trainer:
                         labels = batch.get(label_key) if isinstance(batch, dict) else None
                         if logits is None or labels is None:
                             continue
-                        if kind == "multiclass":
-                            pred = logits.argmax(dim=-1)
-                            preds[task_name].append(pred.detach().cpu().numpy())
-                            gts[task_name].append(labels.detach().cpu().numpy())
-                        else:  # multilabel
-                            pred = (torch.sigmoid(logits) > 0.5).int()
-                            preds[task_name].append(pred.detach().cpu().numpy())
-                            gts[task_name].append(
-                                (labels > 0.5).int().detach().cpu().numpy()
-                            )
+                        logits_buf[task_name].append(logits.detach().cpu())
+                        if kind == "multilabel":
+                            labels_buf[task_name].append((labels > 0.5).int().detach().cpu())
+                        else:
+                            labels_buf[task_name].append(labels.detach().long().cpu())
 
         mean_loss = (loss_accum / max(step_count, 1)).detach().item()
 
-        # Compute and log per-task macro F1.
+        # Compute and log per-task metrics.
         try:
             import numpy as _np
-            from sklearn.metrics import f1_score as _f1
+            from sklearn.metrics import (
+                accuracy_score as _acc,
+                f1_score as _f1,
+                roc_auc_score as _auc,
+            )
 
             metric_parts = []
+            self.last_val_metrics = {}
             for task_name, _label_key, kind in self._VAL_TASKS:
-                if not preds[task_name]:
+                if not logits_buf[task_name]:
                     continue
-                y_pred = _np.concatenate(preds[task_name], axis=0)
-                y_true = _np.concatenate(gts[task_name], axis=0)
-                try:
-                    score = _f1(
-                        y_true, y_pred,
-                        average="macro",
-                        zero_division=0,
+                logits_np = torch.cat(logits_buf[task_name], dim=0).numpy()
+                labels_np = torch.cat(labels_buf[task_name], dim=0).numpy()
+
+                task_metrics: Dict[str, float] = {}
+
+                if kind == "multiclass":
+                    probs_np = torch.softmax(
+                        torch.from_numpy(logits_np).float(), dim=-1
+                    ).numpy()
+                    preds_np = probs_np.argmax(axis=1)
+                    task_metrics["accuracy"] = float(_acc(labels_np, preds_np))
+                    task_metrics["f1_macro"] = float(
+                        _f1(labels_np, preds_np, average="macro", zero_division=0)
                     )
-                except Exception as exc:
-                    logger.warning("F1 failed for %s: %s", task_name, exc)
-                    continue
-                metric_parts.append(f"{task_name}_f1={score:.4f}")
+                    task_metrics["f1_weighted"] = float(
+                        _f1(labels_np, preds_np, average="weighted", zero_division=0)
+                    )
+                    try:
+                        if probs_np.shape[1] == 2:
+                            task_metrics["auroc"] = float(_auc(labels_np, probs_np[:, 1]))
+                        else:
+                            task_metrics["auroc"] = float(
+                                _auc(labels_np, probs_np, multi_class="ovr")
+                            )
+                    except ValueError:
+                        task_metrics["auroc"] = float("nan")
+
+                else:  # multilabel
+                    probs_np = torch.sigmoid(torch.from_numpy(logits_np).float()).numpy()
+                    preds_np = (probs_np >= 0.5).astype(_np.int64)
+                    # element-wise accuracy for multilabel setting
+                    task_metrics["accuracy"] = float((preds_np == labels_np).mean())
+                    task_metrics["f1_macro"] = float(
+                        _f1(labels_np, preds_np, average="macro", zero_division=0)
+                    )
+                    task_metrics["f1_weighted"] = float(
+                        _f1(labels_np, preds_np, average="weighted", zero_division=0)
+                    )
+                    try:
+                        task_metrics["auroc"] = float(
+                            _auc(labels_np, probs_np, average="macro")
+                        )
+                    except ValueError:
+                        task_metrics["auroc"] = float("nan")
+
+                self.last_val_metrics[task_name] = task_metrics
+                metric_parts.append(
+                    f"{task_name}_acc={task_metrics['accuracy']:.4f} "
+                    f"{task_name}_f1m={task_metrics['f1_macro']:.4f} "
+                    f"{task_name}_f1w={task_metrics['f1_weighted']:.4f} "
+                    f"{task_name}_auc={task_metrics['auroc']:.4f}"
+                )
 
             if metric_parts:
                 logger.info("VAL | loss=%.6f | %s", mean_loss, " ".join(metric_parts))

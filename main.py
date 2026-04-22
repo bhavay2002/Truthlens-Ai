@@ -145,22 +145,56 @@ EMOTION_COLUMNS = [f"emotion_{i}" for i in range(len(EMOTION_LABELS))]
 # Dataset (pre-tokenized, tensor-ready, length-aware)
 # -----------------------------------------------------
 def _check_label_leakage(train_df, val_df, text_column: str, sample: int = 10000) -> None:
-    """Warn if train/val share identical input texts (label-leakage smell)."""
+    """Detect train/val overlap; fail fast when threshold is exceeded."""
     if text_column not in train_df.columns or text_column not in val_df.columns:
         return
     train_texts = set(train_df[text_column].fillna("").astype(str).head(sample))
     val_texts = set(val_df[text_column].fillna("").astype(str).head(sample))
     overlap = len(train_texts & val_texts)
-    if overlap:
-        logger.warning(
-            "Label-leakage check: %d / %d sampled val rows have identical text "
-            "in train (text_column=%r). This will inflate validation metrics.",
-            overlap, len(val_texts), text_column,
-        )
-    else:
+    train_hashes = {
+        hashlib.md5(text.encode("utf-8")).hexdigest()
+        for text in train_df[text_column].fillna("").astype(str).head(sample)
+    }
+    val_hashes = {
+        hashlib.md5(text.encode("utf-8")).hexdigest()
+        for text in val_df[text_column].fillna("").astype(str).head(sample)
+    }
+    hash_overlap = len(train_hashes & val_hashes)
+
+    if overlap == 0 and hash_overlap == 0:
         logger.info(
             "Label-leakage check: 0 overlap on %d sampled val rows (text_column=%r).",
             len(val_texts), text_column,
+        )
+        return
+
+    msg = (
+        "Label-leakage check detected sampled overlap "
+        "(raw=%d, hash=%d, val_sample=%d, text_column=%r)."
+    )
+    max_overlap = int(os.environ.get("TRUTHLENS_MAX_TEXT_OVERLAP", "0"))
+    if max(overlap, hash_overlap) > max_overlap:
+        raise RuntimeError(
+            (msg + " Allowed threshold=%d.")
+            % (overlap, hash_overlap, len(val_texts), text_column, max_overlap)
+        )
+    logger.warning(msg, overlap, hash_overlap, len(val_texts), text_column)
+
+
+def _log_dataset_label_distribution(df: pd.DataFrame, split_name: str) -> None:
+    """Log label distributions so class imbalance is visible before training."""
+    label_columns = [BIAS_LABEL, IDEOLOGY_LABEL, PROPAGANDA_LABEL]
+    total = max(1, len(df))
+    for col in label_columns:
+        if col not in df.columns:
+            continue
+        counts = df[col].value_counts(dropna=False)
+        parts = [f"{k}:{v}({(v / total) * 100:.2f}%)" for k, v in counts.items()]
+        logger.info(
+            "Label distribution | split=%s | column=%s | %s",
+            split_name,
+            col,
+            " ".join(parts),
         )
 
 
@@ -221,12 +255,95 @@ def _sanity_batch_test(model, dataloader, device) -> None:
         )
 
 
-def _safe_int_series(s, default=0):
-    return pd.to_numeric(s, errors="coerce").fillna(default).astype(np.int64)
+def _validate_model_output_contract(model, tokenizer, device) -> None:
+    """Fail fast if required task outputs are missing after model init/load."""
+    was_training = model.training
+    model.eval()
+    try:
+        dummy = tokenizer(
+            ["contract validation sample"],
+            return_tensors="pt",
+            truncation=True,
+            max_length=32,
+        )
+        dummy = {k: v.to(device) for k, v in dummy.items()}
+        with torch.no_grad():
+            outputs = model(**dummy)
+    finally:
+        if was_training:
+            model.train()
+
+    if not isinstance(outputs, dict):
+        raise RuntimeError(
+            "Model output contract violation: forward() must return a dict."
+        )
+
+    required_tasks = ("bias", "ideology", "propaganda", "narrative", "narrative_frame", "emotion")
+    for task_name in required_tasks:
+        head = outputs.get(task_name)
+        if not isinstance(head, dict):
+            raise RuntimeError(
+                f"Model output contract violation: missing task output '{task_name}'. "
+                f"Available keys: {list(outputs.keys())}"
+            )
+        logits = head.get("logits")
+        if not torch.is_tensor(logits):
+            raise RuntimeError(
+                f"Model output contract violation: task '{task_name}' missing tensor logits."
+            )
+        if logits.shape[-1] <= 0:
+            raise RuntimeError(
+                f"Model output contract violation: task '{task_name}' has invalid logits shape {tuple(logits.shape)}."
+            )
 
 
-def _safe_float_series(s, default=0.0):
-    return pd.to_numeric(s, errors="coerce").fillna(default).astype(np.float32)
+def _strict_int_series(
+    s: pd.Series,
+    *,
+    column_name: str,
+    split_name: str = "dataset",
+    allowed_values: set[int] | None = None,
+    allow_na: bool = False,
+) -> pd.Series:
+    """Parse integer labels with fail-fast validation (no silent coercion)."""
+    normalized = s.astype("string").str.strip()
+    parsed = pd.to_numeric(normalized, errors="raise")
+    if not allow_na and parsed.isna().any():
+        raise RuntimeError(
+            f"{split_name}.{column_name} contains NaN values after parsing."
+        )
+    parsed_int = parsed.astype("Int64")
+    if allowed_values is not None:
+        invalid = ~parsed_int.isin(sorted(allowed_values))
+        if invalid.any():
+            examples = (
+                normalized[invalid]
+                .dropna()
+                .astype(str)
+                .head(5)
+                .tolist()
+            )
+            raise RuntimeError(
+                f"{split_name}.{column_name} has invalid labels. "
+                f"Allowed={sorted(allowed_values)} Examples={examples}"
+            )
+    return parsed_int
+
+
+def _strict_float_series(
+    s: pd.Series,
+    *,
+    column_name: str,
+    split_name: str = "dataset",
+) -> pd.Series:
+    """Parse float features with fail-fast validation."""
+    normalized = s.astype("string").str.strip()
+    parsed = pd.to_numeric(normalized, errors="raise")
+    if parsed.isna().any():
+        raise RuntimeError(
+            f"{split_name}.{column_name} contains NaN values after parsing."
+        )
+    return parsed.astype(np.float32)
 
 
 def _entity_series_to_binary(s) -> np.ndarray:
@@ -259,14 +376,14 @@ class TruthLensMultiTaskDataset(Dataset):
         self.attention_mask = enc["attention_mask"]
         self.lengths = [len(ids) for ids in self.input_ids]
 
-        # Pre-build label tensors (vectorized via pandas / numpy)
-        bias = _safe_int_series(df.get(BIAS_LABEL, 0)).to_numpy()
-        ideology = _safe_int_series(df.get(IDEOLOGY_LABEL, 1), default=1).to_numpy()
-        propaganda = _safe_int_series(df.get(PROPAGANDA_LABEL, 0)).to_numpy()
+        # Pre-build label tensors from pre-validated columns.
+        bias = df[BIAS_LABEL].astype(np.int64).to_numpy()
+        ideology = df[IDEOLOGY_LABEL].astype(np.int64).to_numpy()
+        propaganda = df[PROPAGANDA_LABEL].astype(np.int64).to_numpy()
 
-        hero_lbl = _safe_int_series(df.get("hero", 0)).to_numpy()
-        villain_lbl = _safe_int_series(df.get("villain", 0)).to_numpy()
-        victim_lbl = _safe_int_series(df.get("victim", 0)).to_numpy()
+        hero_lbl = df["hero"].astype(np.int64).to_numpy()
+        villain_lbl = df["villain"].astype(np.int64).to_numpy()
+        victim_lbl = df["victim"].astype(np.int64).to_numpy()
 
         hero_ent = _entity_series_to_binary(df["hero_entities"]) if "hero_entities" in df else np.zeros(len(df), dtype=np.int64)
         villain_ent = _entity_series_to_binary(df["villain_entities"]) if "villain_entities" in df else np.zeros(len(df), dtype=np.int64)
@@ -282,12 +399,12 @@ class TruthLensMultiTaskDataset(Dataset):
         ).astype(np.float32)
 
         frame = np.stack(
-            [_safe_float_series(df.get(c, 0)).to_numpy() for c in FRAME_COLUMNS],
+            [df[c].astype(np.float32).to_numpy() for c in FRAME_COLUMNS],
             axis=1,
         ).astype(np.float32)
 
         emotion = np.stack(
-            [_safe_float_series(df.get(c, 0)).to_numpy() for c in EMOTION_COLUMNS],
+            [df[c].astype(np.float32).to_numpy() for c in EMOTION_COLUMNS],
             axis=1,
         ).astype(np.float32)
 
@@ -372,12 +489,8 @@ def load_data():
               " before running."
         )
 
-    # low_memory=False forces a single-pass type inference pass and
-    # eliminates the "Columns (...) have mixed types" DtypeWarning that
-    # otherwise leaks string/NaN values into label columns. Label columns
-    # are subsequently coerced to numeric via _safe_int_series / _safe_float_series.
-    # We additionally pin dtypes for known label / text columns so pandas
-    # never has to guess on chunk boundaries.
+    # Data contract: pin dtypes at read time so pandas never infers mixed types.
+    # low_memory=False prevents chunk-wise inference drift.
     _explicit_dtypes = {
         TEXT_COLUMN: "string",
         "title": "string",
@@ -395,36 +508,62 @@ def load_data():
     }
 
     def _read(path):
-        # dtype is best-effort: only columns that exist are pinned; pandas
-        # ignores unknown dtype keys silently.
-        return pd.read_csv(path, low_memory=False, dtype=_explicit_dtypes)
+        # dtype is best-effort: pandas ignores unknown dtype keys.
+        return pd.read_csv(
+            path,
+            low_memory=False,
+            dtype=_explicit_dtypes,
+            keep_default_na=True,
+            na_values=["", "NA", "N/A", "null", "None"],
+        )
 
     train_df = _read(TRAIN_PATH)
     val_df = _read(VAL_PATH)
     test_df = _read(TEST_PATH)
 
-    # Label-range sanity probe — catches silently-corrupted label columns
-    # (e.g. stray "?", out-of-range categorical IDs). Warn-only: real-world
-    # datasets occasionally have ragged rows and we don't want to crash a
-    # 6h training run on an off-by-one in row 4 million.
-    _label_ranges = {
-        BIAS_LABEL: (0, 1),         # binary
-        PROPAGANDA_LABEL: (0, 1),    # binary
-        IDEOLOGY_LABEL: (0, 4),      # 5-way
+    # Hard schema + value validation. Any violation stops the run.
+    _required_columns = [
+        TEXT_COLUMN,
+        BIAS_LABEL,
+        IDEOLOGY_LABEL,
+        PROPAGANDA_LABEL,
+        "hero",
+        "villain",
+        "victim",
+        *FRAME_COLUMNS,
+        *EMOTION_COLUMNS,
+    ]
+    _label_allowed = {
+        BIAS_LABEL: {0, 1},
+        PROPAGANDA_LABEL: {0, 1},
+        IDEOLOGY_LABEL: {0, 1, 2, 3, 4},
+        "hero": {0, 1},
+        "villain": {0, 1},
+        "victim": {0, 1},
     }
+
     for split_name, df in (("train", train_df), ("val", val_df), ("test", test_df)):
-        for col, (lo, hi) in _label_ranges.items():
-            if col not in df.columns:
-                continue
-            s = pd.to_numeric(df[col], errors="coerce")
-            n_nan = int(s.isna().sum())
-            n_oor = int(((s < lo) | (s > hi)).sum())
-            if n_nan or n_oor:
-                logger.warning(
-                    "Label sanity (%s.%s): %d NaN, %d out-of-range "
-                    "(expected [%d,%d]) — coerced via _safe_int_series",
-                    split_name, col, n_nan, n_oor, lo, hi,
-                )
+        missing_cols = [c for c in _required_columns if c not in df.columns]
+        if missing_cols:
+            raise RuntimeError(
+                f"{split_name} split missing required columns: {missing_cols}"
+            )
+
+        for col, allowed_values in _label_allowed.items():
+            df[col] = _strict_int_series(
+                df[col],
+                column_name=col,
+                split_name=split_name,
+                allowed_values=allowed_values,
+                allow_na=False,
+            )
+
+        for col in [*FRAME_COLUMNS, *EMOTION_COLUMNS]:
+            df[col] = _strict_float_series(
+                df[col],
+                column_name=col,
+                split_name=split_name,
+            )
 
     for df in (train_df, val_df, test_df):
         if "title" in df.columns and TEXT_COLUMN in df.columns:
@@ -602,8 +741,9 @@ def _evaluate_on_test(model, test_loader, device) -> None:
             y_proba.extend(probs[:, 1].cpu().tolist() if probs.shape[-1] > 1 else probs.squeeze(-1).cpu().tolist())
 
     if not y_true:
-        logger.warning("Test evaluation skipped: no bias logits returned by model")
-        return
+        raise RuntimeError(
+            "Test evaluation contract violation: no bias labels/predictions were collected."
+        )
 
     summary = evaluate(y_true, y_pred, y_proba)
     report = {"summary": summary, "tasks": {"bias": summary}}
@@ -659,6 +799,9 @@ def main():
         # --------------------------------------------------
 
         train_df, val_df, test_df = load_data()
+        _log_dataset_label_distribution(train_df, "train")
+        _log_dataset_label_distribution(val_df, "val")
+        _log_dataset_label_distribution(test_df, "test")
 
         # Cheap label-leakage probe: identical input texts in train+val
         # silently inflate validation metrics. Warn early so the user knows
@@ -783,6 +926,7 @@ def main():
 
         model = MultiTaskTruthLensModel(config=model_config)
         model = model.to(device)
+        _validate_model_output_contract(model, tokenizer, device)
 
         # Gradient checkpointing trades ~15-25% speed for lower memory.
         # Default OFF (faster); enable via TRUTHLENS_GRADIENT_CHECKPOINTING=1
@@ -884,6 +1028,7 @@ def main():
                     trainer.load_checkpoint(str(latest_ckpt), strict=True)
                 except Exception as exc:
                     logger.warning("Explicit resume failed (%s); starting fresh", exc)
+        _validate_model_output_contract(trainer.model, tokenizer, device)
 
         # --------------------------------------------------
         # Launcher-level interrupt handler (SIGINT / SIGTERM)
@@ -930,10 +1075,7 @@ def main():
 
         save_model(trainer.model, tokenizer)
 
-        try:
-            _evaluate_on_test(trainer.model, test_loader, device)
-        except Exception as exc:
-            logger.error("Final test evaluation failed: %s", exc, exc_info=True)
+        _evaluate_on_test(trainer.model, test_loader, device)
 
         logger.info("Pipeline finished | history=%s", history)
 

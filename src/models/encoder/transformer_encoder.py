@@ -108,6 +108,11 @@ class TransformerEncoder(BaseModel):
 
         try:
             self.config = AutoConfig.from_pretrained(model_name)
+            # We never consume HF pooler_output in this codebase; using a
+            # random pooler (e.g. RoBERTa) adds noisy unused parameters and
+            # triggers misleading initialization warnings.
+            if hasattr(self.config, "add_pooling_layer"):
+                self.config.add_pooling_layer = False
             if init_from_config_only:
                 logger.info(
                     "Initializing encoder from config only: %s", model_name

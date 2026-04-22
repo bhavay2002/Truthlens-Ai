@@ -61,5 +61,5 @@ def test_load_checkpoint_rejects_missing_model_state_dict(tmp_path: Path) -> Non
 
     model = nn.Linear(4, 2)
 
-    with pytest.raises(KeyError):
+    with pytest.raises(RuntimeError, match="Checkpoint missing required key: model_state_dict"):
         load_checkpoint(model, checkpoint_dir=checkpoint_dir)
