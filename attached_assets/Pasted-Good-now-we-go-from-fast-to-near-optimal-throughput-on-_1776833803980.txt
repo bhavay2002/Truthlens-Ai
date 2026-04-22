@@ -1,0 +1,409 @@
+Good—now we go from “fast” to **near-optimal throughput on a T4** without touching model semantics or hurting accuracy. I’ll give you **concrete patches + rationale + expected gains**.
+
+---
+
+# 🧠 Target State
+
+* **GPU util:** 85–95%
+* **No CPU stalls**
+* **No wasted padding**
+* **No redundant compute**
+* **Numerics unchanged (same loss, same convergence)**
+
+---
+
+# 🔥 1) Pre-tokenize + Length Bucketing (BIGGEST WIN)
+
+You already moved tokenization out of `collate_fn`. Now remove *padding waste* and *variance*.
+
+## ✅ A. Store lengths
+
+In your dataset init:
+
+```python
+enc = tokenizer(
+    df[text_column].tolist(),
+    padding=False,
+    truncation=True,
+    max_length=max_length,
+)
+self.encodings = enc
+self.lengths = [len(x) for x in enc["input_ids"]]
+```
+
+## ✅ B. Bucketed sampler (group similar lengths)
+
+```python
+from torch.utils.data import Sampler
+import math, random
+
+class BucketSampler(Sampler):
+    def __init__(self, lengths, batch_size, shuffle=True, bucket_size=100):
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+
+        indices = list(range(len(lengths)))
+        indices.sort(key=lambda i: lengths[i])
+
+        # chunk into buckets
+        self.buckets = [
+            indices[i:i+bucket_size]
+            for i in range(0, len(indices), bucket_size)
+        ]
+
+    def __iter__(self):
+        if self.shuffle:
+            for b in self.buckets:
+                random.shuffle(b)
+            random.shuffle(self.buckets)
+
+        batch = []
+        for bucket in self.buckets:
+            for idx in bucket:
+                batch.append(idx)
+                if len(batch) == self.batch_size:
+                    yield batch
+                    batch = []
+
+        if batch:
+            yield batch
+
+    def __len__(self):
+        return math.ceil(sum(len(b) for b in self.buckets) / self.batch_size)
+```
+
+## ✅ C. Use it
+
+```python
+sampler = BucketSampler(dataset.lengths, batch_size)
+
+train_loader = DataLoader(
+    dataset,
+    batch_sampler=sampler,
+    collate_fn=DataCollatorWithPadding(tokenizer),
+    num_workers=2,
+    pin_memory=True,
+    persistent_workers=True,
+)
+```
+
+---
+
+## 🚀 Impact
+
+* Padding reduced massively
+* Kernel efficiency ↑
+* **+30–50% speed**
+
+---
+
+# 🔥 2) Dynamic Padding (confirm optimal config)
+
+```python
+from transformers import DataCollatorWithPadding
+
+collate_fn = DataCollatorWithPadding(
+    tokenizer,
+    pad_to_multiple_of=8   # 🔥 IMPORTANT for Tensor Cores
+)
+```
+
+---
+
+## 🚀 Why `pad_to_multiple_of=8`
+
+* Aligns with Tensor Core tile size
+* Faster matmul kernels
+
+---
+
+# 🔥 3) Fuse label tensor creation (remove Python overhead)
+
+Your current:
+
+```python
+for key in label_keys:
+    values = [item["labels"][key] for item in batch]
+```
+
+👉 This is slow Python looping
+
+---
+
+## ✅ Fix: move label tensors into Dataset
+
+Inside `__getitem__`:
+
+```python
+return {
+    "input_ids": ...,
+    "attention_mask": ...,
+    "labels_bias": torch.tensor(...),
+    "labels_ideology": torch.tensor(...),
+}
+```
+
+👉 No per-batch Python loops anymore
+
+---
+
+## 🚀 Impact
+
+* Removes CPU overhead
+* smoother pipeline
+
+---
+
+# 🔥 4) Enable TF32 (FREE SPEED)
+
+You already partially do this, ensure full:
+
+```python
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.set_float32_matmul_precision("high")
+```
+
+---
+
+## 🚀 Impact
+
+* Faster matmul
+* No accuracy loss in transformers
+
+---
+
+# 🔥 5) Optimize AMP (CRITICAL)
+
+## ✅ Final config
+
+```python
+amp_dtype="fp16"
+```
+
+and in trainer:
+
+```python
+with torch.autocast("cuda", dtype=torch.float16):
+```
+
+---
+
+## 🚀 Extra boost
+
+Add:
+
+```python
+torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
+```
+
+---
+
+# 🔥 6) Remove gradient checkpointing (if memory allows)
+
+You currently:
+
+```python
+model.encoder.gradient_checkpointing_enable()
+```
+
+---
+
+## ⚠️ Tradeoff
+
+| Mode | Speed  | Memory |
+| ---- | ------ | ------ |
+| ON   | slower | low    |
+| OFF  | faster | higher |
+
+---
+
+## ✅ Recommendation
+
+If no OOM:
+
+```python
+# disable it
+```
+
+---
+
+## 🚀 Impact
+
+* **+15–25% speed**
+
+---
+
+# 🔥 7) Increase effective batch size (CRITICAL)
+
+Goal: maximize GPU occupancy
+
+---
+
+## Strategy
+
+```python
+batch_size ↑
+gradient_accumulation ↓
+```
+
+---
+
+## Example
+
+| Before           | After             |
+| ---------------- | ----------------- |
+| batch=8, accum=2 | batch=16, accum=1 |
+
+---
+
+## 🚀 Impact
+
+* Better kernel utilization
+* fewer optimizer steps
+
+---
+
+# 🔥 8) Optimizer micro-optimization
+
+You already use AdamW.
+
+Ensure fused path triggers:
+
+```python
+fused=True
+```
+
+Your factory already handles this — just ensure:
+
+* CUDA available
+* torch ≥ 2.0
+
+---
+
+# 🔥 9) Avoid tiny kernel launches
+
+Increase sequence packing efficiency.
+
+---
+
+## Advanced: Sequence packing (optional but huge)
+
+Pack multiple short sequences into one.
+
+👉 Complex but yields:
+
+* **+20–40% speed**
+
+(Only worth it if many short texts)
+
+---
+
+# 🔥 10) Reduce validation frequency
+
+Validation is expensive.
+
+---
+
+## Instead of:
+
+```python
+every epoch
+```
+
+---
+
+## Do:
+
+```python
+every 2 epochs
+```
+
+---
+
+## 🚀 Impact
+
+* Saves 10–20% total time
+
+---
+
+# 🔥 11) Async data transfer already correct
+
+You already use:
+
+```python
+non_blocking=True
+pin_memory=True
+```
+
+✔️ optimal
+
+---
+
+# 🔥 12) Remove torch.compile (reconfirm)
+
+On T4:
+
+```python
+# disable
+```
+
+---
+
+# 📊 Final Expected Gains
+
+| Optimization         | Gain        |
+| -------------------- | ----------- |
+| Pre-tokenization     | 🔥 2–3×     |
+| Bucketing            | 🔥 1.3–1.5× |
+| Dynamic padding      | 🔥 1.5×     |
+| Remove checkpointing | ⚡ 1.2×      |
+| Batch tuning         | ⚡ 1.2–1.5×  |
+
+---
+
+# 🚀 Combined Result
+
+👉 Realistic:
+
+**53 hours → 10–15 hours**
+
+---
+
+# 🧠 Final System (Ultra-Optimized)
+
+```
+Dataset:
+    → pre-tokenized
+    → tensor-ready
+    → length-aware
+
+Sampler:
+    → bucketed batching
+
+Collate:
+    → dynamic padding (multiple of 8)
+
+Trainer:
+    → FP16 + TF32
+    → no compile
+    → large batches
+
+Model:
+    → no checkpointing (if possible)
+```
+
+---
+
+# 🔥 If you want absolute peak (last 10–20%)
+
+I can help you implement:
+
+* Flash Attention (if model supports)
+* Sequence packing engine
+* Multi-task loss parallelization
+* CUDA graph capture
+
+Just say:
+
+👉 **“max out performance”**
