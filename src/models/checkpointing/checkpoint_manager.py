@@ -214,6 +214,7 @@ class CheckpointManager:
         scheduler: Optional[Any] = None,
         metadata: Optional[Dict[str, Any]] = None,
         *,
+        scaler: Optional[Any] = None,
         save_optimizer: bool = False,
         save_every: int = 1000,
         deduplicate: bool = True,
@@ -272,6 +273,16 @@ class CheckpointManager:
                 payload["scheduler_state_dict"] = scheduler.state_dict()
             except Exception as exc:
                 logger.warning("Scheduler state_dict() failed: %s", exc)
+
+        # AMP GradScaler — without this, the loss scale resets on resume,
+        # which produces the exact "calm → spike → calm → spike" pattern
+        # the loss-stability audit flagged.
+        if scaler is not None:
+            try:
+                if getattr(scaler, "is_enabled", lambda: True)():
+                    payload["scaler_state_dict"] = scaler.state_dict()
+            except Exception as exc:
+                logger.warning("Scaler state_dict() failed: %s", exc)
 
         if metadata:
             payload["metadata"] = metadata
@@ -366,9 +377,13 @@ class CheckpointManager:
     # -------------------------------------------------
 
     def cleanup_old_checkpoints(self, max_checkpoints: int = 3):
-        if max_checkpoints <= 0:
+        # Audit guardrail: keep_last >= 2 prevents catastrophic loss if a
+        # single corrupt checkpoint sneaks past validation. Keeping at
+        # least 2 always lets you fall back to the prior good one.
+        if max_checkpoints < 2:
             raise ValueError(
-                f"max_checkpoints must be a positive integer, got {max_checkpoints}"
+                f"max_checkpoints must be >= 2 to prevent catastrophic "
+                f"checkpoint loss, got {max_checkpoints}"
             )
 
         # Flush (not close!) so we don't delete a checkpoint still being written.

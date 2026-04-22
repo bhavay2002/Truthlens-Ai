@@ -330,6 +330,7 @@ class Trainer:
                         model=self.model,
                         optimizer=self.optimizer,
                         scheduler=self.scheduler,
+                        scaler=self.scaler,
                         metadata=metadata,
                         save_optimizer=True,
                         save_every=1,
@@ -376,6 +377,7 @@ class Trainer:
             model=self.model,
             optimizer=self.optimizer,
             scheduler=self.scheduler,
+            scaler=self.scaler,
             metadata={
                 "step": self.global_step,
                 "epoch": None,
@@ -427,6 +429,15 @@ class Trainer:
             except Exception as exc:
                 logger.warning("Scheduler state restore failed: %s", exc)
 
+        # Restore AMP loss-scale so the first post-resume step doesn't
+        # trigger a scale-search spike.
+        scaler_state = state.get("scaler_state_dict") or state.get("scaler")
+        if scaler_state is not None and getattr(self, "scaler", None) is not None:
+            try:
+                self.scaler.load_state_dict(scaler_state)
+            except Exception as exc:
+                logger.warning("Scaler state restore failed: %s", exc)
+
         self.global_step = int(state.get("step", self.global_step) or 0)
         logger.info("Loaded checkpoint from %s @ step %d", path, self.global_step)
         return state
@@ -472,6 +483,7 @@ class Trainer:
                 model=self.model,
                 optimizer=self.optimizer,
                 scheduler=self.scheduler,
+                scaler=self.scaler,
                 metadata={
                     "step": self.global_step,
                     "epoch": None,
@@ -492,6 +504,11 @@ class Trainer:
         # Accumulate loss on-device to avoid per-step GPU→CPU sync.
         loss_accum = torch.zeros((), device=self.device, dtype=torch.float32)
         step_count = 0
+
+        # Spike-batch detector: warn (don't skip) when raw_loss exceeds
+        # 5x the running mean. Surfaces the "calm → spike → calm" pattern
+        # the loss-stability audit asked us to instrument.
+        _spike_ratio = float(os.environ.get("TRUTHLENS_SPIKE_RATIO", "5.0"))
 
         self.optimizer.zero_grad(set_to_none=True)
 
@@ -527,6 +544,18 @@ class Trainer:
             step_count += 1
             self.global_step += 1
 
+            # Spike detection on the raw (un-divided) loss. Compare to the
+            # running mean so the threshold scales with the task difficulty.
+            if step_count >= 10:
+                _running_mean = float((loss_accum / step_count).detach().item())
+                _raw = float(raw_loss.detach().item())
+                if _running_mean > 0 and _raw > _spike_ratio * _running_mean:
+                    logger.warning(
+                        "Loss spike at step %d: raw=%.4f vs running_mean=%.4f (ratio=%.1fx)",
+                        self.global_step, _raw, _running_mean,
+                        _raw / max(_running_mean, 1e-9),
+                    )
+
             # -------------------------------------------------
             # STEP CHECKPOINTING (every N global steps)
             # -------------------------------------------------
@@ -541,6 +570,7 @@ class Trainer:
                         model=self.model,
                         optimizer=self.optimizer,
                         scheduler=self.scheduler,
+                        scaler=self.scaler,
                         metadata={
                             "step": self.global_step,
                             "epoch": None,
@@ -571,6 +601,17 @@ class Trainer:
                     self.model.parameters(),
                     self.config.max_grad_norm,
                 )
+
+                # Periodic grad-norm visibility: surfaces exploding-grad
+                # patterns BEFORE they cause loss spikes.
+                if self.global_step % max(1, self.config.log_every_steps) == 0:
+                    try:
+                        logger.info(
+                            "step %d | grad_norm(pre-clip)=%.4f",
+                            self.global_step, float(total_norm.detach().item()),
+                        )
+                    except Exception:
+                        pass
 
                 if not torch.isfinite(total_norm):
                     logger.warning(

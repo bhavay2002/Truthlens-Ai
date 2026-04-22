@@ -10,6 +10,12 @@ TruthLens AI is a multi-layer AI platform for misinformation detection and news 
 - **Port**: 5000
 
 ## Recent Refactors (audit fixes applied)
+- **HARDEN-1** (training-stability audit): AMP `GradScaler` state now persisted in checkpoints (`scaler_state_dict`) and restored on `load_checkpoint`. Without this, the loss scale resets on every resume and produces the "calm → spike → calm" pattern visible in the training log.
+- **HARDEN-2**: `CheckpointManager.cleanup_old_checkpoints` enforces `max_checkpoints >= 2` (was `>0`). Single-checkpoint retention risks catastrophic loss if the only surviving file is corrupt.
+- **HARDEN-3**: `_train_epoch` emits a `WARNING` when raw loss exceeds `TRUTHLENS_SPIKE_RATIO` (default 5×) the running mean — instruments spike-batch visibility.
+- **HARDEN-4**: Pre-clip grad norm logged every `log_every_steps` to surface exploding-grad before it spikes the loss.
+- **HARDEN-5**: `main._evaluate_on_test` now raises a `RuntimeError` instead of silently `continue`-ing when bias logits are missing — that path indicates a model contract violation, not a data issue.
+- **HARDEN-6**: `load_data` now warns on out-of-range / NaN values for `BIAS_LABEL`, `PROPAGANDA_LABEL`, `IDEOLOGY_LABEL` so silently-corrupted label columns are visible in the log.
 - **PERF-3**: All 14 singleton analyzers share one spaCy `en_core_web_sm` model via `get_shared_nlp()` in `src/analysis/_nlp.py`. All `disable_components` defaults unified to `()` so the cache key is always `("en_core_web_sm", ())`. Previous state: 4 separate pipeline instances.
 - **ARCH-1**: `PredictionPipeline._compute_credibility_score()` and its dead private task methods (`_predict_bias`, `_predict_ideology`, `_predict_propaganda`, `_predict_emotion`) removed. Credibility computation is now exclusively owned by `AggregationPipeline`. `predict_with_aggregation()` reads `truthlens_credibility_score` directly from aggregation output.
 - **ARCH-3**: `ExplainabilityLayer` (was in `prediction_pipeline.py`) and `explain_prediction_full`/`explain_fast` (was in `model_explainer.py`) consolidated into `ExplainabilityOrchestrator` in `src/explainability/orchestrator.py`. Single `explain()` method owns the full lifecycle: SHAP → LIME → bias/emotion → attention rollout → propaganda → aggregation → consistency. Backward-compat shims kept in both files.

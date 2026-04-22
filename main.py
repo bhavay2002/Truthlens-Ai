@@ -403,6 +403,29 @@ def load_data():
     val_df = _read(VAL_PATH)
     test_df = _read(TEST_PATH)
 
+    # Label-range sanity probe — catches silently-corrupted label columns
+    # (e.g. stray "?", out-of-range categorical IDs). Warn-only: real-world
+    # datasets occasionally have ragged rows and we don't want to crash a
+    # 6h training run on an off-by-one in row 4 million.
+    _label_ranges = {
+        BIAS_LABEL: (0, 1),         # binary
+        PROPAGANDA_LABEL: (0, 1),    # binary
+        IDEOLOGY_LABEL: (0, 4),      # 5-way
+    }
+    for split_name, df in (("train", train_df), ("val", val_df), ("test", test_df)):
+        for col, (lo, hi) in _label_ranges.items():
+            if col not in df.columns:
+                continue
+            s = pd.to_numeric(df[col], errors="coerce")
+            n_nan = int(s.isna().sum())
+            n_oor = int(((s < lo) | (s > hi)).sum())
+            if n_nan or n_oor:
+                logger.warning(
+                    "Label sanity (%s.%s): %d NaN, %d out-of-range "
+                    "(expected [%d,%d]) — coerced via _safe_int_series",
+                    split_name, col, n_nan, n_oor, lo, hi,
+                )
+
     for df in (train_df, val_df, test_df):
         if "title" in df.columns and TEXT_COLUMN in df.columns:
             df[TEXT_COLUMN] = df["title"].fillna("").str.cat(
@@ -520,9 +543,12 @@ def _evaluate_on_test(model, test_loader, device) -> None:
             labels = batch.get("labels", {})
             outputs = raw(**inputs)
 
-            # The model returns outputs["bias"] = {"logits": ..., "loss": ...}
+            # The model returns outputs["bias"] = {"logits": ..., "loss": ...}.
             # Earlier code looked under outputs["heads"]["bias"] which never
             # existed — that produced "Test evaluation skipped: no bias logits".
+            # Per the output-contract audit: this is a HARD requirement.
+            # Missing bias logits is a model contract violation, not a
+            # data issue, so we fail fast instead of silently skipping.
             logits = None
             if isinstance(outputs, dict):
                 head = outputs.get("bias")
@@ -538,7 +564,13 @@ def _evaluate_on_test(model, test_loader, device) -> None:
                     elif torch.is_tensor(heads):
                         logits = heads
             if logits is None:
-                continue
+                raise RuntimeError(
+                    "Model output contract violation: no bias logits in "
+                    f"outputs (keys={list(outputs) if isinstance(outputs, dict) else type(outputs)}). "
+                    "The bias head must always emit logits — check that "
+                    "the checkpoint was loaded with strict=True and that "
+                    "bias_head weights are present."
+                )
 
             probs = torch.softmax(logits.float(), dim=-1)
             preds = probs.argmax(dim=-1)
