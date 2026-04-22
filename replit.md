@@ -16,6 +16,16 @@ TruthLens AI is a multi-layer AI platform for misinformation detection and news 
 - **CRIT-P2-1** (second-pass audit): `models/inference/predictor.py` `predict_batch` was collapsing N texts into 1 averaged result and returning a single dict — causing silent data loss and a `KeyError` crash in the `/batch-predict` fallback path. Fixed: per-sample tensor slicing after the batch forward pass; returns `[[real0,fake0], [real1,fake1], …]` as `app.py` expects.
 - **CRIT-P2-2** (second-pass audit): `src/models/inference/predictor.py` `build_fake_real_output` called `probs.argmax(dim=-1).item()` on a (N,2) tensor — raises `RuntimeError` for N>1. Fixed: `probs.mean(dim=0)` collapses batch first; `argmax` and `max` are then safe for any batch size.
 
+## Training-Log Audit (15-issue fix pass, April 2026)
+- **#1/#13 Resume key mismatch (showstopper)**: `CheckpointManager.save_checkpoint` saved under key `model` while `src/training/checkpointing.load_checkpoint` strictly required `model_state_dict`, so every resume silently failed and training restarted from scratch. Saver now writes the canonical keys (`model_state_dict`, `optimizer_state_dict`, `scheduler_state_dict`); `Trainer.load_checkpoint` accepts both old and new keys. `Trainer._attempt_resume` now **raises** when an on-disk checkpoint fails to load (escape hatch: `TRUTHLENS_ALLOW_RESUME_FAIL=1`).
+- **#3 Test-eval pipeline broken**: `main._evaluate_on_test` was reading `outputs["heads"]["bias"]`, but the model returns `outputs["bias"]["logits"]` — every batch produced `logits=None`, so `y_true` stayed empty and the run logged "Test evaluation skipped: no bias logits". Fixed with the correct path; old shape kept as backward-compat fallback.
+- **#7 `checkpoint-1000000001` artifacts**: best model now lives in `<ckpt_dir>/best/` (was already in place); plus checkpoint listing is now numerically sorted (`checkpoint-100` > `checkpoint-2`), removing latent "wrong latest resumed" risk.
+- **#14 Validator wired**: `validate_checkpoint` (encoder + head prefixes) is now invoked inside `CheckpointManager.save_checkpoint` so unusable payloads fail loudly *before* serialization.
+- **#4 DtypeWarning**: `main.load_data` pins explicit dtypes for text + label columns in addition to `low_memory=False`.
+- **#10 torch.compile**: passed `dynamic=True` to bound recompiles under the bucket sampler.
+- **#15 Reproducibility**: `set_seed` honors `TRUTHLENS_DETERMINISTIC=1` and the missing `Optional` import in `seed_utils` is fixed.
+- All 9 checkpoint-related tests pass (`tests/test_checkpoint_manager.py`, `tests/test_training_checkpointing.py`, `tests/test_checkpointing.py`).
+
 ## Deep ML Systems Audit (April 2026)
 - **Predictor key matching**: `_format_outputs` now uses `key.endswith("_logits")` instead of a loose `"logits" in key` substring match, so keys like `per_sample_logits_norm` are no longer mis-softmaxed.
 - **Model wrapper precision**: Removed unconditional `.half()` and `torch.compile(mode="max-autotune")` side effects. Both are now opt-in via `use_half_precision` and `compile_mode` constructor kwargs. Autocast uses the device's actual `device.type` (not hardcoded `"cuda"`) with bf16/fp16 chosen by capability.

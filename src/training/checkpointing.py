@@ -35,13 +35,26 @@ def list_checkpoints(checkpoint_root: Path | str) -> list[Path]:
     root = Path(checkpoint_root)
     if not root.exists() or not root.is_dir():
         return []
-    found: list[Path] = []
-    for entry in sorted(root.iterdir()):
-        if not entry.is_dir():
-            continue
-        if (entry / CHECKPOINT_FILE).exists() or (entry / f"{CHECKPOINT_FILE}.gz").exists():
-            found.append(entry)
-    return found
+
+    def _step_key(p: Path) -> tuple[int, int, str]:
+        # Sort HF-style ``checkpoint-<N>`` numerically (so checkpoint-100
+        # comes after checkpoint-2, not before). Non-numeric directories
+        # (e.g. "best/") sort first by a fallback tier so they never get
+        # picked as "the latest".
+        name = p.name
+        if name.startswith("checkpoint-"):
+            tail = name[len("checkpoint-"):]
+            if tail.isdigit():
+                return (1, int(tail), name)
+        return (0, 0, name)
+
+    candidates = [
+        entry for entry in root.iterdir()
+        if entry.is_dir()
+        and ((entry / CHECKPOINT_FILE).exists()
+             or (entry / f"{CHECKPOINT_FILE}.gz").exists())
+    ]
+    return sorted(candidates, key=_step_key)
 
 
 # =========================================================
@@ -124,6 +137,17 @@ def _resolve_checkpoint_path(checkpoint_dir: Path) -> Path:
         return pt
     if gz.exists():
         return gz
+
+    # Fallback: caller passed a checkpoint *root* (containing
+    # ``checkpoint-<step>/`` subdirs) instead of an individual checkpoint
+    # directory. Walk one level down and pick the latest valid one.
+    nested = list_checkpoints(checkpoint_dir)
+    if nested:
+        latest = nested[-1]
+        if (latest / CHECKPOINT_FILE).exists():
+            return latest / CHECKPOINT_FILE
+        if (latest / f"{CHECKPOINT_FILE}.gz").exists():
+            return latest / f"{CHECKPOINT_FILE}.gz"
 
     raise FileNotFoundError(
         f"No checkpoint found in {checkpoint_dir}. "
@@ -303,7 +327,10 @@ def load_checkpoint(
         raise RuntimeError("Invalid checkpoint format")
 
     if "model_state_dict" not in checkpoint:
-        raise RuntimeError("Checkpoint missing 'model_state_dict'")
+        # KeyError is the audit-mandated signal: callers (e.g. Trainer
+        # ._attempt_resume) distinguish "schema drift" from generic load
+        # failures by catching this specifically.
+        raise KeyError("Checkpoint missing 'model_state_dict'")
 
     state_dict = checkpoint["model_state_dict"]
 

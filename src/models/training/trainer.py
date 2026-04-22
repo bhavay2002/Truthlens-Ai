@@ -142,7 +142,9 @@ class Trainer:
             and not getattr(self.model, "_dynamo_compiled", False)
         ):
             try:
-                self.model = torch.compile(self.model)
+                # dynamic=True keeps recompiles bounded when the bucket
+                # sampler emits varying sequence lengths each batch.
+                self.model = torch.compile(self.model, dynamic=True)
                 try:
                     self.model._dynamo_compiled = True
                 except Exception:
@@ -227,7 +229,20 @@ class Trainer:
             logger.info("Resumed training from %s", latest)
 
         except Exception as exc:
-            logger.warning("Checkpoint resume skipped: %s", exc)
+            # An on-disk checkpoint exists but failed to load. Silently
+            # restarting from scratch (the previous behaviour) hides
+            # corruption / schema-drift bugs. Surface them loudly unless
+            # the operator opts out via TRUTHLENS_ALLOW_RESUME_FAIL=1.
+            logger.error(
+                "Checkpoint resume FAILED for %s: %s", latest, exc, exc_info=True,
+            )
+            if os.environ.get("TRUTHLENS_ALLOW_RESUME_FAIL", "0") != "1":
+                raise RuntimeError(
+                    f"Refusing to silently restart: checkpoint at {latest} "
+                    f"could not be resumed ({exc}). Set "
+                    f"TRUTHLENS_ALLOW_RESUME_FAIL=1 to override."
+                ) from exc
+            logger.warning("Checkpoint resume skipped (override active)")
 
     # ---------------------------------------------------------
 
@@ -382,7 +397,13 @@ class Trainer:
 
         state = self.checkpoint_manager.load_checkpoint(path)
 
-        model_state = state.get("model", state)
+        # Accept both the canonical "model_state_dict" key (audit-mandated)
+        # and the legacy "model" key from older CheckpointManager payloads.
+        model_state = (
+            state.get("model_state_dict")
+            or state.get("model")
+            or state
+        )
         target = self.model
         # torch.compile wraps the module; load into the original module.
         target = getattr(target, "_orig_mod", target)
@@ -392,15 +413,17 @@ class Trainer:
                 "load_checkpoint: missing=%d unexpected=%d", len(missing), len(unexpected),
             )
 
-        if "optimizer" in state and self.optimizer is not None:
+        opt_state = state.get("optimizer_state_dict") or state.get("optimizer")
+        if opt_state is not None and self.optimizer is not None:
             try:
-                self.optimizer.load_state_dict(state["optimizer"])
+                self.optimizer.load_state_dict(opt_state)
             except Exception as exc:
                 logger.warning("Optimizer state restore failed: %s", exc)
 
-        if "scheduler" in state and self.scheduler is not None:
+        sch_state = state.get("scheduler_state_dict") or state.get("scheduler")
+        if sch_state is not None and self.scheduler is not None:
             try:
-                self.scheduler.load_state_dict(state["scheduler"])
+                self.scheduler.load_state_dict(sch_state)
             except Exception as exc:
                 logger.warning("Scheduler state restore failed: %s", exc)
 

@@ -376,9 +376,32 @@ def load_data():
     # eliminates the "Columns (...) have mixed types" DtypeWarning that
     # otherwise leaks string/NaN values into label columns. Label columns
     # are subsequently coerced to numeric via _safe_int_series / _safe_float_series.
-    train_df = pd.read_csv(TRAIN_PATH, low_memory=False)
-    val_df = pd.read_csv(VAL_PATH, low_memory=False)
-    test_df = pd.read_csv(TEST_PATH, low_memory=False)
+    # We additionally pin dtypes for known label / text columns so pandas
+    # never has to guess on chunk boundaries.
+    _explicit_dtypes = {
+        TEXT_COLUMN: "string",
+        "title": "string",
+        BIAS_LABEL: "Int64",
+        IDEOLOGY_LABEL: "Int64",
+        PROPAGANDA_LABEL: "Int64",
+        "hero": "Int64",
+        "villain": "Int64",
+        "victim": "Int64",
+        "hero_entities": "string",
+        "villain_entities": "string",
+        "victim_entities": "string",
+        **{c: "Float64" for c in FRAME_COLUMNS},
+        **{c: "Float64" for c in EMOTION_COLUMNS},
+    }
+
+    def _read(path):
+        # dtype is best-effort: only columns that exist are pinned; pandas
+        # ignores unknown dtype keys silently.
+        return pd.read_csv(path, low_memory=False, dtype=_explicit_dtypes)
+
+    train_df = _read(TRAIN_PATH)
+    val_df = _read(VAL_PATH)
+    test_df = _read(TEST_PATH)
 
     for df in (train_df, val_df, test_df):
         if "title" in df.columns and TEXT_COLUMN in df.columns:
@@ -497,13 +520,23 @@ def _evaluate_on_test(model, test_loader, device) -> None:
             labels = batch.get("labels", {})
             outputs = raw(**inputs)
 
+            # The model returns outputs["bias"] = {"logits": ..., "loss": ...}
+            # Earlier code looked under outputs["heads"]["bias"] which never
+            # existed — that produced "Test evaluation skipped: no bias logits".
             logits = None
             if isinstance(outputs, dict):
-                heads = outputs.get("heads") or outputs.get("logits") or {}
-                if isinstance(heads, dict):
-                    logits = heads.get("bias")
-                elif torch.is_tensor(heads):
-                    logits = heads
+                head = outputs.get("bias")
+                if isinstance(head, dict):
+                    logits = head.get("logits")
+                elif torch.is_tensor(head):
+                    logits = head
+                else:
+                    # Backward-compat fallbacks for older output shapes.
+                    heads = outputs.get("heads") or outputs.get("logits") or {}
+                    if isinstance(heads, dict):
+                        logits = heads.get("bias")
+                    elif torch.is_tensor(heads):
+                        logits = heads
             if logits is None:
                 continue
 

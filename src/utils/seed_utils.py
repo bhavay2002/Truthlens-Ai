@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import os
 import random
+from typing import Optional
 
 import numpy as np
 import torch
@@ -41,7 +42,7 @@ logger = logging.getLogger(__name__)
 def set_seed(
     seed: int = 42,
     *,
-    deterministic: bool = False,
+    deterministic: Optional[bool] = None,
     enable_tf32: bool = True,
     matmul_precision: str = "high",
 ) -> None:
@@ -87,6 +88,11 @@ def set_seed(
     # -----------------------------
     # Backend Config
     # -----------------------------
+
+    # Resolve from env when caller didn't pass an explicit value.
+    # TRUTHLENS_DETERMINISTIC=1 forces reproducible (slower) mode.
+    if deterministic is None:
+        deterministic = os.environ.get("TRUTHLENS_DETERMINISTIC", "0") == "1"
 
     if deterministic:
         _set_deterministic()

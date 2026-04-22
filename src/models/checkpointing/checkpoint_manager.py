@@ -36,6 +36,8 @@ from typing import Optional, List, Dict, Any
 import torch
 import torch.distributed as dist
 
+from .validator import validate_checkpoint
+
 logger = logging.getLogger(__name__)
 
 
@@ -232,8 +234,14 @@ class CheckpointManager:
         state_dict = self._extract_state(model)
         state_dict = self._to_cpu(state_dict)
 
-        # C6: NaN/Inf guard before queueing for serialization
+        # C6: NaN/Inf guard + structural validation before queueing.
         self._validate_finite(state_dict)
+        try:
+            validate_checkpoint(state_dict)
+        except Exception as exc:
+            # Validator enforces required component prefixes (encoder + heads).
+            # A failure here means we'd save an unusable checkpoint.
+            raise RuntimeError(f"Checkpoint validation failed: {exc}") from exc
 
         # Deduplication
         if deduplicate:
@@ -243,23 +251,25 @@ class CheckpointManager:
                 return None
             self._last_hash = h
 
-        # C5: full audit-required payload
+        # C5: full audit-required payload.
+        # IMPORTANT: key is "model_state_dict" (not "model") so the resume
+        # loader in src/training/checkpointing.load_checkpoint can find it.
         _meta = metadata or {}
         payload: Dict[str, Any] = {
             "step": step,
             "epoch": _meta.get("epoch"),
             "loss": _meta.get("val_loss") or _meta.get("train_loss") or _meta.get("loss"),
             "config": _meta.get("config"),
-            "model": state_dict,
+            "model_state_dict": state_dict,
             "pytorch_version": torch.__version__,
         }
 
         if save_optimizer and optimizer is not None:
-            payload["optimizer"] = optimizer.state_dict()
+            payload["optimizer_state_dict"] = optimizer.state_dict()
 
         if scheduler is not None:
             try:
-                payload["scheduler"] = scheduler.state_dict()
+                payload["scheduler_state_dict"] = scheduler.state_dict()
             except Exception as exc:
                 logger.warning("Scheduler state_dict() failed: %s", exc)
 
