@@ -322,13 +322,15 @@ class Trainer:
                     )
                     if val_loss is not None and val_loss < best_val:
                         best_val = val_loss
-                        self.checkpoint_manager.save_checkpoint(
-                            step=10**9 + epoch,
-                            model=self.model,
-                            metadata={**metadata, "marker": "best"},
-                            save_every=1,
-                            deduplicate=False,
-                        )
+                        # Save the best model under a dedicated "best/" directory
+                        # instead of injecting a fake step like 10**9+epoch into
+                        # the step namespace (that produced the
+                        # `checkpoint-1000000001` artifacts seen in earlier runs
+                        # and corrupted step-based listing/sorting).
+                        try:
+                            self._save_best_model(epoch=epoch + 1, metadata=metadata)
+                        except Exception as exc:
+                            logger.error("Best-model save failed: %s", exc, exc_info=True)
                     self.checkpoint_manager.cleanup_old_checkpoints(max_checkpoints=3)
                 except Exception as exc:
                     logger.error(
@@ -407,6 +409,34 @@ class Trainer:
         return state
 
     # ---------------------------------------------------------
+
+    def _save_best_model(self, epoch: int, metadata: Dict[str, Any]) -> None:
+        """Persist the current model under ``<checkpoint_dir>/best/``.
+
+        Uses a dedicated subdirectory so the best-model marker never collides
+        with the step-numbered checkpoint namespace (which previously produced
+        `checkpoint-1000000001` artifacts and broke step-based sorting).
+        """
+        if self.checkpoint_manager is None:
+            return
+        best_dir = Path(self.config.checkpoint_dir) / "best"
+        best_dir.mkdir(parents=True, exist_ok=True)
+        best_file = best_dir / "checkpoint.pt"
+        target = getattr(self.model, "_orig_mod", self.model)
+        payload = {
+            "step": self.global_step,
+            "epoch": epoch,
+            "model": {k: v.detach().cpu() for k, v in target.state_dict().items()},
+            "metadata": {**metadata, "marker": "best"},
+            "pytorch_version": torch.__version__,
+        }
+        tmp = best_file.with_suffix(best_file.suffix + ".tmp")
+        torch.save(payload, tmp)
+        os.replace(tmp, best_file)
+        logger.info(
+            "[Best] Saved best-model checkpoint at epoch %d step %d -> %s",
+            epoch, self.global_step, best_file,
+        )
 
     def _save_emergency_checkpoint(self) -> None:
         """Best-effort checkpoint flush triggered by SIGINT / SIGTERM."""
@@ -527,7 +557,30 @@ class Trainer:
                 self.optimizer.zero_grad(set_to_none=True)
 
             if (step + 1) % self.config.log_every_steps == 0:
-                logger.info("step %d | loss %.6f", step + 1, float(raw_loss.detach().item()))
+                # Per-task breakdown surfaces multi-task imbalance / collapse
+                # (one head dominating, another flat-lining at 0). Falls back
+                # to the aggregate loss when the model isn't multi-task.
+                task_losses = None
+                if isinstance(outputs, dict):
+                    task_losses = outputs.get("task_losses") or outputs.get("loss_breakdown")
+                else:
+                    task_losses = getattr(outputs, "task_losses", None)
+
+                if isinstance(task_losses, dict) and task_losses:
+                    parts = " ".join(
+                        f"{name}={float(v.detach().item()):.4f}"
+                        for name, v in task_losses.items()
+                        if torch.is_tensor(v)
+                    )
+                    logger.info(
+                        "step %d | loss %.6f | %s",
+                        step + 1, float(raw_loss.detach().item()), parts,
+                    )
+                else:
+                    logger.info(
+                        "step %d | loss %.6f",
+                        step + 1, float(raw_loss.detach().item()),
+                    )
 
         # Final step fix — flush any partial accumulation window (M3)
         if step >= 0 and (step + 1) % self.config.gradient_accumulation_steps != 0:

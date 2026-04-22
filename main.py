@@ -247,9 +247,13 @@ class BucketSampler(Sampler):
 
 def load_data():
 
-    train_df = pd.read_csv(TRAIN_PATH)
-    val_df = pd.read_csv(VAL_PATH)
-    test_df = pd.read_csv(TEST_PATH)
+    # low_memory=False forces a single-pass type inference pass and
+    # eliminates the "Columns (...) have mixed types" DtypeWarning that
+    # otherwise leaks string/NaN values into label columns. Label columns
+    # are subsequently coerced to numeric via _safe_int_series / _safe_float_series.
+    train_df = pd.read_csv(TRAIN_PATH, low_memory=False)
+    val_df = pd.read_csv(VAL_PATH, low_memory=False)
+    test_df = pd.read_csv(TEST_PATH, low_memory=False)
 
     for df in (train_df, val_df, test_df):
         if "title" in df.columns and TEXT_COLUMN in df.columns:
