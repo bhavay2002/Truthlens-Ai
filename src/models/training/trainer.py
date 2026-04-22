@@ -340,6 +340,74 @@ class Trainer:
 
     # ---------------------------------------------------------
 
+    # ---------------------------------------------------------
+    # Public checkpoint API (Lightning-AI style external control)
+    # ---------------------------------------------------------
+
+    def save_checkpoint(self, tag: Optional[str] = None) -> Optional[Path]:
+        """Manually flush a checkpoint at the current global_step.
+
+        ``tag`` is recorded in the checkpoint metadata (e.g. "interrupt",
+        "manual", "preempt") so different save reasons are distinguishable
+        on disk and during analysis.
+        """
+        if self.checkpoint_manager is None:
+            logger.warning("save_checkpoint() called but no checkpoint_manager configured.")
+            return None
+        return self.checkpoint_manager.save_checkpoint(
+            step=self.global_step,
+            model=self.model,
+            optimizer=self.optimizer,
+            scheduler=self.scheduler,
+            metadata={
+                "step": self.global_step,
+                "epoch": None,
+                "type": tag or "manual",
+            },
+            save_optimizer=True,
+            save_every=1,
+            deduplicate=False,
+        )
+
+    def load_checkpoint(self, path: str | Path, strict: bool = True) -> Dict[str, Any]:
+        """Restore model + optimizer + scheduler + global_step from ``path``.
+
+        Accepts either a checkpoint directory (``checkpoint-1234/``) or the
+        ``checkpoint.pt`` file directly.
+        """
+        if self.checkpoint_manager is None:
+            self.checkpoint_manager = CheckpointManager(Path(self.config.checkpoint_dir or "."))
+
+        state = self.checkpoint_manager.load_checkpoint(path)
+
+        model_state = state.get("model", state)
+        target = self.model
+        # torch.compile wraps the module; load into the original module.
+        target = getattr(target, "_orig_mod", target)
+        missing, unexpected = target.load_state_dict(model_state, strict=strict)
+        if missing or unexpected:
+            logger.warning(
+                "load_checkpoint: missing=%d unexpected=%d", len(missing), len(unexpected),
+            )
+
+        if "optimizer" in state and self.optimizer is not None:
+            try:
+                self.optimizer.load_state_dict(state["optimizer"])
+            except Exception as exc:
+                logger.warning("Optimizer state restore failed: %s", exc)
+
+        if "scheduler" in state and self.scheduler is not None:
+            try:
+                self.scheduler.load_state_dict(state["scheduler"])
+            except Exception as exc:
+                logger.warning("Scheduler state restore failed: %s", exc)
+
+        self.global_step = int(state.get("step", self.global_step) or 0)
+        logger.info("Loaded checkpoint from %s @ step %d", path, self.global_step)
+        return state
+
+    # ---------------------------------------------------------
+
     def _save_emergency_checkpoint(self) -> None:
         """Best-effort checkpoint flush triggered by SIGINT / SIGTERM."""
         if self.checkpoint_manager is None:

@@ -1,0 +1,215 @@
+import os
+import sys
+import math
+import signal
+import logging
+from pathlib import Path
+
+import torch
+import pandas as pd
+from transformers import AutoTokenizer
+
+from src.utils.seed_utils import set_seed
+from src.utils.device_utils import get_device
+from src.utils.logging_utils import configure_logging
+
+from src.models.multitask.multitask_truthlens_model import (
+    MultiTaskTruthLensConfig,
+    MultiTaskTruthLensModel,
+)
+
+from src.training.optimizer_factory import create_optimizer
+from src.training.scheduler_factory import create_scheduler
+from src.models.training.trainer import Trainer, TrainerConfig
+
+
+# =====================================================
+# 🔧 BASE PATH (AUTO-DETECT PROJECT ROOT)
+# =====================================================
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+DATA_DIR = Path(os.environ.get("TRUTHLENS_DATA_DIR", PROJECT_ROOT / "data"))
+CHECKPOINT_DIR = Path(os.environ.get("TRUTHLENS_CHECKPOINT_DIR", PROJECT_ROOT / "artifacts/checkpoints"))
+MODEL_DIR = Path(os.environ.get("TRUTHLENS_MODEL_DIR", PROJECT_ROOT / "artifacts/model"))
+
+TRAIN_PATH = DATA_DIR / "unified_dataset_train.csv"
+VAL_PATH   = DATA_DIR / "unified_dataset_val.csv"
+TEST_PATH  = DATA_DIR / "unified_dataset_test.csv"
+
+CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# =====================================================
+# 🔧 LOGGING
+# =====================================================
+
+configure_logging()
+logger = logging.getLogger(__name__)
+
+
+# =====================================================
+# 📦 DATA LOADER
+# =====================================================
+
+def load_data():
+    for p in [TRAIN_PATH, VAL_PATH, TEST_PATH]:
+        if not p.exists():
+            raise FileNotFoundError(f"Missing dataset: {p}")
+
+    train = pd.read_csv(TRAIN_PATH)
+    val   = pd.read_csv(VAL_PATH)
+    test  = pd.read_csv(TEST_PATH)
+
+    logger.info(f"Loaded data: {len(train)} / {len(val)} / {len(test)}")
+    return train, val, test
+
+
+# =====================================================
+# 💾 CHECKPOINT UTILS
+# =====================================================
+
+def get_latest_checkpoint():
+    ckpts = sorted(CHECKPOINT_DIR.glob("*.pt"))
+    return ckpts[-1] if ckpts else None
+
+
+def validate_model(model):
+    for k, v in model.state_dict().items():
+        if torch.is_tensor(v) and not torch.isfinite(v).all():
+            raise RuntimeError(f"Non-finite values in {k}")
+
+
+# =====================================================
+# ⚠️ INTERRUPT HANDLER
+# =====================================================
+
+def register_interrupt_handler(trainer):
+    def handle_interrupt(signum, frame):
+        logger.warning("⚠️ Interrupt detected — saving checkpoint...")
+        try:
+            trainer.save_checkpoint(tag="interrupt")
+        except Exception as e:
+            logger.error(f"Checkpoint failed: {e}")
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, handle_interrupt)
+    signal.signal(signal.SIGTERM, handle_interrupt)
+
+
+# =====================================================
+# 🚀 MAIN
+# =====================================================
+
+def main():
+
+    logger.info("=== TruthLens Lightning Training ===")
+
+    set_seed(42)
+
+    device = get_device(prefer_gpu=True)
+    logger.info(f"Device: {device}")
+
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+
+    # ---------------------------
+    # DATA
+    # ---------------------------
+    train_df, val_df, test_df = load_data()
+
+    tokenizer = AutoTokenizer.from_pretrained("roberta-base")
+
+    from src.data.dataset import TruthLensDataset
+
+    train_ds = TruthLensDataset(train_df, tokenizer)
+    val_ds   = TruthLensDataset(val_df, tokenizer)
+
+    train_loader = torch.utils.data.DataLoader(
+        train_ds,
+        batch_size=16,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=torch.cuda.is_available()
+    )
+
+    val_loader = torch.utils.data.DataLoader(
+        val_ds,
+        batch_size=16,
+        num_workers=4,
+        pin_memory=torch.cuda.is_available()
+    )
+
+    # ---------------------------
+    # MODEL
+    # ---------------------------
+    config = MultiTaskTruthLensConfig(model_name="roberta-base")
+    model = MultiTaskTruthLensModel(config).to(device)
+
+    # ---------------------------
+    # OPTIMIZER
+    # ---------------------------
+    optimizer = create_optimizer(model, "adamw", 2e-5, 0.01)
+
+    total_steps = 10000
+
+    scheduler = create_scheduler(
+        optimizer,
+        "linear",
+        num_training_steps=total_steps,
+        num_warmup_steps=int(0.1 * total_steps)
+    )
+
+    # ---------------------------
+    # TRAINER CONFIG
+    # ---------------------------
+    trainer_config = TrainerConfig(
+        epochs=3,
+        gradient_accumulation_steps=2,
+        device=str(device),
+        use_amp=(device.type == "cuda"),
+        amp_dtype="bf16",  # best for A100
+        checkpoint_dir=str(CHECKPOINT_DIR),
+        checkpoint_every_steps=int(os.environ.get("TRUTHLENS_CHECKPOINT_EVERY_STEPS", "4000")),
+        log_every_steps=100,
+    )
+
+    trainer = Trainer(
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        config=trainer_config,
+    )
+
+    # ---------------------------
+    # RESUME
+    # ---------------------------
+    ckpt = get_latest_checkpoint()
+    if ckpt:
+        logger.info(f"Resuming from {ckpt}")
+        trainer.load_checkpoint(str(ckpt), strict=True)
+
+    # ---------------------------
+    # INTERRUPT SAFE
+    # ---------------------------
+    register_interrupt_handler(trainer)
+
+    # ---------------------------
+    # TRAIN
+    # ---------------------------
+    trainer.train(train_loader, val_loader)
+
+    # ---------------------------
+    # FINAL SAVE
+    # ---------------------------
+    validate_model(model)
+
+    model.save_pretrained(MODEL_DIR)
+    tokenizer.save_pretrained(MODEL_DIR)
+
+    logger.info("✅ Training complete")
+
+
+if __name__ == "__main__":
+    main()
