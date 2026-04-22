@@ -14,13 +14,15 @@ import hashlib
 import logging
 import os
 import math
+import random
 import shutil
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Sampler
 from transformers import AutoTokenizer
 
 from src.evaluation.evaluate_model import evaluate
@@ -104,80 +106,139 @@ EMOTION_COLUMNS = [f"emotion_{i}" for i in range(len(EMOTION_LABELS))]
 
 
 # -----------------------------------------------------
-# Dataset
+# Dataset (pre-tokenized, tensor-ready, length-aware)
 # -----------------------------------------------------
-class TruthLensMultiTaskDataset(Dataset):
+def _safe_int_series(s, default=0):
+    return pd.to_numeric(s, errors="coerce").fillna(default).astype(np.int64)
 
-    def __init__(self, df, max_length=256, text_column="text"):
-        self.df = df.reset_index(drop=True)
+
+def _safe_float_series(s, default=0.0):
+    return pd.to_numeric(s, errors="coerce").fillna(default).astype(np.float32)
+
+
+def _entity_series_to_binary(s) -> np.ndarray:
+    if s is None:
+        return None
+    out = s.fillna("").astype(str).str.strip().ne("").astype(np.int64).to_numpy()
+    return out
+
+
+class TruthLensMultiTaskDataset(Dataset):
+    """Pre-tokenizes texts and pre-builds label tensors at construction time.
+
+    Removes per-batch tokenization and per-batch Python loops in collate.
+    """
+
+    def __init__(self, df, tokenizer, max_length=256, text_column="text"):
+        df = df.reset_index(drop=True)
         self.max_length = max_length
         self.text_column = text_column
 
+        # Pre-tokenize the entire split (no padding here — handled by collator)
+        texts = df[text_column].fillna("").astype(str).tolist()
+        enc = tokenizer(
+            texts,
+            padding=False,
+            truncation=True,
+            max_length=max_length,
+        )
+        self.input_ids = enc["input_ids"]
+        self.attention_mask = enc["attention_mask"]
+        self.lengths = [len(ids) for ids in self.input_ids]
+
+        # Pre-build label tensors (vectorized via pandas / numpy)
+        bias = _safe_int_series(df.get(BIAS_LABEL, 0)).to_numpy()
+        ideology = _safe_int_series(df.get(IDEOLOGY_LABEL, 1), default=1).to_numpy()
+        propaganda = _safe_int_series(df.get(PROPAGANDA_LABEL, 0)).to_numpy()
+
+        hero_lbl = _safe_int_series(df.get("hero", 0)).to_numpy()
+        villain_lbl = _safe_int_series(df.get("villain", 0)).to_numpy()
+        victim_lbl = _safe_int_series(df.get("victim", 0)).to_numpy()
+
+        hero_ent = _entity_series_to_binary(df["hero_entities"]) if "hero_entities" in df else np.zeros(len(df), dtype=np.int64)
+        villain_ent = _entity_series_to_binary(df["villain_entities"]) if "villain_entities" in df else np.zeros(len(df), dtype=np.int64)
+        victim_ent = _entity_series_to_binary(df["victim_entities"]) if "victim_entities" in df else np.zeros(len(df), dtype=np.int64)
+
+        narrative = np.stack(
+            [
+                np.maximum(hero_lbl, hero_ent),
+                np.maximum(villain_lbl, villain_ent),
+                np.maximum(victim_lbl, victim_ent),
+            ],
+            axis=1,
+        ).astype(np.float32)
+
+        frame = np.stack(
+            [_safe_float_series(df.get(c, 0)).to_numpy() for c in FRAME_COLUMNS],
+            axis=1,
+        ).astype(np.float32)
+
+        emotion = np.stack(
+            [_safe_float_series(df.get(c, 0)).to_numpy() for c in EMOTION_COLUMNS],
+            axis=1,
+        ).astype(np.float32)
+
+        self.labels_bias = torch.from_numpy(bias).long()
+        self.labels_ideology = torch.from_numpy(ideology).long()
+        self.labels_propaganda = torch.from_numpy(propaganda).long()
+        self.labels_narrative = torch.from_numpy(narrative)
+        self.labels_narrative_frame = torch.from_numpy(frame)
+        self.labels_emotion = torch.from_numpy(emotion)
+
     def __len__(self):
-        return len(self.df)
-
-    def _safe_int(self, value, default=0):
-        try:
-            if pd.isna(value):
-                return default
-            return int(float(value))
-        except Exception:
-            return default
-
-    def _safe_float(self, value, default=0.0):
-        try:
-            if pd.isna(value):
-                return default
-            return float(value)
-        except Exception:
-            return default
-
-    def _entity_to_binary(self, entity_field) -> int:
-        if entity_field is None:
-            return 0
-        if isinstance(entity_field, str) and entity_field.strip() == "":
-            return 0
-        try:
-            if pd.isna(entity_field):
-                return 0
-        except Exception:
-            pass
-        return 1
+        return len(self.input_ids)
 
     def __getitem__(self, idx):
-
-        row = self.df.iloc[idx]
-        text = str(row[self.text_column])
-
-        labels = {
-            "bias": self._safe_int(row.get(BIAS_LABEL, 0)),
-            "ideology": self._safe_int(row.get(IDEOLOGY_LABEL, 1)),
-            "propaganda": self._safe_int(row.get(PROPAGANDA_LABEL, 0)),
-            "narrative": [
-                float(max(
-                    self._safe_int(row.get("hero", 0)),
-                    self._entity_to_binary(row.get("hero_entities")),
-                )),
-                float(max(
-                    self._safe_int(row.get("villain", 0)),
-                    self._entity_to_binary(row.get("villain_entities")),
-                )),
-                float(max(
-                    self._safe_int(row.get("victim", 0)),
-                    self._entity_to_binary(row.get("victim_entities")),
-                )),
-            ],
-            "narrative_frame": [self._safe_float(row.get(c, 0)) for c in FRAME_COLUMNS],
-            "emotion": [self._safe_float(row.get(c, 0)) for c in EMOTION_COLUMNS],
-        }
-
         return {
-            "text": text,
-            "labels": labels,
-            "hero_entities": row.get("hero_entities", ""),
-            "villain_entities": row.get("villain_entities", ""),
-            "victim_entities": row.get("victim_entities", ""),
+            "input_ids": self.input_ids[idx],
+            "attention_mask": self.attention_mask[idx],
+            "labels_bias": self.labels_bias[idx],
+            "labels_ideology": self.labels_ideology[idx],
+            "labels_propaganda": self.labels_propaganda[idx],
+            "labels_narrative": self.labels_narrative[idx],
+            "labels_narrative_frame": self.labels_narrative_frame[idx],
+            "labels_emotion": self.labels_emotion[idx],
         }
+
+
+# -----------------------------------------------------
+# Length-bucketed batch sampler
+# -----------------------------------------------------
+class BucketSampler(Sampler):
+    """Groups examples of similar length into batches to minimize padding."""
+
+    def __init__(self, lengths, batch_size, shuffle=True, bucket_size=100):
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+
+        indices = list(range(len(lengths)))
+        indices.sort(key=lambda i: lengths[i])
+
+        self.buckets = [
+            indices[i:i + bucket_size]
+            for i in range(0, len(indices), bucket_size)
+        ]
+
+    def __iter__(self):
+        buckets = [list(b) for b in self.buckets]
+        if self.shuffle:
+            for b in buckets:
+                random.shuffle(b)
+            random.shuffle(buckets)
+
+        batch = []
+        for bucket in buckets:
+            for idx in bucket:
+                batch.append(idx)
+                if len(batch) == self.batch_size:
+                    yield batch
+                    batch = []
+        if batch:
+            yield batch
+
+    def __len__(self):
+        total = sum(len(b) for b in self.buckets)
+        return math.ceil(total / self.batch_size)
 
 # -----------------------------------------------------
 # Load Data
@@ -382,47 +443,61 @@ def main():
 
         train_df, val_df, test_df = load_data()
 
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        tok = tokenizer
+        tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+
+        # Vectorized collate: pad input_ids/attention_mask to multiple of 8
+        # (Tensor Core friendly), then stack pre-built label tensors.
+        _LABEL_KEYS = (
+            "labels_bias",
+            "labels_ideology",
+            "labels_propaganda",
+            "labels_narrative",
+            "labels_narrative_frame",
+            "labels_emotion",
+        )
 
         def collate_fn(batch):
-            texts = [item["text"] for item in batch]
-            enc = tok(
-                texts,
+            features = [
+                {"input_ids": b["input_ids"], "attention_mask": b["attention_mask"]}
+                for b in batch
+            ]
+            enc = tokenizer.pad(
+                features,
                 padding=True,
-                truncation=True,
-                max_length=max_length,
+                pad_to_multiple_of=8,
                 return_tensors="pt",
             )
-
-            batched_labels = {}
-            label_keys = list(batch[0]["labels"])
-            for key in label_keys:
-                values = [item["labels"][key] for item in batch]
-                if isinstance(values[0], (list, tuple)):
-                    batched_labels[key] = torch.tensor(values, dtype=torch.float)
-                elif isinstance(values[0], float):
-                    batched_labels[key] = torch.tensor(values, dtype=torch.float)
-                else:
-                    batched_labels[key] = torch.tensor(values, dtype=torch.long)
-
-            enc["labels"] = batched_labels
-            return dict(enc)
+            labels = {
+                "bias": torch.stack([b["labels_bias"] for b in batch]),
+                "ideology": torch.stack([b["labels_ideology"] for b in batch]),
+                "propaganda": torch.stack([b["labels_propaganda"] for b in batch]),
+                "narrative": torch.stack([b["labels_narrative"] for b in batch]),
+                "narrative_frame": torch.stack([b["labels_narrative_frame"] for b in batch]),
+                "emotion": torch.stack([b["labels_emotion"] for b in batch]),
+            }
+            return {
+                "input_ids": enc["input_ids"],
+                "attention_mask": enc["attention_mask"],
+                "labels": labels,
+            }
 
         train_dataset = TruthLensMultiTaskDataset(
             train_df,
+            tokenizer=tokenizer,
             max_length=max_length,
             text_column=TEXT_COLUMN,
         )
 
         val_dataset = TruthLensMultiTaskDataset(
             val_df,
+            tokenizer=tokenizer,
             max_length=max_length,
             text_column=TEXT_COLUMN,
         )
 
         test_dataset = TruthLensMultiTaskDataset(
             test_df,
+            tokenizer=tokenizer,
             max_length=max_length,
             text_column=TEXT_COLUMN,
         )
@@ -430,10 +505,17 @@ def main():
         _num_workers = 2 if _pin else 0
         _persistent = bool(_num_workers)
 
-        train_loader = DataLoader(
-            train_dataset,
+        # Length-bucketed sampler eliminates padding waste on the train loader.
+        train_sampler = BucketSampler(
+            train_dataset.lengths,
             batch_size=batch_size,
             shuffle=True,
+            bucket_size=max(100, batch_size * 8),
+        )
+
+        train_loader = DataLoader(
+            train_dataset,
+            batch_sampler=train_sampler,
             collate_fn=collate_fn,
             num_workers=_num_workers,
             pin_memory=_pin,
@@ -468,8 +550,13 @@ def main():
         model = MultiTaskTruthLensModel(config=model_config)
         model = model.to(device)
 
-        if hasattr(model, "encoder") and hasattr(model.encoder, "gradient_checkpointing_enable"):
-            model.encoder.gradient_checkpointing_enable()
+        # Gradient checkpointing trades ~15-25% speed for lower memory.
+        # Default OFF (faster); enable via TRUTHLENS_GRADIENT_CHECKPOINTING=1
+        # if you hit OOM.
+        if os.environ.get("TRUTHLENS_GRADIENT_CHECKPOINTING", "0") == "1":
+            if hasattr(model, "encoder") and hasattr(model.encoder, "gradient_checkpointing_enable"):
+                model.encoder.gradient_checkpointing_enable()
+                logger.info("Gradient checkpointing ENABLED (memory-saving mode)")
 
         if hasattr(model, "config") and hasattr(model.config, "use_flash_attention"):
             model.config.use_flash_attention = True
@@ -521,9 +608,13 @@ def main():
             gradient_accumulation_steps=gradient_accumulation_steps,
             device=str(device),
             use_amp=(device.type == "cuda"),
-            amp_dtype="bf16",
+            # fp16 enables Tensor Core matmul on T4; bf16 has no Tensor Core
+            # acceleration on T4. Override via TRUTHLENS_AMP_DTYPE=bf16 on Ampere+.
+            amp_dtype=os.environ.get("TRUTHLENS_AMP_DTYPE", "fp16"),
             checkpoint_dir=str(SETTINGS.paths.models_dir / "checkpoints"),
             checkpoint_every_steps=0,  # epoch-based saves handled in Trainer.train
+            log_every_steps=100,
+            validate_every_n_epochs=int(os.environ.get("TRUTHLENS_VALIDATE_EVERY", "2")),
         )
 
         trainer = Trainer(
