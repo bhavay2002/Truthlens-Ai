@@ -32,6 +32,8 @@ from __future__ import annotations
 import inspect
 import logging
 import os
+import signal
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Any, List
@@ -240,6 +242,49 @@ class Trainer:
 
         validate_every = max(1, int(getattr(self.config, "validate_every_n_epochs", 1)))
 
+        # ---------------------------------------------------------
+        # Interrupt handling (Lightning AI / preemption / Ctrl+C)
+        # Flush a checkpoint before the process dies.
+        # ---------------------------------------------------------
+        previous_handlers: Dict[int, Any] = {}
+        interrupt_state = {"handled": False}
+
+        def _handle_interrupt(signum, _frame):
+            if interrupt_state["handled"]:
+                return
+            interrupt_state["handled"] = True
+            logger.warning(
+                "Interrupt %s received - saving emergency checkpoint at step %d",
+                signum, self.global_step,
+            )
+            self._save_emergency_checkpoint()
+            sys.exit(0)
+
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                previous_handlers[sig] = signal.signal(sig, _handle_interrupt)
+            except (ValueError, OSError):
+                # signal.signal only works in the main thread; skip otherwise.
+                pass
+
+        try:
+            return self._train_loop(train_loader, val_loader, history, best_val, validate_every)
+        finally:
+            for sig, prev in previous_handlers.items():
+                try:
+                    signal.signal(sig, prev)
+                except (ValueError, OSError):
+                    pass
+
+    def _train_loop(
+        self,
+        train_loader: DataLoader,
+        val_loader: Optional[DataLoader],
+        history: Dict[str, List[float]],
+        best_val: float,
+        validate_every: int,
+    ) -> Dict[str, List[float]]:
+
         for epoch in range(self.config.epochs):
 
             logger.info("Epoch %d/%d", epoch + 1, self.config.epochs)
@@ -294,6 +339,30 @@ class Trainer:
         return history
 
     # ---------------------------------------------------------
+
+    def _save_emergency_checkpoint(self) -> None:
+        """Best-effort checkpoint flush triggered by SIGINT / SIGTERM."""
+        if self.checkpoint_manager is None:
+            logger.warning("[Emergency Checkpoint] No checkpoint_manager configured; skipping.")
+            return
+        try:
+            self.checkpoint_manager.save_checkpoint(
+                step=self.global_step,
+                model=self.model,
+                optimizer=self.optimizer,
+                scheduler=self.scheduler,
+                metadata={
+                    "step": self.global_step,
+                    "epoch": None,
+                    "type": "interrupt",
+                },
+                save_optimizer=True,
+                save_every=1,
+                deduplicate=False,
+            )
+            logger.info("[Emergency Checkpoint] Saved at step %d", self.global_step)
+        except Exception as exc:  # noqa: BLE001 - we are about to exit
+            logger.error("[Emergency Checkpoint] Failed: %s", exc, exc_info=True)
 
     def _train_epoch(self, dataloader: DataLoader) -> float:
 
