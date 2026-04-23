@@ -43,6 +43,15 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from ..checkpointing.checkpoint_manager import CheckpointManager
+from src.training.instrumentation import (
+    LossTracker,
+    LossStats,
+    GradTracker,
+    SpikeDetector,
+    detect_grad_anomaly,
+    check_optimizer,
+    dump_batch,
+)
 from src.training.checkpointing import (
     list_checkpoints as list_training_checkpoints,
     resume_training as resume_training_checkpoint,
@@ -192,6 +201,24 @@ class Trainer:
             self._forward_accepts_kwargs = True
 
         self.global_step = 0
+
+        # Defensive training instrumentation (loss/grad tracking + spike
+        # detection + post-mortem batch dumps). Tasks are discovered lazily
+        # in _train_epoch from the model's task_losses dict; we initialize
+        # empty here so single-task models incur no overhead.
+        self._loss_tracker = LossTracker(tasks=(), alpha=0.1)
+        self._loss_stats = LossStats(tasks=(), window=50)
+        self._grad_tracker = GradTracker(window=50)
+        self._spike_detector = SpikeDetector(
+            threshold=float(os.environ.get("TRUTHLENS_SPIKE_RATIO", "2.5")),
+        )
+        self._debug_dump_dir = os.environ.get(
+            "TRUTHLENS_DEBUG_DUMP_DIR",
+            str(Path(getattr(config, "checkpoint_dir", ".") or ".") / "debug_dumps"),
+        )
+        # Cap dumps so a sustained-spike run doesn't fill the disk.
+        self._max_debug_dumps = int(os.environ.get("TRUTHLENS_MAX_DEBUG_DUMPS", "20"))
+        self._debug_dump_count = 0
 
         # Checkpoint manager
         self.checkpoint_manager: Optional[CheckpointManager] = None
@@ -698,46 +725,95 @@ class Trainer:
             step_count += 1
             self.global_step += 1
 
-            # Spike detection on the raw (un-divided) loss. Compare to the
-            # running mean so the threshold scales with the task difficulty.
-            if step_count >= 10:
-                _running_mean = float((loss_accum / step_count).detach().item())
-                _raw = float(raw_loss.detach().item())
-                if _running_mean > 0 and _raw > _spike_ratio * _running_mean:
-                    # Per-task breakdown + sample input identifier so we can
-                    # actually find which head and which batch is causing
-                    # the spike (loss-stability audit §10).
-                    _per_task = ""
-                    if isinstance(outputs, dict):
-                        _tl = outputs.get("task_losses") or outputs.get("loss_breakdown")
-                        if isinstance(_tl, dict) and _tl:
-                            _per_task = " | " + " ".join(
-                                f"{n}={float(v.detach().item()):.3f}"
-                                for n, v in _tl.items()
-                                if torch.is_tensor(v)
-                            )
-                    _ids = batch.get("input_ids") if isinstance(batch, dict) else None
-                    _sample_id = (
-                        int(_ids[0, :8].sum().item())
-                        if torch.is_tensor(_ids) and _ids.numel() > 0
-                        else "?"
-                    )
-                    logger.warning(
-                        "Loss spike at step %d: raw=%.4f vs running_mean=%.4f "
-                        "(ratio=%.1fx) batch_sig=%s%s",
-                        self.global_step, _raw, _running_mean,
-                        _raw / max(_running_mean, 1e-9),
-                        _sample_id, _per_task,
-                    )
-                if isinstance(outputs, dict):
-                    _tl_dom = outputs.get("task_losses") or outputs.get("loss_breakdown")
-                    _dom_msg = self._task_loss_dominance_summary(_tl_dom)
-                    if _dom_msg is not None:
-                        logger.warning(
-                            "Task loss domination at step %d | %s",
-                            self.global_step,
-                            _dom_msg,
+            # Defensive instrumentation: per-task EMA + windowed variance +
+            # hybrid (ratio | z-score) spike detection. When a spike fires
+            # we dump the offending batch (inputs/labels/logits/losses/grads)
+            # so root cause analysis is possible after the run completes.
+            _per_task_losses: Dict[str, float] = {}
+            if isinstance(outputs, dict):
+                _tl = outputs.get("task_losses") or outputs.get("loss_breakdown")
+                if isinstance(_tl, dict):
+                    _per_task_losses = {
+                        n: float(v.detach().item())
+                        for n, v in _tl.items()
+                        if torch.is_tensor(v)
+                    }
+            # Always include the aggregate so single-task models still get
+            # spike detection without a task_losses dict.
+            _per_task_losses.setdefault("_total", float(raw_loss.detach().item()))
+
+            try:
+                _ema = self._loss_tracker.update(_per_task_losses)
+                _stats = self._loss_stats.update(_per_task_losses)
+            except ValueError as _exc:
+                # Non-finite loss slipped past the earlier isfinite check
+                # (shouldn't happen, but treat as spike if it does).
+                logger.error("LossTracker rejected step %d: %s", self.global_step, _exc)
+                _ema, _stats = {}, {}
+
+            # Detect — fire on the worst offender so we don't dump 6 times
+            # for the same batch.
+            _spiked_task: Optional[str] = None
+            for _task, _v in _per_task_losses.items():
+                if _task not in _ema:
+                    continue
+                if self._spike_detector.detect(
+                    _v, _ema[_task], _stats.get(_task, {}).get("var"),
+                ):
+                    _spiked_task = _task
+                    break
+
+            if _spiked_task is not None and step_count >= 10:
+                _ids = batch.get("input_ids") if isinstance(batch, dict) else None
+                _sig = (
+                    int(_ids[0, :8].sum().item())
+                    if torch.is_tensor(_ids) and _ids.numel() > 0
+                    else "?"
+                )
+                logger.warning(
+                    "Loss spike at step %d in task=%s: raw=%.4f ema=%.4f var=%.4f "
+                    "batch_sig=%s | per_task=%s",
+                    self.global_step, _spiked_task,
+                    _per_task_losses[_spiked_task],
+                    _ema[_spiked_task],
+                    _stats.get(_spiked_task, {}).get("var", 0.0),
+                    _sig,
+                    {k: round(v, 3) for k, v in _per_task_losses.items()},
+                )
+                if self._debug_dump_count < self._max_debug_dumps:
+                    try:
+                        _logits = {}
+                        if isinstance(outputs, dict):
+                            for _k, _v in outputs.items():
+                                if isinstance(_v, dict) and torch.is_tensor(_v.get("logits")):
+                                    _logits[_k] = _v["logits"]
+                        _dump_path = dump_batch(
+                            self._debug_dump_dir,
+                            {
+                                "step": self.global_step,
+                                "spiked_task": _spiked_task,
+                                "inputs": batch if isinstance(batch, dict) else {"batch": batch},
+                                "logits": _logits,
+                                "losses": _per_task_losses,
+                                "smoothed_losses": _ema,
+                                "loss_stats": _stats,
+                                "lr": check_optimizer(self.optimizer),
+                            },
                         )
+                        self._debug_dump_count += 1
+                        logger.warning("Spike batch dumped to %s", _dump_path)
+                    except Exception as _exc:  # noqa: BLE001
+                        logger.warning("Spike batch dump failed: %s", _exc)
+
+            if isinstance(outputs, dict):
+                _tl_dom = outputs.get("task_losses") or outputs.get("loss_breakdown")
+                _dom_msg = self._task_loss_dominance_summary(_tl_dom)
+                if _dom_msg is not None:
+                    logger.warning(
+                        "Task loss domination at step %d | %s",
+                        self.global_step,
+                        _dom_msg,
+                    )
 
             # -------------------------------------------------
             # STEP CHECKPOINTING (every N global steps)
@@ -785,16 +861,33 @@ class Trainer:
                     self.config.max_grad_norm,
                 )
 
-                # Periodic grad-norm visibility: surfaces exploding-grad
-                # patterns BEFORE they cause loss spikes.
-                if self.global_step % max(1, self.config.log_every_steps) == 0:
-                    try:
-                        logger.info(
-                            "step %d | grad_norm(pre-clip)=%.4f",
-                            self.global_step, float(total_norm.detach().item()),
+                # GradTracker keeps a windowed history (mean / variance per
+                # parameter) and detect_grad_anomaly classifies the global
+                # norm as EXPLODING / VANISHING / NORMAL. Anomalies are
+                # always logged; the periodic info line keeps run-time
+                # visibility cheap.
+                try:
+                    _grad_record = self._grad_tracker.update(self.model)
+                    _anomaly = detect_grad_anomaly(_grad_record)
+                    if _anomaly != "NORMAL":
+                        logger.warning(
+                            "Gradient anomaly at step %d: %s "
+                            "(total_norm=%.4f mean_norm=%.4f mean_var=%.4g)",
+                            self.global_step, _anomaly,
+                            _grad_record["total_norm"],
+                            _grad_record["mean_norm"],
+                            _grad_record["mean_var"],
                         )
-                    except Exception:
-                        pass
+                    if self.global_step % max(1, self.config.log_every_steps) == 0:
+                        logger.info(
+                            "step %d | grad_norm(pre-clip)=%.4f mean=%.4f var=%.4g",
+                            self.global_step,
+                            _grad_record["total_norm"],
+                            _grad_record["mean_norm"],
+                            _grad_record["mean_var"],
+                        )
+                except Exception:
+                    pass
 
                 if not torch.isfinite(total_norm):
                     logger.warning(

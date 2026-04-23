@@ -1,0 +1,353 @@
+You’re building exactly the kind of **defensive training instrumentation layer** that separates fragile pipelines from production-grade systems. I’ll tighten this into a **fully integrated, failure-resilient subsystem** with correct math, edge-case handling, and hooks you can drop into TruthLens.
+
+---
+
+# ⚙️ PHASE 1 — Loss Tracking (Correct + Production-Ready)
+
+### 🔴 Issues in your current version
+
+* Hardcoded `0.9 / 0.1` ignores `alpha`
+* No **bias correction** → EMA is skewed early
+* No **NaN/inf protection**
+* No **per-step tracking (needed for spike timing)**
+
+---
+
+## ✅ Fixed + Extended Version
+
+```python
+import torch
+
+class LossTracker:
+    def __init__(self, tasks, alpha=0.1, eps=1e-8):
+        self.alpha = alpha
+        self.eps = eps
+        self.ema = {t: None for t in tasks}
+        self.steps = {t: 0 for t in tasks}
+
+    def update(self, losses: dict):
+        smoothed = {}
+
+        for t, val in losses.items():
+            val = float(val)
+
+            if not torch.isfinite(torch.tensor(val)):
+                raise ValueError(f"Non-finite loss detected in task {t}: {val}")
+
+            self.steps[t] += 1
+
+            if self.ema[t] is None:
+                self.ema[t] = val
+            else:
+                self.ema[t] = self.alpha * val + (1 - self.alpha) * self.ema[t]
+
+            # Bias correction (important early)
+            bias_correction = 1 - (1 - self.alpha) ** self.steps[t]
+            corrected = self.ema[t] / (bias_correction + self.eps)
+
+            smoothed[t] = corrected
+
+        return smoothed
+```
+
+---
+
+## 🔬 Add: Loss Variance (VERY IMPORTANT)
+
+Detect instability even when mean looks fine.
+
+```python
+class LossStats:
+    def __init__(self, tasks, window=50):
+        self.window = window
+        self.history = {t: [] for t in tasks}
+
+    def update(self, losses):
+        stats = {}
+
+        for t, val in losses.items():
+            hist = self.history[t]
+            hist.append(float(val))
+
+            if len(hist) > self.window:
+                hist.pop(0)
+
+            if len(hist) > 1:
+                var = float(torch.tensor(hist).var())
+            else:
+                var = 0.0
+
+            stats[t] = {
+                "mean": sum(hist) / len(hist),
+                "var": var
+            }
+
+        return stats
+```
+
+---
+
+# ⚙️ PHASE 1.2 — Gradient Tracking (Upgraded)
+
+### 🔴 Problems in your version
+
+* No aggregation → too noisy
+* No history → cannot detect trends
+* No task-level view
+* No exploding gradient detection
+
+---
+
+## ✅ Production Version
+
+```python
+class GradTracker:
+    def __init__(self, window=50):
+        self.window = window
+        self.history = []
+
+    def update(self, model):
+        total_norm = 0.0
+        norms = []
+        vars_ = []
+
+        for name, p in model.named_parameters():
+            if p.grad is None:
+                continue
+
+            g = p.grad.detach()
+
+            norm = g.norm().item()
+            var = g.var().item()
+
+            norms.append(norm)
+            vars_.append(var)
+
+            total_norm += norm ** 2
+
+        total_norm = total_norm ** 0.5
+
+        record = {
+            "total_norm": total_norm,
+            "mean_norm": sum(norms) / (len(norms) + 1e-8),
+            "mean_var": sum(vars_) / (len(vars_) + 1e-8)
+        }
+
+        self.history.append(record)
+        if len(self.history) > self.window:
+            self.history.pop(0)
+
+        return record
+```
+
+---
+
+## 🚨 Add: Exploding / Vanishing Detection
+
+```python
+def detect_grad_anomaly(grad_stats, explode_th=1000, vanish_th=1e-6):
+    norm = grad_stats["total_norm"]
+
+    if norm > explode_th:
+        return "EXPLODING"
+    elif norm < vanish_th:
+        return "VANISHING"
+    return "NORMAL"
+```
+
+---
+
+# 🔍 PHASE 2 — Validation Layer (Hardened)
+
+## ✅ Label Validator (Better)
+
+```python
+def validate_labels(labels, num_classes):
+    if not torch.is_tensor(labels):
+        raise TypeError("Labels must be a tensor")
+
+    if labels.numel() == 0:
+        raise ValueError("Empty labels")
+
+    if labels.min().item() < 0 or labels.max().item() >= num_classes:
+        raise ValueError(
+            f"Invalid label range: [{labels.min().item()}, {labels.max().item()}]"
+        )
+```
+
+---
+
+## ✅ Optimizer Monitor (Multi-param safe)
+
+```python
+def check_optimizer(optimizer):
+    lrs = [pg["lr"] for pg in optimizer.param_groups]
+    return {
+        "min_lr": min(lrs),
+        "max_lr": max(lrs),
+        "mean_lr": sum(lrs) / len(lrs)
+    }
+```
+
+---
+
+## ✅ Gradient Clipping (Safe + Logged)
+
+```python
+def apply_clipping(model, max_norm=1.0):
+    total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+    return float(total_norm)
+```
+
+---
+
+# ⚡ PHASE 3 — Spike Detection (Robust)
+
+## 🔴 Issue
+
+Your spike logic:
+
+```python
+loss > threshold * ema
+```
+
+Fails when:
+
+* EMA is near zero
+* Loss naturally scales across tasks
+
+---
+
+## ✅ Fixed Version (Relative + Z-score hybrid)
+
+```python
+class SpikeDetector:
+    def __init__(self, threshold=2.5, eps=1e-8):
+        self.threshold = threshold
+        self.eps = eps
+
+    def detect(self, loss, ema_loss, var=None):
+        ratio = loss / (ema_loss + self.eps)
+
+        if var is not None and var > 0:
+            z = (loss - ema_loss) / (var ** 0.5 + self.eps)
+        else:
+            z = 0
+
+        return ratio > self.threshold or z > self.threshold
+```
+
+---
+
+# 💾 PHASE 3.2 — Batch Dump System (Critical Fixes)
+
+### 🔴 Missing:
+
+* Directory safety
+* CPU conversion
+* Metadata (step, epoch, seed)
+
+---
+
+## ✅ Production Version
+
+```python
+import os
+import time
+
+def dump_batch(debug_path, payload):
+    os.makedirs(debug_path, exist_ok=True)
+
+    safe_payload = {}
+
+    for k, v in payload.items():
+        if torch.is_tensor(v):
+            safe_payload[k] = v.detach().cpu()
+        else:
+            safe_payload[k] = v
+
+    filename = f"spike_{int(time.time() * 1000)}.pt"
+    path = os.path.join(debug_path, filename)
+
+    torch.save(safe_payload, path)
+
+    return path
+```
+
+---
+
+## ✅ REQUIRED Payload (Strict Schema)
+
+```python
+payload = {
+    "step": step,
+    "epoch": epoch,
+    "inputs": inputs,
+    "labels": labels,
+    "logits": logits,
+    "losses": loss_dict,
+    "smoothed_losses": ema_losses,
+    "grad_stats": grad_stats,
+    "lr": optimizer.param_groups[0]["lr"]
+}
+```
+
+---
+
+# 🧠 FINAL — How to Integrate in Training Loop
+
+```python
+losses = compute_losses(...)
+ema_losses = loss_tracker.update(losses)
+loss_stats = loss_stats_tracker.update(losses)
+
+grad_stats = grad_tracker.update(model)
+
+apply_clipping(model)
+
+for task in losses:
+    if spike_detector.detect(
+        losses[task],
+        ema_losses[task],
+        loss_stats[task]["var"]
+    ):
+        dump_batch(debug_path, payload)
+```
+
+---
+
+# 🚨 WHAT YOU STILL DON’T HAVE (But Should)
+
+These are **high-impact missing pieces**:
+
+### 1. Task dominance detection
+
+Detect one loss overpowering others.
+
+### 2. Silent collapse detector
+
+Loss ↓ but F1 / accuracy = 0
+
+### 3. Gradient conflict detection
+
+Multi-task gradients fighting each other
+
+### 4. Auto LR reducer on spike clusters
+
+Not just detection → reaction
+
+---
+
+# ⚡ If you want next step
+
+I can design:
+
+### 👉 FULL TruthLens Training Supervisor
+
+* Auto-debugging engine
+* Self-healing training loop
+* Task balancing (GradNorm + uncertainty weighting)
+* Failure classification (not just detection)
+
+Just say:
+**“build supervisor system”**
