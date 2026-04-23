@@ -876,10 +876,36 @@ def main():
 
         device = get_device(prefer_gpu=True)
 
+        # CUDA diagnostic block — printed up-front so a CPU fallback is
+        # impossible to miss in the logs.
+        _cuda_avail = torch.cuda.is_available()
         logger.info("Training device: %s", device)
+        logger.info(
+            "CUDA available=%s | torch.version.cuda=%s | device_count=%d",
+            _cuda_avail,
+            getattr(torch.version, "cuda", None),
+            torch.cuda.device_count() if _cuda_avail else 0,
+        )
+        if _cuda_avail:
+            logger.info("CUDA device name: %s", torch.cuda.get_device_name(0))
+
+        # Hard GPU gate. Set TRUTHLENS_REQUIRE_GPU=1 (default on Lightning AI
+        # Studios / Colab GPU runtimes) to fail loud instead of silently
+        # training on CPU at 1/100th throughput. Opt-out with =0 for local
+        # smoke tests on a laptop.
+        _require_gpu = os.environ.get("TRUTHLENS_REQUIRE_GPU", "0").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+        if _require_gpu and not _cuda_avail:
+            raise RuntimeError(
+                "TRUTHLENS_REQUIRE_GPU=1 but CUDA is not available. "
+                "Refusing to train on CPU. Either run on a GPU runtime "
+                "(nvidia-smi must work, torch must be a CUDA build) or "
+                "unset TRUTHLENS_REQUIRE_GPU for an explicit CPU run."
+            )
 
         # C8: cudnn.benchmark only meaningful on CUDA + cuDNN
-        if torch.cuda.is_available() and torch.backends.cudnn.is_available():
+        if _cuda_avail and torch.backends.cudnn.is_available():
             torch.backends.cudnn.benchmark = True
             configure_cuda_kernels()
 
@@ -895,13 +921,48 @@ def main():
         _log_dataset_label_distribution(val_df, "val")
         _log_dataset_label_distribution(test_df, "test")
 
-        # Cheap label-leakage probe: identical input texts in train+val
-        # silently inflate validation metrics. Warn early so the user knows
-        # before trusting any val numbers.
-        try:
-            _check_label_leakage(train_df, val_df, text_column=TEXT_COLUMN)
-        except Exception as exc:
-            logger.warning("Label-leakage check failed: %s", exc)
+        # Defensive dedup BEFORE the leak check. Even if upstream split
+        # CSVs contain duplicate text rows or cross-split overlaps, we
+        # remove them here so leakage is structurally impossible. Train
+        # is the loser in any train/val or train/test collision (we keep
+        # the eval split intact so reported metrics stay comparable).
+        for split_name, df in (("train", train_df), ("val", val_df), ("test", test_df)):
+            before = len(df)
+            df.drop_duplicates(subset=[TEXT_COLUMN], keep="first", inplace=True)
+            removed = before - len(df)
+            if removed:
+                logger.warning(
+                    "Intra-split dedup: removed %d duplicate-text rows from %s "
+                    "(%.2f%%)",
+                    removed, split_name, 100.0 * removed / max(1, before),
+                )
+
+        _val_texts = set(val_df[TEXT_COLUMN].fillna("").astype(str))
+        _test_texts = set(test_df[TEXT_COLUMN].fillna("").astype(str))
+        _eval_texts = _val_texts | _test_texts
+        _train_text_col = train_df[TEXT_COLUMN].fillna("").astype(str)
+        _overlap_mask = _train_text_col.isin(_eval_texts)
+        _overlap_count = int(_overlap_mask.sum())
+        if _overlap_count:
+            logger.warning(
+                "Cross-split leakage: dropping %d train rows that also appear "
+                "in val/test (%.2f%% of train).",
+                _overlap_count,
+                100.0 * _overlap_count / max(1, len(train_df)),
+            )
+            train_df.drop(train_df.index[_overlap_mask.to_numpy()], inplace=True)
+            train_df.reset_index(drop=True, inplace=True)
+
+        logger.info(
+            "Post-dedup sizes — train: %d  val: %d  test: %d",
+            len(train_df), len(val_df), len(test_df),
+        )
+
+        # Final leak check is FATAL. After dedup it must pass; if it
+        # doesn't, something is structurally wrong (e.g. text column
+        # mismatch) and we refuse to train on contaminated data.
+        _check_label_leakage(train_df, val_df, text_column=TEXT_COLUMN)
+        _check_label_leakage(train_df, test_df, text_column=TEXT_COLUMN)
 
         tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
 

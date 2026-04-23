@@ -1,0 +1,310 @@
+Yes — beyond the GPU issue, your logs expose **multiple high-severity problems**. I’ll walk through them like a proper ML systems audit so you can prioritize fixes.
+
+---
+
+# 🚨 1. **Data Leakage (CRITICAL — must fix before training)**
+
+```
+Label-leakage check failed:
+sampled overlap (raw=486, hash=486)
+```
+
+### What this means
+
+You have **duplicate or near-identical samples across train and validation**.
+
+* `raw=486` → exact text overlap
+* `hash=486` → confirmed duplicate content
+* `threshold=0` → your system correctly flags this as invalid
+
+### Why this is dangerous
+
+* Inflated validation metrics
+* Model memorization instead of generalization
+* Completely invalid evaluation
+
+### Fix (non-negotiable)
+
+You need **strict dataset de-duplication BEFORE splitting**:
+
+```python
+df = df.drop_duplicates(subset=["text"])
+```
+
+Then split:
+
+```python
+from sklearn.model_selection import train_test_split
+
+train, temp = train_test_split(df, test_size=0.3, random_state=42)
+val, test = train_test_split(temp, test_size=0.5, random_state=42)
+```
+
+If you already split → you must **rebuild splits from scratch**.
+
+---
+
+# ⚠️ 2. **Extreme Label Sparsity (STRUCTURAL PROBLEM)**
+
+Example:
+
+```
+bias_label:
+<NA>: 90.91%
+```
+
+### Interpretation
+
+* Only ~9% of samples have labels
+* 91% are masked / missing
+
+Same pattern across all heads.
+
+### Why this is risky
+
+* Model receives **very weak supervision**
+* Gradients dominated by sparse signals
+* Heads may collapse to constant predictions
+
+### Hidden failure mode
+
+Even if loss decreases → model learns:
+
+> “predict majority or nothing”
+
+---
+
+# 🧠 Required Fix (you already partially did)
+
+You MUST ensure **strict masked loss**:
+
+```python
+mask = ~labels.isna()
+loss = (criterion(preds, labels_clean) * mask).sum() / mask.sum()
+```
+
+If you don’t normalize by `mask.sum()` → gradients are wrong.
+
+---
+
+# 🚨 3. **Label Imbalance (SEVERE)**
+
+Example:
+
+```
+bias_label:
+1: 6.74%
+0: 2.34%
+```
+
+That’s **~3:1 imbalance + huge NA dominance**
+
+### Consequences
+
+* Model biased toward majority
+* F1 score collapses for minority class
+* Silent failure despite "good accuracy"
+
+### Fix
+
+Use **class weighting**:
+
+```python
+weights = torch.tensor([w0, w1]).to(device)
+criterion = nn.CrossEntropyLoss(weight=weights)
+```
+
+Or use:
+
+* Focal Loss (better)
+* Oversampling (careful with leakage)
+
+---
+
+# ⚠️ 4. **Multi-Task Head Interference**
+
+You have:
+
+* bias
+* ideology
+* propaganda
+
+Each with:
+
+* different sparsity
+* different distributions
+
+### Risk
+
+Shared encoder gets **conflicting gradients**
+
+### Symptoms
+
+* One head improves → others degrade
+* Training unstable
+
+### Fix (advanced but important)
+
+```python
+loss = (
+    w_bias * loss_bias +
+    w_ideology * loss_ideology +
+    w_propaganda * loss_propaganda
+)
+```
+
+Where weights are proportional to:
+
+* label availability
+* task importance
+
+---
+
+# ⚠️ 5. **Potential Silent Collapse Risk**
+
+Given:
+
+* sparse labels
+* imbalance
+* CPU fallback (earlier)
+
+Your model is highly vulnerable to:
+
+### Silent collapse condition
+
+```python
+if loss < 0.2 and f1 < 0.1:
+    collapse = True
+```
+
+You should already be monitoring this (you mentioned Phase 8).
+
+If not → add it immediately.
+
+---
+
+# ⚠️ 6. **Dataset Size vs Setup Mismatch**
+
+```
+train: 153,322
+model: roberta-base
+multi-head: 6
+```
+
+### Risks
+
+* High memory pressure
+* Slow training even on GPU if not optimized
+
+### Required optimizations
+
+* `pin_memory=True`
+* `num_workers >= 4`
+* gradient accumulation
+* mixed precision (fp16)
+
+---
+
+# ⚠️ 7. **No Evidence of Stratified Splitting**
+
+Given your imbalance + sparsity:
+
+👉 If you did random split → distribution drift likely
+
+### Fix
+
+Use stratification **per task** (or approximate):
+
+```python
+train_test_split(df, stratify=df["bias_label"].fillna(-1))
+```
+
+Better: multi-label stratification (iterative stratification)
+
+---
+
+# ⚠️ 8. **Potential Tokenization / Text Normalization Drift**
+
+Not shown in logs, but very common in your setup:
+
+If:
+
+* train uses one tokenizer config
+* inference uses another
+
+→ model degrades silently
+
+### Ensure:
+
+* same tokenizer
+* same max_length
+* same truncation
+
+---
+
+# ⚠️ 9. **Checkpoint Integrity Risk (from your previous issue)**
+
+You earlier had:
+
+```
+strict=False in load_state_dict
+```
+
+### This is dangerous because:
+
+* Missing weights ignored
+* Model partially initialized
+* Silent corruption
+
+### Fix
+
+```python
+load_result = model.load_state_dict(state_dict, strict=True)
+```
+
+---
+
+# 🧨 Priority Order (Do THIS first)
+
+## 🔴 BLOCKERS
+
+1. Fix data leakage
+2. Fix GPU (otherwise training unusable)
+
+## 🟠 HIGH RISK
+
+3. Correct masked loss normalization
+4. Handle label imbalance
+
+## 🟡 STABILITY
+
+5. Add collapse detection
+6. Balance multi-task loss
+
+## 🟢 OPTIMIZATION
+
+7. DataLoader tuning
+8. Mixed precision
+
+---
+
+# 🎯 Bottom Line
+
+Your system is currently failing on **three axes simultaneously**:
+
+* ❌ Infrastructure (CPU instead of GPU)
+* ❌ Data integrity (leakage)
+* ❌ Learning signal (sparse + imbalanced labels)
+
+Even if training “runs”, results will be **misleading or unusable**.
+
+---
+
+If you want a **surgical fix**, I can:
+
+* rewrite your full training loop
+* add leak-proof splitting
+* enforce GPU usage
+* stabilize multi-task learning
+
+Just drop your training script.
