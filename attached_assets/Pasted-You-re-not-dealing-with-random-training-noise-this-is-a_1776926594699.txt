@@ -1,0 +1,348 @@
+You’re not dealing with “random training noise” — this is a **system-level data + optimization pathology**. The fixes need to be **structural, not cosmetic**. I’ll walk you through **production-grade corrections** with exact strategies and implementation patterns.
+
+---
+
+# 🚨 1. DATA-LEVEL FIXES (HIGHEST PRIORITY)
+
+## 1.1 Massive Missing Labels → Convert to *Masked Multi-Task Learning*
+
+Right now your batches mix:
+
+* fully labeled samples
+* partially labeled samples
+* completely missing labels for some heads
+
+This corrupts gradients.
+
+### ✅ FIX: Task-wise Loss Masking (MANDATORY)
+
+```python
+def compute_task_loss(logits, labels, loss_fn):
+    mask = labels != -100  # assume -100 = missing label
+    if mask.sum() == 0:
+        return torch.tensor(0.0, device=logits.device)
+
+    logits = logits[mask]
+    labels = labels[mask]
+
+    return loss_fn(logits, labels)
+```
+
+### ✅ Apply per task:
+
+```python
+loss_bias = compute_task_loss(out["bias"], batch["bias_label"], bias_loss_fn)
+loss_ideo = compute_task_loss(out["ideology"], batch["ideology_label"], ideo_loss_fn)
+loss_prop = compute_task_loss(out["propaganda"], batch["propaganda_label"], prop_loss_fn)
+
+total_loss = loss_bias + loss_ideo + loss_prop
+```
+
+---
+
+### ⚠️ CRITICAL UPGRADE: Normalize by Active Tasks
+
+Otherwise batches with fewer labels produce smaller gradients.
+
+```python
+active_losses = [loss for loss in [loss_bias, loss_ideo, loss_prop] if loss > 0]
+
+if len(active_losses) > 0:
+    total_loss = sum(active_losses) / len(active_losses)
+else:
+    total_loss = torch.tensor(0.0, device=device)
+```
+
+---
+
+## 1.2 Severe Class Imbalance → Weighted + Focal Hybrid
+
+### ✅ Step 1: Compute Class Weights
+
+```python
+from sklearn.utils.class_weight import compute_class_weight
+
+weights = compute_class_weight(
+    class_weight="balanced",
+    classes=np.array([0,1]),
+    y=train_labels
+)
+```
+
+---
+
+### ✅ Step 2: Use Focal Loss (NOT plain BCE)
+
+```python
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=0.75, gamma=2.0):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+
+    def forward(self, logits, targets):
+        bce = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
+        prob = torch.sigmoid(logits)
+
+        pt = targets * prob + (1 - targets) * (1 - prob)
+        focal = self.alpha * (1 - pt) ** self.gamma * bce
+
+        return focal.mean()
+```
+
+---
+
+### ✅ Step 3: Combine with weights
+
+```python
+loss = focal_loss(logits, targets) * class_weights[targets.long()]
+```
+
+---
+
+### ⚠️ Optional but STRONG: Use Weighted Sampler
+
+```python
+from torch.utils.data import WeightedRandomSampler
+
+sampler = WeightedRandomSampler(sample_weights, num_samples=len(sample_weights))
+```
+
+---
+
+## 1.3 Duplicate Data → Fix at Pipeline Level (NOT just cleaning)
+
+You already removed duplicates — good — but root cause persists.
+
+### ✅ Add Hash-Based Dedup at Ingestion
+
+```python
+import hashlib
+
+def hash_text(text):
+    return hashlib.md5(text.encode()).hexdigest()
+
+df["hash"] = df["text"].apply(hash_text)
+df = df.drop_duplicates(subset=["hash"])
+```
+
+---
+
+### ✅ Add Assertion Gate
+
+```python
+assert df["hash"].duplicated().sum() == 0, "Duplicates still present!"
+```
+
+---
+
+## 1.4 Cross-Split Leakage → Enforce BEFORE Split
+
+### ❌ Current problem:
+
+You cleaned AFTER split → too late.
+
+### ✅ Correct Pipeline:
+
+```python
+# Step 1: deduplicate FULL dataset
+df = deduplicate(df)
+
+# Step 2: group by hash
+groups = df["hash"]
+
+# Step 3: split with grouping
+from sklearn.model_selection import GroupShuffleSplit
+
+gss = GroupShuffleSplit(test_size=0.2, n_splits=1)
+train_idx, val_idx = next(gss.split(df, groups=groups))
+
+train_df = df.iloc[train_idx]
+val_df = df.iloc[val_idx]
+```
+
+---
+
+# 🟠 2. MODEL INITIALIZATION FIX
+
+## 2.1 Roberta Pooler Warning
+
+This is expected behavior in Hugging Face Transformers when using base models.
+
+### ✅ Fix Options:
+
+### Option A (Preferred): Disable Pooler
+
+```python
+model = RobertaModel.from_pretrained("roberta-base", add_pooling_layer=False)
+```
+
+---
+
+### Option B: Explicit Initialization
+
+```python
+def init_weights(m):
+    if isinstance(m, nn.Linear):
+        nn.init.xavier_uniform_(m.weight)
+        nn.init.zeros_(m.bias)
+
+model.pooler.apply(init_weights)
+```
+
+---
+
+# 🟡 3. TRAINING STABILITY FIXES (CORE PROBLEM)
+
+## 3.1 Loss Spikes → Gradient Stabilization Stack
+
+### ✅ Add Gradient Clipping (MANDATORY)
+
+```python
+torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+```
+
+---
+
+### ✅ Add EMA (Exponential Moving Average)
+
+```python
+class EMA:
+    def __init__(self, model, decay=0.999):
+        self.shadow = {k: v.clone() for k, v in model.state_dict().items()}
+        self.decay = decay
+
+    def update(self, model):
+        for k, v in model.state_dict().items():
+            self.shadow[k] = self.decay * self.shadow[k] + (1 - self.decay) * v
+```
+
+---
+
+## 3.2 Mixed Supervision → Batch-Level Filtering
+
+### 🚨 Problem:
+
+Batches contain inconsistent label availability.
+
+### ✅ Fix: Enforce Minimum Label Density
+
+```python
+def valid_batch(batch):
+    valid_tasks = sum([
+        (batch["bias_label"] != -100).sum() > 0,
+        (batch["ideology_label"] != -100).sum() > 0,
+        (batch["propaganda_label"] != -100).sum() > 0
+    ])
+    return valid_tasks >= 2
+```
+
+Skip weak batches:
+
+```python
+if not valid_batch(batch):
+    continue
+```
+
+---
+
+## 3.3 Variance Explosion → Loss Smoothing
+
+### ✅ Use Running Loss Stabilizer
+
+```python
+class LossEMA:
+    def __init__(self, alpha=0.9):
+        self.alpha = alpha
+        self.value = None
+
+    def update(self, loss):
+        if self.value is None:
+            self.value = loss
+        else:
+            self.value = self.alpha * self.value + (1 - self.alpha) * loss
+        return self.value
+```
+
+---
+
+## 3.4 Task Dominance → Dynamic Loss Balancing (VERY IMPORTANT)
+
+Right now tasks compete destructively.
+
+### ✅ Fix: Uncertainty Weighting
+
+```python
+class MultiTaskLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.log_vars = nn.Parameter(torch.zeros(3))
+
+    def forward(self, losses):
+        total = 0
+        for i, loss in enumerate(losses):
+            precision = torch.exp(-self.log_vars[i])
+            total += precision * loss + self.log_vars[i]
+        return total
+```
+
+---
+
+# 🔥 4. ROOT CAUSE SUMMARY (WHAT'S ACTUALLY BREAKING)
+
+Your instability is coming from:
+
+| Issue             | Severity    | Effect              |
+| ----------------- | ----------- | ------------------- |
+| Missing labels    | 🔴 Critical | Corrupt gradients   |
+| Imbalance         | 🔴 Critical | Loss spikes         |
+| Mixed supervision | 🔴 Critical | Batch inconsistency |
+| Leakage           | 🔴 Critical | Fake validation     |
+| Variance          | 🟠 High     | No convergence      |
+| Initialization    | 🟡 Minor    | Early noise         |
+
+---
+
+# 🚀 5. PRIORITY EXECUTION ORDER
+
+If you do things randomly → won’t fix.
+
+Follow THIS order:
+
+### Phase 1 (Must do first)
+
+* ✔ Masked loss
+* ✔ Dedup BEFORE split
+* ✔ Fix leakage
+
+### Phase 2
+
+* ✔ Focal + class weights
+* ✔ Gradient clipping
+
+### Phase 3
+
+* ✔ Dynamic task weighting
+* ✔ Batch filtering
+
+### Phase 4 (advanced)
+
+* ✔ EMA
+* ✔ Loss smoothing
+
+---
+
+# ⚠️ Final Reality Check
+
+If you **don’t fix masked loss + leakage**, then:
+
+* Your logs will **keep showing anomalies forever**
+* Training will **look like it works but won’t generalize**
+* Metrics will be **misleading**
+
+---
+
+If you want, I can next:
+
+* audit your **training loop code line-by-line**
+* or give you a **fully corrected trainer implementation (production-grade)**
