@@ -1,0 +1,335 @@
+These are **core correctness bugs**, not just “nice-to-fix.” Each one can silently invalidate your training signal or metrics. I’ll give you **precise fixes + integration points** so you can wire this cleanly.
+
+---
+
+# 🚨 1. Misaligned Labels in Multi-Task Batches
+
+## ❌ Root Problem
+
+* Different tasks get labels from different indices or shuffles
+* Dataloader or collate_fn mixes ordering
+* Result: model learns **wrong supervision**
+
+---
+
+## ✅ Step-by-step Fix
+
+### Step 1 — Enforce row-level integrity at dataset level
+
+```python
+class MultiTaskDataset(torch.utils.data.Dataset):
+    def __init__(self, df, tokenizer):
+        self.texts = df["text"].tolist()
+        self.labels_task1 = df["task1_label"].tolist()
+        self.labels_task2 = df["task2_label"].tolist()
+        self.tokenizer = tokenizer
+
+        assert len(self.texts) == len(self.labels_task1) == len(self.labels_task2)
+
+    def __getitem__(self, idx):
+        return {
+            "text": self.texts[idx],
+            "task1_label": self.labels_task1[idx],
+            "task2_label": self.labels_task2[idx],
+        }
+```
+
+---
+
+### Step 2 — Tokenize inside `collate_fn` (prevents drift)
+
+```python
+def collate_fn(batch):
+    texts = [x["text"] for x in batch]
+
+    enc = tokenizer(
+        texts,
+        padding=True,
+        truncation=True,
+        return_tensors="pt"
+    )
+
+    return {
+        "input_ids": enc["input_ids"],
+        "attention_mask": enc["attention_mask"],
+        "task1_labels": torch.tensor([x["task1_label"] for x in batch]),
+        "task2_labels": torch.tensor([x["task2_label"] for x in batch]),
+    }
+```
+
+---
+
+### Step 3 — Add alignment assertion (CRITICAL)
+
+```python
+assert batch["input_ids"].size(0) == batch["task1_labels"].size(0)
+assert batch["input_ids"].size(0) == batch["task2_labels"].size(0)
+```
+
+---
+
+### Step 4 — Debug check (one-time sanity)
+
+```python
+for i in range(3):
+    print(batch["task1_labels"][i], batch["task2_labels"][i])
+```
+
+---
+
+## ✅ Result
+
+* Guaranteed label ↔ input alignment
+* No cross-task contamination
+
+---
+
+# ⚠️ 2. Incorrect Padding Mask Handling
+
+## ❌ Problem
+
+* Padding tokens contribute to loss or attention
+* Model learns from garbage tokens
+
+---
+
+## ✅ Fix
+
+### Step 1 — Always pass `attention_mask`
+
+```python
+outputs = model(
+    input_ids=batch["input_ids"],
+    attention_mask=batch["attention_mask"]
+)
+```
+
+---
+
+### Step 2 — Loss masking (if sequence-level loss)
+
+```python
+loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+```
+
+Ensure padded labels are:
+
+```python
+labels[padding_positions] = -100
+```
+
+---
+
+### Step 3 — Verify mask correctness
+
+```python
+assert batch["attention_mask"].sum() > 0, "All tokens masked → broken batch"
+```
+
+---
+
+## ✅ Result
+
+* Padding tokens ignored correctly
+* Cleaner gradients
+
+---
+
+# ⚠️ 3. Attention Mask Ignored in Custom Heads
+
+## ❌ Problem
+
+Custom head uses:
+
+```python
+cls = hidden_states[:, 0]
+```
+
+BUT ignores mask in pooling or sequence ops
+
+---
+
+## ✅ Fix (Mask-aware pooling)
+
+### Option A — CLS (safe if model handles mask internally)
+
+```python
+cls = outputs.last_hidden_state[:, 0]
+```
+
+---
+
+### Option B — Mean pooling with mask (better for robustness)
+
+```python
+hidden = outputs.last_hidden_state
+mask = batch["attention_mask"].unsqueeze(-1)
+
+masked_hidden = hidden * mask
+pooled = masked_hidden.sum(dim=1) / mask.sum(dim=1)
+```
+
+---
+
+### Step 3 — Pass mask into head explicitly
+
+```python
+logits = self.head(hidden_states, attention_mask)
+```
+
+---
+
+## ✅ Result
+
+* No padding leakage into representations
+* Stable embeddings
+
+---
+
+# 🚨 4. Logits vs Probabilities Confusion
+
+## ❌ Problem
+
+Mixing:
+
+* logits (raw outputs)
+* probabilities (softmax)
+
+Leads to:
+
+* wrong metrics
+* inconsistent thresholds
+
+---
+
+## ✅ Rule (STRICT)
+
+| Use Case            | Input                   |
+| ------------------- | ----------------------- |
+| Loss (CrossEntropy) | logits                  |
+| Metrics             | probabilities OR argmax |
+
+---
+
+## ✅ Fix
+
+### Step 1 — Keep logits for loss
+
+```python
+loss = loss_fn(logits, labels)
+```
+
+---
+
+### Step 2 — Convert for metrics
+
+```python
+probs = torch.softmax(logits, dim=-1)
+preds = torch.argmax(probs, dim=-1)
+```
+
+---
+
+### Step 3 — Binary case
+
+```python
+probs = torch.sigmoid(logits)
+preds = (probs > 0.5).long()
+```
+
+---
+
+## ✅ Result
+
+* Correct evaluation
+* Consistent thresholds
+
+---
+
+# 🚨 5. F1 Computed on Raw Logits — CRITICAL BUG
+
+## ❌ Problem
+
+```python
+f1_score(labels, logits)  # WRONG
+```
+
+* logits are continuous, unbounded
+* F1 expects discrete labels
+
+---
+
+## ✅ Fix
+
+### Step 1 — Convert logits → predictions
+
+#### Multi-class
+
+```python
+preds = torch.argmax(logits, dim=1)
+```
+
+#### Binary
+
+```python
+preds = (torch.sigmoid(logits) > 0.5).long()
+```
+
+---
+
+### Step 2 — Move to CPU + numpy
+
+```python
+from sklearn.metrics import f1_score
+
+f1 = f1_score(
+    labels.cpu().numpy(),
+    preds.cpu().numpy(),
+    average="weighted"
+)
+```
+
+---
+
+### Step 3 — Multi-task F1 (important)
+
+```python
+f1_task1 = f1_score(labels1, preds1, average="weighted")
+f1_task2 = f1_score(labels2, preds2, average="weighted")
+
+f1 = (f1_task1 + f1_task2) / 2
+```
+
+---
+
+## ✅ Result
+
+* Valid metrics
+* No false confidence
+
+---
+
+# 🧠 Final Integrity Checklist
+
+After applying all fixes:
+
+| Component         | Status              |
+| ----------------- | ------------------- |
+| Label alignment   | ✅ Guaranteed        |
+| Padding handling  | ✅ Correct           |
+| Attention masking | ✅ Propagated        |
+| Logits usage      | ✅ Strict separation |
+| F1 computation    | ✅ Valid             |
+
+---
+
+# 🔥 If You Want One Level Deeper
+
+I can help you add:
+
+* **Batch-level label consistency hashing**
+* **Automatic metric sanity checks (detect impossible F1)**
+* **Mask visualization debugging**
+* **Per-task confusion matrices during training**
+
+Just say: **“add metric sanity system”**

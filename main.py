@@ -506,6 +506,20 @@ class TruthLensMultiTaskDataset(Dataset):
         self.labels_narrative_frame = torch.from_numpy(frame)
         self.labels_emotion = torch.from_numpy(emotion)
 
+        # Row-level integrity: every label tensor must be exactly as long as
+        # the tokenised sequence list so that __getitem__(idx) is aligned.
+        n = len(self.input_ids)
+        for _attr in (
+            "labels_bias", "labels_ideology", "labels_propaganda",
+            "labels_narrative", "labels_narrative_frame", "labels_emotion",
+        ):
+            _t = getattr(self, _attr)
+            if len(_t) != n:
+                raise RuntimeError(
+                    f"[DATASET ALIGNMENT] {_attr} length {len(_t)} != "
+                    f"input_ids length {n}. Label/text mismatch in dataframe."
+                )
+
     def __len__(self):
         return len(self.input_ids)
 
@@ -1194,18 +1208,62 @@ def main():
                 for b in batch
             ]
             enc = _hf_padder(features)
+
+            # Stack per-task labels preserving order from __getitem__.
+            labels_bias           = torch.stack([b["labels_bias"] for b in batch])
+            labels_ideology       = torch.stack([b["labels_ideology"] for b in batch])
+            labels_propaganda     = torch.stack([b["labels_propaganda"] for b in batch])
+            labels_narrative      = torch.stack([b["labels_narrative"] for b in batch])
+            labels_narrative_frame = torch.stack([b["labels_narrative_frame"] for b in batch])
+            labels_emotion        = torch.stack([b["labels_emotion"] for b in batch])
+
+            # Batch-level alignment: every label tensor must have the same
+            # leading dimension as input_ids.
+            _bsz = enc["input_ids"].size(0)
+            for _name, _t in (
+                ("labels_bias",            labels_bias),
+                ("labels_ideology",        labels_ideology),
+                ("labels_propaganda",      labels_propaganda),
+                ("labels_narrative",       labels_narrative),
+                ("labels_narrative_frame", labels_narrative_frame),
+                ("labels_emotion",         labels_emotion),
+            ):
+                if _t.size(0) != _bsz:
+                    raise RuntimeError(
+                        f"[COLLATE ALIGNMENT] {_name} batch size {_t.size(0)} "
+                        f"!= input_ids batch size {_bsz}."
+                    )
+
+            # Mask sanity: at least one non-padding token must exist.
+            if enc["attention_mask"].sum() == 0:
+                raise ValueError(
+                    "[COLLATE MASK] attention_mask is all zeros — "
+                    "entire batch is padding. Check tokenizer / data."
+                )
+
+            # Nested dict for model.forward(labels=...) signature.
             labels = {
-                "bias": torch.stack([b["labels_bias"] for b in batch]),
-                "ideology": torch.stack([b["labels_ideology"] for b in batch]),
-                "propaganda": torch.stack([b["labels_propaganda"] for b in batch]),
-                "narrative": torch.stack([b["labels_narrative"] for b in batch]),
-                "narrative_frame": torch.stack([b["labels_narrative_frame"] for b in batch]),
-                "emotion": torch.stack([b["labels_emotion"] for b in batch]),
+                "bias":             labels_bias,
+                "ideology":         labels_ideology,
+                "propaganda":       labels_propaganda,
+                "narrative":        labels_narrative,
+                "narrative_frame":  labels_narrative_frame,
+                "emotion":          labels_emotion,
             }
+
+            # Flat keys for trainer's _validate_batch_labels, single-class
+            # check, and _validate_epoch metric collector. These are filtered
+            # out by _prepare_model_inputs before reaching model.forward().
             return {
-                "input_ids": enc["input_ids"],
-                "attention_mask": enc["attention_mask"],
-                "labels": labels,
+                "input_ids":             enc["input_ids"],
+                "attention_mask":        enc["attention_mask"],
+                "labels":                labels,
+                "labels_bias":           labels_bias,
+                "labels_ideology":       labels_ideology,
+                "labels_propaganda":     labels_propaganda,
+                "labels_narrative":      labels_narrative,
+                "labels_narrative_frame": labels_narrative_frame,
+                "labels_emotion":        labels_emotion,
             }
 
         train_dataset = TruthLensMultiTaskDataset(
