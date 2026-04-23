@@ -5,6 +5,7 @@ Training helper for EmotionClassifier.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Iterable, Dict, Any, Optional
 
 import torch
@@ -45,6 +46,18 @@ class EmotionTrainer:
         self.use_amp = use_amp
 
         self.scaler = GradScaler(enabled=use_amp)
+        self.amp_dtype = (
+            torch.bfloat16
+            if self.device.type == "cuda" and torch.cuda.is_bf16_supported()
+            else torch.float16
+        )
+        if (
+            self.device.type == "cuda"
+            and self.use_amp
+            and self.amp_dtype == torch.bfloat16
+            and os.environ.get("TRUTHLENS_FORCE_MODEL_BF16", "1") == "1"
+        ):
+            self.model = self.model.to(dtype=torch.bfloat16)
 
         logger.info("EmotionTrainer initialized on device: %s", self.device)
 
@@ -64,7 +77,7 @@ class EmotionTrainer:
 
         self.optimizer.zero_grad()
 
-        with autocast(enabled=self.use_amp):
+        with autocast(enabled=self.use_amp, dtype=self.amp_dtype):
 
             outputs: Dict[str, Any] = self.model(**batch)
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Any, List
 from pathlib import Path
@@ -41,9 +42,17 @@ def configure_cuda_kernels() -> None:
 
     if torch.cuda.is_available():
         try:
-            torch.backends.cuda.enable_flash_sdp(True)
-            torch.backends.cuda.enable_mem_efficient_sdp(False)
-            torch.backends.cuda.enable_math_sdp(False)
+            # H100/Ada path: prefer FlashAttention kernels first, then memory-efficient
+            # as fallback. Keep math kernel disabled by default for throughput.
+            torch.backends.cuda.enable_flash_sdp(
+                os.environ.get("TRUTHLENS_ENABLE_FLASH_SDP", "1") == "1"
+            )
+            torch.backends.cuda.enable_mem_efficient_sdp(
+                os.environ.get("TRUTHLENS_ENABLE_MEM_EFFICIENT_SDP", "1") == "1"
+            )
+            torch.backends.cuda.enable_math_sdp(
+                os.environ.get("TRUTHLENS_ENABLE_MATH_SDP", "0") == "1"
+            )
         except Exception:
             logger.warning("Flash SDP not supported, falling back safely")
 

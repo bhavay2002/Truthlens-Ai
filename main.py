@@ -32,6 +32,7 @@ from src.features.emotion.emotion_schema import EMOTION_LABELS
 from src.models.multitask.multitask_truthlens_model import (
     MultiTaskTruthLensConfig,
     MultiTaskTruthLensModel,
+    configure_cuda_kernels,
 )
 from src.models.training.trainer import Trainer, TrainerConfig
 from src.training.optimizer_factory import create_optimizer
@@ -790,6 +791,7 @@ def main():
         # C8: cudnn.benchmark only meaningful on CUDA + cuDNN
         if torch.cuda.is_available() and torch.backends.cudnn.is_available():
             torch.backends.cudnn.benchmark = True
+            configure_cuda_kernels()
 
         # M1: gate pin_memory on CUDA availability
         _pin = torch.cuda.is_available()

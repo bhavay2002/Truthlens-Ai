@@ -98,7 +98,14 @@ class PredictionPipeline:
         outputs: Dict[str, Any] = {}
 
         ctx = (
-            torch.autocast(device_type="cuda", dtype=torch.float16)
+            torch.autocast(
+                device_type="cuda",
+                dtype=(
+                    torch.bfloat16
+                    if torch.cuda.is_bf16_supported()
+                    else torch.float16
+                ),
+            )
             if self.device.type == "cuda"
             else nullcontext()
         )

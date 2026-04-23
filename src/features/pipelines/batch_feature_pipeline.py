@@ -86,7 +86,14 @@ class BatchFeaturePipeline:
 
         with torch.no_grad():
             if self.device == "cuda" and self.use_amp:
-                with torch.cuda.amp.autocast(dtype=torch.float16):
+                with torch.autocast(
+                    device_type="cuda",
+                    dtype=(
+                        torch.bfloat16
+                        if torch.cuda.is_bf16_supported()
+                        else torch.float16
+                    ),
+                ):
                     features = self._run_batch_extract(batch)
             else:
                 features = self._run_batch_extract(batch)

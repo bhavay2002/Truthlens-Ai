@@ -190,6 +190,17 @@ class Trainer:
             self.autocast_device_type = "cpu"
             self.use_amp = False
 
+        # H100-first precision path: when bf16 autocast is active on CUDA, keep
+        # model weights in bf16 as well (opt-out via TRUTHLENS_FORCE_MODEL_BF16=0).
+        if (
+            self.device.type == "cuda"
+            and self.use_amp
+            and self.autocast_dtype == torch.bfloat16
+            and os.environ.get("TRUTHLENS_FORCE_MODEL_BF16", "1") == "1"
+        ):
+            self.model = self.model.to(dtype=torch.bfloat16)
+            logger.info("Model parameters cast to bfloat16")
+
         self.scaler = torch.amp.GradScaler(
             "cuda",
             enabled=self.use_amp and self.autocast_dtype == torch.float16
