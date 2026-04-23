@@ -50,6 +50,10 @@ from src.training.instrumentation import (
     SpikeDetector,
     AnomalyClassifier,
     TaskDominanceDetector,
+    SpikeCluster,
+    spike_severity,
+    HealthScore,
+    SmoothedHealth,
     anomaly_severity,
     detect_grad_anomaly,
     check_optimizer,
@@ -225,6 +229,16 @@ class Trainer:
             alpha=0.1,
             dominance_ratio=float(os.environ.get("TRUTHLENS_DOMINANCE_RATIO", "5.0")),
         )
+        # HARDEN-12: spike density tracker + health score. Both are
+        # observation-only (no optimizer/loss mutation), so safe to wire.
+        self._spike_cluster = SpikeCluster(
+            window=int(os.environ.get("TRUTHLENS_SPIKE_WINDOW", "50")),
+            spike_ratio=float(os.environ.get("TRUTHLENS_SPIKE_DENSITY", "0.2")),
+            min_events=10,
+        )
+        self._health_score = HealthScore()
+        self._smoothed_health = SmoothedHealth(alpha=0.1)
+        self._health_log_every = int(os.environ.get("TRUTHLENS_HEALTH_LOG_EVERY", "100"))
         self._debug_dump_dir = os.environ.get(
             "TRUTHLENS_DEBUG_DUMP_DIR",
             str(Path(getattr(config, "checkpoint_dir", ".") or ".") / "debug_dumps"),
@@ -863,9 +877,38 @@ class Trainer:
             if _dom is not None:
                 logger.warning(
                     "Task dominance at step %d: %s suppresses %s "
-                    "(smoothed ratio=%.2fx)",
+                    "(smoothed ratio=%.2fx, type=%s)",
                     self.global_step,
                     _dom["dominant"], _dom["suppressed"], _dom["ratio"],
+                    _dom.get("type", "grad_dominance"),
+                )
+
+            # HARDEN-12: spike density + composite health signal.
+            _spike_dense = self._spike_cluster.update(_spiked_task is not None)
+            if _spike_dense:
+                logger.warning(
+                    "Spike cluster at step %d: density=%.2f severity=%s",
+                    self.global_step,
+                    self._spike_cluster.density(),
+                    spike_severity(self._spike_cluster.density()),
+                )
+            if (
+                self._health_log_every > 0
+                and self.global_step > 0
+                and self.global_step % self._health_log_every == 0
+            ):
+                _h_signals = {
+                    "spike": _spiked_task is not None,
+                    "spike_cluster": _spike_dense,
+                    "dominance": _dom is not None,
+                }
+                _h = self._health_score.compute(_h_signals)
+                _h_smoothed = self._smoothed_health.update(_h)
+                logger.info(
+                    "Training health at step %d: %.2f (%s, smoothed=%.2f)",
+                    self.global_step, _h,
+                    self._health_score.interpret(_h_smoothed),
+                    _h_smoothed,
                 )
 
             # -------------------------------------------------

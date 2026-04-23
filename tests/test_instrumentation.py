@@ -347,3 +347,342 @@ def test_task_dominance_detector_silent_when_balanced():
 def test_task_dominance_detector_returns_none_with_one_task():
     d = TaskDominanceDetector()
     assert d.update({"a": 100.0}) is None
+
+
+# =============================================================================
+# HARDEN-12 control-plane components
+# =============================================================================
+
+from src.training.instrumentation import (
+    AutoDebugEngine,
+    BatchAnalyzer,
+    FailureClassifier,
+    FailureMemory,
+    GradientConflictDetector,
+    HealthScore,
+    SilentCollapseDetector,
+    SmoothedHealth,
+    SpikeCluster,
+    TaskBalancer,
+    classify_collapse_type,
+    detect_failure_trend,
+    flatten_grads,
+    handle_silent_collapse,
+    handle_task_dominance,
+    resolve_conflicts,
+    spike_severity,
+)
+
+
+# ----- 1. SilentCollapseDetector -----
+
+def test_silent_collapse_fires_after_patience():
+    # Small alpha so the EMA "remembers" the high seed loss after the drop.
+    d = SilentCollapseDetector(loss_ratio=0.5, metric_floor=0.1, alpha=0.05, patience=3)
+    d.update(loss=10.0, metric=0.05)  # seed: loss_ema=10, metric_ema=0.05
+    assert d.update(loss=0.1, metric=0.05) is False
+    assert d.update(loss=0.1, metric=0.05) is False
+    assert d.update(loss=0.1, metric=0.05) is True
+
+
+def test_silent_collapse_resets_on_recovery():
+    d = SilentCollapseDetector(loss_ratio=0.5, metric_floor=0.1, alpha=0.05, patience=2)
+    d.update(10.0, 0.05)
+    d.update(0.1, 0.05)
+    d.update(10.0, 0.9)  # recovery (loss not dropped, metric healthy)
+    assert d.counter == 0
+
+
+def test_silent_collapse_requires_both_conditions():
+    # Healthy F1 → never fires even with loss drops
+    d = SilentCollapseDetector(loss_ratio=0.5, metric_floor=0.1, alpha=0.05, patience=2)
+    d.update(10.0, 0.9)
+    for _ in range(10):
+        assert d.update(0.1, 0.9) is False
+
+
+def test_silent_collapse_rejects_nonfinite():
+    d = SilentCollapseDetector()
+    assert d.update(float("nan"), 0.5) is False
+
+
+# ----- 2. classify_collapse_type -----
+
+def test_classify_collapse_mode():
+    # All argmax to same class
+    logits = torch.tensor([[5.0, 0.0, 0.0]] * 4)
+    assert classify_collapse_type(logits) == "mode_collapse"
+
+
+def test_classify_collapse_confidence():
+    # Uniform-ish but different argmaxes — max prob low
+    logits = torch.tensor([[0.1, 0.05, 0.0], [0.0, 0.1, 0.05]])
+    assert classify_collapse_type(logits) == "confidence_collapse"
+
+
+def test_classify_collapse_unknown():
+    assert classify_collapse_type(None) == "unknown"
+    assert classify_collapse_type(torch.empty(0)) == "unknown"
+
+
+# ----- 3. BatchAnalyzer -----
+
+def test_batch_analyzer_priority():
+    a = BatchAnalyzer()
+    # nan_loss outranks everything
+    assert a.analyze({"nan_loss": True, "loss_spike": True, "grad_norm": 5000}) == "nan_loss"
+    assert a.analyze({"grad_norm": 5000, "loss_spike": True}) == "grad_explosion"
+    assert a.analyze({"loss_spike": True, "loss_var": 10}) == "loss_spike"
+    assert a.analyze({"loss_var": 10}) == "high_variance"
+    assert a.analyze({}) == "normal"
+
+
+def test_batch_analyzer_multi():
+    a = BatchAnalyzer()
+    out = a.analyze_multi({"nan_loss": True, "loss_var": 10, "severity": "high"})
+    assert "nan_loss" in out["issues"]
+    assert "high_variance" in out["issues"]
+    assert out["severity"] == "high"
+
+
+# ----- 4. handle_task_dominance -----
+
+def test_handle_task_dominance_mutates_weights():
+    weights = {"a": 1.0, "b": 1.0}
+    out = handle_task_dominance(
+        {"dominant": "a", "suppressed": "b", "ratio": 10.0},
+        optimizer=None,
+        task_weights=weights,
+        dominant_decay=0.5,
+        suppressed_boost=2.0,
+    )
+    assert out["a"] == 0.5
+    assert out["b"] == 2.0
+
+
+def test_handle_task_dominance_noop_when_none():
+    weights = {"a": 1.0}
+    assert handle_task_dominance(None, None, weights) is weights
+    assert weights == {"a": 1.0}
+
+
+def test_handle_task_dominance_lr_decay():
+    p = torch.nn.Parameter(torch.zeros(1))
+    opt = torch.optim.SGD([{"params": [p], "lr": 0.1, "name": "head_a"}])
+    handle_task_dominance(
+        {"dominant": "head_a", "suppressed": "head_b", "ratio": 10.0},
+        optimizer=opt,
+        task_weights={"head_a": 1.0, "head_b": 1.0},
+        lr_decay=0.5,
+    )
+    assert math.isclose(opt.param_groups[0]["lr"], 0.05)
+
+
+# ----- 5. handle_silent_collapse -----
+
+def test_handle_silent_collapse_returns_checklist():
+    out = handle_silent_collapse()
+    assert out["action"] == "inspect_dataset"
+    assert "label_distribution" in out["checks"]
+
+
+# ----- 6. GradientConflictDetector + flatten_grads -----
+
+def test_flatten_grads_skips_none():
+    g = flatten_grads([torch.ones(2, 2), None, torch.zeros(3)])
+    assert g.numel() == 4 + 3
+
+
+def test_flatten_grads_empty():
+    assert flatten_grads([None, None]).numel() == 0
+
+
+def test_gradient_conflict_detects_opposing():
+    d = GradientConflictDetector(threshold=0.0)
+    g1 = torch.tensor([1.0, 0.0, 0.0])
+    g2 = torch.tensor([-1.0, 0.0, 0.0])
+    out = d.compute({"a": g1, "b": g2})
+    assert ("a", "b") in out
+    assert out[("a", "b")] < 0
+
+
+def test_gradient_conflict_silent_on_aligned():
+    d = GradientConflictDetector(threshold=0.0)
+    g1 = torch.tensor([1.0, 1.0])
+    g2 = torch.tensor([2.0, 2.0])
+    assert d.compute({"a": g1, "b": g2}) == {}
+
+
+def test_resolve_conflicts_dampens():
+    weights = {"a": 1.0, "b": 1.0}
+    out = resolve_conflicts({("a", "b"): -1.0}, weights, rate=0.1)
+    # penalty = 1.0, weight *= (1 - 0.1*1.0) = 0.9
+    assert math.isclose(out["a"], 0.9)
+    assert math.isclose(out["b"], 0.9)
+
+
+# ----- 7. TaskBalancer -----
+
+def test_task_balancer_log_vars_are_parameters():
+    b = TaskBalancer(["x", "y"])
+    names = {n for n, _ in b.named_parameters()}
+    assert "log_vars.x" in names
+    assert "log_vars.y" in names
+
+
+def test_task_balancer_forward_combines_losses():
+    b = TaskBalancer(["x", "y"])
+    losses = {"x": torch.tensor(1.0), "y": torch.tensor(2.0)}
+    total = b(losses)
+    # At log_var=0: precision=1, term = 1*loss + 0 = loss => total = 3
+    assert math.isclose(total.item(), 3.0, rel_tol=1e-5)
+
+
+def test_task_balancer_unknown_task_skipped():
+    b = TaskBalancer(["x"])
+    total = b({"x": torch.tensor(1.0), "z": torch.tensor(99.0)})
+    assert math.isclose(total.item(), 1.0)
+
+
+# ----- 8. AutoDebugEngine + FailureMemory -----
+
+class _FakeCallable:
+    def __init__(self, ret):
+        self.ret = ret
+    def __call__(self, **kwargs):
+        return self.ret
+
+
+def test_auto_debug_engine_runs_and_stores():
+    mem = FailureMemory()
+    cls = FailureClassifier()
+    engine = AutoDebugEngine(
+        detectors={"d1": _FakeCallable(True)},
+        classifier=cls,
+        memory=mem,
+    )
+    ftype, results = engine.step({"nan_loss": True, "grad_norm": 0.0})
+    assert ftype == "numerical_instability"
+    assert "d1" in results
+    assert mem.get_stats().get("numerical_instability", 0) == 1
+
+
+def test_auto_debug_engine_normal_does_not_store():
+    mem = FailureMemory()
+    engine = AutoDebugEngine({}, FailureClassifier(), mem)
+    ftype, _ = engine.step({})
+    assert ftype == "normal"
+    assert mem.get_stats() == {}
+
+
+def test_failure_memory_caps_per_type():
+    mem = FailureMemory(max_per_type=3)
+    for i in range(10):
+        mem.store("foo", {"i": i})
+    assert len(mem.history["foo"]) == 3
+    # Oldest dropped: should retain i=7,8,9
+    assert [r["signals"]["i"] for r in mem.history["foo"]] == [7, 8, 9]
+
+
+def test_failure_memory_recent_and_distribution():
+    mem = FailureMemory()
+    for _ in range(3):
+        mem.store("a", {})
+    mem.store("b", {})
+    assert len(mem.recent("a", 2)) == 2
+    assert mem.distribution()["a"] == 3
+    assert mem.distribution()["b"] == 1
+
+
+def test_detect_failure_trend():
+    mem = FailureMemory()
+    for _ in range(5):
+        mem.store("nan_loss", {})
+    assert detect_failure_trend(mem, "nan_loss", window=5) is True
+    assert detect_failure_trend(mem, "nan_loss", window=6) is False
+
+
+# ----- 9. FailureClassifier -----
+
+def test_failure_classifier_priority_and_causes():
+    c = FailureClassifier()
+    root, causes = c.classify({
+        "nan_loss": True,
+        "grad_norm": 5000,
+        "dominance": True,
+    })
+    assert root == "numerical_instability"
+    assert "gradient_explosion" in causes
+    assert "task_imbalance" in causes
+
+
+def test_failure_classifier_normal():
+    assert FailureClassifier().classify({}) == ("normal", [])
+
+
+# ----- 10. SpikeCluster + spike_severity -----
+
+def test_spike_cluster_density_threshold():
+    sc = SpikeCluster(window=10, spike_ratio=0.3, min_events=5)
+    # Below min_events
+    for _ in range(4):
+        assert sc.update(True) is False
+    # 5th spike → density=1.0 > 0.3
+    assert sc.update(True) is True
+
+
+def test_spike_cluster_silent_when_sparse():
+    sc = SpikeCluster(window=10, spike_ratio=0.3, min_events=5)
+    for _ in range(5):
+        sc.update(False)
+    # No spikes → density 0.0
+    assert sc.update(True) is False  # 1/6 = 0.16 < 0.3
+
+
+def test_spike_severity_buckets():
+    assert spike_severity(0.6) == "critical"
+    assert spike_severity(0.4) == "high"
+    assert spike_severity(0.25) == "medium"
+    assert spike_severity(0.1) == "low"
+
+
+# ----- 11/12. HealthScore + SmoothedHealth -----
+
+def test_health_score_subtracts_weights():
+    h = HealthScore()
+    assert h.compute({}) == 1.0
+    s = h.compute({"silent_collapse": True})
+    assert math.isclose(s, 0.7)
+    # All bad → 0
+    bad = {k: True for k in HealthScore.DEFAULT_WEIGHTS}
+    assert h.compute(bad) == 0.0
+
+
+def test_health_score_interpret():
+    h = HealthScore()
+    assert h.interpret(0.9) == "healthy"
+    assert h.interpret(0.6) == "unstable"
+    assert h.interpret(0.3) == "failing"
+
+
+def test_smoothed_health_first_call_seeds():
+    s = SmoothedHealth(alpha=0.1)
+    assert s.update(0.5) == 0.5
+
+
+def test_smoothed_health_ema():
+    s = SmoothedHealth(alpha=0.5)
+    s.update(1.0)
+    out = s.update(0.0)
+    assert math.isclose(out, 0.5)
+
+
+# ----- TaskDominanceDetector grad_zero_collapse -----
+
+def test_task_dominance_grad_zero_collapse():
+    from src.training.instrumentation import TaskDominanceDetector as TDD
+    d = TDD(alpha=1.0, dominance_ratio=5.0, eps=1e-6)
+    out = d.update({"a": 1.0, "b": 0.0})
+    assert out is not None
+    assert out["type"] == "grad_zero_collapse"
+    assert out["suppressed"] == "b"

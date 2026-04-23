@@ -539,7 +539,11 @@ class TaskDominanceDetector:
         self.eps = float(eps)
         self.ema: Dict[str, float] = {}
 
-    def update(self, task_grads: Dict[str, float]) -> Optional[Dict[str, Any]]:
+    def update(
+        self,
+        task_grads: Dict[str, float],
+        task_losses: Optional[Dict[str, float]] = None,  # noqa: ARG002 — accepted for API symmetry
+    ) -> Optional[Dict[str, Any]]:
         for t, g in task_grads.items():
             gv = float(g)
             if not math.isfinite(gv):
@@ -553,12 +557,548 @@ class TaskDominanceDetector:
             return None
         max_t = max(self.ema, key=self.ema.get)  # type: ignore[arg-type]
         min_t = min(self.ema, key=self.ema.get)  # type: ignore[arg-type]
+        # grad_zero_collapse: one task's smoothed grad has fully vanished.
+        # Surface it explicitly instead of swallowing it as "no signal".
         if self.ema[min_t] <= self.eps:
-            return None
+            return {
+                "dominant": max_t,
+                "suppressed": min_t,
+                "ratio": math.inf,
+                "type": "grad_zero_collapse",
+            }
         r = self.ema[max_t] / self.ema[min_t]
         if r > self.ratio:
-            return {"dominant": max_t, "suppressed": min_t, "ratio": r}
+            return {
+                "dominant": max_t,
+                "suppressed": min_t,
+                "ratio": r,
+                "type": "grad_dominance",
+            }
         return None
+
+
+# =============================================================================
+# HARDEN-12: Control-plane components.
+#
+# Twelve features grouped into three layers:
+#   detection : SilentCollapseDetector, classify_collapse_type,
+#               GradientConflictDetector, SpikeCluster
+#   action    : handle_task_dominance, handle_silent_collapse,
+#               resolve_conflicts, TaskBalancer
+#   control   : BatchAnalyzer, FailureClassifier, FailureMemory,
+#               AutoDebugEngine, HealthScore + SmoothedHealth
+#
+# Detection components are observation-only and safe to wire automatically.
+# Action components mutate optimizer/loss state and are intentionally
+# OPT-IN — they are not invoked by Trainer by default; callers must
+# explicitly opt in once they understand the convergence implications.
+# =============================================================================
+
+from collections import Counter, defaultdict
+
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+# ----- 1. SilentCollapseDetector --------------------------------------------
+
+class SilentCollapseDetector:
+    """EMA-smoothed silent-collapse detector.
+
+    Fires when:
+      - the *raw* loss drops below ``loss_ratio × loss_ema`` (suspicious
+        sudden drop, often a degenerate solution like predicting majority
+        class), AND
+      - the smoothed metric (e.g. macro-F1) is below ``metric_floor``,
+    for ``patience`` consecutive update calls.
+
+    Both conditions are required so a legitimate loss drop with healthy
+    metric does not trigger.
+    """
+
+    def __init__(
+        self,
+        loss_ratio: float = 0.5,
+        metric_floor: float = 0.1,
+        alpha: float = 0.1,
+        patience: int = 5,
+    ):
+        if not 0 < alpha <= 1:
+            raise ValueError(f"alpha must be in (0, 1], got {alpha}")
+        if patience < 1:
+            raise ValueError(f"patience must be >= 1, got {patience}")
+        self.loss_ratio = float(loss_ratio)
+        self.metric_floor = float(metric_floor)
+        self.alpha = float(alpha)
+        self.patience = int(patience)
+        self.loss_ema: Optional[float] = None
+        self.metric_ema: Optional[float] = None
+        self.counter = 0
+
+    def update(self, loss: float, metric: float) -> bool:
+        if not (math.isfinite(loss) and math.isfinite(metric)):
+            return False
+        if self.loss_ema is None:
+            self.loss_ema = float(loss)
+            self.metric_ema = float(metric)
+            return False
+        self.loss_ema = self.alpha * loss + (1 - self.alpha) * self.loss_ema
+        self.metric_ema = self.alpha * metric + (1 - self.alpha) * self.metric_ema
+        if loss < self.loss_ratio * self.loss_ema and self.metric_ema < self.metric_floor:
+            self.counter += 1
+        else:
+            self.counter = 0
+        return self.counter >= self.patience
+
+
+# ----- 2. classify_collapse_type --------------------------------------------
+
+def classify_collapse_type(
+    logits: Optional[torch.Tensor],
+    labels: Optional[torch.Tensor] = None,  # noqa: ARG001 — accepted for future use
+) -> str:
+    """Classify the *type* of collapse from current head logits.
+
+    Returns one of ``mode_collapse`` (all predictions are the same class),
+    ``confidence_collapse`` (max prob < 0.4 — the head has lost
+    discriminative signal), or ``unknown``.
+    """
+    if logits is None or not torch.is_tensor(logits) or logits.numel() == 0:
+        return "unknown"
+    if logits.dim() < 2:
+        return "unknown"
+    with torch.no_grad():
+        probs = torch.softmax(logits, dim=-1)
+        preds = probs.argmax(dim=-1)
+        if preds.unique().numel() == 1:
+            return "mode_collapse"
+        if probs.max().item() < 0.4:
+            return "confidence_collapse"
+    return "unknown"
+
+
+# ----- 3. BatchAnalyzer (priority-based multi-signal classifier) ------------
+
+class BatchAnalyzer:
+    """Priority-ordered batch-level anomaly classifier.
+
+    Distinct from :class:`AnomalyClassifier`: this works on a generic
+    *signals dict* assembled by the caller (so it can fuse outputs from
+    multiple detectors), whereas ``AnomalyClassifier`` works on raw
+    loss/grad/logits tensors.
+    """
+
+    PRIORITY: tuple[str, ...] = (
+        "nan_loss",
+        "label_error",
+        "grad_explosion",
+        "silent_collapse",
+        "loss_spike",
+        "high_variance",
+    )
+
+    def __init__(self, grad_explode_th: float = 1000.0, var_th: float = 5.0):
+        self.grad_explode_th = float(grad_explode_th)
+        self.var_th = float(var_th)
+
+    def analyze(self, stats: Dict[str, Any]) -> str:
+        flags = self._flags(stats)
+        if not flags:
+            return "normal"
+        for p in self.PRIORITY:
+            if p in flags:
+                return p
+        return flags[0]
+
+    def analyze_multi(self, stats: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "issues": self._flags(stats),
+            "severity": stats.get("severity", "unknown"),
+        }
+
+    def _flags(self, stats: Dict[str, Any]) -> list[str]:
+        flags: list[str] = []
+        if stats.get("nan_loss"):
+            flags.append("nan_loss")
+        if stats.get("label_invalid"):
+            flags.append("label_error")
+        if float(stats.get("grad_norm", 0.0) or 0.0) > self.grad_explode_th:
+            flags.append("grad_explosion")
+        if stats.get("silent_collapse"):
+            flags.append("silent_collapse")
+        if stats.get("loss_spike"):
+            flags.append("loss_spike")
+        if float(stats.get("loss_var", 0.0) or 0.0) > self.var_th:
+            flags.append("high_variance")
+        return flags
+
+
+# ----- 4. handle_task_dominance (action hook, opt-in) -----------------------
+
+def handle_task_dominance(
+    result: Optional[Dict[str, Any]],
+    optimizer: Optional[torch.optim.Optimizer],
+    task_weights: Dict[str, float],
+    *,
+    dominant_decay: float = 0.7,
+    suppressed_boost: float = 1.3,
+    lr_decay: float = 0.5,
+) -> Dict[str, float]:
+    """Mutate ``task_weights`` (and optionally optimizer LR) in response to a
+    :class:`TaskDominanceDetector` result. Returns the (possibly mutated)
+    weights dict. No-op when ``result`` is ``None``.
+
+    Caller is responsible for invoking this — ``Trainer`` does not call it
+    automatically because it changes the loss landscape mid-run.
+    """
+    if result is None:
+        return task_weights
+    dominant = result["dominant"]
+    suppressed = result["suppressed"]
+    if dominant in task_weights:
+        task_weights[dominant] = float(task_weights[dominant]) * dominant_decay
+    if suppressed in task_weights:
+        task_weights[suppressed] = float(task_weights[suppressed]) * suppressed_boost
+    if optimizer is not None:
+        for pg in optimizer.param_groups:
+            if dominant in str(pg.get("name", "")):
+                pg["lr"] = float(pg.get("lr", 0.0)) * lr_decay
+    return task_weights
+
+
+# ----- 5. handle_silent_collapse (action hook, opt-in) ----------------------
+
+def handle_silent_collapse() -> Dict[str, Any]:
+    """Return the recommended manual-inspection checklist when the silent
+    collapse detector fires. This is intentionally *advice*, not an
+    auto-mutation — the right response depends on which check fails."""
+    return {
+        "action": "inspect_dataset",
+        "checks": [
+            "label_distribution",
+            "data_leakage",
+            "class_imbalance",
+            "augmentation_errors",
+        ],
+    }
+
+
+# ----- 6. GradientConflictDetector ------------------------------------------
+
+def flatten_grads(grads) -> torch.Tensor:
+    """Flatten a list of per-parameter grad tensors to a single 1-D vector,
+    skipping ``None`` entries. Returns an empty tensor when nothing remains.
+    """
+    parts = [g.reshape(-1) for g in grads if g is not None]
+    if not parts:
+        return torch.empty(0)
+    return torch.cat(parts)
+
+
+class GradientConflictDetector:
+    """Detect pairwise gradient conflicts between tasks.
+
+    Conflict := cosine similarity below ``threshold`` (default 0 →
+    strictly opposing directions). Operates on *flattened* shared-backbone
+    grad vectors so different head sizes do not matter.
+    """
+
+    def __init__(self, threshold: float = 0.0):
+        self.threshold = float(threshold)
+
+    def compute(
+        self, task_grad_vecs: Dict[str, torch.Tensor]
+    ) -> Dict[tuple, float]:
+        conflicts: Dict[tuple, float] = {}
+        tasks = list(task_grad_vecs.keys())
+        for i in range(len(tasks)):
+            for j in range(i + 1, len(tasks)):
+                t1, t2 = tasks[i], tasks[j]
+                g1 = task_grad_vecs[t1]
+                g2 = task_grad_vecs[t2]
+                if not torch.is_tensor(g1) or not torch.is_tensor(g2):
+                    continue
+                if g1.numel() == 0 or g2.numel() == 0 or g1.numel() != g2.numel():
+                    continue
+                # cosine_similarity needs at least 1-D and identical shape.
+                sim = F.cosine_similarity(g1.unsqueeze(0), g2.unsqueeze(0), dim=1).item()
+                if not math.isfinite(sim):
+                    continue
+                if sim < self.threshold:
+                    conflicts[(t1, t2)] = sim
+        return conflicts
+
+
+def resolve_conflicts(
+    conflicts: Dict[tuple, float],
+    task_weights: Dict[str, float],
+    *,
+    rate: float = 0.1,
+) -> Dict[str, float]:
+    """Soft conflict damping: reduce both conflicting tasks' weights by
+    ``rate × |sim|``. Opt-in helper, not auto-invoked."""
+    for (t1, t2), sim in conflicts.items():
+        penalty = abs(sim)
+        if t1 in task_weights:
+            task_weights[t1] = float(task_weights[t1]) * (1.0 - rate * penalty)
+        if t2 in task_weights:
+            task_weights[t2] = float(task_weights[t2]) * (1.0 - rate * penalty)
+    return task_weights
+
+
+# ----- 7. TaskBalancer (uncertainty weighting, learnable) -------------------
+
+class TaskBalancer(nn.Module):
+    """Kendall et al. (2018) homoscedastic-uncertainty task balancer.
+
+    ``log_vars`` are registered as ``nn.ParameterDict`` so they are picked
+    up by ``model.parameters()`` and trained jointly with the model. Per
+    task: ``loss_t = exp(-log_var_t) * raw_loss_t + log_var_t``.
+
+    Opt-in: instantiate and pass to your training loop manually. Trainer
+    does not auto-instantiate because it changes the loss formulation.
+    """
+
+    def __init__(self, tasks: Iterable[str]):
+        super().__init__()
+        self.log_vars = nn.ParameterDict(
+            {t: nn.Parameter(torch.zeros(1)) for t in tasks}
+        )
+
+    def uncertainty_weight(self, loss: torch.Tensor, task: str) -> torch.Tensor:
+        log_var = self.log_vars[task]
+        precision = torch.exp(-log_var)
+        return precision * loss + log_var
+
+    def forward(self, task_losses: Dict[str, torch.Tensor]) -> torch.Tensor:
+        total: Optional[torch.Tensor] = None
+        for t, loss in task_losses.items():
+            if t not in self.log_vars:
+                continue
+            term = self.uncertainty_weight(loss, t).squeeze()
+            total = term if total is None else total + term
+        if total is None:
+            raise ValueError("task_losses contained no known tasks")
+        return total
+
+
+# ----- 8. AutoDebugEngine + FailureMemory (control brain) -------------------
+
+class FailureMemory:
+    """Structured, queryable failure history.
+
+    Stores records grouped by failure type, capped at ``max_per_type``.
+    Provides distribution/recent/trend queries useful for dashboards and
+    post-run reports.
+    """
+
+    def __init__(self, max_per_type: int = 500):
+        self.max_per_type = int(max_per_type)
+        self.history: Dict[str, list[Dict[str, Any]]] = defaultdict(list)
+
+    def store(self, failure_type: str, signals: Dict[str, Any]) -> None:
+        rec = {"timestamp": time.time(), "signals": dict(signals)}
+        bucket = self.history[failure_type]
+        bucket.append(rec)
+        if len(bucket) > self.max_per_type:
+            bucket.pop(0)
+
+    def get_stats(self) -> Dict[str, int]:
+        return {k: len(v) for k, v in self.history.items()}
+
+    def recent(self, failure_type: str, n: int = 5) -> list[Dict[str, Any]]:
+        return list(self.history.get(failure_type, [])[-n:])
+
+    def distribution(self) -> Counter:
+        return Counter({k: len(v) for k, v in self.history.items()})
+
+
+def detect_failure_trend(
+    memory: FailureMemory, failure_type: str, window: int = 20
+) -> bool:
+    """Return True iff the last ``window`` stored events are *all* of the
+    given type — i.e. a continuous, persistent failure pattern."""
+    recent = memory.history.get(failure_type, [])
+    return len(recent) >= window
+
+
+class AutoDebugEngine:
+    """Composes detectors + classifier + memory into one ``step(signals)``
+    call. Detectors may expose either ``update(**signals)`` or be plain
+    callables. Returns ``(failure_type, detector_outputs)``.
+    """
+
+    def __init__(
+        self,
+        detectors: Dict[str, Any],
+        classifier: Any,
+        memory: FailureMemory,
+    ):
+        self.detectors = detectors
+        self.classifier = classifier
+        self.memory = memory
+
+    def step(self, signals: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
+        results: Dict[str, Any] = {}
+        for name, det in self.detectors.items():
+            try:
+                if hasattr(det, "update"):
+                    results[name] = det.update(**signals)
+                else:
+                    results[name] = det(**signals)
+            except TypeError:
+                # Detector did not accept these kwargs — skip rather than
+                # crash the training step.
+                results[name] = None
+
+        cls_out = self.classifier.classify({**signals, **results})
+        # FailureClassifier returns (type, causes); BatchAnalyzer returns str.
+        failure_type = cls_out[0] if isinstance(cls_out, tuple) else cls_out
+        if failure_type != "normal":
+            self.memory.store(failure_type, signals)
+        return failure_type, results
+
+
+# ----- 9. FailureClassifier (priority + causes) -----------------------------
+
+class FailureClassifier:
+    """Multi-signal failure classifier returning ``(root_cause, all_flags)``.
+
+    Distinct from ``BatchAnalyzer`` (single-string return) — this one keeps
+    secondary symptoms so reports can show "root: numerical_instability,
+    co-occurring: [gradient_conflict, task_imbalance]".
+    """
+
+    PRIORITY: tuple[str, ...] = (
+        "numerical_instability",
+        "gradient_explosion",
+        "representation_failure",
+        "task_imbalance",
+        "gradient_conflict",
+        "persistent_instability",
+    )
+
+    def __init__(self, grad_explode_th: float = 1000.0):
+        self.grad_explode_th = float(grad_explode_th)
+
+    def classify(self, signals: Dict[str, Any]) -> tuple[str, list[str]]:
+        flags: list[str] = []
+        if signals.get("nan_loss") or signals.get("nan_logits"):
+            flags.append("numerical_instability")
+        if float(signals.get("grad_norm", 0.0) or 0.0) > self.grad_explode_th:
+            flags.append("gradient_explosion")
+        if signals.get("silent_collapse"):
+            flags.append("representation_failure")
+        if signals.get("dominance"):
+            flags.append("task_imbalance")
+        if signals.get("conflicts"):
+            flags.append("gradient_conflict")
+        if signals.get("spike_cluster"):
+            flags.append("persistent_instability")
+        if not flags:
+            return "normal", []
+        for p in self.PRIORITY:
+            if p in flags:
+                return p, flags
+        return flags[0], flags
+
+
+# ----- 10. SpikeCluster + spike_severity ------------------------------------
+
+class SpikeCluster:
+    """Sliding-window spike density tracker.
+
+    ``update(is_spike)`` returns True iff the spike *density* in the
+    trailing window exceeds ``spike_ratio`` AND the window has at least
+    ``min_events`` samples (avoids early false positives).
+    """
+
+    def __init__(
+        self,
+        window: int = 50,
+        spike_ratio: float = 0.2,
+        min_events: int = 5,
+    ):
+        if window < 1:
+            raise ValueError(f"window must be >= 1, got {window}")
+        self.window: deque[int] = deque(maxlen=window)
+        self.spike_ratio = float(spike_ratio)
+        self.min_events = int(min_events)
+
+    def update(self, is_spike: bool) -> bool:
+        self.window.append(1 if is_spike else 0)
+        if len(self.window) < self.min_events:
+            return False
+        return self.density() > self.spike_ratio
+
+    def density(self) -> float:
+        if not self.window:
+            return 0.0
+        return sum(self.window) / len(self.window)
+
+
+def spike_severity(cluster_ratio: float) -> str:
+    if cluster_ratio > 0.5:
+        return "critical"
+    if cluster_ratio > 0.3:
+        return "high"
+    if cluster_ratio > 0.2:
+        return "medium"
+    return "low"
+
+
+# ----- 11/12. HealthScore + SmoothedHealth ----------------------------------
+
+class HealthScore:
+    """Weighted health score in [0, 1]. Higher is healthier.
+
+    Each present-and-truthy signal subtracts its weight. Total subtractable
+    weight sums to 1.0 so a fully-failing run produces 0.
+    """
+
+    DEFAULT_WEIGHTS: Dict[str, float] = {
+        "spike": 0.15,
+        "spike_cluster": 0.25,
+        "dominance": 0.15,
+        "conflicts": 0.15,
+        "silent_collapse": 0.30,
+    }
+
+    def __init__(self, weights: Optional[Dict[str, float]] = None):
+        self.weights = dict(weights) if weights else dict(self.DEFAULT_WEIGHTS)
+
+    def compute(self, signals: Dict[str, Any]) -> float:
+        score = 1.0
+        for key, weight in self.weights.items():
+            if signals.get(key):
+                score -= weight
+        return max(score, 0.0)
+
+    def interpret(self, score: float) -> str:
+        if score >= 0.8:
+            return "healthy"
+        if score >= 0.5:
+            return "unstable"
+        return "failing"
+
+
+class SmoothedHealth:
+    """EMA smoother for health scores. Survives single bad batches without
+    flipping a dashboard from 'healthy' to 'failing' on one event."""
+
+    def __init__(self, alpha: float = 0.1):
+        if not 0 < alpha <= 1:
+            raise ValueError(f"alpha must be in (0, 1], got {alpha}")
+        self.alpha = float(alpha)
+        self.ema: Optional[float] = None
+
+    def update(self, score: float) -> float:
+        s = float(score)
+        if self.ema is None:
+            self.ema = s
+        else:
+            self.ema = self.alpha * s + (1 - self.alpha) * self.ema
+        return self.ema
 
 
 __all__ = [
@@ -577,4 +1117,22 @@ __all__ = [
     "compute_task_grad_norms",
     "GradHookManager",
     "TaskDominanceDetector",
+    # HARDEN-12 control plane
+    "SilentCollapseDetector",
+    "classify_collapse_type",
+    "BatchAnalyzer",
+    "handle_task_dominance",
+    "handle_silent_collapse",
+    "flatten_grads",
+    "GradientConflictDetector",
+    "resolve_conflicts",
+    "TaskBalancer",
+    "FailureMemory",
+    "detect_failure_trend",
+    "AutoDebugEngine",
+    "FailureClassifier",
+    "SpikeCluster",
+    "spike_severity",
+    "HealthScore",
+    "SmoothedHealth",
 ]

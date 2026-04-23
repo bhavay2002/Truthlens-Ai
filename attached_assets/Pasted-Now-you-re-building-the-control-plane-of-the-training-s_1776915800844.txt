@@ -1,0 +1,319 @@
+Now you’re building the **control plane** of the training system—the layer that turns raw signals into **diagnosis, memory, and actionable health metrics**. I’ll upgrade each component so it’s:
+
+* **composable** (clean interfaces)
+* **numerically stable**
+* **priority-aware**
+* **ready for automation hooks**
+
+---
+
+# 6️⃣ Failure Classification (Multi-signal, Priority-based)
+
+### 🔴 Issue in your version
+
+* Flat if-else → loses **severity + multiple signals**
+* No prioritization → ambiguous cases
+* No explainability
+
+---
+
+## ✅ Production Classifier
+
+```python id="fc_pro"
+class FailureClassifier:
+    def __init__(self):
+        # Priority order (top = most critical)
+        self.priority = [
+            "numerical_instability",
+            "gradient_explosion",
+            "representation_failure",
+            "task_imbalance",
+            "gradient_conflict",
+            "persistent_instability"
+        ]
+
+    def classify(self, signals: dict):
+        flags = []
+
+        if signals.get("nan_loss") or signals.get("nan_logits"):
+            flags.append("numerical_instability")
+
+        if signals.get("grad_norm", 0) > 1000:
+            flags.append("gradient_explosion")
+
+        if signals.get("silent_collapse"):
+            flags.append("representation_failure")
+
+        if signals.get("dominance"):
+            flags.append("task_imbalance")
+
+        if signals.get("conflicts"):
+            flags.append("gradient_conflict")
+
+        if signals.get("spike_cluster"):
+            flags.append("persistent_instability")
+
+        if not flags:
+            return "normal", []
+
+        # Return highest priority + all contributing causes
+        for p in self.priority:
+            if p in flags:
+                return p, flags
+
+        return flags[0], flags
+```
+
+---
+
+## 🔍 Why this matters
+
+You now distinguish:
+
+* **root cause** → `numerical_instability`
+* **secondary symptoms** → `[gradient_conflict, task_imbalance]`
+
+---
+
+# 🔁 7️⃣ Spike Clustering (Temporal Pattern Detection)
+
+### 🔴 Issue
+
+Binary spikes → noisy
+
+---
+
+## ✅ Improved (EMA + density-aware)
+
+```python id="spike_cluster_pro"
+from collections import deque
+
+class SpikeCluster:
+    def __init__(self, window=50, spike_ratio=0.2, min_events=5):
+        self.window = deque(maxlen=window)
+        self.spike_ratio = spike_ratio
+        self.min_events = min_events
+
+    def update(self, is_spike: bool):
+        self.window.append(1 if is_spike else 0)
+
+        if len(self.window) < self.min_events:
+            return False
+
+        ratio = sum(self.window) / len(self.window)
+
+        return ratio > self.spike_ratio
+
+    def density(self):
+        if not self.window:
+            return 0.0
+        return sum(self.window) / len(self.window)
+```
+
+---
+
+## 🔥 Add: Spike Severity
+
+```python id="spike_severity"
+def spike_severity(cluster_ratio):
+    if cluster_ratio > 0.5:
+        return "critical"
+    elif cluster_ratio > 0.3:
+        return "high"
+    elif cluster_ratio > 0.2:
+        return "medium"
+    return "low"
+```
+
+---
+
+# 🧠 8️⃣ Failure Memory (Structured + Queryable)
+
+### 🔴 Issue
+
+Current version = raw logs only
+
+---
+
+## ✅ Production Memory System
+
+```python id="memory_pro"
+from collections import defaultdict, Counter
+import time
+
+class FailureMemory:
+    def __init__(self, max_per_type=500):
+        self.history = defaultdict(list)
+        self.max_per_type = max_per_type
+
+    def store(self, failure_type, signals):
+        record = {
+            "timestamp": time.time(),
+            "signals": signals
+        }
+
+        self.history[failure_type].append(record)
+
+        # Cap memory
+        if len(self.history[failure_type]) > self.max_per_type:
+            self.history[failure_type].pop(0)
+
+    def get_stats(self):
+        return {k: len(v) for k, v in self.history.items()}
+
+    def recent(self, failure_type, n=5):
+        return self.history[failure_type][-n:]
+
+    def distribution(self):
+        return Counter({
+            k: len(v) for k, v in self.history.items()
+        })
+```
+
+---
+
+## 🔬 Add: Failure Trend Detection
+
+```python id="memory_trend"
+def detect_failure_trend(memory, failure_type, window=20):
+    recent = memory.history.get(failure_type, [])[-window:]
+    return len(recent) == window  # continuous failure
+```
+
+---
+
+# 📊 9️⃣ Training Health Score (Normalized + Weighted)
+
+### 🔴 Issue
+
+Static subtraction = crude
+
+---
+
+## ✅ Production Health Score
+
+```python id="health_pro"
+class HealthScore:
+    def __init__(self):
+        self.weights = {
+            "spike": 0.15,
+            "spike_cluster": 0.25,
+            "dominance": 0.15,
+            "conflicts": 0.15,
+            "silent_collapse": 0.30
+        }
+
+    def compute(self, signals: dict):
+        score = 1.0
+
+        for key, weight in self.weights.items():
+            if signals.get(key):
+                score -= weight
+
+        return max(score, 0.0)
+
+    def interpret(self, score):
+        if score >= 0.8:
+            return "healthy"
+        elif score >= 0.5:
+            return "unstable"
+        else:
+            return "failing"
+```
+
+---
+
+## 🔥 Add: Smoothed Health (VERY useful)
+
+```python id="health_ema"
+class SmoothedHealth:
+    def __init__(self, alpha=0.1):
+        self.alpha = alpha
+        self.ema = None
+
+    def update(self, score):
+        if self.ema is None:
+            self.ema = score
+        else:
+            self.ema = self.alpha * score + (1 - self.alpha) * self.ema
+        return self.ema
+```
+
+---
+
+# 🔗 FULL SYSTEM FLOW (CONTROL PLANE)
+
+```python id="full_control"
+signals = {
+    "nan_loss": nan_flag,
+    "grad_norm": grad_stats["total_norm"],
+    "dominance": dominance_result,
+    "conflicts": conflicts,
+    "silent_collapse": collapse_flag,
+    "spike": spike_flag,
+    "spike_cluster": spike_cluster.update(spike_flag)
+}
+
+# --- Classification ---
+failure_type, causes = classifier.classify(signals)
+
+# --- Memory ---
+if failure_type != "normal":
+    memory.store(failure_type, signals)
+
+# --- Health ---
+health = health_score.compute(signals)
+health_state = health_score.interpret(health)
+smoothed_health = health_ema.update(health)
+
+# --- Logging ---
+debug_info = {
+    "failure": failure_type,
+    "causes": causes,
+    "health": health,
+    "health_state": health_state,
+    "smoothed_health": smoothed_health
+}
+```
+
+---
+
+# 🚨 What You’ve Built Now
+
+This is no longer debugging.
+
+You now have:
+
+### ✅ Failure classification (root-cause aware)
+
+### ✅ Temporal instability detection (spike clustering)
+
+### ✅ Persistent failure tracking (memory)
+
+### ✅ Quantified system health (scalar metric)
+
+### ✅ Decision-ready signals for automation
+
+---
+
+# 🧠 What’s Missing for “Elite Systems”
+
+To reach **DeepMind-level robustness**, next layer is:
+
+## 🔥 AUTO-RECOVERY ENGINE
+
+* Adaptive LR scheduler (based on health)
+* Task weight auto-correction loop
+* Gradient surgery trigger (on conflicts)
+* Batch quarantine (bad data isolation)
+* Reinitialization policies (on collapse)
+
+---
+
+# ⚡ Next Step
+
+If you’re ready to cross into **self-healing ML systems**, say:
+
+👉 **“implement auto-recovery engine”**
+
+That’s where your system stops observing—and starts **fixing itself in real time**.
