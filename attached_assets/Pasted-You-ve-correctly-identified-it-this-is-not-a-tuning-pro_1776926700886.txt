@@ -1,0 +1,330 @@
+You’ve correctly identified it: this is **not a tuning problem — it’s a gradient allocation failure across tasks**. Your system is behaving like a **degenerate multi-task learner collapsing into a dominant head**.
+
+Let’s fix this at the **mechanism level**, not heuristics.
+
+---
+
+# 🔴 4. TASK DOMINANCE — HARD FIX (ARCHITECTURAL)
+
+## 🧠 Root Cause (Precise)
+
+Your current training likely does:
+
+```python
+total_loss = loss_bias + loss_ideo + loss_prop
+```
+
+This assumes:
+
+* equal gradient scales ❌
+* equal label density ❌
+* equal task difficulty ❌
+
+So **ideology (dense + easier) dominates gradient flow**.
+
+---
+
+# ✅ SOLUTION STACK (PRODUCTION-GRADE)
+
+## ✅ 4.1 Gradient-Normalized Loss (GradNorm) — MUST IMPLEMENT
+
+This directly **balances gradient magnitudes per task**, not just loss values.
+
+### 🔧 Implementation
+
+```python
+class GradNormBalancer:
+    def __init__(self, model, task_names, alpha=0.5):
+        self.task_names = task_names
+        self.alpha = alpha
+        self.initial_losses = None
+
+    def compute_grad_norm(self, loss, shared_params):
+        grads = torch.autograd.grad(loss, shared_params, retain_graph=True, create_graph=True)
+        return torch.norm(torch.stack([g.norm() for g in grads if g is not None]))
+
+    def balance(self, losses, shared_params):
+        if self.initial_losses is None:
+            self.initial_losses = [l.detach() for l in losses]
+
+        grad_norms = []
+        for loss in losses:
+            grad_norms.append(self.compute_grad_norm(loss, shared_params))
+
+        avg_grad = torch.mean(torch.stack(grad_norms))
+
+        loss_ratios = [l / init for l, init in zip(losses, self.initial_losses)]
+        target_grads = [avg_grad * (r ** self.alpha) for r in loss_ratios]
+
+        grad_loss = sum(torch.abs(g - t) for g, t in zip(grad_norms, target_grads))
+
+        return grad_loss
+```
+
+---
+
+### 🔧 Training Integration
+
+```python
+shared_params = list(model.encoder.parameters())
+
+losses = [loss_bias, loss_ideo, loss_prop]
+
+gradnorm_loss = balancer.balance(losses, shared_params)
+
+total_loss = sum(losses) + 0.1 * gradnorm_loss
+```
+
+---
+
+## ✅ 4.2 Task Loss Scaling via Learnable Weights (Uncertainty Weighting)
+
+You need **adaptive weighting**, not static.
+
+```python
+class MultiTaskLoss(nn.Module):
+    def __init__(self, num_tasks):
+        super().__init__()
+        self.log_vars = nn.Parameter(torch.zeros(num_tasks))
+
+    def forward(self, losses):
+        total = 0
+        for i, loss in enumerate(losses):
+            precision = torch.exp(-self.log_vars[i])
+            total += precision * loss + self.log_vars[i]
+        return total
+```
+
+---
+
+### ⚠️ IMPORTANT
+
+Use **either GradNorm OR Uncertainty Weighting initially**, not both together.
+Then combine later if needed.
+
+---
+
+## ✅ 4.3 Per-Task Gradient Isolation (ADVANCED, HIGH IMPACT)
+
+Right now all tasks backprop through same graph simultaneously → interference.
+
+### 🔧 Fix: Backward per task (controlled accumulation)
+
+```python
+optimizer.zero_grad()
+
+loss_bias.backward(retain_graph=True)
+loss_ideo.backward(retain_graph=True)
+loss_prop.backward()
+
+torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+optimizer.step()
+```
+
+---
+
+### 🔥 Upgrade: Scale before backward
+
+```python
+(loss_bias * w_bias).backward(retain_graph=True)
+(loss_ideo * w_ideo).backward(retain_graph=True)
+(loss_prop * w_prop).backward()
+```
+
+---
+
+## ✅ 4.4 Task Sampling Balancer (DATA SIDE FIX)
+
+Dominance is also caused by **frequency imbalance of labels per batch**.
+
+### 🔧 Strategy: Task-aware batching
+
+Ensure each batch has:
+
+* minimum N samples for each task
+
+```python
+def enforce_task_presence(batch):
+    return (
+        (batch["bias_label"] != -100).sum() > 4 and
+        (batch["ideology_label"] != -100).sum() > 4 and
+        (batch["propaganda_label"] != -100).sum() > 4
+    )
+```
+
+---
+
+# 🟠 5. GRADIENT BEHAVIOR — FIX THE “FALSE STABILITY”
+
+## 🧠 Problem
+
+Global grad norm looks fine:
+
+```
+grad_norm ≈ 0.7
+```
+
+BUT internally:
+
+```
+ideology_grad >> propaganda_grad
+```
+
+---
+
+## ✅ 5.1 Log Per-Task Gradient Norms (MANDATORY DEBUG)
+
+```python
+def get_grad_norm(loss, params):
+    grads = torch.autograd.grad(loss, params, retain_graph=True)
+    return torch.norm(torch.stack([g.norm() for g in grads if g is not None]))
+```
+
+---
+
+### 🔧 Add Logging
+
+```python
+g_bias = get_grad_norm(loss_bias, shared_params)
+g_ideo = get_grad_norm(loss_ideo, shared_params)
+g_prop = get_grad_norm(loss_prop, shared_params)
+
+logger.info(f"GradNorms | bias={g_bias:.4f}, ideo={g_ideo:.4f}, prop={g_prop:.4f}")
+```
+
+---
+
+### 🚨 Add Dominance Detector
+
+```python
+def detect_dominance(g):
+    max_g = max(g)
+    min_g = min(g) + 1e-6
+    return max_g / min_g > 3.0
+```
+
+---
+
+# 🟡 6. DEBUG DUMP SYSTEM — MAKE IT INTELLIGENT
+
+Right now:
+
+* dumping everything ❌
+* no analysis ❌
+
+---
+
+## ✅ 6.1 Add Smart Trigger
+
+```python
+if detect_dominance([g_bias, g_ideo, g_prop]) or loss > 2.0:
+    save_debug_dump(batch, outputs, step)
+```
+
+---
+
+## ✅ 6.2 Limit Disk Usage
+
+```python
+MAX_DUMPS = 50
+
+if len(existing_dumps) > MAX_DUMPS:
+    delete_oldest_dump()
+```
+
+---
+
+## ✅ 6.3 Add Auto-Analysis (VERY IMPORTANT)
+
+When saving:
+
+```python
+dump = {
+    "losses": {
+        "bias": loss_bias.item(),
+        "ideo": loss_ideo.item(),
+        "prop": loss_prop.item()
+    },
+    "grad_norms": {
+        "bias": g_bias.item(),
+        "ideo": g_ideo.item(),
+        "prop": g_prop.item()
+    },
+    "label_density": {
+        "bias": (batch["bias_label"] != -100).float().mean().item(),
+        "ideo": (batch["ideology_label"] != -100).float().mean().item(),
+        "prop": (batch["propaganda_label"] != -100).float().mean().item(),
+    }
+}
+```
+
+---
+
+# 🟢 7. WHAT’S WORKING — USE IT PROPERLY
+
+You have a **strong infra baseline**:
+
+| Component           | Status |
+| ------------------- | ------ |
+| bf16                | ✅      |
+| H100                | ✅      |
+| torch.compile       | ✅      |
+| optimizer/scheduler | ✅      |
+
+---
+
+### 🚨 But note:
+
+These **do NOT fix optimization pathologies**.
+
+They only:
+
+* make wrong training faster ⚠️
+
+---
+
+# 🔥 FINAL EXECUTION PLAN
+
+## Phase 1 (Immediate — DO THIS FIRST)
+
+* ✅ Per-task gradient logging
+* ✅ Dominance detector
+* ✅ Masked loss (from previous fix)
+
+---
+
+## Phase 2 (Core Fix)
+
+* ✅ Implement GradNorm **OR** Uncertainty weighting
+* ✅ Task-aware batching
+
+---
+
+## Phase 3 (Stabilization)
+
+* ✅ Gradient clipping
+* ✅ Smart debug dumping
+
+---
+
+## Phase 4 (Advanced)
+
+* ✅ Per-task backward scaling
+* ✅ Combine GradNorm + uncertainty
+
+---
+
+# ⚠️ TRUTH (No sugarcoating)
+
+If you **don’t fix task dominance**:
+
+* Your model = **single-task ideology classifier in disguise**
+* Propaganda head = **dead branch**
+* Multi-task gains = **illusion**
+
+---
+
+If you want next level, I can:
+
+* integrate all fixes into your **exact training loop**
+* or build a **TruthLens-grade multi-task trainer (fully instrumented)**

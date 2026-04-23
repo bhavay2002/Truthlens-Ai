@@ -1,0 +1,304 @@
+You’re now at the **true failure layer**: *structural incoherence in multi-task optimization*.
+This isn’t about adding one trick — you need to **redefine how batches, losses, and gradients interact**.
+
+I’ll give you a **clean, production-grade architecture** that fixes all three issues *together*, not piecemeal.
+
+---
+
+# 🔴 8.1 MULTI-TASK LOSS IMBALANCE → CONTROL THE SIGNAL, NOT JUST THE VALUE
+
+## 🧠 Problem (Formalized)
+
+Each task differs in:
+
+* label density: `p(task active)`
+* intrinsic difficulty: `entropy(task)`
+* loss scale: `E[loss_task]`
+
+But you currently treat:
+
+```python
+total_loss = loss_bias + loss_ideo + loss_prop
+```
+
+This is mathematically invalid for heterogeneous tasks.
+
+---
+
+## ✅ FIX: **Two-Level Loss Normalization (Critical)**
+
+### Level 1 — **Per-task normalization by label density**
+
+```python id="lvl1norm"
+def normalize_by_density(loss, labels):
+    valid = (labels != -100).sum().clamp(min=1)
+    return loss / valid
+```
+
+---
+
+### Level 2 — **Running-scale normalization (stabilizes magnitude drift)**
+
+```python id="lvl2norm"
+class TaskNormalizer:
+    def __init__(self, momentum=0.9):
+        self.momentum = momentum
+        self.running = {}
+
+    def update(self, task, loss):
+        val = loss.detach()
+        if task not in self.running:
+            self.running[task] = val
+        else:
+            self.running[task] = (
+                self.momentum * self.running[task]
+                + (1 - self.momentum) * val
+            )
+        return loss / (self.running[task] + 1e-6)
+```
+
+---
+
+### 🔧 Combined Usage
+
+```python id="norm_usage"
+loss_bias = normalize_by_density(loss_bias, batch["bias_label"])
+loss_bias = normalizer.update("bias", loss_bias)
+
+loss_ideo = normalize_by_density(loss_ideo, batch["ideology_label"])
+loss_ideo = normalizer.update("ideology", loss_ideo)
+
+loss_prop = normalize_by_density(loss_prop, batch["propaganda_label"])
+loss_prop = normalizer.update("propaganda", loss_prop)
+```
+
+---
+
+### ⚠️ Why this works
+
+* removes batch-to-batch scale randomness
+* prevents dense tasks from dominating
+* stabilizes EMA and GradNorm later
+
+---
+
+# 🟠 8.2 SPARSE TASK ACTIVATION → FIX THE BATCH GEOMETRY
+
+## 🧠 Problem
+
+Your batches are **structurally inconsistent**:
+
+| Batch | Active Tasks      |
+| ----- | ----------------- |
+| A     | ideology only     |
+| B     | bias + propaganda |
+| C     | ideology + bias   |
+
+This breaks:
+
+* gradient consistency
+* optimizer state tracking
+* EMA assumptions
+
+---
+
+## ✅ FIX: **Task-Stratified Batch Construction**
+
+You must **control batch composition explicitly**.
+
+---
+
+### 🔧 Step 1 — Split dataset by task availability
+
+```python id="split_dataset"
+bias_pool = df[df.bias_label.notna()]
+ideo_pool = df[df.ideology_label.notna()]
+prop_pool = df[df.propaganda_label.notna()]
+```
+
+---
+
+### 🔧 Step 2 — Multi-source batch sampler
+
+```python id="batch_sampler"
+def build_batch():
+    batch = []
+
+    batch += sample(bias_pool, k=8)
+    batch += sample(ideo_pool, k=8)
+    batch += sample(prop_pool, k=8)
+
+    return collate(batch)
+```
+
+---
+
+### ✅ Guarantee:
+
+Every batch contains **ALL tasks**
+
+---
+
+### 🔥 Upgrade: Adaptive Sampling
+
+If propaganda is rare:
+
+```python id="adaptive_sampling"
+k_prop = max(8, int(0.3 * batch_size))
+```
+
+---
+
+## ⚠️ Alternative (if dataset too sparse)
+
+Use **Task Alternation Scheduler**:
+
+```python id="task_scheduler"
+if step % 3 == 0:
+    train_on("bias")
+elif step % 3 == 1:
+    train_on("ideology")
+else:
+    train_on("propaganda")
+```
+
+---
+
+# 🟡 8.3 WEAK SUPERVISION MIXING → REMOVE GRADIENT NOISE
+
+## 🧠 Problem
+
+Your batch contains:
+
+* labeled samples
+* unlabeled samples for a task
+
+Even with masking:
+👉 representation still influenced by unlabeled noise
+
+---
+
+## ✅ FIX: **Task-Conditioned Forward Pass (CRITICAL)**
+
+Instead of:
+
+```python
+outputs = model(input_ids)
+```
+
+---
+
+### 🔧 Do this:
+
+```python id="task_forward"
+def forward_task(model, batch, task):
+    mask = batch[f"{task}_label"] != -100
+
+    if mask.sum() == 0:
+        return None
+
+    inputs = {k: v[mask] for k, v in batch.items() if k in ["input_ids", "attention_mask"]}
+    labels = batch[f"{task}_label"][mask]
+
+    logits = model(**inputs)[task]
+
+    return logits, labels
+```
+
+---
+
+### 🔧 Training Loop (Clean Separation)
+
+```python id="task_loop"
+losses = []
+
+for task in ["bias", "ideology", "propaganda"]:
+    out = forward_task(model, batch, task)
+    if out is None:
+        continue
+
+    logits, labels = out
+    loss = loss_fn[task](logits, labels)
+
+    losses.append(loss)
+```
+
+---
+
+### ⚠️ Why this is powerful
+
+* eliminates cross-task noise
+* ensures clean gradients
+* aligns representation learning per task
+
+---
+
+# 🔥 COMBINED FINAL TRAINING STEP (PRODUCTION)
+
+```python id="final_step"
+optimizer.zero_grad()
+
+losses = []
+
+for task in tasks:
+    out = forward_task(model, batch, task)
+    if out is None:
+        continue
+
+    logits, labels = out
+
+    loss = loss_fn[task](logits, labels)
+    loss = normalize_by_density(loss, labels)
+    loss = normalizer.update(task, loss)
+
+    losses.append(loss)
+
+if len(losses) == 0:
+    continue
+
+# optional: GradNorm or uncertainty weighting here
+total_loss = sum(losses) / len(losses)
+
+total_loss.backward()
+
+torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+optimizer.step()
+```
+
+---
+
+# 🚨 WHAT THIS FIXES (DIRECTLY)
+
+| Issue                  | Fixed By                         |
+| ---------------------- | -------------------------------- |
+| Task dominance         | normalization + balanced batches |
+| Sparse activation      | stratified sampling              |
+| Weak supervision noise | task-conditioned forward         |
+| Loss inconsistency     | running normalization            |
+| EMA instability        | consistent task presence         |
+
+---
+
+# ⚠️ HARD TRUTH
+
+If you **don’t enforce batch structure + task isolation**:
+
+* GradNorm won’t save you
+* Loss weighting won’t stabilize
+* You’ll keep seeing:
+
+  * random spikes
+  * task collapse
+  * fake convergence
+
+---
+
+# 🚀 NEXT STEP (HIGH IMPACT)
+
+If you want to push this to **research-grade stability**, I can:
+
+* implement **PCGrad (gradient conflict resolution)**
+* or build a **fully modular multi-task trainer with hooks + diagnostics**
+* or integrate this into your **TruthLens pipeline end-to-end**
+
+Just tell me.

@@ -676,6 +676,40 @@ class Trainer:
         _low_loss_floor = float(os.environ.get("TRUTHLENS_LOW_LOSS_FLOOR", "0.001"))
         _low_loss_tripwire = int(os.environ.get("TRUTHLENS_LOW_LOSS_TRIPWIRE", "8"))
         _single_class_warn_every = int(os.environ.get("TRUTHLENS_SINGLE_CLASS_WARN_EVERY", "20"))
+
+        # Opt-in per-task gradient-norm probe. Off by default because it
+        # forces an extra autograd.grad() pass per active task per logged
+        # step. Turn on with TRUTHLENS_LOG_GRAD_NORMS=1 when you need to
+        # diagnose multi-task gradient dominance (which task is actually
+        # driving the shared-encoder updates, vs. just looking large in
+        # the loss). Only the RATIOS between tasks matter for diagnosing
+        # dominance, so this works under both bf16 (no scaler) and fp16
+        # (we read unscaled task_losses; absolute magnitudes will look
+        # small but ratios are preserved).
+        _log_grad_norms = os.environ.get(
+            "TRUTHLENS_LOG_GRAD_NORMS", "0"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        _grad_norms_every = max(
+            1, int(os.environ.get("TRUTHLENS_GRAD_NORMS_EVERY", "200"))
+        )
+        _grad_norm_dominance_warn = float(
+            os.environ.get("TRUTHLENS_GRAD_NORM_DOMINANCE_WARN", "5.0")
+        )
+        # Resolve the shared-encoder parameter list once per epoch (cheap;
+        # avoids re-walking the module tree every step). torch.compile
+        # wraps the module under `_orig_mod`, so peel it off first.
+        _raw_model_for_grads = getattr(self.model, "_orig_mod", self.model)
+        _shared_encoder = getattr(_raw_model_for_grads, "encoder", None)
+        _shared_params = (
+            [p for p in _shared_encoder.parameters() if p.requires_grad]
+            if _shared_encoder is not None
+            else []
+        )
+        if _log_grad_norms and not _shared_params:
+            logger.warning(
+                "TRUTHLENS_LOG_GRAD_NORMS=1 but no shared encoder params "
+                "were found; per-task grad-norm logging will be skipped."
+            )
         low_loss_streak = 0
 
         self.optimizer.zero_grad(set_to_none=True)
@@ -761,6 +795,63 @@ class Trainer:
                     )
             else:
                 low_loss_streak = 0
+
+            # Per-task gradient-norm probe (opt-in). Computes per-task
+            # grad norms w.r.t. the shared encoder using autograd.grad
+            # with retain_graph=True, so the main backward() that follows
+            # still sees a complete graph. Only runs every N steps to keep
+            # overhead bounded.
+            if (
+                _log_grad_norms
+                and _shared_params
+                and (self.global_step % _grad_norms_every == 0)
+                and isinstance(outputs, dict)
+            ):
+                _tl_for_grads = (
+                    outputs.get("task_losses") or outputs.get("loss_breakdown")
+                )
+                if isinstance(_tl_for_grads, dict) and _tl_for_grads:
+                    _gn: Dict[str, float] = {}
+                    for _name, _v in _tl_for_grads.items():
+                        if not (torch.is_tensor(_v) and _v.requires_grad):
+                            continue
+                        try:
+                            _grads = torch.autograd.grad(
+                                _v,
+                                _shared_params,
+                                retain_graph=True,
+                                allow_unused=True,
+                            )
+                        except RuntimeError as _gn_exc:
+                            logger.debug(
+                                "grad-norm probe failed for task %s at step %d: %s",
+                                _name, self.global_step, _gn_exc,
+                            )
+                            continue
+                        _sq = 0.0
+                        for _g in _grads:
+                            if _g is None:
+                                continue
+                            _sq += float(_g.detach().float().norm().item()) ** 2
+                        _gn[_name] = _sq ** 0.5
+                    if _gn:
+                        _gn_str = " ".join(f"{n}={v:.4e}" for n, v in _gn.items())
+                        logger.info(
+                            "per-task grad-norms (encoder) @ step %d | %s",
+                            self.global_step, _gn_str,
+                        )
+                        _vals = [v for v in _gn.values() if v > 0]
+                        if len(_vals) >= 2:
+                            _ratio = max(_vals) / max(min(_vals), 1e-12)
+                            if _ratio > _grad_norm_dominance_warn:
+                                _dom_task = max(_gn, key=_gn.get)
+                                logger.warning(
+                                    "Gradient dominance @ step %d: max/min=%.2f "
+                                    "(dominant=%s, threshold=%.2f). Consider "
+                                    "GradNorm or uncertainty weighting.",
+                                    self.global_step, _ratio, _dom_task,
+                                    _grad_norm_dominance_warn,
+                                )
 
             if self.scaler.is_enabled():
                 self.scaler.scale(loss).backward()
