@@ -349,7 +349,15 @@ def _strict_int_series(
 ) -> pd.Series:
     """Parse integer labels with fail-fast validation (no silent coercion)."""
     normalized = s.astype("string").str.strip()
-    parsed = pd.to_numeric(normalized, errors="raise")
+    try:
+        parsed = pd.to_numeric(normalized, errors="raise")
+    except Exception as e:
+        bad_mask = pd.to_numeric(normalized, errors="coerce").isna()
+        bad_rows = normalized[bad_mask]
+        print(f"\n🚨 COLUMN FAILURE: {column_name} (split: {split_name})")
+        print(f"Sample bad values: {bad_rows.unique()[:10]}")
+        print(f"Bad row indices: {bad_rows.index[:10].tolist()}")
+        raise ValueError(f"Column '{column_name}' in split '{split_name}' contains non-numeric values") from e
     if not allow_na and parsed.isna().any():
         raise RuntimeError(
             f"{split_name}.{column_name} contains NaN values after parsing."
@@ -367,6 +375,9 @@ def _strict_int_series(
                 .head(5)
                 .tolist()
             )
+            print(f"\n🚨 COLUMN FAILURE: {column_name} (split: {split_name})")
+            print(f"Sample bad values: {examples}")
+            print(f"Bad row indices: {normalized[invalid].index[:5].tolist()}")
             raise RuntimeError(
                 f"{split_name}.{column_name} has invalid labels. "
                 f"Allowed={sorted(allowed_values)} Examples={examples}"
