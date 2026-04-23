@@ -343,7 +343,21 @@ def load_checkpoint(
 
     state_dict = checkpoint["model_state_dict"]
 
-    load_result = model.load_state_dict(state_dict, strict=False)
+    # torch.compile wraps the module under `_orig_mod`, so a compiled model's
+    # keys look like `_orig_mod.encoder.…` while saved checkpoints (produced
+    # via CheckpointManager._extract_state / main.save_model, both of which
+    # strip the wrapper before saving) carry plain `encoder.…` keys. Loading
+    # the plain dict into a compiled model would fail strict mode with massive
+    # missing/unexpected key lists. Normalize both ends so the load is
+    # invariant to whether either side was compiled.
+    target_model = getattr(model, "_orig_mod", model)
+    if any(k.startswith("_orig_mod.") for k in state_dict.keys()):
+        state_dict = {
+            (k[len("_orig_mod."):] if k.startswith("_orig_mod.") else k): v
+            for k, v in state_dict.items()
+        }
+
+    load_result = target_model.load_state_dict(state_dict, strict=False)
 
     missing = [
         k for k in load_result.missing_keys
