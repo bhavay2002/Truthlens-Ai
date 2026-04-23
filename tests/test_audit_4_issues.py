@@ -454,6 +454,30 @@ def test_issue3_multitask_loss_skips_fully_masked_multiclass_task():
     assert "emotion" in task_losses
 
 
+def test_issue3_resolve_data_dir_requires_all_splits(tmp_path, monkeypatch):
+    """Resolver must not stop at a directory containing only train.csv."""
+    partial = tmp_path / "data"
+    complete = tmp_path / "truthlens datat"
+    partial.mkdir()
+    complete.mkdir()
+
+    (partial / "unified_dataset_train.csv").write_text("text\nhello\n")
+    for name in (
+        "unified_dataset_train.csv",
+        "unified_dataset_validation.csv",
+        "unified_dataset_test.csv",
+    ):
+        (complete / name).write_text("text\nhello\n")
+
+    import importlib
+    import main as launcher
+
+    monkeypatch.setenv("TRUTHLENS_DATA_DIR", str(tmp_path))
+    importlib.reload(launcher)
+
+    assert launcher.DRIVE_DATA_PATH == complete
+
+
 # =====================================================================
 # Issue #4 — loss stability: clipping + NaN guard + per-task visibility
 # =====================================================================

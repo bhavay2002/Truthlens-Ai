@@ -84,15 +84,56 @@ _DATA_CANDIDATES = [
 ]
 
 _TRAIN_FILE = "unified_dataset_train.csv"
+_VAL_FILE = "unified_dataset_validation.csv"
+_TEST_FILE = "unified_dataset_test.csv"
+
+
+def _has_all_dataset_splits(path: Path) -> bool:
+    return all((path / name).is_file() for name in (_TRAIN_FILE, _VAL_FILE, _TEST_FILE))
+
+
+def _search_dataset_dir(root: Path, max_depth: int = 3) -> Path | None:
+    """Find the nearest directory containing all unified dataset splits."""
+    try:
+        root = root.expanduser()
+    except Exception:
+        return None
+
+    if _has_all_dataset_splits(root):
+        return root
+    if not root.exists() or not root.is_dir() or max_depth <= 0:
+        return None
+
+    try:
+        for child in root.iterdir():
+            if not child.is_dir():
+                continue
+            found = _search_dataset_dir(child, max_depth=max_depth - 1)
+            if found is not None:
+                return found
+    except OSError:
+        return None
+    return None
 
 
 def _resolve_data_dir() -> Path:
     env = os.environ.get("TRUTHLENS_DATA_DIR")
     if env:
-        return Path(env).expanduser()
+        env_path = Path(env).expanduser()
+        found = _search_dataset_dir(env_path, max_depth=4)
+        return found or env_path
     for cand in _DATA_CANDIDATES:
-        if (cand / _TRAIN_FILE).is_file():
-            return cand
+        found = _search_dataset_dir(cand, max_depth=3)
+        if found is not None:
+            return found
+    for root in (
+        Path("/teamspace/studios/this_studio"),
+        Path(__file__).resolve().parent,
+        Path("/content"),
+    ):
+        found = _search_dataset_dir(root, max_depth=4)
+        if found is not None:
+            return found
     # Nothing found — return the first repo-local candidate so the
     # FileNotFoundError below is actionable (path printed in the error).
     return Path(__file__).resolve().parent / "data"
@@ -101,8 +142,8 @@ def _resolve_data_dir() -> Path:
 DRIVE_DATA_PATH = _resolve_data_dir()
 
 TRAIN_PATH = DRIVE_DATA_PATH / _TRAIN_FILE
-VAL_PATH = DRIVE_DATA_PATH / "unified_dataset_validation.csv"
-TEST_PATH = DRIVE_DATA_PATH / "unified_dataset_test.csv"
+VAL_PATH = DRIVE_DATA_PATH / _VAL_FILE
+TEST_PATH = DRIVE_DATA_PATH / _TEST_FILE
 
 # Local save dir: prefer a writable, platform-appropriate default.
 if Path("/teamspace/studios/this_studio").is_dir():
