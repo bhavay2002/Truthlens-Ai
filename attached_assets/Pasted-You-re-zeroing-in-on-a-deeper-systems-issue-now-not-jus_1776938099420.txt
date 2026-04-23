@@ -1,0 +1,343 @@
+You’re zeroing in on a **deeper systems issue** now—not just loss math, but **how optimization signal flows through your shared encoder over time**. The fixes you outlined are directionally correct, but a few of them need tightening to avoid subtle failure modes.
+
+I’ll walk you through **#4–6 with precise corrections + production-grade implementation patterns**.
+
+---
+
+# ⚠️ FIRST — Critical Correction (Very Important)
+
+> ❌ “Compute zero loss for missing tasks so weights stay balanced”
+
+This is **dangerous and incorrect in practice**.
+
+### Why?
+
+* A zero loss ≠ neutral update
+* It **biases gradients toward tasks with data**
+* It **artificially reduces total loss**, misleading schedulers and early stopping
+
+### ✅ Correct Principle
+
+> Only compute gradients where supervision exists,
+> but ensure **long-term balance across steps**, not fake per-step balance.
+
+---
+
+# ✅ 4. FIX — Multi-task Optimization Behavior
+
+## 🎯 Goal
+
+Ensure the shared encoder receives **consistent, multi-task signal over time**, not necessarily every batch.
+
+---
+
+## 🔧 STRATEGY A — Masked Loss + True Normalization
+
+```python
+def compute_multitask_loss(outputs, batch, tasks):
+    total_loss = 0.0
+    active_tasks = 0
+
+    for task in tasks:
+        logits = outputs[task]
+        labels = batch[task]
+
+        mask = (labels != -1)
+
+        if mask.sum() == 0:
+            continue  # skip — no fake loss
+
+        loss = F.binary_cross_entropy_with_logits(
+            logits[mask], labels[mask].float()
+        )
+
+        total_loss += loss
+        active_tasks += 1
+
+    if active_tasks == 0:
+        return None  # skip batch entirely
+
+    return total_loss / active_tasks
+```
+
+---
+
+## ⚠️ Key Insight
+
+You **do NOT need every task in every batch**
+👉 You need **balanced gradient exposure over time**
+
+---
+
+## 🔧 STRATEGY B — Gradient Accumulation Across Tasks (Advanced)
+
+If batches are sparse:
+
+```python
+optimizer.zero_grad()
+
+for step in range(accum_steps):
+    loss = compute_multitask_loss(...)
+    loss.backward()
+
+optimizer.step()
+```
+
+👉 Over multiple steps → all tasks contribute
+
+---
+
+## 🔥 STRATEGY C — Task Cycling (Highly Effective)
+
+Instead of forcing multi-task per batch:
+
+```
+Step 1 → ideology batch
+Step 2 → emotion batch
+Step 3 → narrative batch
+```
+
+This gives:
+
+* clean gradients
+* stable updates
+* no masking chaos
+
+---
+
+# ✅ 5. FIX — Data Leakage Cleanup Fallout
+
+You correctly identified the issue—but here’s how to operationalize it.
+
+---
+
+## 🔧 STEP 1 — Post-clean Distribution Audit
+
+Compute:
+
+```python
+for task in tasks:
+    print(task, {
+        "positive": count_pos,
+        "negative": count_neg,
+        "na": count_na
+    })
+```
+
+---
+
+## 🔧 STEP 2 — Detect Distribution Shift
+
+Compare:
+
+| Metric         | Before | After |
+| -------------- | ------ | ----- |
+| Label coverage | 40%    | 18% ❌ |
+| Positive ratio | 0.3    | 0.1 ❌ |
+
+---
+
+## 🔧 STEP 3 — Fix Imbalance
+
+### OPTION A — Class Weights
+
+```python
+pos_weight = (neg_count / pos_count)
+loss = BCEWithLogitsLoss(pos_weight=pos_weight)
+```
+
+---
+
+### OPTION B — Oversampling
+
+```python
+WeightedRandomSampler(weights)
+```
+
+Where:
+
+```
+weight ∝ 1 / task_label_frequency
+```
+
+---
+
+### OPTION C — Task-aware Sampling (Best)
+
+Each batch ensures:
+
+* at least K samples per task
+
+---
+
+## 🔧 STEP 4 — Validation Alignment
+
+🚨 Many people miss this:
+
+After cleaning:
+
+* Your **train distribution changed**
+* Your **val/test likely didn’t**
+
+👉 Result = misleading metrics
+
+### Fix:
+
+* Re-split OR
+* Re-weight validation metrics
+
+---
+
+# ✅ 6. FIX — NA Handling Strategy (CORE INSTABILITY SOURCE)
+
+This is where your system is currently breaking.
+
+---
+
+## ❌ Current Behavior
+
+* Tasks randomly appear/disappear per batch
+* Gradient direction constantly shifts
+* Encoder never stabilizes
+
+---
+
+## ✅ FIX 1 — Minimum Task Presence Constraint
+
+Define:
+
+```python
+MIN_LABELS_PER_TASK = 2
+```
+
+In batch:
+
+```python
+valid = (labels != -1).sum()
+
+if valid < MIN_LABELS_PER_TASK:
+    skip_task
+```
+
+---
+
+## ✅ FIX 2 — Smart Batch Builder (Practical Version)
+
+Instead of perfect stratification (hard), use **soft guarantees**:
+
+```python
+def build_batch(dataset, tasks):
+    batch = []
+
+    for task in tasks:
+        sample = dataset.sample_with_label(task)
+        if sample:
+            batch.append(sample)
+
+    # fill rest randomly
+    while len(batch) < BATCH_SIZE:
+        batch.append(dataset.random_sample())
+
+    return collate(batch)
+```
+
+---
+
+## ✅ FIX 3 — EMA-Based Task Balancing (VERY POWERFUL)
+
+Track how often each task contributes:
+
+```python
+task_ema[task] = 0.9 * task_ema[task] + 0.1 * (mask.sum() > 0)
+```
+
+Then weight:
+
+```python
+weight = 1 / (task_ema[task] + 1e-6)
+```
+
+👉 Rare tasks automatically get boosted
+
+---
+
+## ✅ FIX 4 — Combine with Dynamic Weighting
+
+Final loss:
+
+```python
+total_loss += weight[task] * task_loss
+```
+
+---
+
+# 🔥 SYSTEM-LEVEL VIEW (WHAT YOU'RE REALLY FIXING)
+
+| Issue                   | Root Cause             | Real Fix                     |
+| ----------------------- | ---------------------- | ---------------------------- |
+| Tasks missing per batch | Sparse labels          | Temporal balancing           |
+| Encoder instability     | Gradient inconsistency | Task cycling / EMA weighting |
+| Dominant tasks          | Frequency skew         | Adaptive weighting           |
+| Post-clean degradation  | Distribution shift     | Rebalancing                  |
+
+---
+
+# 🚀 RECOMMENDED EXECUTION ORDER (DO THIS EXACTLY)
+
+## Phase 1 — Stabilize Core Training
+
+1. ✅ Masked loss (strict)
+2. ✅ Skip empty-task losses (no fake zeros)
+3. ✅ Skip empty batches
+
+---
+
+## Phase 2 — Fix Data + Sampling
+
+4. ✅ Distribution audit
+5. ✅ Add class weights
+6. ✅ Add oversampling OR soft task batching
+
+---
+
+## Phase 3 — Fix Optimization Dynamics
+
+7. ✅ EMA-based task weighting
+8. ✅ Gradient clipping
+
+---
+
+## Phase 4 — Advanced (Only After Stable)
+
+9. GradNorm or uncertainty weighting
+10. Task cycling (if still unstable)
+
+---
+
+# ⚠️ HARD TRUTH
+
+If:
+
+* label coverage < 20–30%
+* AND tasks are independent
+
+👉 True multi-task learning may be **the wrong architecture**
+
+You may get better results with:
+
+* separate models per task
+* shared encoder only in pretraining
+
+---
+
+# 👉 If you want next step
+
+I can build you a **fully integrated training loop for TruthLens** that includes:
+
+* masked loss
+* EMA task balancing
+* smart batching
+* anomaly detection
+* gradient stabilization
+
+Just say the word.
