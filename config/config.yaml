@@ -42,7 +42,7 @@ training:
 
   epochs: 4
 
-  batch_size: 36
+  batch_size: 48
 
   # throughput scaling
   gradient_accumulation_steps: 1
@@ -167,7 +167,8 @@ hyperparameter_tuning:
 
     batch_size:
       - 16
-      - 36
+      - 32
+      - 64
 
     epochs:
       - 3
