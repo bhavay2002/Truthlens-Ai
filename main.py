@@ -598,14 +598,68 @@ def load_data():
         **{c: "Float64" for c in EMOTION_COLUMNS},
     }
 
-    def _read(path):
-        return pd.read_csv(
+    # ── Data Ingestion Firewall ────────────────────────────────────────────────
+
+    import hashlib, csv as _csv
+
+    def _file_hash(path: "Path") -> str:
+        h = hashlib.md5()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    def _check_column_alignment(path: "Path", expected_cols: int) -> None:
+        """Raise if any non-header line has a different comma count."""
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for i, line in enumerate(f, 1):
+                n = line.count(",")
+                if i == 1:
+                    expected_cols = n   # derive from header
+                    continue
+                if n != expected_cols:
+                    raise RuntimeError(
+                        f"Column alignment mismatch in {path.name} at line {i}: "
+                        f"expected {expected_cols} commas, got {n}.\n"
+                        f"  First 200 chars: {line[:200]!r}"
+                    )
+
+    def _read(path: "Path") -> "pd.DataFrame":
+        # 1. Log file identity so training vs. validation mismatches are detectable.
+        logger.info("DATA HASH %s  %s", _file_hash(path), path.name)
+
+        # 2. Structural alignment guard — catches silent delimiter drift before
+        #    pandas ever sees the file.
+        _check_column_alignment(path, len(_explicit_dtypes))
+
+        # 3. Safe parse: python engine + explicit dtypes enforce schema at load time;
+        #    on_bad_lines skips any rows that survive the alignment check but still
+        #    corrupt the parser.
+        df = pd.read_csv(
             path,
-            engine="python",          # fallback parser (more tolerant)
-            on_bad_lines="skip",      # skip corrupted rows
-            quoting=3,                # csv.QUOTE_NONE
+            engine="python",
+            dtype=_explicit_dtypes,
+            on_bad_lines="skip",
             encoding="utf-8",
+            keep_default_na=True,
+            na_values=["", "NA", "N/A", "null", "None"],
         )
+
+        # 4. Immediate label-integrity check: non-numeric values in bias_label are
+        #    the canonical signal that a column shift occurred.
+        if BIAS_LABEL in df.columns:
+            invalid_mask = pd.to_numeric(df[BIAS_LABEL], errors="coerce").isna() & df[BIAS_LABEL].notna()
+            n_invalid = int(invalid_mask.sum())
+            if n_invalid:
+                sample = df.loc[invalid_mask, BIAS_LABEL].head(5).tolist()
+                raise RuntimeError(
+                    f"Column corruption detected in {path.name}: "
+                    f"{n_invalid} row(s) have non-numeric '{BIAS_LABEL}' values "
+                    f"(e.g. {sample}). "
+                    "This indicates a column shift — check CSV delimiters."
+                )
+
+        return df
 
     train_df = _read(TRAIN_PATH)
     val_df = _read(VAL_PATH)

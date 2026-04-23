@@ -1,0 +1,190 @@
+Good—this is the right kind of validation mindset. But your conclusion is **too optimistic**.
+
+You’ve only ruled out **one failure mode (unbalanced quotes)**.
+Your actual error:
+
+```text
+bias_label contains: 'leadership', 'electricity', ...
+```
+
+👉 That **cannot happen in a clean, correctly parsed dataset** where `bias_label ∈ {0,1}`.
+
+So one of these is still true:
+
+---
+
+# 🔴 Reality Check (Don’t Skip This)
+
+Even with:
+
+```
+0 rows with unbalanced quotes
+```
+
+You still have **at least one of the following**:
+
+### 1. Column shift due to delimiter inconsistency
+
+* Mixed quoting styles across rows
+* Some rows quoted, some not
+
+### 2. Wrong column mapping during load
+
+* Column order mismatch
+* Header misinterpretation
+
+### 3. Dataset version mismatch
+
+* You validated **one file**
+* Training used **another**
+
+### 4. Silent parsing drift (most likely)
+
+* Pandas inferred structure differently across chunks / files
+
+---
+
+# 🎯 What To Do (Deterministic, No Guessing)
+
+## ✅ STEP 1 — Prove or Disprove Column Corruption
+
+Run this EXACT check:
+
+```python
+invalid_bias = df[
+    pd.to_numeric(df['bias_label'], errors='coerce').isna()
+    & df['bias_label'].notna()
+]
+
+print("Invalid rows:", len(invalid_bias))
+print(invalid_bias.head(10))
+```
+
+---
+
+### 👉 Interpretation:
+
+| Result | Meaning                        |
+| ------ | ------------------------------ |
+| `0`    | Current file is clean          |
+| `>0`   | Column corruption STILL exists |
+
+---
+
+## ✅ STEP 2 — Verify Column Alignment (CRITICAL)
+
+Check if rows are structurally consistent:
+
+```python
+EXPECTED_COLS = len(df.columns)
+
+with open(PATH, "r", encoding="utf-8", errors="replace") as f:
+    for i, line in enumerate(f, 1):
+        if line.count(",") != EXPECTED_COLS - 1:
+            print(f"⚠️ Column mismatch at line {i}")
+            print(line[:200])
+            break
+```
+
+👉 This catches **silent delimiter issues** (your quote test does NOT)
+
+---
+
+## ✅ STEP 3 — Lock Schema (Stop Future Breakage)
+
+Hard enforce:
+
+```python
+EXPECTED_SCHEMA = {
+    "text": "string",
+    "bias_label": "int",
+}
+
+def validate_schema(df):
+    # Column existence
+    assert set(EXPECTED_SCHEMA.keys()).issubset(df.columns)
+
+    # Label integrity
+    if not df["bias_label"].isin([0, 1]).all():
+        bad = df[~df["bias_label"].isin([0, 1])]
+        raise ValueError(f"Invalid labels:\n{bad[['bias_label']].head()}")
+```
+
+---
+
+## ✅ STEP 4 — Force Safe Parsing (Non-Negotiable)
+
+Even if file *looks* clean:
+
+```python
+df = pd.read_csv(
+    PATH,
+    engine="python",          # prevents C parser edge-case drift
+    dtype={"bias_label": "Int64"},  # enforce schema at load time
+)
+```
+
+---
+
+## ⚠️ STEP 5 — Verify You’re Using SAME FILE
+
+This is where people get burned.
+
+Add:
+
+```python
+import hashlib
+
+def file_hash(path):
+    with open(path, "rb") as f:
+        return hashlib.md5(f.read()).hexdigest()
+
+print("TRAIN:", file_hash(TRAIN_PATH))
+print("TEST :", file_hash(TEST_PATH))
+```
+
+👉 Ensure the file you validated == file used in training
+
+---
+
+# 🧠 My Diagnosis (Based on Your Logs)
+
+Given:
+
+* earlier `"leadership"` inside `bias_label`
+* now “clean” quote check
+* but no full structural validation
+
+👉 Most likely:
+
+> **You validated a cleaned version, but training is still reading a corrupted or differently parsed file**
+
+---
+
+# 🚨 What You Should Do Right Now (Minimal Path)
+
+1. Run `invalid_bias` check → confirm corruption
+2. Run column count validator → catch misalignment
+3. Print first bad row (if exists)
+4. Verify file hash consistency
+5. Force `engine="python"`
+
+---
+
+# 🔥 If You Want This Fully Solved
+
+I can wire a **Data Ingestion Firewall** into your pipeline:
+
+### It will:
+
+* validate structure (columns, delimiters)
+* enforce schema strictly
+* detect drift across splits
+* auto-reject corrupted rows
+* produce a data audit report before training
+
+Just say:
+
+👉 **“build ingestion firewall v1”**
+
+And I’ll implement it cleanly into your existing codebase.
