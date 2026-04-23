@@ -48,6 +48,9 @@ from src.training.instrumentation import (
     LossStats,
     GradTracker,
     SpikeDetector,
+    AnomalyClassifier,
+    TaskDominanceDetector,
+    anomaly_severity,
     detect_grad_anomaly,
     check_optimizer,
     dump_batch,
@@ -211,6 +214,16 @@ class Trainer:
         self._grad_tracker = GradTracker(window=50)
         self._spike_detector = SpikeDetector(
             threshold=float(os.environ.get("TRUTHLENS_SPIKE_RATIO", "2.5")),
+        )
+        # Phase-4 multi-signal classifier and Phase-7 dominance detector.
+        # Both feed off of the same per-task loss/grad data we already
+        # collect, so wiring them is essentially free.
+        self._anomaly_classifier = AnomalyClassifier(
+            spike_ratio=float(os.environ.get("TRUTHLENS_SPIKE_RATIO", "2.5")),
+        )
+        self._dominance_detector = TaskDominanceDetector(
+            alpha=0.1,
+            dominance_ratio=float(os.environ.get("TRUTHLENS_DOMINANCE_RATIO", "5.0")),
         )
         self._debug_dump_dir = os.environ.get(
             "TRUTHLENS_DEBUG_DUMP_DIR",
@@ -770,9 +783,42 @@ class Trainer:
                     if torch.is_tensor(_ids) and _ids.numel() > 0
                     else "?"
                 )
+
+                # Phase-4: multi-signal classification + severity bucket.
+                # Pulls per-head logits + labels for the spiked task so the
+                # classifier can distinguish data issues (negative_labels,
+                # logit_collapse) from optimization issues.
+                _spike_logits = None
+                _spike_labels = None
+                if isinstance(outputs, dict):
+                    _head = outputs.get(_spiked_task)
+                    if isinstance(_head, dict) and torch.is_tensor(_head.get("logits")):
+                        _spike_logits = _head["logits"]
+                if isinstance(batch, dict):
+                    _spike_labels = (
+                        batch.get(f"labels_{_spiked_task}")
+                        or batch.get(_spiked_task)
+                    )
+                _anomaly = self._anomaly_classifier.classify(
+                    loss=_per_task_losses[_spiked_task],
+                    ema_loss=_ema.get(_spiked_task, 0.0),
+                    grad_stats=(self._grad_tracker.history[-1]
+                                if self._grad_tracker.history else None),
+                    loss_var=_stats.get(_spiked_task, {}).get("var"),
+                    logits=_spike_logits,
+                    labels=_spike_labels if torch.is_tensor(_spike_labels) else None,
+                )
+                _severity = anomaly_severity(
+                    _per_task_losses[_spiked_task],
+                    _ema.get(_spiked_task, 0.0),
+                    (self._grad_tracker.history[-1]["total_norm"]
+                     if self._grad_tracker.history else 0.0),
+                )
+
                 logger.warning(
-                    "Loss spike at step %d in task=%s: raw=%.4f ema=%.4f var=%.4f "
-                    "batch_sig=%s | per_task=%s",
+                    "Anomaly[%s/%s] at step %d task=%s: raw=%.4f ema=%.4f "
+                    "var=%.4f batch_sig=%s | per_task=%s",
+                    _anomaly, _severity,
                     self.global_step, _spiked_task,
                     _per_task_losses[_spiked_task],
                     _ema[_spiked_task],
@@ -792,6 +838,8 @@ class Trainer:
                             {
                                 "step": self.global_step,
                                 "spiked_task": _spiked_task,
+                                "anomaly": _anomaly,
+                                "severity": _severity,
                                 "inputs": batch if isinstance(batch, dict) else {"batch": batch},
                                 "logits": _logits,
                                 "losses": _per_task_losses,
@@ -805,15 +853,20 @@ class Trainer:
                     except Exception as _exc:  # noqa: BLE001
                         logger.warning("Spike batch dump failed: %s", _exc)
 
-            if isinstance(outputs, dict):
-                _tl_dom = outputs.get("task_losses") or outputs.get("loss_breakdown")
-                _dom_msg = self._task_loss_dominance_summary(_tl_dom)
-                if _dom_msg is not None:
-                    logger.warning(
-                        "Task loss domination at step %d | %s",
-                        self.global_step,
-                        _dom_msg,
-                    )
+            # Phase-7: EMA-smoothed task dominance — uses per-task losses as
+            # a proxy for per-task grad magnitudes (true per-task grad norms
+            # would require an extra autograd.grad call per task, which is
+            # only worth paying for when GradNorm is enabled). Smoothing
+            # prevents the per-step noise that the previous max/min summary
+            # produced.
+            _dom = self._dominance_detector.update(_per_task_losses)
+            if _dom is not None:
+                logger.warning(
+                    "Task dominance at step %d: %s suppresses %s "
+                    "(smoothed ratio=%.2fx)",
+                    self.global_step,
+                    _dom["dominant"], _dom["suppressed"], _dom["ratio"],
+                )
 
             # -------------------------------------------------
             # STEP CHECKPOINTING (every N global steps)
