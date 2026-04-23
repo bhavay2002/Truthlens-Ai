@@ -35,19 +35,40 @@ class MultiTaskLoss(nn.Module):
         "regression",
     }
 
+    VALID_NORMALIZATIONS = {"active", "fixed", "sum"}
+
     def __init__(
         self,
         task_configs: Dict[str, TaskLossConfig],
         *,
         strict: bool = True,
+        normalization: str = "active",
     ) -> None:
         super().__init__()
 
         if not isinstance(task_configs, dict) or not task_configs:
             raise ValueError("task_configs must be a non-empty dictionary")
 
+        if normalization not in self.VALID_NORMALIZATIONS:
+            raise ValueError(
+                f"normalization must be one of {self.VALID_NORMALIZATIONS}, "
+                f"got {normalization!r}"
+            )
+
         self.task_configs = task_configs
         self.strict = strict
+        self.normalization = normalization
+
+        # Head-starvation tracker: counts how many forward() calls actually
+        # produced a contributing loss for each task. Sparse-supervision
+        # multi-task setups can silently starve a head when most of its
+        # labels are missing, so we expose a counter the trainer can log.
+        self.head_call_counts: Dict[str, int] = {name: 0 for name in task_configs}
+        self.total_forward_calls: int = 0
+
+        # Most recent forward()'s active-head count, exposed for trainer
+        # logging without changing the (total_loss, task_losses) return shape.
+        self.last_active_heads: int = 0
 
         #  M-LOSS-1: Register modules correctly
         self.loss_functions = nn.ModuleDict()
@@ -82,10 +103,27 @@ class MultiTaskLoss(nn.Module):
         """
         return self.task_configs
 
+    def reset_head_stats(self) -> None:
+        """Zero the per-head call counters (call at the start of an epoch)."""
+        for name in self.head_call_counts:
+            self.head_call_counts[name] = 0
+        self.total_forward_calls = 0
+
+    def head_starvation_report(self) -> Dict[str, float]:
+        """Return per-head supervision rate over the current tracking window.
+
+        Useful for logging: a value near 0.0 means the head almost never
+        receives a labeled batch and is silently starved of gradient signal.
+        """
+        denom = max(self.total_forward_calls, 1)
+        return {name: count / denom for name, count in self.head_call_counts.items()}
+
     @classmethod
     def from_task_settings(
         cls,
         task_settings: Dict[str, Dict[str, str | float]],
+        *,
+        normalization: str = "active",
     ) -> "MultiTaskLoss":
 
         if not isinstance(task_settings, dict) or not task_settings:
@@ -119,7 +157,7 @@ class MultiTaskLoss(nn.Module):
         if not configs:
             raise ValueError("No valid task loss settings found")
 
-        return cls(configs)
+        return cls(configs, normalization=normalization)
 
     def forward(
         self,
@@ -147,6 +185,11 @@ class MultiTaskLoss(nn.Module):
 
         task_losses: Dict[str, torch.Tensor] = {}
         total_loss: Optional[torch.Tensor] = None
+        active_heads = 0
+
+        # Bump the global call counter once per forward(); per-head increments
+        # happen below only when a head actually contributes a loss.
+        self.total_forward_calls += 1
 
         for task_name, task_config in self.task_configs.items():
 
@@ -241,12 +284,33 @@ class MultiTaskLoss(nn.Module):
             weighted_loss = loss * weight
 
             task_losses[task_name] = weighted_loss
+            active_heads += 1
+            self.head_call_counts[task_name] += 1
 
             total_loss = (
                 weighted_loss if total_loss is None else total_loss + weighted_loss
             )
 
-        if total_loss is None:
-            raise RuntimeError("No task losses were computed")
+        if total_loss is None or active_heads == 0:
+            raise RuntimeError(
+                "No task losses were computed — every head was masked out for "
+                "this batch. Check label sparsity / batch sampling."
+            )
+
+        # Normalize so gradient scale does not fluctuate with how many heads
+        # happened to be supervised in a given batch.
+        #   - "active": fair per-batch (divide by heads that contributed)
+        #   - "fixed":  most stable gradients (divide by total configured heads)
+        #   - "sum":    legacy behavior (no normalization)
+        if self.normalization == "active":
+            total_loss = total_loss / float(active_heads)
+        elif self.normalization == "fixed":
+            total_loss = total_loss / float(len(self.task_configs))
+        # "sum" → leave as-is
+
+        # Expose active-head count via a module attribute (no change to the
+        # (total_loss, task_losses) return shape, so existing consumers that
+        # iterate task_losses keep working unchanged).
+        self.last_active_heads = active_heads
 
         return total_loss, task_losses

@@ -1,0 +1,302 @@
+Good — now let’s turn your outline into a **production-grade, failure-resistant implementation**. I’ll give you a **drop-in PyTorch design** that fixes masking, loss scaling, metrics, and all the hidden edge cases you’re about to hit.
+
+---
+
+# ✅ 0. Assumptions (explicit)
+
+* `outputs` → dict: `{head_name: logits}`
+* `labels` → dict OR tensor-like per head (with NaNs)
+* Each head is **classification** (binary or multi-class)
+* Batch-level processing
+
+---
+
+# ✅ 1. Robust Mask + Clean Labels (vector-safe)
+
+### ❗ Key rule:
+
+* **Never use raw labels directly**
+* Always derive **mask first**, then clean
+
+```python
+def prepare_targets(labels_dict):
+    """
+    labels_dict: {head: tensor [B]}
+    returns:
+        clean_labels: {head: tensor}
+        masks: {head: bool tensor}
+    """
+    clean_labels = {}
+    masks = {}
+
+    for head, y in labels_dict.items():
+        mask = ~torch.isnan(y)
+        y_clean = torch.where(mask, y, torch.zeros_like(y))  # safe replacement
+
+        clean_labels[head] = y_clean.long()  # ensure correct dtype
+        masks[head] = mask
+
+    return clean_labels, masks
+```
+
+---
+
+# ✅ 2. Masked Multi-Head Loss (fully correct)
+
+### 🔥 Handles:
+
+* zero-label batches
+* per-head masking
+* class imbalance hooks
+* safe normalization
+
+```python
+def compute_multitask_loss(outputs, labels, criteria, head_weights=None):
+    """
+    outputs: {head: logits [B, C]}
+    labels: {head: tensor [B] with NaN}
+    criteria: {head: loss_fn}
+    head_weights: optional {head: float}
+    """
+
+    clean_labels, masks = prepare_targets(labels)
+
+    total_loss = 0.0
+    active_heads = 0
+    per_head_loss = {}
+
+    for head in outputs.keys():
+        logits = outputs[head]
+        target = clean_labels[head]
+        mask = masks[head]
+
+        valid_count = mask.sum()
+
+        if valid_count == 0:
+            per_head_loss[head] = None
+            continue  # 🔴 critical skip
+
+        # Apply mask
+        logits_masked = logits[mask]
+        target_masked = target[mask]
+
+        loss_fn = criteria[head]
+        loss_head = loss_fn(logits_masked, target_masked)
+
+        # Optional weighting
+        weight = head_weights.get(head, 1.0) if head_weights else 1.0
+        loss_head = loss_head * weight
+
+        total_loss += loss_head
+        active_heads += 1
+        per_head_loss[head] = loss_head.detach()
+
+    # 🔥 Safe normalization
+    if active_heads == 0:
+        raise RuntimeError("No active heads in batch — all labels are NaN")
+
+    total_loss = total_loss / active_heads
+
+    return total_loss, per_head_loss, active_heads
+```
+
+---
+
+# ✅ 3. Gradient Stability Fix (often missed)
+
+### Problem:
+
+* Some batches → 1 active head
+* Some → 4 active heads
+  → gradient scale fluctuates
+
+### Fix (better normalization):
+
+```python
+total_loss = total_loss / (active_heads + 1e-8)
+```
+
+Or even stronger:
+
+```python
+total_loss = total_loss / len(outputs)  # fixed scale
+```
+
+👉 Choose:
+
+* **dynamic (active_heads)** → fair per batch
+* **fixed (len(outputs))** → stable gradients
+
+---
+
+# ✅ 4. Masked Metrics (correct F1 per head)
+
+```python
+from sklearn.metrics import f1_score
+
+def compute_metrics(outputs, labels):
+    metrics = {}
+
+    for head in outputs:
+        logits = outputs[head]
+        y = labels[head]
+
+        mask = ~torch.isnan(y)
+
+        if mask.sum() == 0:
+            metrics[head] = None
+            continue
+
+        preds = torch.argmax(logits[mask], dim=1).cpu().numpy()
+        targets = y[mask].cpu().numpy()
+
+        f1 = f1_score(targets, preds, average="macro")
+        metrics[head] = f1
+
+    return metrics
+```
+
+---
+
+# ✅ 5. Silent Head Starvation Tracker (CRITICAL)
+
+You *will* have this problem with 90% NaNs.
+
+```python
+class HeadStats:
+    def __init__(self, heads):
+        self.counts = {h: 0 for h in heads}
+
+    def update(self, masks):
+        for h, m in masks.items():
+            if m.sum() > 0:
+                self.counts[h] += 1
+
+    def report(self):
+        return self.counts
+```
+
+### Use:
+
+```python
+head_stats.update(masks)
+```
+
+---
+
+# ✅ 6. Rebalancing Strategy (if needed)
+
+If one head dominates:
+
+```python
+head_weights = {
+    "bias": 2.0,        # rare → boost
+    "ideology": 1.5,
+    "propaganda": 1.0
+}
+```
+
+OR dynamic:
+
+```python
+weight = 1.0 / (valid_count + 1e-6)
+```
+
+---
+
+# ✅ 7. Full Training Step (clean integration)
+
+```python
+def training_step(batch, model, criteria, optimizer, head_weights=None):
+    model.train()
+
+    inputs = batch["inputs"]
+    labels = batch["labels"]  # dict of heads
+
+    outputs = model(inputs)
+
+    loss, per_head_loss, active_heads = compute_multitask_loss(
+        outputs, labels, criteria, head_weights
+    )
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    metrics = compute_metrics(outputs, labels)
+
+    return {
+        "loss": loss.item(),
+        "per_head_loss": per_head_loss,
+        "active_heads": active_heads,
+        "metrics": metrics
+    }
+```
+
+---
+
+# 🚨 Your Dataset-Specific Reality
+
+With your stats:
+
+| Head       | NaN % | Risk                  |
+| ---------- | ----- | --------------------- |
+| bias       | ~91%  | 🔴 extreme starvation |
+| ideology   | ~70%  | ⚠️ moderate           |
+| propaganda | ~74%  | ⚠️ moderate           |
+
+### What WILL happen:
+
+* Many batches → **bias head skipped**
+* Model may **never learn bias properly**
+
+---
+
+# 🔥 Strong Recommendation (not optional at your scale)
+
+## Option A — Stratified batching
+
+Ensure each batch has at least some labeled samples per head.
+
+## Option B — Task-specific mini-batches
+
+Alternate:
+
+* batch for bias
+* batch for ideology
+* batch for propaganda
+
+## Option C — Oversample labeled rows
+
+```python
+df_bias = df[df["bias_label"].notna()]
+```
+
+---
+
+# 🚨 Final Reality Check
+
+If you **don’t implement all of this correctly**, you will see:
+
+* Loss decreasing ✅
+* F1 near zero ❌
+* Model "training" but learning nothing ❌
+
+---
+
+# 🎯 Bottom Line
+
+You are not dealing with a simple classification problem anymore.
+This is a **sparse-supervision multi-task system**, and:
+
+> Masking + normalization + tracking = mandatory, not optional.
+
+---
+
+If you want next step, I can:
+
+* Integrate this directly into your **TruthLens training code**
+* Add **automatic collapse detection + alerts**
+* Or design a **balanced sampler for your dataset**
+
+Just send your training loop file.
