@@ -609,34 +609,56 @@ def load_data():
                 h.update(chunk)
         return h.hexdigest()
 
-    def _check_column_alignment(path: "Path", expected_cols: int) -> None:
-        """Raise if any non-header line has a different comma count."""
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            for i, line in enumerate(f, 1):
-                n = line.count(",")
-                if i == 1:
-                    expected_cols = n   # derive from header
-                    continue
-                if n != expected_cols:
-                    raise RuntimeError(
-                        f"Column alignment mismatch in {path.name} at line {i}: "
-                        f"expected {expected_cols} commas, got {n}.\n"
-                        f"  First 200 chars: {line[:200]!r}"
-                    )
+    def _filter_bad_rows(path: "Path") -> "Path":
+        """
+        Strip rows whose comma count differs from the header, write the clean
+        rows to filtered_<name>.csv beside the original, and return that path.
+        Logs the number of rows kept/dropped so the audit trail is always clear.
+        """
+        filtered_path = path.parent / f"filtered_{path.name}"
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+        if not lines:
+            filtered_path.write_text("", encoding="utf-8")
+            return filtered_path
+
+        header = lines[0]
+        expected_commas = header.count(",")
+        clean_rows = [header]
+        dropped = 0
+        for i, line in enumerate(lines[1:], start=2):
+            if line.count(",") == expected_commas:
+                clean_rows.append(line)
+            else:
+                dropped += 1
+                logger.warning(
+                    "Dropped misaligned row %d in %s "
+                    "(expected %d commas, got %d): %r",
+                    i, path.name, expected_commas, line.count(","), line[:120],
+                )
+
+        with open(filtered_path, "w", encoding="utf-8") as f:
+            f.writelines(clean_rows)
+
+        logger.info(
+            "Row filter complete for %s: %d kept, %d dropped → %s",
+            path.name, len(clean_rows) - 1, dropped, filtered_path.name,
+        )
+        return filtered_path
 
     def _read(path: "Path") -> "pd.DataFrame":
         # 1. Log file identity so training vs. validation mismatches are detectable.
         logger.info("DATA HASH %s  %s", _file_hash(path), path.name)
 
-        # 2. Structural alignment guard — catches silent delimiter drift before
-        #    pandas ever sees the file.
-        _check_column_alignment(path, len(_explicit_dtypes))
+        # 2. Strip misaligned rows before pandas ever sees the file.
+        clean_path = _filter_bad_rows(path)
 
         # 3. Safe parse: python engine + explicit dtypes enforce schema at load time;
-        #    on_bad_lines skips any rows that survive the alignment check but still
+        #    on_bad_lines skips any rows that survive the row-filter but still
         #    corrupt the parser.
         df = pd.read_csv(
-            path,
+            clean_path,
             engine="python",
             dtype=_explicit_dtypes,
             on_bad_lines="skip",
