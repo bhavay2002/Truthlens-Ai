@@ -281,9 +281,23 @@ class Trainer:
     # ---------------------------------------------------------
 
     def _validate_batch_labels(self, batch: Dict[str, Any]) -> None:
-        """Fail fast on out-of-range multiclass labels before forward/loss."""
+        """Fail fast on empty or out-of-range label batches before forward/loss."""
         if not isinstance(batch, dict):
             return
+
+        # Empty batch guard — a zero-length batch produces a meaningless
+        # forward pass and no gradient signal.
+        input_ids = batch.get("input_ids")
+        if torch.is_tensor(input_ids) and input_ids.numel() == 0:
+            raise ValueError(
+                "[BATCH ERROR] Empty batch detected (input_ids has 0 elements). "
+                "Check the DataLoader and dataset filtering logic."
+            )
+        if input_ids is None or (torch.is_tensor(input_ids) and input_ids.shape[0] == 0):
+            raise ValueError(
+                "[BATCH ERROR] Batch contains no input_ids. "
+                "Check collate_fn and dataset __getitem__."
+            )
 
         # Default to known TruthLens ranges; model attributes override when present.
         label_specs = (
@@ -1148,6 +1162,19 @@ class Trainer:
 
                 if self.scaler.is_enabled():
                     self.scaler.unscale_(self.optimizer)
+
+                # NaN gradient hard-stop: a NaN in any parameter's gradient
+                # poisons every subsequent update and cannot be fixed by
+                # clipping. Fail immediately so the root cause (bad data,
+                # unstable loss, overflowing activations) surfaces clearly
+                # instead of propagating silently for N more steps.
+                for _name, _p in self.model.named_parameters():
+                    if _p.grad is not None and torch.isnan(_p.grad).any():
+                        raise RuntimeError(
+                            f"[GRAD ERROR] NaN gradient detected in parameter "
+                            f"'{_name}' at step {self.global_step}. "
+                            "Check loss scaling, learning rate, and input data."
+                        )
 
                 # ---- #12 of the playbook: log PRE-clip stats BEFORE the
                 # clip rescales every gradient. Doing this in the wrong

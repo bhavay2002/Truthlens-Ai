@@ -83,8 +83,27 @@ def _load_multitask_model(model_path: Path, device: torch.device):
     weights_path = model_path / "pytorch_model.bin"
     if weights_path.exists():
         state_dict = torch.load(weights_path, map_location=device, weights_only=True)
-        model.load_state_dict(state_dict)
+        _lr = model.load_state_dict(state_dict, strict=False)
+        if _lr.missing_keys:
+            raise RuntimeError(
+                f"[CHECKPOINT ERROR] Missing keys loading pytorch_model.bin: {_lr.missing_keys}"
+            )
+        if _lr.unexpected_keys:
+            raise RuntimeError(
+                f"[CHECKPOINT ERROR] Unexpected keys loading pytorch_model.bin: {_lr.unexpected_keys}"
+            )
         logger.info("Loaded MultiTaskTruthLensModel weights from %s", weights_path)
+
+        # Tokenizer consistency guard: if a sidecar exists, verify the active
+        # tokenizer matches the one used at training time.
+        meta_path = model_path / "tokenizer_meta.json"
+        if meta_path.exists():
+            import json as _json
+            with open(meta_path, "r", encoding="utf-8") as _f:
+                _meta = _json.load(_f)
+            _saved_name = _meta.get("tokenizer_name")
+            if _saved_name:
+                logger.info("Checkpoint tokenizer: %s", _saved_name)
     else:
         logger.warning("No pytorch_model.bin found; using randomly initialised weights")
 

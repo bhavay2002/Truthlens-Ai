@@ -925,11 +925,21 @@ def save_model(model, tokenizer):
         if torch.is_tensor(v) and v.is_floating_point() and not torch.isfinite(v).all():
             raise RuntimeError(f"Refusing to save: non-finite values in {k}")
 
-    # Atomic write of model weights
+    # Atomic write of model weights (raw state dict — weights_only=True compatible)
     final = LOCAL_SAVE_PATH / "pytorch_model.bin"
     tmp = LOCAL_SAVE_PATH / "pytorch_model.bin.tmp"
     torch.save(state, tmp)
     os.replace(tmp, final)
+
+    # Write tokenizer identity as a sidecar so every load site can verify
+    # the checkpoint was produced with the same tokenizer without touching
+    # the binary weights file.
+    tokenizer_name = getattr(tokenizer, "name_or_path", None)
+    save_json(
+        {"tokenizer_name": tokenizer_name},
+        LOCAL_SAVE_PATH / "tokenizer_meta.json",
+        indent=2,
+    )
 
     # Tokenizer + config (synchronous so Drive sync sees a complete tree)
     tokenizer.save_pretrained(str(LOCAL_SAVE_PATH))
@@ -1061,7 +1071,7 @@ def main():
             get_config_value(_cfg, "training", "gradient_accumulation_steps", default=2)
         )
 
-        set_seed(seed)
+        set_seed(seed, deterministic=True)
 
         device = get_device(prefer_gpu=True)
 

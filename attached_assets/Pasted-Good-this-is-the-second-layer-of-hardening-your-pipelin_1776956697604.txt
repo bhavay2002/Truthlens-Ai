@@ -1,0 +1,394 @@
+Good—this is the **second layer of hardening** your pipeline needed. What you’ve identified are *training-time instability vectors*. Below is a **tight, production-grade implementation plan** that closes them properly (not superficially).
+
+---
+
+# 🚨 7. Batch-Level Guardrails — FULL COVERAGE
+
+## ❌ Current gap
+
+You only check:
+
+```python
+if batch_stats["label_invalid"]:
+```
+
+That misses **runtime numerical failures**, which are the most dangerous.
+
+---
+
+## ✅ Step-by-step implementation
+
+### Step 1 — Centralized batch validator
+
+```python
+def validate_batch(loss, batch, model):
+    # NaN / Inf loss
+    if torch.isnan(loss) or torch.isinf(loss):
+        raise ValueError("[BATCH ERROR] NaN/Inf loss detected")
+
+    # Loss explosion
+    if loss.item() > 1e3:
+        return "loss_explosion"
+
+    # Empty batch
+    if batch is None or len(batch["input_ids"]) == 0:
+        raise ValueError("[BATCH ERROR] Empty batch detected")
+
+    return "ok"
+```
+
+---
+
+### Step 2 — Gradient anomaly detection
+
+Run **after backward**:
+
+```python
+def check_gradients(model):
+    total_norm = 0.0
+
+    for p in model.parameters():
+        if p.grad is not None:
+            if torch.isnan(p.grad).any():
+                raise ValueError("[GRAD ERROR] NaN gradients detected")
+
+            param_norm = p.grad.data.norm(2)
+            total_norm += param_norm.item() ** 2
+
+    total_norm = total_norm ** 0.5
+
+    if total_norm > 1e3:
+        return "grad_explosion"
+
+    return total_norm
+```
+
+---
+
+### Step 3 — Integrate into training loop
+
+```python
+status = validate_batch(loss, batch, model)
+
+if status == "loss_explosion":
+    logger.warning("Loss explosion detected — skipping batch")
+    optimizer.zero_grad()
+    continue
+```
+
+---
+
+# ⚠️ 8. Gradient Clipping — STABILITY CONTROL
+
+## ❌ Problem
+
+Unbounded gradients → parameter jumps → divergence
+
+---
+
+## ✅ Correct placement (IMPORTANT)
+
+```python
+loss.backward()
+
+torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+optimizer.step()
+```
+
+---
+
+## ✅ Advanced: log gradient norm
+
+```python
+grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+logger.info(f"Grad norm: {grad_norm:.4f}")
+```
+
+---
+
+## ✅ Result
+
+* Prevents spikes
+* Stabilizes early training
+* Critical for transformers
+
+---
+
+# ⚠️ 9. Tokenization Mismatch — ARCHITECTURAL FIX
+
+## ❌ Problem
+
+Multiple tokenizers across:
+
+* main model
+* explainers
+* auxiliary heads
+
+→ **semantic misalignment**
+
+---
+
+## ✅ Step-by-step fix
+
+### Step 1 — Single tokenizer source of truth
+
+```python
+# tokenizer_registry.py
+from transformers import AutoTokenizer
+
+TOKENIZER = AutoTokenizer.from_pretrained("your-model-name")
+```
+
+---
+
+### Step 2 — Import everywhere
+
+```python
+from tokenizer_registry import TOKENIZER as tokenizer
+```
+
+---
+
+### Step 3 — Enforce consistency check
+
+```python
+def assert_tokenizer_consistency(tokenizer_a, tokenizer_b):
+    assert tokenizer_a.name_or_path == tokenizer_b.name_or_path, \
+        "Tokenizer mismatch detected"
+```
+
+---
+
+### Step 4 — Lock config in checkpoint
+
+```python
+checkpoint["tokenizer_name"] = tokenizer.name_or_path
+```
+
+On load:
+
+```python
+assert checkpoint["tokenizer_name"] == tokenizer.name_or_path
+```
+
+---
+
+## ✅ Result
+
+* Explanations align with predictions
+* No hidden semantic drift
+
+---
+
+# ⚠️ 10. Logging — MAKE IT ACTIONABLE
+
+## ❌ Problem
+
+Logs exist but **don’t support debugging decisions**
+
+---
+
+## ✅ Step-by-step upgrade
+
+### Step 1 — Structured logging
+
+```python
+logger.info({
+    "step": step,
+    "loss": loss.item(),
+    "f1": f1,
+    "lr": scheduler.get_last_lr()[0],
+})
+```
+
+---
+
+### Step 2 — Add per-task losses
+
+```python
+logger.info({
+    "loss_total": loss.item(),
+    "loss_task1": loss_task1.item(),
+    "loss_task2": loss_task2.item(),
+})
+```
+
+---
+
+### Step 3 — Add gradient + anomaly signals
+
+```python
+logger.info({
+    "grad_norm": grad_norm,
+    "batch_status": status,
+})
+```
+
+---
+
+### Step 4 — Log distribution drift (advanced)
+
+```python
+logger.info({
+    "pred_mean": preds.mean().item(),
+    "pred_std": preds.std().item(),
+})
+```
+
+---
+
+## ✅ Result
+
+You can now:
+
+* diagnose collapse early
+* track instability sources
+* debug without reruns
+
+---
+
+# 🧠 11. Learning Rate Warmup — REQUIRED FOR TRANSFORMERS
+
+## ❌ Problem
+
+No warmup → unstable early updates
+
+---
+
+## ✅ Fix
+
+```python
+from transformers import get_linear_schedule_with_warmup
+
+scheduler = get_linear_schedule_with_warmup(
+    optimizer,
+    num_warmup_steps=int(0.1 * total_steps),
+    num_training_steps=total_steps
+)
+```
+
+---
+
+## ✅ Use in loop
+
+```python
+optimizer.step()
+scheduler.step()
+```
+
+---
+
+## ✅ Result
+
+* Smooth early training
+* Prevents divergence
+
+---
+
+# ⚡ 12. Mixed Precision — GPU READINESS (A100 / H100)
+
+## ❌ Problem
+
+Full FP32 wastes:
+
+* memory
+* throughput
+
+---
+
+## ✅ Fix (PyTorch AMP)
+
+```python
+scaler = torch.cuda.amp.GradScaler()
+```
+
+---
+
+### Training loop
+
+```python
+with torch.cuda.amp.autocast():
+    outputs = model(**batch)
+    loss = outputs.loss
+
+scaler.scale(loss).backward()
+
+scaler.step(optimizer)
+scaler.update()
+```
+
+---
+
+## ✅ Result
+
+* ~2x speedup
+* lower memory usage
+* essential for H100
+
+---
+
+# ⚠️ 13. Determinism — REPRODUCIBILITY FIX
+
+You logged:
+
+```
+deterministic=False
+```
+
+→ That’s unacceptable for debugging ML systems.
+
+---
+
+## ✅ Step-by-step fix
+
+```python
+import torch
+import random
+import numpy as np
+
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+```
+
+---
+
+## ⚠️ Note
+
+* Determinism ↓ performance slightly
+* But ↑ debugging reliability massively
+
+---
+
+# 🧠 Final System State (After All Fixes)
+
+| Area               | Status          |
+| ------------------ | --------------- |
+| Batch validation   | ✅ Robust        |
+| Gradient stability | ✅ Controlled    |
+| Tokenization       | ✅ Consistent    |
+| Logging            | ✅ Actionable    |
+| LR scheduling      | ✅ Stabilized    |
+| Mixed precision    | ✅ Ready         |
+| Reproducibility    | ✅ Deterministic |
+
+---
+
+# 🔥 If You Want Next-Level (Serious Production ML)
+
+I can help you implement:
+
+* **Auto-recovery training loop (resume on crash)**
+* **Gradient accumulation scheduler**
+* **Dynamic loss reweighting (uncertainty-based)**
+* **Real-time training health dashboard**
+* **Dataset drift detection during training**
+
+Say: **“build full training guardrail system”** and I’ll wire everything into a clean architecture.
