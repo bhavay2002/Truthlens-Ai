@@ -436,7 +436,7 @@ class MultiTaskLoss(nn.Module):
             # up. The trainer treats `last_active_heads == 0` as "skip
             # optimizer step" so no parameters are nudged by the zero loss.
             import os as _os
-            if _os.environ.get("TRUTHLENS_SKIP_EMPTY_BATCH", "0") == "1":
+            if _os.environ.get("TRUTHLENS_SKIP_EMPTY_BATCH", "1") == "1":
                 _grad_carrier = None
                 for _name, _t in logits.items():
                     if torch.is_tensor(_t) and _t.requires_grad:

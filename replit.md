@@ -206,18 +206,18 @@ The following files were created during Replit migration to resolve missing modu
 - `src/models/ensemble/stacking_ensemble.py` — StackingEnsembleModel / StackingEnsembleConfig
 
 ## Multi-Task Training Playbook (applied)
-All four phases of the misinformation multi-task playbook + corrections are wired in.
-Defaults are SAFE (off / strict); each addition is opt-in via env var.
+All four phases of the misinformation multi-task playbook + corrections are wired in
+and ON by default. Set the corresponding env var to `0` to disable any one.
 
 | Env var | Default | Effect |
 |---|---|---|
-| `TRUTHLENS_SKIP_EMPTY_BATCH` | `0` | When `1`, `MultiTaskLoss` returns a zero loss instead of raising when every head is masked out (use only if your sampler is unstable). |
-| `TRUTHLENS_OVERSAMPLE` | `0` | When `1`, train loader uses `WeightedRandomSampler` with inverse-frequency weights on the bias label (overrides the length-bucketed sampler). |
-| `TRUTHLENS_EMA_TASK_WEIGHTING` | `0` | When `1`, `MultiTaskLoss` multiplies each task's static weight by `min(1/cov_ema, cap)` so under-supervised heads get gradient-weight boosts. |
+| `TRUTHLENS_SKIP_EMPTY_BATCH` | `1` | `MultiTaskLoss` returns a zero loss instead of raising when every head is masked out (trainer skips the optimizer step). Set `0` for strict mode. |
+| `TRUTHLENS_OVERSAMPLE` | `1` | Train loader uses `WeightedRandomSampler` with inverse-frequency weights on the bias label. Set `0` to use the length-bucketed sampler. |
+| `TRUTHLENS_EMA_TASK_WEIGHTING` | `1` | `MultiTaskLoss` multiplies each task's static weight by `min(1/cov_ema, cap)` so under-supervised heads get gradient-weight boosts. |
 | `TRUTHLENS_EMA_ALPHA` | `0.1` | EMA smoothing factor for per-task coverage. |
 | `TRUTHLENS_EMA_FLOOR` | `0.05` | Minimum coverage used in the inverse — caps boost magnitude. |
 | `TRUTHLENS_EMA_CAP` | `10.0` | Hard upper bound on the EMA multiplier. |
-| `TRUTHLENS_TASK_BALANCER` | `0` | When `1`, attaches a Kendall-uncertainty `TaskBalancer` so per-task scaling is learned via log-variances. |
+| `TRUTHLENS_TASK_BALANCER` | `1` | Attaches a Kendall-uncertainty `TaskBalancer` so per-task scaling is learned via log-variances. |
 
 Always-on additions (no env flag needed):
 - `MultiTaskLoss` accepts `pos_weight` per BCE/multi-label task via `from_task_settings`.

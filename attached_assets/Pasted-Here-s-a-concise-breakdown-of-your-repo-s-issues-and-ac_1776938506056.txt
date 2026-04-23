@@ -1,0 +1,75 @@
+Here's a concise breakdown of your repo’s issues and actionable recommendations:
+
+
+### 1. **Extreme Label Sparsity (Missing Supervision)**
+- **Problem:** Most labels for certain tasks are “NA” (not annotated). This isn’t a simple class imbalance—your model essentially has no signal to learn for those labels in most batches.
+- **Effects:**  
+  - Loss functions become ill-defined or inconsistent (many “empty” targets).
+  - Gradient updates become almost random or very weak for those heads/tasks.
+  - Heads may essentially stop learning, or learn noise.
+
+#### **How to Fix**
+- **a. Improve Label Coverage:**  
+  - Annotate more data for the sparse labels. Even a small increase in positive/negative samples for underrepresented tasks can help.
+  - If this isn’t possible, consider discarding the most incomplete tasks from multi-task training for now (don’t include task heads without sufficient supervision in batches/epochs).
+
+- **b. Masking & Losses:**  
+  - Ensure the loss computation masks out “NA” labels, so only valid (non-NA) samples contribute per task.
+  - In multi-task training, only compute gradients for available labels per batch/task.
+
+---
+
+### 2. **Task Dominance (Gradient Imbalance)**
+- **Problem:** Well-annotated tasks (e.g. ideology or narrative_frame) produce much stronger gradients than sparser tasks, “drowning out” those tasks during training. The model becomes good at one thing, bad at the others.
+- **Effects:**  
+  - Some heads never learn.
+  - Multi-task claims, but only a single (dominant) task drives training.
+
+#### **How to Fix**
+- **a. Gradient Normalization or Balancing:**  
+  - Use dynamic loss weighting (e.g. GradNorm, DWA, or uncertainty-based weighting [Kendall et al. 2018]).
+  - Explicitly scale down loss for overrepresented tasks, or increase loss for underrepresented ones.
+
+- **b. Curriculum or Alternate Task Sampling:**  
+  - Mix batches to include more data for the weaker tasks (over/under-sample, or batch by task).
+  - Consider task-specific learning rate schedulers.
+
+---
+
+### 3. **Loss Spikes + Anomaly Flooding**
+- **Problem:** Your frequent anomaly/loss spikes are probably due to the above instabilities (missing labels = noisy loss = volatile training).
+- **Effects:**  
+  - Likely poor, unreliable model convergence.
+  - Model may "forget" or overfit erratically.
+
+#### **How to Fix**
+- **a. Stabilize Label/Input Pipeline:**  
+  - Fix issues listed above first; stable, balanced data = stable loss dynamics.
+- **b. Smoothing & Robust Training:**  
+  - Try gradient clipping.
+  - Use loss smoothing or robust loss functions if class imbalance is extreme.
+
+---
+
+## **Summary of Recommendations**
+
+1. **Increase label coverage** or drop severely incomplete tasks from multi-task setup.
+2. **Use loss masking** for NA labels—never average losses with “missing” supervision.
+3. **Balance task gradients** via intelligent loss weighting, gradient normalization, or batch balancing.
+4. **Monitor batch composition:** Ensure each batch or epoch has sufficient “active” labels for every task.
+5. **Use anomaly/loss spike detection** as a signal to adjust your pipeline/settings iteratively.
+
+**Reference reading:**  
+- [GradNorm: Gradient Normalization for Adaptive Loss Balancing in Deep Multitask Networks](https://arxiv.org/abs/1711.02257)  
+- [Multi-Task Learning Using Uncertainty to Weigh Losses](https://arxiv.org/abs/1705.07115)
+
+---
+
+**Immediate Fix Checklist:**
+- [ ] Mask “NA” labels in your loss calculation.
+- [ ] Experiment with dynamic loss weighting.
+- [ ] Review batch construction.
+- [ ] Temporarily disable task heads with too little data.
+- [ ] Gather more labels if possible—even modest improvements help greatly.
+
+Let me know if you want a specific code snippet (PyTorch/Keras/etc) for masked loss calculation, dynamic loss weighting, or batch balancing!

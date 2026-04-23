@@ -1108,7 +1108,7 @@ def main():
         # classes proportionally more exposure; trades padding-efficiency
         # for label balance.
         _use_weighted_sampler = (
-            os.environ.get("TRUTHLENS_OVERSAMPLE", "0") == "1"
+            os.environ.get("TRUTHLENS_OVERSAMPLE", "1") == "1"
         )
 
         if _use_weighted_sampler:
@@ -1210,7 +1210,7 @@ def main():
         # Opt-in via TRUTHLENS_EMA_TASK_WEIGHTING=1. Boosts under-supervised
         # heads' gradient contribution proportionally to how often they are
         # masked out, without re-tuning the static per-task weights.
-        if os.environ.get("TRUTHLENS_EMA_TASK_WEIGHTING", "0") == "1":
+        if os.environ.get("TRUTHLENS_EMA_TASK_WEIGHTING", "1") == "1":
             if hasattr(model, "multitask_loss") and hasattr(
                 model.multitask_loss, "enable_ema_weighting"
             ):
@@ -1231,7 +1231,7 @@ def main():
         # sum across heads with a learnable log-variance combination so the
         # model finds its own per-task scaling. Attached BEFORE optimizer
         # construction below so balancer params get picked up.
-        if os.environ.get("TRUTHLENS_TASK_BALANCER", "0") == "1":
+        if os.environ.get("TRUTHLENS_TASK_BALANCER", "1") == "1":
             try:
                 from src.training.instrumentation import TaskBalancer
                 if hasattr(model, "multitask_loss") and hasattr(
