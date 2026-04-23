@@ -295,6 +295,132 @@ def test_issue3_load_data_emits_no_dtype_warning(tmp_path, monkeypatch):
         )
 
 
+def test_issue3_load_data_accepts_sparse_multitask_labels(tmp_path, monkeypatch):
+    """Unified multitask rows may omit labels for unrelated tasks; load_data
+    must preserve those missing values instead of failing fast."""
+    emotion_cols = [f"emotion_{i}" for i in range(20)]
+    payload_df = pd.DataFrame(
+        [
+            {
+                "text": "bias row",
+                "bias_label": 1,
+            },
+            {
+                "text": "ideology row",
+                "ideology_label": 2,
+            },
+            {
+                "text": "narrative row",
+                "hero": 1,
+                "villain": 0,
+                "victim": 0,
+                "hero_entities": "alice",
+            },
+            {
+                "text": "emotion row",
+                "RE": 0.1,
+                "HI": 0.2,
+                "CO": 0.3,
+                "MO": 0.4,
+                "EC": 0.5,
+                **{col: int(col == "emotion_3") for col in emotion_cols},
+            },
+        ]
+    )
+    for col in [
+        "bias_label",
+        "ideology_label",
+        "propaganda_label",
+        "hero",
+        "villain",
+        "victim",
+        "hero_entities",
+        "villain_entities",
+        "victim_entities",
+        "RE",
+        "HI",
+        "CO",
+        "MO",
+        "EC",
+        *emotion_cols,
+    ]:
+        if col not in payload_df.columns:
+            payload_df[col] = pd.NA
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    for name in (
+        "unified_dataset_train.csv",
+        "unified_dataset_validation.csv",
+        "unified_dataset_test.csv",
+    ):
+        payload_df.to_csv(data_dir / name, index=False)
+
+    import importlib, main as launcher
+    monkeypatch.setenv("TRUTHLENS_DATA_DIR", str(data_dir))
+    importlib.reload(launcher)
+
+    train_df, _, _ = launcher.load_data()
+
+    assert train_df[launcher.BIAS_LABEL].isna().sum() > 0
+    assert train_df[launcher.IDEOLOGY_LABEL].isna().sum() > 0
+    assert train_df["hero"].isna().sum() > 0
+    assert train_df["RE"].isna().sum() > 0
+
+    ds = launcher.TruthLensMultiTaskDataset(
+        train_df,
+        tokenizer=type(
+            "_Tok",
+            (),
+            {
+                "__call__": lambda self, texts, padding, truncation, max_length: {
+                    "input_ids": [[1, 2]] * len(texts),
+                    "attention_mask": [[1, 1]] * len(texts),
+                }
+            },
+        )(),
+        max_length=8,
+        text_column=launcher.TEXT_COLUMN,
+    )
+
+    assert int(ds.labels_ideology[0].item()) == -100
+    assert float(ds.labels_narrative[0][0].item()) == -100.0
+    assert float(ds.labels_emotion[0][0].item()) == -100.0
+
+
+def test_issue3_multitask_loss_ignores_masked_multilabel_targets():
+    """Sparse rows encoded with -100 sentinel must not produce NaN loss."""
+    from src.models.multitask.multitask_loss import MultiTaskLoss, TaskLossConfig
+
+    criterion = MultiTaskLoss(
+        {
+            "bias": TaskLossConfig(task_type="multi_class", ignore_index=-100),
+            "emotion": TaskLossConfig(task_type="multi_label", ignore_index=-100),
+        }
+    )
+    logits = {
+        "bias": torch.randn(3, 2),
+        "emotion": torch.randn(3, 4),
+    }
+    labels = {
+        "bias": torch.tensor([1, -100, 0]),
+        "emotion": torch.tensor(
+            [
+                [1.0, 0.0, 1.0, 0.0],
+                [-100.0, -100.0, -100.0, -100.0],
+                [0.0, 1.0, 0.0, 1.0],
+            ]
+        ),
+    }
+
+    total_loss, task_losses = criterion(logits, labels)
+
+    assert torch.isfinite(total_loss)
+    assert "bias" in task_losses
+    assert "emotion" in task_losses
+    assert torch.isfinite(task_losses["emotion"])
+
+
 # =====================================================================
 # Issue #4 — loss stability: clipping + NaN guard + per-task visibility
 # =====================================================================

@@ -316,6 +316,8 @@ def _strict_int_series(
     parsed_int = parsed.astype("Int64")
     if allowed_values is not None:
         invalid = ~parsed_int.isin(sorted(allowed_values))
+        if allow_na:
+            invalid &= parsed_int.notna()
         if invalid.any():
             examples = (
                 normalized[invalid]
@@ -336,15 +338,16 @@ def _strict_float_series(
     *,
     column_name: str,
     split_name: str = "dataset",
+    allow_na: bool = False,
 ) -> pd.Series:
     """Parse float features with fail-fast validation."""
     normalized = s.astype("string").str.strip()
     parsed = pd.to_numeric(normalized, errors="raise")
-    if parsed.isna().any():
+    if not allow_na and parsed.isna().any():
         raise RuntimeError(
             f"{split_name}.{column_name} contains NaN values after parsing."
         )
-    return parsed.astype(np.float32)
+    return parsed.astype("Float32")
 
 
 def _entity_series_to_binary(s) -> np.ndarray:
@@ -378,17 +381,47 @@ class TruthLensMultiTaskDataset(Dataset):
         self.lengths = [len(ids) for ids in self.input_ids]
 
         # Pre-build label tensors from pre-validated columns.
-        bias = df[BIAS_LABEL].astype(np.int64).to_numpy()
-        ideology = df[IDEOLOGY_LABEL].astype(np.int64).to_numpy()
-        propaganda = df[PROPAGANDA_LABEL].astype(np.int64).to_numpy()
+        missing_label_value = -100
+        missing_multilabel_value = float(missing_label_value)
 
-        hero_lbl = df["hero"].astype(np.int64).to_numpy()
-        villain_lbl = df["villain"].astype(np.int64).to_numpy()
-        victim_lbl = df["victim"].astype(np.int64).to_numpy()
+        bias = (
+            df[BIAS_LABEL]
+            .fillna(missing_label_value)
+            .astype(np.int64)
+            .to_numpy()
+        )
+        ideology = (
+            df[IDEOLOGY_LABEL]
+            .fillna(missing_label_value)
+            .astype(np.int64)
+            .to_numpy()
+        )
+        propaganda = (
+            df[PROPAGANDA_LABEL]
+            .fillna(missing_label_value)
+            .astype(np.int64)
+            .to_numpy()
+        )
+
+        hero_raw = df["hero"]
+        villain_raw = df["villain"]
+        victim_raw = df["victim"]
+        hero_lbl = hero_raw.fillna(0).astype(np.int64).to_numpy()
+        villain_lbl = villain_raw.fillna(0).astype(np.int64).to_numpy()
+        victim_lbl = victim_raw.fillna(0).astype(np.int64).to_numpy()
 
         hero_ent = _entity_series_to_binary(df["hero_entities"]) if "hero_entities" in df else np.zeros(len(df), dtype=np.int64)
         villain_ent = _entity_series_to_binary(df["villain_entities"]) if "villain_entities" in df else np.zeros(len(df), dtype=np.int64)
         victim_ent = _entity_series_to_binary(df["victim_entities"]) if "victim_entities" in df else np.zeros(len(df), dtype=np.int64)
+
+        narrative_valid = (
+            hero_raw.notna()
+            | villain_raw.notna()
+            | victim_raw.notna()
+            | (hero_ent > 0)
+            | (villain_ent > 0)
+            | (victim_ent > 0)
+        ).to_numpy()
 
         narrative = np.stack(
             [
@@ -398,16 +431,21 @@ class TruthLensMultiTaskDataset(Dataset):
             ],
             axis=1,
         ).astype(np.float32)
+        narrative[~narrative_valid] = missing_multilabel_value
 
         frame = np.stack(
-            [df[c].astype(np.float32).to_numpy() for c in FRAME_COLUMNS],
+            [df[c].fillna(missing_multilabel_value).astype(np.float32).to_numpy() for c in FRAME_COLUMNS],
             axis=1,
         ).astype(np.float32)
+        frame_valid = df[FRAME_COLUMNS].notna().any(axis=1).to_numpy()
+        frame[~frame_valid] = missing_multilabel_value
 
         emotion = np.stack(
-            [df[c].astype(np.float32).to_numpy() for c in EMOTION_COLUMNS],
+            [df[c].fillna(missing_multilabel_value).astype(np.float32).to_numpy() for c in EMOTION_COLUMNS],
             axis=1,
         ).astype(np.float32)
+        emotion_valid = df[EMOTION_COLUMNS].notna().any(axis=1).to_numpy()
+        emotion[~emotion_valid] = missing_multilabel_value
 
         self.labels_bias = torch.from_numpy(bias).long()
         self.labels_ideology = torch.from_numpy(ideology).long()
@@ -556,7 +594,7 @@ def load_data():
                 column_name=col,
                 split_name=split_name,
                 allowed_values=allowed_values,
-                allow_na=False,
+                allow_na=True,
             )
 
         for col in [*FRAME_COLUMNS, *EMOTION_COLUMNS]:
@@ -564,6 +602,7 @@ def load_data():
                 df[col],
                 column_name=col,
                 split_name=split_name,
+                allow_na=True,
             )
 
     for df in (train_df, val_df, test_df):
@@ -737,9 +776,19 @@ def _evaluate_on_test(model, test_loader, device) -> None:
             probs = torch.softmax(logits.float(), dim=-1)
             preds = probs.argmax(dim=-1)
 
-            y_true.extend(labels["bias"].cpu().tolist())
-            y_pred.extend(preds.cpu().tolist())
-            y_proba.extend(probs[:, 1].cpu().tolist() if probs.shape[-1] > 1 else probs.squeeze(-1).cpu().tolist())
+            bias_labels = labels["bias"]
+            valid_mask = bias_labels.ne(-100)
+            if not bool(valid_mask.any()):
+                continue
+
+            y_true.extend(bias_labels[valid_mask].cpu().tolist())
+            y_pred.extend(preds[valid_mask].cpu().tolist())
+            selected_probs = probs[valid_mask]
+            y_proba.extend(
+                selected_probs[:, 1].cpu().tolist()
+                if selected_probs.shape[-1] > 1
+                else selected_probs.squeeze(-1).cpu().tolist()
+            )
 
     if not y_true:
         raise RuntimeError(

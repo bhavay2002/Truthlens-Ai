@@ -285,8 +285,11 @@ class Trainer:
                 continue
             if labels.numel() == 0:
                 continue
-            lo = int(labels.min().item())
-            hi = int(labels.max().item())
+            valid_labels = labels[labels.ne(-100)]
+            if valid_labels.numel() == 0:
+                continue
+            lo = int(valid_labels.min().item())
+            hi = int(valid_labels.max().item())
             if lo < 0 or hi >= num_classes:
                 raise RuntimeError(
                     f"Invalid label range for {key}: min={lo} max={hi} "
@@ -305,7 +308,11 @@ class Trainer:
             labels = batch.get(key)
             if not torch.is_tensor(labels) or labels.numel() == 0:
                 continue
-            uniq, counts = torch.unique(labels.detach().cpu(), return_counts=True)
+            valid = labels[labels.ne(-100)]
+            if valid.numel() == 0:
+                parts.append(f"{key}[unlabeled]")
+                continue
+            uniq, counts = torch.unique(valid.detach().cpu(), return_counts=True)
             items = ",".join(
                 f"{int(u.item())}:{int(c.item())}" for u, c in zip(uniq, counts)
             )

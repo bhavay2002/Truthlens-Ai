@@ -68,7 +68,7 @@ class MultiTaskLoss(nn.Module):
                 )
 
             elif config.task_type in {"binary", "multi_label"}:
-                self.loss_functions[task_name] = nn.BCEWithLogitsLoss()
+                self.loss_functions[task_name] = nn.BCEWithLogitsLoss(reduction="none")
 
             elif config.task_type == "regression":
                 self.loss_functions[task_name] = nn.MSELoss()
@@ -207,7 +207,15 @@ class MultiTaskLoss(nn.Module):
                         f"{task_logits.shape} vs {task_labels.shape}"
                     )
 
-                loss = loss_fn(task_logits, task_labels)
+                ignore_index = float(task_config.ignore_index)
+                valid_mask = task_labels.ne(ignore_index)
+                if not bool(valid_mask.any()):
+                    continue
+
+                safe_labels = torch.where(valid_mask, task_labels, torch.zeros_like(task_labels))
+                raw_loss = loss_fn(task_logits, safe_labels)
+                masked_loss = raw_loss * valid_mask.to(raw_loss.dtype)
+                loss = masked_loss.sum() / valid_mask.sum().clamp_min(1).to(raw_loss.dtype)
 
             elif task_type == "regression":
 
