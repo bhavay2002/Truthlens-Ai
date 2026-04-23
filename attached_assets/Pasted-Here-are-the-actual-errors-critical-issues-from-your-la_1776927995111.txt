@@ -1,0 +1,190 @@
+Here are the **actual errors + critical issues** from your latest logs (clean, no noise, only what matters):
+
+---
+
+# 🔴 **1. HARD FAILURE (Training Stopped)**
+
+### ❌ Checkpoint Resume Failed
+
+```
+Checkpoint resume FAILED
+Strict checkpoint load failed
+RuntimeError raised
+Training failed: Refusing to silently restart
+```
+
+📎 Source: 
+
+👉 This is the **main blocking error** — your training **did NOT start**
+
+---
+
+# 🔴 **2. ROOT CAUSE — STATE_DICT MISMATCH**
+
+### ❌ Massive Missing Keys
+
+```
+Missing keys:
+['_orig_mod.temperature',
+ '_orig_mod.encoder.encoder.embeddings.word_embeddings.weight',
+ ...
+ '_orig_mod.emotion_head.fc.bias']
+```
+
+👉 This includes:
+
+* Entire encoder (ALL transformer layers)
+* ALL task heads
+* Temperature parameter
+
+📌 Meaning:
+
+> Model trying to load weights with `_orig_mod.` prefix
+> but checkpoint does NOT have that structure
+
+---
+
+### ❌ Unexpected Keys (Reverse Mismatch)
+
+```
+Unexpected keys:
+['temperature',
+ 'encoder.encoder.embeddings.word_embeddings.weight',
+ ...
+ 'emotion_head.fc.bias']
+```
+
+📌 Meaning:
+
+> Checkpoint has **normal keys**
+> but model expects **wrapped keys (_orig_mod.)**
+
+---
+
+# 🧠 **3. EXACT TECHNICAL PROBLEM**
+
+This is **100% caused by `torch.compile()`**
+
+You enabled:
+
+```
+torch.compile enabled
+```
+
+👉 PyTorch wraps model internally → adds prefix:
+
+```
+_orig_mod.
+```
+
+So now:
+
+| Component        | Key Format                             |
+| ---------------- | -------------------------------------- |
+| Saved checkpoint | `encoder.encoder.layer.0...`           |
+| Current model    | `_orig_mod.encoder.encoder.layer.0...` |
+
+➡️ **Mismatch → strict load fails**
+
+---
+
+# 🔴 **4. SECONDARY DESIGN ISSUE**
+
+### ❌ Strict Loading is Enforced
+
+From error:
+
+```
+Strict checkpoint load failed
+Refusing to silently restart
+```
+
+📌 Meaning:
+
+* Your system **intentionally blocks fallback**
+* No `strict=False` fallback
+* No key remapping logic
+
+👉 Good for safety
+👉 Bad for robustness
+
+---
+
+# 🟠 **5. MODEL VERSION INCOMPATIBILITY**
+
+Possible additional cause:
+
+* Model architecture changed OR
+* torch.compile enabled AFTER checkpoint was created
+
+👉 So:
+
+* checkpoint = **uncompiled model**
+* current = **compiled model**
+
+---
+
+# 🟡 **6. NON-BLOCKING WARNINGS (Still Issues)**
+
+### ⚠️ Uninitialized Weights
+
+```
+pooler.dense.bias
+pooler.dense.weight
+```
+
+👉 Not critical
+👉 But adds randomness early
+
+---
+
+### ⚠️ Dataset Problems (still present)
+
+* 90% missing labels
+* heavy imbalance
+* duplicates removed
+* leakage detected
+
+📌 These don’t crash training but degrade learning
+
+---
+
+# 📊 **FINAL ISSUE SUMMARY**
+
+## 🔴 Critical (Crash)
+
+1. Checkpoint loading failure
+2. `_orig_mod.` prefix mismatch (torch.compile issue)
+3. Strict loading prevents recovery
+
+## 🟠 High Risk
+
+4. Model / checkpoint incompatibility
+5. No key remapping logic
+
+## 🟡 Medium
+
+6. Uninitialized pooler weights
+7. Dataset quality issues
+
+---
+
+# ⚡ **Bottom Line**
+
+> Your system is failing because **compiled model ≠ saved checkpoint structure**
+
+This is not random — it’s a **deterministic architecture mismatch**
+
+---
+
+# 🚀 If you want the fix
+
+I can give you **exact production-grade fixes**, including:
+
+* auto key remapping (`_orig_mod` ↔ normal)
+* safe checkpoint loader (no silent corruption)
+* compile-safe saving/loading pipeline
+* fallback resume strategy
+
+Just say:
+👉 **“fix checkpoint loading completely”**
