@@ -689,7 +689,8 @@ class Trainer:
                 for key in ("labels_bias", "labels_ideology", "labels_propaganda"):
                     labels = batch.get(key) if isinstance(batch, dict) else None
                     if torch.is_tensor(labels) and labels.numel() > 0:
-                        if torch.unique(labels).numel() == 1:
+                        valid = labels[labels.ne(-100)]
+                        if valid.numel() > 0 and torch.unique(valid).numel() == 1:
                             logger.warning(
                                 "Single-class batch detected at step %d | %s",
                                 self.global_step,

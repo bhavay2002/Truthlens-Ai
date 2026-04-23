@@ -421,6 +421,39 @@ def test_issue3_multitask_loss_ignores_masked_multilabel_targets():
     assert torch.isfinite(task_losses["emotion"])
 
 
+def test_issue3_multitask_loss_skips_fully_masked_multiclass_task():
+    """Cross-entropy with only ignore_index targets must be skipped, not NaN."""
+    from src.models.multitask.multitask_loss import MultiTaskLoss, TaskLossConfig
+
+    criterion = MultiTaskLoss(
+        {
+            "bias": TaskLossConfig(task_type="multi_class", ignore_index=-100),
+            "emotion": TaskLossConfig(task_type="multi_label", ignore_index=-100),
+        }
+    )
+    logits = {
+        "bias": torch.randn(4, 2),
+        "emotion": torch.randn(4, 3),
+    }
+    labels = {
+        "bias": torch.tensor([-100, -100, -100, -100]),
+        "emotion": torch.tensor(
+            [
+                [1.0, 0.0, 1.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ]
+        ),
+    }
+
+    total_loss, task_losses = criterion(logits, labels)
+
+    assert torch.isfinite(total_loss)
+    assert "bias" not in task_losses
+    assert "emotion" in task_losses
+
+
 # =====================================================================
 # Issue #4 — loss stability: clipping + NaN guard + per-task visibility
 # =====================================================================

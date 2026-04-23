@@ -187,6 +187,10 @@ class MultiTaskLoss(nn.Module):
                 if task_labels.dim() == 2:
                     task_labels = task_labels.argmax(dim=1)
 
+                valid_labels = task_labels.ne(task_config.ignore_index)
+                if not bool(valid_labels.any()):
+                    continue
+
                 loss = loss_fn(task_logits, task_labels)
 
             elif task_type == "binary":
