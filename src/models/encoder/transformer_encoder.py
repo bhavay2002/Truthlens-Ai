@@ -108,11 +108,17 @@ class TransformerEncoder(BaseModel):
 
         try:
             self.config = AutoConfig.from_pretrained(model_name)
-            # We never consume HF pooler_output in this codebase; using a
-            # random pooler (e.g. RoBERTa) adds noisy unused parameters and
-            # triggers misleading initialization warnings.
+            # ---- #10 of the playbook: pooler weights ("pooler.dense.*") are
+            # **never** part of MLM-pretrained checkpoints for RoBERTa, so
+            # HF reinitializes them with random Tanh-projected weights.
+            # Because we read raw CLS / pooled hidden states ourselves and
+            # never consume `pooler_output`, those random params would just
+            # add noise and trigger misleading "newly initialized" warnings.
+            # Disable the pooler entirely to dodge the issue at the source.
+            _pooler_disabled = False
             if hasattr(self.config, "add_pooling_layer"):
                 self.config.add_pooling_layer = False
+                _pooler_disabled = True
             if init_from_config_only:
                 logger.info(
                     "Initializing encoder from config only: %s", model_name
@@ -120,6 +126,25 @@ class TransformerEncoder(BaseModel):
                 self.encoder = AutoModel.from_config(self.config)
             else:
                 self.encoder = AutoModel.from_pretrained(model_name, config=self.config)
+            # Visibility: confirm pooler is truly gone, or warn if a
+            # randomly-initialized one slipped through (some HF model
+            # classes ignore the config flag).
+            _pooler_module = getattr(self.encoder, "pooler", None)
+            if _pooler_module is None:
+                if _pooler_disabled:
+                    logger.info(
+                        "Encoder pooler bypassed for %s (using raw CLS / "
+                        "configured pooling instead).",
+                        model_name,
+                    )
+            else:
+                logger.warning(
+                    "Encoder %s still exposes a pooler module — its "
+                    "weights are likely randomly initialized and will be "
+                    "ignored downstream. Consider a model class that "
+                    "honours add_pooling_layer=False.",
+                    model_name,
+                )
         except Exception as exc:
             logger.exception("Failed to initialize transformer model: %s", model_name)
             raise RuntimeError(

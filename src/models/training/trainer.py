@@ -257,6 +257,18 @@ class Trainer:
         # Cap dumps so a sustained-spike run doesn't fill the disk.
         self._max_debug_dumps = int(os.environ.get("TRUTHLENS_MAX_DEBUG_DUMPS", "20"))
         self._debug_dump_count = 0
+        # ---- #11 of the playbook: anomaly-logging rate limit. Even with the
+        # dump cap, sustained spikes can flood the warning channel. We
+        # additionally drop dumps that aren't either (a) the Nth spike since
+        # the last save (TRUTHLENS_SPIKE_LOG_EVERY) or (b) major spikes whose
+        # ratio over EMA exceeds TRUTHLENS_MAJOR_SPIKE_RATIO.
+        self._spike_log_every = max(
+            1, int(os.environ.get("TRUTHLENS_SPIKE_LOG_EVERY", "10"))
+        )
+        self._major_spike_ratio = float(
+            os.environ.get("TRUTHLENS_MAJOR_SPIKE_RATIO", "3.0")
+        )
+        self._spike_seen_count = 0
 
         # Checkpoint manager
         self.checkpoint_manager: Optional[CheckpointManager] = None
@@ -953,7 +965,20 @@ class Trainer:
                     _sig,
                     {k: round(v, 3) for k, v in _per_task_losses.items()},
                 )
-                if self._debug_dump_count < self._max_debug_dumps:
+                # ---- #11: rate-limit + severity filter for spike dumps.
+                self._spike_seen_count += 1
+                _ema_for_task = float(_ema.get(_spiked_task, 0.0) or 0.0)
+                _raw_for_task = float(_per_task_losses.get(_spiked_task, 0.0) or 0.0)
+                _is_major_spike = (
+                    _ema_for_task > 0.0
+                    and _raw_for_task > _ema_for_task * self._major_spike_ratio
+                )
+                _periodic = (self._spike_seen_count % self._spike_log_every) == 0
+                _should_dump = (
+                    self._debug_dump_count < self._max_debug_dumps
+                    and (_is_major_spike or _periodic)
+                )
+                if _should_dump:
                     try:
                         _logits = {}
                         if isinstance(outputs, dict):
@@ -1089,20 +1114,13 @@ class Trainer:
                 if self.scaler.is_enabled():
                     self.scaler.unscale_(self.optimizer)
 
-                # clip_grad_norm_ returns the pre-clip total norm; checking
-                # its finiteness is an O(1) gradient-sanity probe that catches
-                # the spike pattern the diagnostic flagged (3.5 → 0.02 swings)
-                # without paying the cost of scanning every named parameter.
-                total_norm = torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(),
-                    self.config.max_grad_norm,
-                )
-
-                # GradTracker keeps a windowed history (mean / variance per
-                # parameter) and detect_grad_anomaly classifies the global
-                # norm as EXPLODING / VANISHING / NORMAL. Anomalies are
-                # always logged; the periodic info line keeps run-time
-                # visibility cheap.
+                # ---- #12 of the playbook: log PRE-clip stats BEFORE the
+                # clip rescales every gradient. Doing this in the wrong
+                # order produces the famous "grad_norm always ≈ 1.0"
+                # observability illusion (the tracker would just read
+                # the clipped values). GradTracker.update walks
+                # `p.grad.data.norm` per parameter, so it must run on
+                # the un-clipped gradients to be diagnostic.
                 try:
                     _grad_record = self._grad_tracker.update(self.model)
                     _anomaly = detect_grad_anomaly(_grad_record)
@@ -1115,16 +1133,52 @@ class Trainer:
                             _grad_record["mean_norm"],
                             _grad_record["mean_var"],
                         )
-                    if self.global_step % max(1, self.config.log_every_steps) == 0:
-                        logger.info(
-                            "step %d | grad_norm(pre-clip)=%.4f mean=%.4f var=%.4g",
-                            self.global_step,
-                            _grad_record["total_norm"],
-                            _grad_record["mean_norm"],
-                            _grad_record["mean_var"],
-                        )
                 except Exception:
-                    pass
+                    _grad_record = None
+
+                # clip_grad_norm_ returns the **pre-clip** total norm so we
+                # capture true gradient magnitude even after rescaling.
+                total_norm = torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    self.config.max_grad_norm,
+                )
+
+                # Hidden-explosion detector (#12 fix-2): clipping makes a
+                # 50.0 gradient look identical to a 1.0 gradient downstream;
+                # warn loudly when the pre-clip norm is well above the cap.
+                _hidden_explosion_ratio = float(
+                    os.environ.get("TRUTHLENS_HIDDEN_EXPLOSION_RATIO", "5.0")
+                )
+                try:
+                    _pre_clip_val = float(total_norm.detach().item()) if torch.is_tensor(total_norm) else float(total_norm)
+                except Exception:
+                    _pre_clip_val = float("nan")
+                if (
+                    _pre_clip_val == _pre_clip_val  # not NaN
+                    and self.config.max_grad_norm > 0
+                    and _pre_clip_val > self.config.max_grad_norm * _hidden_explosion_ratio
+                ):
+                    logger.warning(
+                        "Hidden gradient explosion at step %d: "
+                        "pre_clip=%.3f >> max_grad_norm=%.3f "
+                        "(ratio=%.2fx). Clipping is masking instability.",
+                        self.global_step, _pre_clip_val,
+                        self.config.max_grad_norm,
+                        _pre_clip_val / max(self.config.max_grad_norm, 1e-12),
+                    )
+
+                if _grad_record is not None and self.global_step % max(1, self.config.log_every_steps) == 0:
+                    # Log explicit pre/post-clip pair so the dashboard can
+                    # never again look "stable" because of clipping alone.
+                    _post = min(_pre_clip_val, float(self.config.max_grad_norm))
+                    logger.info(
+                        "step %d | grad_norm pre=%.4f post=%.4f "
+                        "mean=%.4f var=%.4g",
+                        self.global_step,
+                        _pre_clip_val, _post,
+                        _grad_record["mean_norm"],
+                        _grad_record["mean_var"],
+                    )
 
                 if not torch.isfinite(total_norm):
                     logger.warning(
