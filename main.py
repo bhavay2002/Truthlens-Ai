@@ -682,6 +682,72 @@ def load_data():
         len(test_df),
     )
 
+    # -------------------------------------------------------------
+    # Phase-2 distribution audit (multi-task playbook). Logs per-task
+    # positive / negative / NA coverage so silent label-collapse and
+    # extreme imbalance surface BEFORE training starts. Failure modes
+    # this catches:
+    #   * a task is 99% NA → the head will look "starved" in trainer logs
+    #   * a multi-class task is 99% one class → AUC looks fine but the
+    #     head learned the prior, not the signal
+    #   * a multi-label task has zero positives for some labels → the
+    #     corresponding sigmoid output saturates at 0
+    # -------------------------------------------------------------
+    _MC_TASKS = (
+        ("bias", BIAS_LABEL, {0, 1}),
+        ("ideology", IDEOLOGY_LABEL, {0, 1, 2}),
+        ("propaganda", PROPAGANDA_LABEL, {0, 1}),
+    )
+    _ML_TASKS = (
+        ("narrative_frame", FRAME_COLUMNS),
+        ("emotion", EMOTION_COLUMNS),
+    )
+    for split_name, _df in (("train", train_df), ("val", val_df), ("test", test_df)):
+        n = max(1, len(_df))
+        for task_name, col, allowed in _MC_TASKS:
+            if col not in _df.columns:
+                continue
+            s = _df[col]
+            na = int(s.isna().sum())
+            counts = s.dropna().astype("Int64").value_counts().to_dict()
+            class_str = " ".join(
+                f"c{int(k)}={int(v)}({100.0 * int(v) / n:.1f}%)"
+                for k, v in sorted(counts.items())
+            )
+            logger.info(
+                "[label-audit] %s/%s na=%d(%.1f%%) %s",
+                split_name, task_name, na, 100.0 * na / n, class_str,
+            )
+            if counts:
+                top_frac = max(counts.values()) / max(1, sum(counts.values()))
+                if top_frac > 0.95:
+                    logger.warning(
+                        "[label-audit] %s/%s is %.1f%% one class — head will likely "
+                        "learn the prior. Consider class weights or oversampling.",
+                        split_name, task_name, 100.0 * top_frac,
+                    )
+        for task_name, cols in _ML_TASKS:
+            present = [c for c in cols if c in _df.columns]
+            if not present:
+                continue
+            sub = _df[present]
+            row_na = int(sub.isna().all(axis=1).sum())
+            pos_per_label = (sub.fillna(0).astype(float) > 0.5).sum(axis=0)
+            pos_str = " ".join(
+                f"{c}={int(pos_per_label[c])}({100.0 * int(pos_per_label[c]) / n:.1f}%)"
+                for c in present
+            )
+            logger.info(
+                "[label-audit] %s/%s row_all_na=%d(%.1f%%) pos: %s",
+                split_name, task_name, row_na, 100.0 * row_na / n, pos_str,
+            )
+            zero_pos = [c for c in present if int(pos_per_label[c]) == 0]
+            if zero_pos:
+                logger.warning(
+                    "[label-audit] %s/%s has labels with ZERO positives in this split: %s",
+                    split_name, task_name, zero_pos,
+                )
+
     return train_df, val_df, test_df
 
 
@@ -1035,23 +1101,71 @@ def main():
         _persistent = bool(_num_workers)
         _prefetch = 4 if _persistent else None
 
-        # Length-bucketed sampler eliminates padding waste on the train loader.
-        train_sampler = BucketSampler(
-            train_dataset.lengths,
-            batch_size=batch_size,
-            shuffle=True,
-            bucket_size=max(100, batch_size * 8),
+        # ---- Phase-2 oversampling (multi-task playbook). Opt-in via
+        # TRUTHLENS_OVERSAMPLE=1. Replaces the bucketed sampler with a
+        # WeightedRandomSampler whose per-sample weight is the inverse
+        # frequency of its bias class, NA-rows down-weighted. Gives rare
+        # classes proportionally more exposure; trades padding-efficiency
+        # for label balance.
+        _use_weighted_sampler = (
+            os.environ.get("TRUTHLENS_OVERSAMPLE", "0") == "1"
         )
 
-        train_loader = DataLoader(
-            train_dataset,
-            batch_sampler=train_sampler,
-            collate_fn=collate_fn,
-            num_workers=_num_workers,
-            pin_memory=_pin,
-            persistent_workers=_persistent,
-            prefetch_factor=_prefetch,
-        )
+        if _use_weighted_sampler:
+            from torch.utils.data import WeightedRandomSampler
+            _bias_arr = train_df[BIAS_LABEL].fillna(-100).astype("int64").to_numpy()
+            _valid_mask = _bias_arr != -100
+            _weights = np.ones(len(_bias_arr), dtype=np.float64)
+            if _valid_mask.any():
+                _classes, _counts = np.unique(_bias_arr[_valid_mask], return_counts=True)
+                _inv = {int(c): 1.0 / float(n) for c, n in zip(_classes, _counts)}
+                for _i, _v in enumerate(_bias_arr):
+                    if _v == -100:
+                        # NA-bias rows still carry other-task labels —
+                        # keep them in the rotation but at the median
+                        # inverse-frequency weight to avoid starvation.
+                        _weights[_i] = float(np.median(list(_inv.values())))
+                    else:
+                        _weights[_i] = _inv[int(_v)]
+            train_sampler = WeightedRandomSampler(
+                weights=torch.as_tensor(_weights, dtype=torch.double),
+                num_samples=len(train_dataset),
+                replacement=True,
+            )
+            logger.info(
+                "WeightedRandomSampler ENABLED — class-balanced oversampling "
+                "(bias-classes=%s)",
+                {int(c): int(n) for c, n in zip(*np.unique(_bias_arr[_valid_mask], return_counts=True))}
+                if _valid_mask.any() else {},
+            )
+            train_loader = DataLoader(
+                train_dataset,
+                sampler=train_sampler,
+                batch_size=batch_size,
+                collate_fn=collate_fn,
+                num_workers=_num_workers,
+                pin_memory=_pin,
+                persistent_workers=_persistent,
+                prefetch_factor=_prefetch,
+                drop_last=True,
+            )
+        else:
+            # Length-bucketed sampler eliminates padding waste on the train loader.
+            train_sampler = BucketSampler(
+                train_dataset.lengths,
+                batch_size=batch_size,
+                shuffle=True,
+                bucket_size=max(100, batch_size * 8),
+            )
+            train_loader = DataLoader(
+                train_dataset,
+                batch_sampler=train_sampler,
+                collate_fn=collate_fn,
+                num_workers=_num_workers,
+                pin_memory=_pin,
+                persistent_workers=_persistent,
+                prefetch_factor=_prefetch,
+            )
 
         val_loader = DataLoader(
             val_dataset,
@@ -1091,6 +1205,48 @@ def main():
 
         if hasattr(model, "config") and hasattr(model.config, "use_flash_attention"):
             model.config.use_flash_attention = True
+
+        # ---- Phase-3 EMA-coverage task weighting (multi-task playbook).
+        # Opt-in via TRUTHLENS_EMA_TASK_WEIGHTING=1. Boosts under-supervised
+        # heads' gradient contribution proportionally to how often they are
+        # masked out, without re-tuning the static per-task weights.
+        if os.environ.get("TRUTHLENS_EMA_TASK_WEIGHTING", "0") == "1":
+            if hasattr(model, "multitask_loss") and hasattr(
+                model.multitask_loss, "enable_ema_weighting"
+            ):
+                _alpha = float(os.environ.get("TRUTHLENS_EMA_ALPHA", "0.1"))
+                _floor = float(os.environ.get("TRUTHLENS_EMA_FLOOR", "0.05"))
+                _cap = float(os.environ.get("TRUTHLENS_EMA_CAP", "10.0"))
+                model.multitask_loss.enable_ema_weighting(
+                    alpha=_alpha, floor=_floor, cap=_cap,
+                )
+                logger.info(
+                    "EMA-coverage task weighting ENABLED "
+                    "(alpha=%.3f floor=%.3f cap=%.2f)",
+                    _alpha, _floor, _cap,
+                )
+
+        # ---- Phase-4 Kendall-uncertainty TaskBalancer (multi-task playbook).
+        # Opt-in via TRUTHLENS_TASK_BALANCER=1. Replaces the naive weighted
+        # sum across heads with a learnable log-variance combination so the
+        # model finds its own per-task scaling. Attached BEFORE optimizer
+        # construction below so balancer params get picked up.
+        if os.environ.get("TRUTHLENS_TASK_BALANCER", "0") == "1":
+            try:
+                from src.training.instrumentation import TaskBalancer
+                if hasattr(model, "multitask_loss") and hasattr(
+                    model.multitask_loss, "attach_task_balancer"
+                ):
+                    _tasks = list(model.multitask_loss.task_configs.keys())
+                    _balancer = TaskBalancer(_tasks).to(device)
+                    model.multitask_loss.attach_task_balancer(_balancer)
+                    logger.info(
+                        "Kendall TaskBalancer ATTACHED for tasks=%s", _tasks,
+                    )
+            except Exception as _exc:
+                logger.warning(
+                    "TRUTHLENS_TASK_BALANCER=1 but attach failed: %s", _exc,
+                )
 
         # C2: torch.compile is owned by Trainer.__init__ — do not double-compile.
 

@@ -18,6 +18,10 @@ class TaskLossConfig:
     task_type: str
     weight: float = 1.0
     ignore_index: int = -100  # used for multi_class tasks
+    # Optional positive-class weight for BCE / multi-label tasks. Either a
+    # scalar (broadcast across all label dimensions) or a 1-D tensor with
+    # one entry per label class. ``None`` disables class re-weighting.
+    pos_weight: Optional[torch.Tensor] = None
 
 
 class MultiTaskLoss(nn.Module):
@@ -89,10 +93,40 @@ class MultiTaskLoss(nn.Module):
                 )
 
             elif config.task_type in {"binary", "multi_label"}:
-                self.loss_functions[task_name] = nn.BCEWithLogitsLoss(reduction="none")
+                # pos_weight is registered as a (non-trainable) buffer so it
+                # moves with .to(device) and survives state_dict round-trips.
+                bce = nn.BCEWithLogitsLoss(
+                    reduction="none",
+                    pos_weight=config.pos_weight if config.pos_weight is not None else None,
+                )
+                self.loss_functions[task_name] = bce
 
             elif config.task_type == "regression":
                 self.loss_functions[task_name] = nn.MSELoss()
+
+        # ---- Optional Kendall-uncertainty task balancer (Phase-4 of the
+        # playbook). When attached via ``attach_task_balancer``, the per-task
+        # weighted losses are *re-combined* through the balancer's
+        # learnable log-variances instead of a simple sum. The balancer's
+        # parameters must be added to the optimizer by the caller (it is a
+        # sub-module so ``model.parameters()`` will pick it up automatically
+        # when attached before optimizer construction).
+        self.task_balancer: Optional[nn.Module] = None
+
+        # ---- EMA-based task coverage tracker (Phase-3 of the multi-task
+        # stabilization playbook). Tracks, per task, the smoothed probability
+        # that the task has any valid label in a batch. The inverse is used
+        # as a multiplier so rare tasks get boosted without re-tuning the
+        # static `weight` field. Opt-in via ``ema_weighting=True``.
+        self._coverage_ema: Dict[str, float] = {name: 0.0 for name in task_configs}
+        self._coverage_steps: Dict[str, int] = {name: 0 for name in task_configs}
+        self._ema_alpha: float = 0.1
+        self.ema_weighting: bool = False
+        # Floor stops the inverse-EMA multiplier from blowing up early in
+        # training when a task has been observed only a handful of times.
+        self._ema_floor: float = 0.05
+        # Cap so a single near-zero task doesn't overwhelm the loss.
+        self._ema_cap: float = 10.0
 
         logger.info("MultiTaskLoss initialized with tasks: %s", list(task_configs.keys()))
 
@@ -108,6 +142,56 @@ class MultiTaskLoss(nn.Module):
         for name in self.head_call_counts:
             self.head_call_counts[name] = 0
         self.total_forward_calls = 0
+
+    def attach_task_balancer(self, balancer: nn.Module) -> None:
+        """Attach a Kendall-uncertainty TaskBalancer (or compatible module).
+
+        The balancer must implement ``forward(task_losses: Dict[str, Tensor])
+        -> Tensor``. After attachment, ``MultiTaskLoss.forward`` returns the
+        balancer-combined total instead of the simple weighted sum. The
+        balancer is registered as a sub-module so its parameters appear in
+        ``model.parameters()`` automatically.
+        """
+        if not hasattr(balancer, "forward"):
+            raise TypeError("balancer must be an nn.Module with forward()")
+        self.task_balancer = balancer
+        logger.info(
+            "MultiTaskLoss: TaskBalancer ATTACHED (%s)",
+            balancer.__class__.__name__,
+        )
+
+    def enable_ema_weighting(
+        self,
+        *,
+        alpha: float = 0.1,
+        floor: float = 0.05,
+        cap: float = 10.0,
+    ) -> None:
+        """Turn on EMA-coverage based dynamic task weighting.
+
+        Multiplies each task's static weight by ``min(1/cov_ema, cap)`` where
+        ``cov_ema`` is the smoothed per-batch probability that the task has
+        any valid label. Rare tasks therefore get gradient-weight boosts
+        proportional to how often they go un-supervised.
+        """
+        if not 0.0 < alpha <= 1.0:
+            raise ValueError(f"alpha must be in (0,1], got {alpha}")
+        if floor <= 0.0:
+            raise ValueError(f"floor must be positive, got {floor}")
+        if cap < 1.0:
+            raise ValueError(f"cap must be >= 1.0, got {cap}")
+        self.ema_weighting = True
+        self._ema_alpha = float(alpha)
+        self._ema_floor = float(floor)
+        self._ema_cap = float(cap)
+        logger.info(
+            "MultiTaskLoss EMA-coverage weighting ENABLED (alpha=%.3f floor=%.3f cap=%.2f)",
+            self._ema_alpha, self._ema_floor, self._ema_cap,
+        )
+
+    def coverage_report(self) -> Dict[str, float]:
+        """Return the current per-task EMA coverage estimate."""
+        return dict(self._coverage_ema)
 
     def head_starvation_report(self) -> Dict[str, float]:
         """Return per-head supervision rate over the current tracking window.
@@ -148,10 +232,26 @@ class MultiTaskLoss(nn.Module):
             if not isinstance(ignore_index, int):
                 raise ValueError(f"{task_name}: ignore_index must be int")
 
+            pos_weight_raw = settings.get("pos_weight")
+            pos_weight_tensor: Optional[torch.Tensor] = None
+            if pos_weight_raw is not None:
+                if torch.is_tensor(pos_weight_raw):
+                    pos_weight_tensor = pos_weight_raw.float()
+                else:
+                    try:
+                        pos_weight_tensor = torch.as_tensor(
+                            pos_weight_raw, dtype=torch.float32
+                        )
+                    except Exception as exc:
+                        raise ValueError(
+                            f"{task_name}: pos_weight must be tensor-convertible ({exc})"
+                        ) from exc
+
             configs[task_name] = TaskLossConfig(
                 task_type=task_type,
                 weight=float(weight_raw),
                 ignore_index=ignore_index,
+                pos_weight=pos_weight_tensor,
             )
 
         if not configs:
@@ -184,12 +284,36 @@ class MultiTaskLoss(nn.Module):
             logger.warning(msg)
 
         task_losses: Dict[str, torch.Tensor] = {}
+        # Raw (pre-weight, pre-EMA) per-task losses fed to the optional
+        # Kendall TaskBalancer when attached. Always allocated so the
+        # balancer hook stays simple.
+        raw_losses_for_balancer: Dict[str, torch.Tensor] = {}
         total_loss: Optional[torch.Tensor] = None
         active_heads = 0
 
         # Bump the global call counter once per forward(); per-head increments
         # happen below only when a head actually contributes a loss.
         self.total_forward_calls += 1
+
+        # ---- Per-task coverage probe (used both for the EMA weighting
+        # multiplier below and for the empty-batch guard at the bottom).
+        per_task_coverage: Dict[str, bool] = {}
+        for _name, _cfg in self.task_configs.items():
+            _lbl = labels.get(_name)
+            if not torch.is_tensor(_lbl) or _lbl.numel() == 0:
+                per_task_coverage[_name] = False
+                continue
+            if _cfg.task_type == "multi_class":
+                per_task_coverage[_name] = bool(_lbl.ne(_cfg.ignore_index).any())
+            elif _cfg.task_type in {"binary", "multi_label"}:
+                per_task_coverage[_name] = bool(_lbl.ne(float(_cfg.ignore_index)).any())
+            else:
+                per_task_coverage[_name] = True
+            self._coverage_steps[_name] += 1
+            self._coverage_ema[_name] = (
+                self._ema_alpha * (1.0 if per_task_coverage[_name] else 0.0)
+                + (1.0 - self._ema_alpha) * self._coverage_ema[_name]
+            )
 
         for task_name, task_config in self.task_configs.items():
 
@@ -281,21 +405,72 @@ class MultiTaskLoss(nn.Module):
             if weight < 0:
                 raise ValueError(f"Invalid weight for {task_name}: {weight}")
 
+            # EMA-coverage multiplier (Phase-3 of the playbook): rare tasks
+            # get inversely boosted so they accumulate gradient signal at
+            # roughly the same long-horizon rate as well-supervised tasks.
+            if self.ema_weighting:
+                cov = max(self._coverage_ema.get(task_name, 0.0), self._ema_floor)
+                ema_mul = min(1.0 / cov, self._ema_cap)
+                weight = weight * ema_mul
+
             weighted_loss = loss * weight
 
             task_losses[task_name] = weighted_loss
             active_heads += 1
             self.head_call_counts[task_name] += 1
+            # `loss` is the (pre-weight, pre-EMA) per-task scalar — exactly
+            # what the Kendall-uncertainty balancer wants to combine.
+            if self.task_balancer is not None:
+                raw_losses_for_balancer[task_name] = loss
 
             total_loss = (
                 weighted_loss if total_loss is None else total_loss + weighted_loss
             )
 
         if total_loss is None or active_heads == 0:
+            # The strict path raises so a chronically-misconfigured sampler
+            # (every batch fully masked) cannot be silently swallowed. The
+            # opt-in soft path (TRUTHLENS_SKIP_EMPTY_BATCH=1) returns a
+            # zero scalar carrying gradient through `0 * sum(logits)` so the
+            # caller can detect-and-skip without the autograd graph blowing
+            # up. The trainer treats `last_active_heads == 0` as "skip
+            # optimizer step" so no parameters are nudged by the zero loss.
+            import os as _os
+            if _os.environ.get("TRUTHLENS_SKIP_EMPTY_BATCH", "0") == "1":
+                _grad_carrier = None
+                for _name, _t in logits.items():
+                    if torch.is_tensor(_t) and _t.requires_grad:
+                        _zero = (_t.float().sum() * 0.0)
+                        _grad_carrier = (
+                            _zero if _grad_carrier is None else _grad_carrier + _zero
+                        )
+                if _grad_carrier is None:
+                    _grad_carrier = torch.zeros((), requires_grad=False)
+                logger.warning(
+                    "MultiTaskLoss: every head masked out this batch — "
+                    "returning zero loss (skip-empty-batch mode). Check "
+                    "sampling if this fires repeatedly."
+                )
+                self.last_active_heads = 0
+                return _grad_carrier, {}
             raise RuntimeError(
                 "No task losses were computed — every head was masked out for "
-                "this batch. Check label sparsity / batch sampling."
+                "this batch. Check label sparsity / batch sampling. Set "
+                "TRUTHLENS_SKIP_EMPTY_BATCH=1 to soft-skip instead."
             )
+
+        # ---- Kendall-uncertainty re-combination (Phase-4). Replaces the
+        # naive weighted sum with ``sum_t precision_t * loss_t + log_var_t``
+        # so the model learns its own per-task weights jointly with the
+        # rest of the parameters.
+        if self.task_balancer is not None and raw_losses_for_balancer:
+            try:
+                total_loss = self.task_balancer(raw_losses_for_balancer)
+            except Exception as exc:
+                logger.warning(
+                    "TaskBalancer failed (%s) — falling back to weighted-sum total.",
+                    exc,
+                )
 
         # Normalize so gradient scale does not fluctuate with how many heads
         # happened to be supervised in a given batch.
