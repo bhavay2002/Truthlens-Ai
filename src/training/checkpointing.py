@@ -366,18 +366,22 @@ def load_checkpoint(
 
     unexpected = load_result.unexpected_keys
 
-    if strict and (missing or unexpected):
+    if missing:
         raise RuntimeError(
-            "Strict checkpoint load failed:\n"
-            f"Missing keys: {missing}\n"
-            f"Unexpected keys: {unexpected}"
+            "[CHECKPOINT ERROR] Missing keys after filtering allowed set:\n"
+            f"  {missing}\n"
+            "Add them to allow_missing if the omission is intentional."
         )
 
-    if missing:
-        logger.warning("Missing keys (ignored): %s", missing)
-
     if unexpected:
-        logger.warning("Unexpected keys (ignored): %s", unexpected)
+        raise RuntimeError(
+            "[CHECKPOINT ERROR] Unexpected keys in checkpoint:\n"
+            f"  {unexpected}\n"
+            "These keys have no matching parameter in the model — "
+            "the checkpoint and model architecture are out of sync."
+        )
+
+    logger.info("Checkpoint loaded successfully with full parameter match.")
 
     #  optimizer restore (device safe)
     if optimizer is not None and "optimizer_state_dict" in checkpoint:

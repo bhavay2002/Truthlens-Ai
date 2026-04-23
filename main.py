@@ -806,6 +806,18 @@ def load_data():
             )
             if counts:
                 top_frac = max(counts.values()) / max(1, sum(counts.values()))
+                if len(counts) < 2 and split_name == "train":
+                    raise RuntimeError(
+                        f"[DATA ERROR] Single-class dataset detected in train/{task_name}: "
+                        f"only class {list(counts.keys())[0]} present. "
+                        "The model cannot learn without label diversity."
+                    )
+                if top_frac > 0.90 and split_name == "train":
+                    raise RuntimeError(
+                        f"[DATA ERROR] Extreme class imbalance in train/{task_name}: "
+                        f"{100.0 * top_frac:.1f}% is one class. "
+                        "Training will collapse to the prior. Use class weights or oversample."
+                    )
                 if top_frac > 0.95:
                     logger.warning(
                         "[label-audit] %s/%s is %.1f%% one class — head will likely "
@@ -834,7 +846,32 @@ def load_data():
                     split_name, task_name, zero_pos,
                 )
 
+    # Multi-task label alignment: every label column must have the same row
+    # count as the text column (guaranteed by being in the same DataFrame,
+    # but verify non-null counts aren't wildly mismatched across tasks).
+    for split_name, df in (("train", train_df), ("val", val_df), ("test", test_df)):
+        _label_cols = [BIAS_LABEL, IDEOLOGY_LABEL, PROPAGANDA_LABEL, "hero", "villain", "victim"]
+        _present = [c for c in _label_cols if c in df.columns]
+        _lengths = {c: int(df[c].notna().sum()) for c in _present}
+        _non_zero = [v for v in _lengths.values() if v > 0]
+        if _non_zero and max(_non_zero) > 10 * min(_non_zero):
+            raise RuntimeError(
+                f"[DATA ERROR] Multi-task label alignment failure in {split_name}: "
+                f"label non-null counts vary by >10x across tasks — {_lengths}. "
+                "Check for a column shift or mismatched annotation files."
+            )
+
     return train_df, val_df, test_df
+
+
+# -----------------------------------------------------
+# Silent collapse detector (used in training loop)
+# -----------------------------------------------------
+
+def _detect_silent_collapse(loss: float, f1: float) -> bool:
+    """Return True when loss is suspiciously low but F1 is near zero —
+    the canonical signature of a model that predicts one class for everything."""
+    return loss < 0.2 and f1 < 0.1
 
 
 # -----------------------------------------------------

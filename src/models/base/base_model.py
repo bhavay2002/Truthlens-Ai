@@ -164,12 +164,20 @@ class BaseModel(nn.Module, ABC):
 
         try:
             checkpoint = torch.load(path, map_location=map_location, weights_only=False)
-            self.load_state_dict(checkpoint["model_state_dict"])
+            _lr = self.load_state_dict(checkpoint["model_state_dict"], strict=False)
+            if _lr.missing_keys:
+                raise RuntimeError(
+                    f"[CHECKPOINT ERROR] Missing keys: {_lr.missing_keys}"
+                )
+            if _lr.unexpected_keys:
+                raise RuntimeError(
+                    f"[CHECKPOINT ERROR] Unexpected keys: {_lr.unexpected_keys}"
+                )
 
             if optimizer and checkpoint.get("optimizer_state_dict"):
                 optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
-            logger.info("Checkpoint loaded from %s", path)
+            logger.info("Checkpoint loaded successfully with full parameter match: %s", path)
 
             return checkpoint.get("metadata", {})
 

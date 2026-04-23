@@ -472,6 +472,27 @@ class Trainer:
                 val_loss = self._validate_epoch(val_loader)
                 history["val_loss"].append(val_loss)
 
+                # Fail-fast on silent collapse: a model that outputs the same
+                # class for every input produces very low cross-entropy (loss < 0.2)
+                # while F1 stays near zero. Detect this per task and abort
+                # immediately — continuing would waste the full training run.
+                _val_metrics = getattr(self, "last_val_metrics", {})
+                for _task, _metrics in _val_metrics.items():
+                    _task_f1 = float(_metrics.get("f1_macro", 1.0))
+                    if _task_f1 < 0.2:
+                        logger.warning(
+                            "[COLLAPSE WARNING] Epoch %d: %s f1_macro=%.4f — "
+                            "potential collapse forming.",
+                            epoch + 1, _task, _task_f1,
+                        )
+                    if val_loss is not None and val_loss < 0.2 and _task_f1 < 0.1:
+                        raise RuntimeError(
+                            f"[TRAINING COLLAPSE] Epoch {epoch + 1}: task '{_task}' "
+                            f"loss={val_loss:.4f} f1_macro={_task_f1:.4f}. "
+                            "Model is predicting a constant class. "
+                            "Investigate data balance, label integrity, and learning rate."
+                        )
+
             # C3: epoch-level checkpointing + best-model marker
             if self.checkpoint_manager is not None:
                 metadata = {
@@ -569,6 +590,14 @@ class Trainer:
             logger.warning(
                 "load_checkpoint: missing=%d unexpected=%d", len(missing), len(unexpected),
             )
+
+        if unexpected:
+            raise RuntimeError(
+                f"[CHECKPOINT ERROR] Unexpected keys in checkpoint:\n  {unexpected}\n"
+                "Checkpoint and model architecture are out of sync."
+            )
+
+        if missing:
             # Output-contract audit (Doc 1, root cause #4): silent absence
             # of a task-head's weights is exactly what produced the
             # "no bias logits returned by model" warning in eval. Treat
@@ -585,10 +614,16 @@ class Trainer:
             })
             if _missing_heads:
                 raise RuntimeError(
-                    f"Checkpoint missing task-head weights: {_missing_heads}. "
+                    f"[CHECKPOINT ERROR] Missing task-head weights: {_missing_heads}. "
                     f"Resuming would silently disable these heads. "
                     f"Path: {path}"
                 )
+            raise RuntimeError(
+                f"[CHECKPOINT ERROR] Missing keys in checkpoint:\n  {missing}\n"
+                f"Path: {path}"
+            )
+
+        logger.info("Checkpoint loaded successfully with full parameter match.")
 
         opt_state = state.get("optimizer_state_dict") or state.get("optimizer")
         if opt_state is not None and self.optimizer is not None:

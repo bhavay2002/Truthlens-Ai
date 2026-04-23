@@ -102,13 +102,24 @@ class EmotionModelLoader:
 
         state_dict = EmotionModelLoader._extract_state_dict(checkpoint)
 
-        model.load_state_dict(state_dict, strict=False)
+        _lr = model.load_state_dict(state_dict, strict=False)
+        if _lr.missing_keys:
+            raise RuntimeError(
+                f"[CHECKPOINT ERROR] Missing keys in emotion model: {_lr.missing_keys}"
+            )
+        if _lr.unexpected_keys:
+            raise RuntimeError(
+                f"[CHECKPOINT ERROR] Unexpected keys in emotion model: {_lr.unexpected_keys}"
+            )
 
         model = model.to(device_obj)
 
         model.eval()
 
-        logger.info("Emotion model loaded successfully on device: %s", device_obj)
+        logger.info(
+            "Emotion model loaded successfully with full parameter match on device: %s",
+            device_obj,
+        )
 
         return model
 

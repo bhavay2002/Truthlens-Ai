@@ -156,7 +156,16 @@ class ModelLoader:
                 if "_orig_mod" in str(type(model)):
                     model = model._orig_mod
 
-                model.load_state_dict(state_dict, strict=False)
+                _lr = model.load_state_dict(state_dict, strict=False)
+                if _lr.missing_keys:
+                    raise RuntimeError(
+                        f"[CHECKPOINT ERROR] Missing keys: {_lr.missing_keys}"
+                    )
+                if _lr.unexpected_keys:
+                    raise RuntimeError(
+                        f"[CHECKPOINT ERROR] Unexpected keys: {_lr.unexpected_keys}"
+                    )
+                logger.info("Checkpoint loaded successfully with full parameter match.")
 
                 return model
 
@@ -180,7 +189,16 @@ class ModelLoader:
                         raise RuntimeError("Invalid checkpoint format")
 
                     validate_checkpoint(state_dict)
-                    model.load_state_dict(state_dict, strict=False)
+                    _lr2 = model.load_state_dict(state_dict, strict=False)
+                    if _lr2.missing_keys:
+                        raise RuntimeError(
+                            f"[CHECKPOINT ERROR] Missing keys: {_lr2.missing_keys}"
+                        )
+                    if _lr2.unexpected_keys:
+                        raise RuntimeError(
+                            f"[CHECKPOINT ERROR] Unexpected keys: {_lr2.unexpected_keys}"
+                        )
+                    logger.info("Checkpoint loaded successfully with full parameter match.")
 
             return model
 
