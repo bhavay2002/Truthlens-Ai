@@ -306,8 +306,24 @@ def test_issue3_load_data_accepts_sparse_multitask_labels(tmp_path, monkeypatch)
                 "bias_label": 1,
             },
             {
+                "text": "bias row 2",
+                "bias_label": 0,
+            },
+            {
                 "text": "ideology row",
                 "ideology_label": 2,
+            },
+            {
+                "text": "ideology row 2",
+                "ideology_label": 1,
+            },
+            {
+                "text": "propaganda row",
+                "propaganda_label": 1,
+            },
+            {
+                "text": "propaganda row 2",
+                "propaganda_label": 0,
             },
             {
                 "text": "narrative row",

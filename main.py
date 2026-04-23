@@ -614,7 +614,7 @@ def load_data():
 
     # ── Data Ingestion Firewall ────────────────────────────────────────────────
 
-    import hashlib, csv as _csv
+    import hashlib
 
     def _file_hash(path: "Path") -> str:
         h = hashlib.md5()
@@ -623,63 +623,21 @@ def load_data():
                 h.update(chunk)
         return h.hexdigest()
 
-    def _filter_bad_rows(path: "Path") -> "Path":
-        """
-        Strip rows whose comma count differs from the header, write the clean
-        rows to filtered_<name>.csv beside the original, and return that path.
-        Logs the number of rows kept/dropped so the audit trail is always clear.
-        """
-        filtered_path = path.parent / f"filtered_{path.name}"
-        with open(path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-
-        if not lines:
-            filtered_path.write_text("", encoding="utf-8")
-            return filtered_path
-
-        header = lines[0]
-        expected_commas = header.count(",")
-        clean_rows = [header]
-        dropped = 0
-        for i, line in enumerate(lines[1:], start=2):
-            if line.count(",") == expected_commas:
-                clean_rows.append(line)
-            else:
-                dropped += 1
-                logger.warning(
-                    "Dropped misaligned row %d in %s "
-                    "(expected %d commas, got %d): %r",
-                    i, path.name, expected_commas, line.count(","), line[:120],
-                )
-
-        with open(filtered_path, "w", encoding="utf-8") as f:
-            f.writelines(clean_rows)
-
-        logger.info(
-            "Row filter complete for %s: %d kept, %d dropped → %s",
-            path.name, len(clean_rows) - 1, dropped, filtered_path.name,
-        )
-        return filtered_path
-
     def _read(path: "Path") -> "pd.DataFrame":
-        # 1. Log file identity so training vs. validation mismatches are detectable.
         logger.info("DATA HASH %s  %s", _file_hash(path), path.name)
 
-        # 2. Strip misaligned rows before pandas ever sees the file.
-        clean_path = _filter_bad_rows(path)
-
-        # 3. Safe parse: python engine + explicit dtypes enforce schema at load time;
-        #    on_bad_lines skips any rows that survive the row-filter but still
-        #    corrupt the parser.
         df = pd.read_csv(
-            clean_path,
+            path,
             engine="python",
             dtype=_explicit_dtypes,
-            on_bad_lines="skip",
+            on_bad_lines="warn",
             encoding="utf-8",
             keep_default_na=True,
             na_values=["", "NA", "N/A", "null", "None"],
+            quotechar='"',
+            escapechar="\\",
         )
+        logger.info("Loaded %s rows from %s", len(df), path.name)
 
         # 4. Immediate label-integrity check: non-numeric values in bias_label are
         #    the canonical signal that a column shift occurred.
