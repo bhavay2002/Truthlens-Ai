@@ -222,3 +222,12 @@ and ON by default. Set the corresponding env var to `0` to disable any one.
 Always-on additions (no env flag needed):
 - `MultiTaskLoss` accepts `pos_weight` per BCE/multi-label task via `from_task_settings`.
 - `load_data()` logs a per-task / per-split label distribution audit (`[label-audit]`) and warns on >95% single-class collapse and zero-positive multi-label classes.
+- `MultiTaskLoss` divides each task loss by its smoothed running mean **before** weighting/balancing so harder tasks (e.g. ideology at ~1.2) cannot drown out easier ones (~0.6) by raw magnitude (#8 of the playbook). Disable via `MultiTaskLoss.loss_normalization = False`.
+
+Default-on (was opt-in) since the latest playbook items #7–9:
+
+| Env var | Default | Effect |
+|---|---|---|
+| `TRUTHLENS_LOG_GRAD_NORMS` | `1` | Per-task gradient-norm probe on the shared encoder every `TRUTHLENS_GRAD_NORMS_EVERY` steps; warns when max/min ratio > `TRUTHLENS_GRAD_NORM_DOMINANCE_WARN`. Result is also fed into `HealthScore.grad_unfair`. |
+
+`HealthScore` is now multi-dimensional (#9 of the playbook). The legacy "all-clear" path still scores 1.0, but the score now also subtracts weight for `low_coverage` (any task EMA coverage < 5%), `grad_unfair` (std/mean of per-task grad norms > 1.0), and `loss_unstable`, in addition to spike / spike_cluster / dominance / conflicts / silent_collapse.

@@ -104,6 +104,20 @@ class MultiTaskLoss(nn.Module):
             elif config.task_type == "regression":
                 self.loss_functions[task_name] = nn.MSELoss()
 
+        # ---- EMA loss-magnitude normalization (#8 of the playbook).
+        # Each task's raw loss is divided by its smoothed running mean
+        # before weighting/balancing, so a head whose loss naturally sits
+        # at ~1.2 (e.g. ideology) cannot drown out a head whose loss sits
+        # at ~0.6 just because of its scale. Normalization is applied
+        # BEFORE the static weight, the EMA-coverage multiplier, and the
+        # Kendall balancer, so all of them operate on comparable values.
+        # Opt-out via ``loss_normalization=False``.
+        self.loss_normalization: bool = True
+        self._loss_running_mean: Dict[str, float] = {name: 1.0 for name in task_configs}
+        self._loss_norm_alpha: float = 0.1
+        # Floor avoids divide-by-near-zero when a head briefly hits ~0 loss.
+        self._loss_norm_floor: float = 1e-3
+
         # ---- Optional Kendall-uncertainty task balancer (Phase-4 of the
         # playbook). When attached via ``attach_task_balancer``, the per-task
         # weighted losses are *re-combined* through the balancer's
@@ -400,6 +414,22 @@ class MultiTaskLoss(nn.Module):
 
             if not torch.isfinite(loss):
                 raise RuntimeError(f"Non-finite loss detected in task {task_name}")
+
+            # ---- EMA loss-magnitude normalization (applied BEFORE
+            # weighting so the static weight, the EMA-coverage boost, and
+            # the Kendall balancer all see scale-comparable per-task
+            # losses). Update the running mean from the raw scalar value
+            # then divide by it.
+            if self.loss_normalization:
+                _loss_val = float(loss.detach().item())
+                if torch.isfinite(loss):
+                    self._loss_running_mean[task_name] = (
+                        self._loss_norm_alpha * _loss_val
+                        + (1.0 - self._loss_norm_alpha)
+                        * self._loss_running_mean[task_name]
+                    )
+                _denom = max(self._loss_running_mean[task_name], self._loss_norm_floor)
+                loss = loss / _denom
 
             weight = float(task_config.weight)
             if weight < 0:

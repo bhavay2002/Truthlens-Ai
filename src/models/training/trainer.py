@@ -687,7 +687,7 @@ class Trainer:
         # (we read unscaled task_losses; absolute magnitudes will look
         # small but ratios are preserved).
         _log_grad_norms = os.environ.get(
-            "TRUTHLENS_LOG_GRAD_NORMS", "0"
+            "TRUTHLENS_LOG_GRAD_NORMS", "1"
         ).strip().lower() in {"1", "true", "yes", "on"}
         _grad_norms_every = max(
             1, int(os.environ.get("TRUTHLENS_GRAD_NORMS_EVERY", "200"))
@@ -835,6 +835,9 @@ class Trainer:
                             _sq += float(_g.detach().float().norm().item()) ** 2
                         _gn[_name] = _sq ** 0.5
                     if _gn:
+                        # Stash for the multi-dimensional health probe so
+                        # the next health-log step can compute fairness.
+                        self._last_task_grad_norms = dict(_gn)
                         _gn_str = " ".join(f"{n}={v:.4e}" for n, v in _gn.items())
                         logger.info(
                             "per-task grad-norms (encoder) @ step %d | %s",
@@ -1007,10 +1010,38 @@ class Trainer:
                 and self.global_step > 0
                 and self.global_step % self._health_log_every == 0
             ):
+                # ---- Multi-dimensional health signals (#9 of the playbook).
+                # Pull per-task coverage from MultiTaskLoss when available
+                # and per-task grad-norm fairness from the most recent
+                # gradient-norm log (if grad-norm logging is enabled).
+                _low_coverage = False
+                try:
+                    _raw_m = getattr(self.model, "_orig_mod", self.model)
+                    _mtl = getattr(_raw_m, "multitask_loss", None)
+                    if _mtl is not None and hasattr(_mtl, "coverage_report"):
+                        _cov = _mtl.coverage_report()
+                        if _cov:
+                            _low_coverage = any(v < 0.05 for v in _cov.values())
+                except Exception:
+                    pass
+
+                _grad_unfair = False
+                _last_norms = getattr(self, "_last_task_grad_norms", None)
+                if isinstance(_last_norms, dict) and len(_last_norms) >= 2:
+                    _vals = [float(v) for v in _last_norms.values() if v == v]
+                    if _vals:
+                        _mean = sum(_vals) / len(_vals)
+                        if _mean > 1e-9:
+                            _var = sum((v - _mean) ** 2 for v in _vals) / len(_vals)
+                            _std = _var ** 0.5
+                            _grad_unfair = (_std / _mean) > 1.0
+
                 _h_signals = {
                     "spike": _spiked_task is not None,
                     "spike_cluster": _spike_dense,
                     "dominance": _dom is not None,
+                    "low_coverage": _low_coverage,
+                    "grad_unfair": _grad_unfair,
                 }
                 _h = self._health_score.compute(_h_signals)
                 _h_smoothed = self._smoothed_health.update(_h)

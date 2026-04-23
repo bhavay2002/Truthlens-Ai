@@ -1,0 +1,322 @@
+You’re now in the **refinement phase**—these issues won’t completely break training, but they *absolutely* affect convergence quality, observability, and trust in your metrics. Let’s tighten them properly with **production-grade fixes** (not just surface tweaks).
+
+---
+
+# ✅ 10. Pooler Weights Reinitialization (Subtle but Real Impact)
+
+## 🎯 What’s Actually Happening
+
+In models like BERT or RoBERTa:
+
+```python
+pooled_output = tanh(W * CLS + b)
+```
+
+If `pooler.dense` is randomly initialized:
+
+* Early training = **noisy CLS representation**
+* Classification heads depend on unstable features
+* Slower convergence, sometimes worse local minima
+
+---
+
+## 🔧 FIX 1 — Ensure Pooler Loads Properly
+
+### Correct HuggingFace Pattern
+
+```python
+from transformers import AutoModel
+
+model = AutoModel.from_pretrained(
+    "roberta-base",
+    add_pooling_layer=True  # IMPORTANT
+)
+```
+
+---
+
+## 🔧 FIX 2 — Detect Missing Pooler Weights (MANDATORY)
+
+```python
+missing, unexpected = model.load_state_dict(checkpoint, strict=False)
+
+if any("pooler" in k for k in missing):
+    logger.warning("Pooler weights NOT loaded from checkpoint")
+```
+
+---
+
+## 🔧 FIX 3 — Differential Learning Rate (Very Effective)
+
+If pooler is reinitialized:
+
+```python
+optimizer = AdamW([
+    {"params": model.encoder.parameters(), "lr": 2e-5},
+    {"params": model.pooler.parameters(), "lr": 5e-6},  # smaller LR
+])
+```
+
+👉 Prevents noisy early updates from destabilizing encoder
+
+---
+
+## 🔧 FIX 4 — Optional: Bypass Pooler Entirely
+
+Often better:
+
+```python
+cls_embedding = last_hidden_state[:, 0]  # raw CLS
+```
+
+👉 Many modern setups **skip pooler completely**
+
+---
+
+# ✅ 11. Over-aggressive Anomaly Logging (Silent Performance Killer)
+
+## 🎯 Real Problem
+
+You’ve built a **high-frequency diagnostic system**, but:
+
+* I/O becomes bottleneck
+* Disk fills → crashes
+* Logs lose signal (too dense)
+
+---
+
+## 🔧 FIX 1 — Rate Limiting (Core Solution)
+
+```python
+class AnomalyLogger:
+    def __init__(self, max_logs=50, log_every=20):
+        self.count = 0
+        self.max_logs = max_logs
+        self.log_every = log_every
+
+    def should_log(self, step):
+        if self.count >= self.max_logs:
+            return False
+        return step % self.log_every == 0
+```
+
+Usage:
+
+```python
+if is_spike and logger.should_log(step):
+    save_anomaly()
+    logger.count += 1
+```
+
+---
+
+## 🔧 FIX 2 — Severity Filtering (Much Smarter)
+
+```python
+def is_major_spike(loss, ema_loss):
+    return loss > ema_loss * 3.0
+```
+
+👉 Only log **extreme outliers**, not noise
+
+---
+
+## 🔧 FIX 3 — Rolling Buffer (Prevents Disk Explosion)
+
+```python
+import os
+
+def cleanup_old_logs(path, max_files=20):
+    files = sorted(os.listdir(path))
+    while len(files) > max_files:
+        os.remove(os.path.join(path, files[0]))
+        files.pop(0)
+```
+
+---
+
+## 🔧 FIX 4 — Replace Dumps with Summary Metrics
+
+Instead of saving tensors every time:
+
+```python
+logger.info({
+    "loss": loss,
+    "ema_loss": ema_loss,
+    "spike_ratio": loss / ema_loss
+})
+```
+
+👉 90% of debugging can be done from summaries
+
+---
+
+# ✅ 12. Gradient Norm Always ≈ 1.0 (Critical Observability Bug)
+
+## 🎯 Diagnosis
+
+This almost always means:
+
+```python
+torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+```
+
+👉 You are **only seeing post-clipped norms**
+
+---
+
+## ⚠️ Why This Is Dangerous
+
+You lose visibility into:
+
+* exploding gradients
+* task dominance
+* instability cycles
+
+Your system becomes **blind but “looks stable”**
+
+---
+
+## 🔧 FIX 1 — Log BOTH Pre and Post Clip Norms
+
+```python
+def get_grad_norm(parameters):
+    total = 0
+    for p in parameters:
+        if p.grad is not None:
+            total += p.grad.data.norm(2).item() ** 2
+    return total ** 0.5
+```
+
+Usage:
+
+```python
+pre_clip = get_grad_norm(model.parameters())
+
+torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+post_clip = get_grad_norm(model.parameters())
+
+logger.info({
+    "grad_norm_pre": pre_clip,
+    "grad_norm_post": post_clip
+})
+```
+
+---
+
+## 🔧 FIX 2 — Detect Hidden Instability
+
+```python
+if pre_clip > 5.0:
+    logger.warning("Gradient explosion detected (masked by clipping)")
+```
+
+---
+
+## 🔧 FIX 3 — Relax Clipping (Often Overused)
+
+Instead of:
+
+```python
+clip_grad_norm_(..., 1.0)
+```
+
+Try:
+
+```python
+clip_grad_norm_(..., 5.0)
+```
+
+👉 Only clip true explosions, not normal gradients
+
+---
+
+## 🔧 FIX 4 — Per-Task Gradient Visibility (Advanced but Powerful)
+
+```python
+for task in tasks:
+    grad = torch.autograd.grad(task_loss, shared_params, retain_graph=True)
+    norm = torch.norm(torch.stack([g.norm() for g in grad]))
+
+    logger.info(f"{task}_grad_norm_preclip: {norm.item()}")
+```
+
+---
+
+# 🔥 INTEGRATED BEST PRACTICE (All 3 Together)
+
+```python
+# forward
+loss = compute_multitask_loss(...)
+
+# backward
+loss.backward()
+
+# diagnostics
+pre_clip = get_grad_norm(model.parameters())
+
+# clip
+clip_grad_norm_(model.parameters(), 5.0)
+
+post_clip = get_grad_norm(model.parameters())
+
+# log
+logger.info({
+    "loss": loss.item(),
+    "grad_pre": pre_clip,
+    "grad_post": post_clip
+})
+```
+
+---
+
+# 🚀 PRIORITY ORDER (EXECUTE EXACTLY)
+
+## Phase 1 — Visibility Fix (Do First)
+
+* ✅ Log pre/post gradient norms
+* ✅ Reduce anomaly logging volume
+
+---
+
+## Phase 2 — Stability Fix
+
+* ✅ Adjust gradient clipping threshold
+* ✅ Add spike severity filtering
+
+---
+
+## Phase 3 — Representation Fix
+
+* ✅ Fix or bypass pooler
+* ✅ Add differential LR if needed
+
+---
+
+# ⚠️ FINAL SYSTEM INSIGHT
+
+These issues reveal something important:
+
+| Issue          | What it Means            |
+| -------------- | ------------------------ |
+| Pooler missing | checkpoint integrity gap |
+| Too many logs  | over-instrumentation     |
+| flat grad norm | observability illusion   |
+
+👉 Your system is transitioning from:
+**“debug-heavy experimental” → “controlled production training”**
+
+---
+
+# If you want next step
+
+I can now give you a **complete unified training harness** for TruthLens:
+
+* task balancing (uncertainty / GradNorm)
+* masked loss
+* smart logging (rate-limited + structured)
+* gradient diagnostics (true + clipped)
+* anomaly detection (non-spam)
+
+That would consolidate everything you’ve built into a **clean, stable training pipeline**.

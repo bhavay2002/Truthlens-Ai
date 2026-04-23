@@ -1056,12 +1056,23 @@ class HealthScore:
     weight sums to 1.0 so a fully-failing run produces 0.
     """
 
+    # Multi-dimensional health (#9 of the multi-task playbook). The
+    # cosmetic 1.0-only-when-everything-fires score is replaced by a
+    # composite that also subtracts weight when:
+    #   * `low_coverage`     — at least one task EMA coverage < 5%
+    #   * `grad_unfair`      — std(grad_norms)/mean(grad_norms) > threshold
+    #   * `loss_unstable`    — rolling per-task loss variance is high
+    # Weights are chosen so the legacy "all-clear" path still scores 1.0
+    # but operators see degradations from the new signals immediately.
     DEFAULT_WEIGHTS: Dict[str, float] = {
-        "spike": 0.15,
-        "spike_cluster": 0.25,
-        "dominance": 0.15,
-        "conflicts": 0.15,
-        "silent_collapse": 0.30,
+        "spike": 0.10,
+        "spike_cluster": 0.20,
+        "dominance": 0.10,
+        "conflicts": 0.10,
+        "silent_collapse": 0.25,
+        "low_coverage": 0.10,
+        "grad_unfair": 0.10,
+        "loss_unstable": 0.05,
     }
 
     def __init__(self, weights: Optional[Dict[str, float]] = None):

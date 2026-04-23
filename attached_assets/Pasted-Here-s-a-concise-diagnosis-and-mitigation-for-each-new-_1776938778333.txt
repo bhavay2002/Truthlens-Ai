@@ -1,0 +1,69 @@
+Here’s a concise diagnosis and mitigation for each new medium-priority issue:
+
+---
+
+## 10. ⚠️ “Newly Initialized Pooler Weights”
+
+**Problem:**  
+- `pooler.dense` weights (often in transformers like BERT/Roberta) are newly reinitialized instead of loaded from pretrained checkpoints.
+- Impact:  
+  - CLS pooling may be noisy/unstable at first training steps.
+  - Usually minor in the long run, but can slow convergence or degrade performance for classification.
+
+**Fix:**  
+- Always try to load all weights, including pooler, from the pretrained base model.
+- If you must reinit (e.g., for new head architecture), consider using a smaller learning rate for pooler/later layers.
+- Log a warning when pooler/init weights are not from checkpoint, to catch this early in new experiments.
+
+---
+
+## 11. ⚠️ Over-aggressive Anomaly Logging
+
+**Problem:**  
+- Too many anomaly logs/debug dumps (e.g., `spike_*.pt`), especially for every loss spike.
+- Impact:  
+  - Slows down training.
+  - Consumes disk space rapidly.
+  - Signal lost in the noise of logs.
+
+**Fix:**  
+- Log anomalies sparingly:
+    - Limit saving to 1 in every N spikes (e.g., only major spikes or intervals).
+    - Set a max number or rotate saved anomaly files.
+    - Summarize spike stats in logs, save details only for outliers.
+- Optionally, use a rolling buffer (only last K anomaly logs kept).
+
+---
+
+## 12. ⚠️ Gradient Norm Always ~1.0
+
+**Problem:**  
+- Gradient norm per step is always ≈1.0.
+- Highly suspicious: likely aggressive gradient clipping or normalization.
+- **Impact:**  
+  - Can “hide” instability: model might be flipping between extremes, but norms appear flat due to rescaling.
+  - Loss may look stable while gradients are not informative.
+
+**Fix:**  
+- Audit your optimizer/training scripts:
+    - Check for `torch.nn.utils.clip_grad_norm_` or equivalent — review threshold policy.
+    - If using per-parameter normalization, log unclipped/pre-clipped gradient norms for diagnosis.
+- Only apply strong clipping if genuinely necessary for explosion, not as a crutch for batch/model issues.
+- Review gradient statistics before and after clipping—not just final values.
+
+---
+
+### **Action Items Checklist**
+
+- [ ] Ensure pooler weights load from checkpoint when possible. If not, log, reduce LR, and proceed.
+- [ ] Throttle anomaly logging—summary logging > dumping every spike.
+- [ ] Log both pre-clip and post-clip gradient norms for honest visibility.
+
+---
+
+Let me know if you want code snippets for:
+- Pooler weight loading patterns in HuggingFace/transformers.
+- Anomaly logging rate limiting.
+- Gradient norm auditing in PyTorch.
+
+You’re almost through the major technical debt—just polish these training and logging practices!
