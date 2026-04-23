@@ -588,13 +588,12 @@ def load_data():
     }
 
     def _read(path):
-        # dtype is best-effort: pandas ignores unknown dtype keys.
         return pd.read_csv(
             path,
-            low_memory=False,
-            dtype=_explicit_dtypes,
-            keep_default_na=True,
-            na_values=["", "NA", "N/A", "null", "None"],
+            engine="python",          # fallback parser (more tolerant)
+            on_bad_lines="skip",      # skip corrupted rows
+            quoting=3,                # csv.QUOTE_NONE
+            encoding="utf-8",
         )
 
     train_df = _read(TRAIN_PATH)
