@@ -23,7 +23,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import DataLoader, Dataset, Sampler
+from torch.utils.data import DataLoader, Dataset, Sampler, Subset
 from transformers import AutoTokenizer, DataCollatorWithPadding
 
 from src.evaluation.evaluate_model import evaluate
@@ -1403,6 +1403,53 @@ def main():
         )
 
         # --------------------------------------------------
+        # Per-task DataLoaders  (task-wise training)
+        # --------------------------------------------------
+        # Each loader covers only the rows that have valid labels for its
+        # task.  A row is "valid" when at least one of its task-specific
+        # label columns is not NaN/−100.  Using Subset means we build the
+        # full dataset once and slice into it — no re-tokenisation cost.
+        _TASK_FILTER_FNS = {
+            "bias":             lambda df: df[BIAS_LABEL].notna() & df[BIAS_LABEL].ne(-100),
+            "ideology":         lambda df: df[IDEOLOGY_LABEL].notna() & df[IDEOLOGY_LABEL].ne(-100),
+            "propaganda":       lambda df: df[PROPAGANDA_LABEL].notna() & df[PROPAGANDA_LABEL].ne(-100),
+            "narrative":        lambda df: df[["hero", "villain", "victim"]].notna().any(axis=1),
+            "narrative_frame":  lambda df: df[[c for c in FRAME_COLUMNS if c in df.columns]].notna().any(axis=1),
+            "emotion":          lambda df: df[[c for c in EMOTION_COLUMNS if c in df.columns]].notna().any(axis=1),
+        }
+        task_loaders: dict[str, DataLoader] = {}
+        for _tname, _fn in _TASK_FILTER_FNS.items():
+            _valid = _fn(train_df).to_numpy()
+            _idx = list(np.where(_valid)[0])
+            if not _idx:
+                logger.warning(
+                    "[TASK LOADER] No valid rows found for task '%s' — skipping.", _tname
+                )
+                continue
+            _subset = Subset(train_dataset, _idx)
+            task_loaders[_tname] = DataLoader(
+                _subset,
+                batch_size=batch_size,
+                shuffle=True,
+                collate_fn=collate_fn,
+                num_workers=_num_workers,
+                pin_memory=_pin,
+                persistent_workers=_persistent if _num_workers > 0 else False,
+                prefetch_factor=_prefetch,
+                drop_last=True,
+            )
+            logger.info(
+                "[TASK LOADER] %s: %d valid rows → %d batches/epoch",
+                _tname, len(_idx), len(task_loaders[_tname]),
+            )
+
+        if not task_loaders:
+            raise RuntimeError(
+                "No task-specific DataLoaders could be built — all tasks had zero "
+                "valid rows. Check that label columns are populated."
+            )
+
+        # --------------------------------------------------
         # Model
         # --------------------------------------------------
 
@@ -1489,9 +1536,16 @@ def main():
 
         steps_per_epoch = math.ceil(len(train_dataset) / batch_size)
 
+        # In task-wise training each epoch visits all tasks in sequence.
+        # The scheduler budget is the sum of per-task batches (already built
+        # above) so warmup and decay are spread correctly across the full run.
+        _taskwise_steps_per_epoch = sum(
+            len(dl) for dl in task_loaders.values()
+        ) if task_loaders else steps_per_epoch
+
         total_steps = max(
             1,
-            math.ceil(steps_per_epoch / gradient_accumulation_steps) * epochs,
+            math.ceil(_taskwise_steps_per_epoch / gradient_accumulation_steps) * epochs,
         )
 
         warmup_steps = int(total_steps * warmup_ratio)
@@ -1589,9 +1643,9 @@ def main():
         except Exception as exc:
             logger.warning("Sanity batch test skipped: %s", exc)
 
-        logger.info("Starting training")
+        logger.info("Starting task-wise training (%d tasks)", len(task_loaders))
 
-        history = trainer.train(train_loader, val_loader)
+        history = trainer.train_taskwise(task_loaders, val_loader)
 
         logger.info("Training complete")
 

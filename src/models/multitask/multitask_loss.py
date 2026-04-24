@@ -142,6 +142,11 @@ class MultiTaskLoss(nn.Module):
         # Cap so a single near-zero task doesn't overwhelm the loss.
         self._ema_cap: float = 10.0
 
+        # When True, coverage EMA and Kendall balancer are bypassed so that
+        # single-task batches (one task per forward) do not pollute those
+        # statistics with misleading zeros for the other five tasks.
+        self.single_task_mode: bool = True
+
         logger.info("MultiTaskLoss initialized with tasks: %s", list(task_configs.keys()))
 
     
@@ -273,6 +278,100 @@ class MultiTaskLoss(nn.Module):
 
         return cls(configs, normalization=normalization)
 
+    def _zero_loss(
+        self,
+        logits: Dict[str, torch.Tensor],
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """Return a zero loss that carries gradients for AMP safety."""
+        for t in logits.values():
+            if torch.is_tensor(t) and t.requires_grad:
+                return t.float().sum() * 0.0, {}
+        return torch.zeros((), requires_grad=False), {}
+
+    def _forward_single_task(
+        self,
+        task_name: str,
+        logits: Dict[str, torch.Tensor],
+        labels: Dict[str, torch.Tensor],
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """Fast path for single-task batches.
+
+        Bypasses the multi-task loop, coverage EMA, and Kendall balancer so
+        that training a single head per batch does not pollute statistics that
+        are only meaningful when multiple tasks appear together.
+        """
+        task_config = self.task_configs.get(task_name)
+        if task_config is None:
+            raise ValueError(f"Unknown task '{task_name}'")
+
+        task_logits = logits[task_name]
+        task_labels = labels[task_name]
+
+        if task_labels.device != task_logits.device:
+            task_labels = task_labels.to(task_logits.device)
+
+        task_logits = task_logits.float()
+        task_type = task_config.task_type
+        loss_fn = self.loss_functions[task_name]
+
+        if task_type == "multi_class":
+            task_labels = task_labels.long()
+            if task_labels.dim() == 2:
+                task_labels = task_labels.argmax(dim=1)
+            valid_mask = task_labels.ne(task_config.ignore_index)
+            if not bool(valid_mask.any()):
+                return self._zero_loss(logits)
+            loss = loss_fn(task_logits, task_labels)
+
+        elif task_type in {"binary", "multi_label"}:
+            task_labels = task_labels.float()
+            ignore_index = float(task_config.ignore_index)
+            valid_mask = task_labels.ne(ignore_index)
+            if not bool(valid_mask.any()):
+                return self._zero_loss(logits)
+            if task_type == "binary":
+                if task_logits.dim() == 1:
+                    task_logits = task_logits.unsqueeze(1)
+                if task_labels.dim() == 1:
+                    task_labels = task_labels.unsqueeze(1)
+                loss = loss_fn(task_logits, task_labels)
+            else:
+                safe_labels = torch.where(
+                    valid_mask, task_labels, torch.zeros_like(task_labels)
+                )
+                raw_loss = loss_fn(task_logits, safe_labels)
+                masked = raw_loss * valid_mask.to(raw_loss.dtype)
+                loss = masked.sum() / valid_mask.sum().clamp_min(1).to(raw_loss.dtype)
+
+        elif task_type == "regression":
+            task_labels = task_labels.float().view_as(task_logits)
+            loss = loss_fn(task_logits, task_labels)
+
+        else:
+            raise RuntimeError(f"Unsupported task type: {task_type}")
+
+        loss = loss.mean()
+
+        if not torch.isfinite(loss):
+            raise RuntimeError(f"Non-finite loss detected in task '{task_name}'")
+
+        if self.loss_normalization:
+            val = float(loss.detach().item())
+            self._loss_running_mean[task_name] = (
+                self._loss_norm_alpha * val
+                + (1 - self._loss_norm_alpha) * self._loss_running_mean[task_name]
+            )
+            denom = max(self._loss_running_mean[task_name], self._loss_norm_floor)
+            loss = loss / denom
+
+        loss = loss * float(task_config.weight)
+
+        self.head_call_counts[task_name] += 1
+        self.total_forward_calls += 1
+        self.last_active_heads = 1
+
+        return loss, {task_name: loss}
+
     def forward(
         self,
         logits: Dict[str, torch.Tensor],
@@ -284,6 +383,10 @@ class MultiTaskLoss(nn.Module):
 
         if not isinstance(labels, dict):
             raise TypeError("labels must be a dictionary")
+
+        active_tasks = list(logits.keys())
+        if self.single_task_mode and len(active_tasks) == 1:
+            return self._forward_single_task(active_tasks[0], logits, labels)
 
         missing_logits = [t for t in self.task_configs if t not in logits]
         missing_labels = [t for t in self.task_configs if t not in labels]
@@ -311,23 +414,26 @@ class MultiTaskLoss(nn.Module):
 
         # ---- Per-task coverage probe (used both for the EMA weighting
         # multiplier below and for the empty-batch guard at the bottom).
+        # Skipped in single_task_mode because updating coverage for absent
+        # tasks would corrupt the EMA with spurious zeros.
         per_task_coverage: Dict[str, bool] = {}
-        for _name, _cfg in self.task_configs.items():
-            _lbl = labels.get(_name)
-            if not torch.is_tensor(_lbl) or _lbl.numel() == 0:
-                per_task_coverage[_name] = False
-                continue
-            if _cfg.task_type == "multi_class":
-                per_task_coverage[_name] = bool(_lbl.ne(_cfg.ignore_index).any())
-            elif _cfg.task_type in {"binary", "multi_label"}:
-                per_task_coverage[_name] = bool(_lbl.ne(float(_cfg.ignore_index)).any())
-            else:
-                per_task_coverage[_name] = True
-            self._coverage_steps[_name] += 1
-            self._coverage_ema[_name] = (
-                self._ema_alpha * (1.0 if per_task_coverage[_name] else 0.0)
-                + (1.0 - self._ema_alpha) * self._coverage_ema[_name]
-            )
+        if not self.single_task_mode:
+            for _name, _cfg in self.task_configs.items():
+                _lbl = labels.get(_name)
+                if not torch.is_tensor(_lbl) or _lbl.numel() == 0:
+                    per_task_coverage[_name] = False
+                    continue
+                if _cfg.task_type == "multi_class":
+                    per_task_coverage[_name] = bool(_lbl.ne(_cfg.ignore_index).any())
+                elif _cfg.task_type in {"binary", "multi_label"}:
+                    per_task_coverage[_name] = bool(_lbl.ne(float(_cfg.ignore_index)).any())
+                else:
+                    per_task_coverage[_name] = True
+                self._coverage_steps[_name] += 1
+                self._coverage_ema[_name] = (
+                    self._ema_alpha * (1.0 if per_task_coverage[_name] else 0.0)
+                    + (1.0 - self._ema_alpha) * self._coverage_ema[_name]
+                )
 
         for task_name, task_config in self.task_configs.items():
 

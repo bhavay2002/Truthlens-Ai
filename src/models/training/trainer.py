@@ -460,6 +460,198 @@ class Trainer:
                 except (ValueError, OSError):
                     pass
 
+    # ---------------------------------------------------------
+    # Task-wise training (1 shared encoder + N heads + N loaders)
+    # ---------------------------------------------------------
+
+    def train_taskwise(
+        self,
+        task_loaders: Dict[str, DataLoader],
+        val_loader: Optional[DataLoader] = None,
+    ) -> Dict[str, List[float]]:
+        """Train the model one task at a time.
+
+        Each epoch cycles through every task in round-robin order (or a
+        random permutation when ``TRUTHLENS_RANDOM_TASK_ORDER=1``).  For
+        each task, one complete pass is run over that task's DataLoader with
+        ``task=<name>`` injected into every batch so the model only executes
+        the corresponding head.  All existing instrumentation — NaN/Inf
+        guards, spike detection, per-task grad-norm probe, checkpoint
+        manager — works unchanged because this method delegates the inner
+        loop to the existing :py:meth:`_train_epoch`.
+
+        Parameters
+        ----------
+        task_loaders:
+            Mapping from task name to a :class:`DataLoader` whose dataset
+            contains only rows with valid labels for that task.
+        val_loader:
+            Optional unified validation DataLoader (all heads run at
+            validation time, no ``task`` filter applied).
+        """
+        import random as _random
+
+        _random_order = (
+            os.environ.get("TRUTHLENS_RANDOM_TASK_ORDER", "0") == "1"
+        )
+        history: Dict[str, List[float]] = {"train_loss": [], "val_loss": []}
+        best_val = float("inf")
+        validate_every = max(1, int(getattr(self.config, "validate_every_n_epochs", 1)))
+
+        previous_handlers: Dict[int, Any] = {}
+        interrupt_state = {"handled": False}
+
+        def _handle_interrupt(signum, _frame):
+            if interrupt_state["handled"]:
+                return
+            interrupt_state["handled"] = True
+            logger.warning(
+                "Interrupt %s received — saving emergency checkpoint at step %d",
+                signum, self.global_step,
+            )
+            self._save_emergency_checkpoint()
+            import sys as _sys
+            _sys.exit(0)
+
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                previous_handlers[sig] = signal.signal(sig, _handle_interrupt)
+            except (ValueError, OSError):
+                pass
+
+        try:
+            for epoch in range(self.config.epochs):
+                logger.info(
+                    "[task-wise] Epoch %d/%d — tasks: %s",
+                    epoch + 1, self.config.epochs, list(task_loaders.keys()),
+                )
+
+                task_names = list(task_loaders.keys())
+                if _random_order:
+                    _random.shuffle(task_names)
+
+                epoch_losses: List[float] = []
+                for task_name in task_names:
+                    logger.info(
+                        "[task-wise] Epoch %d — training task '%s' (%d batches)",
+                        epoch + 1, task_name, len(task_loaders[task_name]),
+                    )
+                    task_loss = self._train_epoch_for_task(
+                        task_loaders[task_name], task_name
+                    )
+                    epoch_losses.append(task_loss)
+                    logger.info(
+                        "[task-wise] Epoch %d — task '%s' loss=%.6f",
+                        epoch + 1, task_name, task_loss,
+                    )
+
+                train_loss = sum(epoch_losses) / max(len(epoch_losses), 1)
+                history["train_loss"].append(train_loss)
+                logger.info(
+                    "[task-wise] Epoch %d — mean train loss=%.6f",
+                    epoch + 1, train_loss,
+                )
+
+                val_loss: Optional[float] = None
+                is_last_epoch = (epoch + 1) == self.config.epochs
+                if val_loader is not None and (
+                    ((epoch + 1) % validate_every == 0) or is_last_epoch
+                ):
+                    val_loss = self._validate_epoch(val_loader)
+                    history["val_loss"].append(val_loss)
+
+                    _val_metrics = getattr(self, "last_val_metrics", {})
+                    for _task, _metrics in _val_metrics.items():
+                        _task_f1 = float(_metrics.get("f1_macro", 1.0))
+                        if _task_f1 < 0.2:
+                            logger.warning(
+                                "[task-wise][COLLAPSE WARNING] Epoch %d: %s "
+                                "f1_macro=%.4f — potential collapse forming.",
+                                epoch + 1, _task, _task_f1,
+                            )
+                        if val_loss is not None and val_loss < 0.2 and _task_f1 < 0.1:
+                            raise RuntimeError(
+                                f"[TRAINING COLLAPSE] Epoch {epoch + 1}: task "
+                                f"'{_task}' loss={val_loss:.4f} "
+                                f"f1_macro={_task_f1:.4f}. Model is predicting "
+                                "a constant class."
+                            )
+
+                if self.checkpoint_manager is not None:
+                    metadata = {
+                        "epoch": epoch + 1,
+                        "train_loss": train_loss,
+                        "val_loss": val_loss,
+                    }
+                    try:
+                        self.checkpoint_manager.save_checkpoint(
+                            step=self.global_step,
+                            model=self.model,
+                            optimizer=self.optimizer,
+                            scheduler=self.scheduler,
+                            scaler=self.scaler,
+                            metadata=metadata,
+                            save_optimizer=True,
+                            save_every=1,
+                            deduplicate=False,
+                        )
+                        if val_loss is not None and val_loss < best_val:
+                            best_val = val_loss
+                            try:
+                                self._save_best_model(
+                                    epoch=epoch + 1, metadata=metadata
+                                )
+                            except Exception as exc:
+                                logger.error(
+                                    "Best-model save failed: %s", exc, exc_info=True
+                                )
+                        self.checkpoint_manager.cleanup_old_checkpoints(
+                            max_checkpoints=3
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "Checkpoint save failed at epoch %d: %s",
+                            epoch + 1, exc, exc_info=True,
+                        )
+        finally:
+            for sig, prev in previous_handlers.items():
+                try:
+                    signal.signal(sig, prev)
+                except (ValueError, OSError):
+                    pass
+
+        return history
+
+    def _train_epoch_for_task(
+        self, dataloader: DataLoader, task_name: str
+    ) -> float:
+        """Run one epoch on *dataloader* with every batch tagged ``task=task_name``.
+
+        Injects ``task`` into each batch dict so that
+        :py:meth:`_prepare_model_inputs` routes it to
+        ``model.forward(task=task_name)``, which runs only the named head.
+        All other epoch-level logic (AMP, grad clipping, instrumentation,
+        checkpointing) is handled by the existing :py:meth:`_train_epoch`.
+        """
+
+        class _TaskInjector:
+            """Wraps a DataLoader iterator to inject ``task`` into each batch."""
+
+            def __init__(self_inner, loader: DataLoader, name: str) -> None:
+                self_inner._loader = loader
+                self_inner._name = name
+
+            def __iter__(self_inner):
+                for batch in self_inner._loader:
+                    if isinstance(batch, dict):
+                        batch = {**batch, "task": self_inner._name}
+                    yield batch
+
+            def __len__(self_inner) -> int:
+                return len(self_inner._loader)
+
+        return self._train_epoch(_TaskInjector(dataloader, task_name))
+
     def _train_loop(
         self,
         train_loader: DataLoader,

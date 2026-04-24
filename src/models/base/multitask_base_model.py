@@ -113,19 +113,24 @@ class MultiTaskBaseModel(BaseModel):
         self,
         *inputs: torch.Tensor,
         labels: Optional[Dict[str, torch.Tensor]] = None,
+        task: Optional[str] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """
-        Executes forward pass for all registered tasks.
+        Executes forward pass.
+
+        When ``task`` is provided, only that head is executed and only that
+        task's loss is computed (single-task training path). When ``task`` is
+        ``None``, all registered heads run (inference / multi-task path).
 
         Args:
-            *inputs:
-                Input tensors.
-            labels:
-                Optional dictionary mapping task names to ground truth labels.
+            *inputs: Input tensors.
+            labels:  Optional dict mapping task names to ground-truth labels.
+            task:    Active task name for single-task training, or ``None``.
 
         Returns:
-            Dictionary containing task outputs and optional losses.
+            Dictionary containing logits, probabilities, predictions, and
+            optionally loss.
         """
         shared_features = self.encode(*inputs, **kwargs)
 
@@ -135,10 +140,20 @@ class MultiTaskBaseModel(BaseModel):
                 f"got shape {shared_features.shape}"
             )
 
+        active_task: Optional[str] = task
+        if active_task is None and labels is not None and len(labels) == 1:
+            active_task = next(iter(labels))
+
+        head_names = [active_task] if active_task else list(self.task_heads.keys())
+
         outputs: Dict[str, Any] = {"tasks": {}}
         total_loss: Optional[torch.Tensor] = None
 
-        for task_name, head in self.task_heads.items():
+        for task_name in head_names:
+            head = self.task_heads.get(task_name)
+            if head is None:
+                raise ValueError(f"No head registered for task {task_name!r}")
+
             logits = head(shared_features)
 
             task_config = self.task_configs.get(task_name, {})
@@ -168,15 +183,16 @@ class MultiTaskBaseModel(BaseModel):
                     task_labels = task_labels.float()
 
                 task_loss = loss_fn(logits, task_labels)
-
                 task_output["loss"] = task_loss
-
-                if total_loss is None:
-                    total_loss = task_loss
-                else:
-                    total_loss = total_loss + task_loss
+                total_loss = task_loss if active_task else (
+                    task_loss if total_loss is None else total_loss + task_loss
+                )
 
             outputs["tasks"][task_name] = task_output
+
+        if active_task and active_task in outputs["tasks"]:
+            task_out = outputs["tasks"][active_task]
+            outputs["logits"] = task_out["logits"]
 
         if total_loss is not None:
             outputs["loss"] = total_loss
@@ -187,31 +203,30 @@ class MultiTaskBaseModel(BaseModel):
     def predict(
         self,
         *inputs: torch.Tensor,
+        task: Optional[str] = None,
         **kwargs: Any,
     ) -> Dict[str, Dict[str, torch.Tensor]]:
         """
-        Performs inference for all tasks.
+        Performs inference.
 
         Args:
-            *inputs:
-                Input tensors.
+            *inputs: Input tensors.
+            task:    When provided, only that task's head is executed.
 
         Returns:
-            Dictionary containing predictions and probabilities per task.
+            Dict mapping task name(s) to prediction/probability dicts.
         """
         self.eval()
 
-        outputs = self.forward(*inputs, **kwargs)
+        outputs = self.forward(*inputs, task=task, **kwargs)
 
-        predictions: Dict[str, Dict[str, torch.Tensor]] = {}
-
-        for task_name, task_output in outputs["tasks"].items():
-            predictions[task_name] = {
+        return {
+            task_name: {
                 "predictions": task_output["predictions"],
                 "probabilities": task_output["probabilities"],
             }
-
-        return predictions
+            for task_name, task_output in outputs["tasks"].items()
+        }
 
     def get_tasks(self) -> Dict[str, Dict[str, Any]]:
         """

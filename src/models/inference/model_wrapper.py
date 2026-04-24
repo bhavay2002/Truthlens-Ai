@@ -33,8 +33,11 @@ import torch.nn as nn
 from src.models.calibration import IsotonicCalibrator, TemperatureScaler
 from src.models.inference.prediction_output import PredictionOutput
 
-
 logger = logging.getLogger(__name__)
+
+_MULTICLASS_TASKS: frozenset = frozenset({"bias", "ideology", "propaganda"})
+_MULTILABEL_TASKS: frozenset = frozenset({"narrative", "narrative_frame", "emotion"})
+_VALID_TASKS: frozenset = _MULTICLASS_TASKS | _MULTILABEL_TASKS
 
 
 class ModelWrapper:
@@ -114,23 +117,40 @@ class ModelWrapper:
         self.ensemble_model.to(self.device)
         self.ensemble_model.eval()
 
+    def _validate_task(self, task: str) -> None:
+        if not isinstance(task, str):
+            raise TypeError(f"task must be a string, got {type(task).__name__}")
+        if task not in _VALID_TASKS:
+            raise ValueError(
+                f"Unknown task {task!r}. Valid tasks: {sorted(_VALID_TASKS)}"
+            )
+
     def forward(
         self,
         batch: Dict[str, torch.Tensor],
+        *,
+        task: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Execute forward pass.
 
         Args:
-            batch:
-                Dictionary containing model inputs.
-
-        Returns:
-            Model outputs.
+            batch: Dictionary containing model inputs.
+            task:  When provided, only that task's head is executed (inference
+                   for a single task).  ``None`` runs all heads.
         """
 
         if not isinstance(batch, dict):
             raise TypeError("batch must be a dictionary")
+
+        if task is not None:
+            self._validate_task(task)
+
+        batch = dict(batch)
+        batch.pop("labels", None)
+
+        if task is not None:
+            batch["task"] = task
 
         batch = self._move_to_device(batch)
 
@@ -158,21 +178,27 @@ class ModelWrapper:
         self,
         batch: Dict[str, torch.Tensor],
         *,
+        task: Optional[str] = None,
         return_structured: bool = False,
     ) -> Dict[str, Any]:
         """
         Run inference and return predictions.
 
         Args:
-            batch:
-                Input tensors.
-
-        Returns:
-            Prediction dictionary.
+            batch:  Input tensors.
+            task:   Task name for single-task inference.  When provided, only
+                    that head runs and predictions/probabilities are computed
+                    with the correct strategy (argmax vs sigmoid threshold).
         """
 
-        outputs = self.forward(batch)
-        extracted = self._extract_predictions(outputs)
+        if task is not None:
+            self._validate_task(task)
+
+        outputs = self.forward(batch, task=task)
+        extracted = self._extract_predictions(outputs, task=task)
+
+        if return_structured and task is not None:
+            return PredictionOutput.from_single_task(task, extracted).to_dict()
 
         if return_structured:
             return PredictionOutput.from_raw_outputs(extracted).to_dict()
@@ -182,10 +208,29 @@ class ModelWrapper:
     def predict_structured(
         self,
         batch: Dict[str, torch.Tensor],
+        *,
+        task: Optional[str] = None,
     ) -> PredictionOutput:
-        outputs = self.forward(batch)
-        extracted = self._extract_predictions(outputs)
+        if task is not None:
+            self._validate_task(task)
+        outputs = self.forward(batch, task=task)
+        extracted = self._extract_predictions(outputs, task=task)
+        if task is not None:
+            return PredictionOutput.from_single_task(task, extracted)
         return PredictionOutput.from_raw_outputs(extracted)
+
+    def predict_multi_task(
+        self,
+        batch: Dict[str, torch.Tensor],
+        tasks: Optional[list] = None,
+    ) -> Dict[str, Any]:
+        """Run inference for each specified task (or all tasks if None)."""
+        target_tasks = tasks or sorted(_VALID_TASKS)
+        results = {}
+        for t in target_tasks:
+            batch_copy = dict(batch)
+            results[t] = self.predict(batch_copy, task=t)
+        return results
 
     def load_checkpoint(
         self,
@@ -254,58 +299,75 @@ class ModelWrapper:
     def _extract_predictions(
         self,
         outputs: Any,
+        *,
+        task: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """Convert model outputs to a flat prediction dict.
+
+        When ``task`` is supplied, probabilities and predictions are derived
+        using the task-correct strategy: softmax+argmax for multiclass tasks,
+        sigmoid+threshold for multilabel tasks.  Temperature calibration is
+        only applied to multiclass tasks (it is not valid for multilabel).
         """
-        Convert model outputs to prediction format.
-        """
 
-        if isinstance(outputs, dict):
-            if self.return_logits_only:
-                return outputs
+        if not isinstance(outputs, dict):
+            raise RuntimeError("Unsupported model output format")
 
-            softmax = torch.softmax
-            argmax = torch.argmax
-            results: Dict[str, Any] = {}
+        if self.return_logits_only:
+            return outputs
 
-            for key, value in outputs.items():
-                if isinstance(value, torch.Tensor):
-                    # Match only real logits keys, not e.g. "logits_norm" or
-                    # "per_sample_logits_aux". Exact equality or an "_logits"
-                    # suffix is what our heads actually produce.
-                    is_logits = key == "logits" or key.endswith("_logits")
-                    if is_logits:
-                        logits = value
-                        if self.compute_probabilities:
-                            probs = softmax(logits, dim=-1)
-                            calibrated_probs = self._calibrate_probabilities(
-                                logits=logits,
-                                probabilities=probs,
-                            )
-                        else:
-                            probs = None
-                            calibrated_probs = None
+        results: Dict[str, Any] = {}
 
-                        preds = argmax(logits, dim=-1)
-                        # Strip the suffix precisely; avoids mangling keys
-                        # where "logits" appears as a substring elsewhere.
-                        if key == "logits":
-                            base = ""
-                        else:
-                            base = key[: -len("_logits")] + "_"
-                        results[f"{base}predictions"] = preds
+        for key, value in outputs.items():
+            if not isinstance(value, torch.Tensor):
+                results[key] = value
+                continue
 
-                        if probs is not None:
-                            results[f"{base}probabilities"] = probs
-                        if calibrated_probs is not None:
-                            results[f"{base}calibrated_probabilities"] = calibrated_probs
-                    else:
-                        results[key] = value
+            is_logits = key == "logits" or key.endswith("_logits")
+            if not is_logits:
+                results[key] = value
+                continue
+
+            logits = value
+
+            if key == "logits":
+                base = ""
+                inferred_task = task
+            else:
+                base = key[: -len("_logits")] + "_"
+                inferred_task = key[: -len("_logits")]
+
+            is_multilabel = inferred_task in _MULTILABEL_TASKS if inferred_task else False
+            is_multiclass = inferred_task in _MULTICLASS_TASKS if inferred_task else True
+
+            if self.compute_probabilities:
+                if is_multilabel:
+                    probs = torch.sigmoid(logits)
+                    calibrated_probs = probs
                 else:
-                    results[key] = value
+                    probs = torch.softmax(logits, dim=-1)
+                    calibrated_probs = self._calibrate_probabilities(
+                        logits=logits,
+                        probabilities=probs,
+                    )
+            else:
+                probs = None
+                calibrated_probs = None
 
-            return results
+            if is_multilabel:
+                preds = (torch.sigmoid(logits) > 0.5).int()
+            else:
+                preds = torch.argmax(logits, dim=-1)
 
-        raise RuntimeError("Unsupported model output format")
+            results[f"{base}predictions"] = preds
+            results[f"{base}logits"] = logits
+
+            if probs is not None:
+                results[f"{base}probabilities"] = probs
+            if calibrated_probs is not None and calibrated_probs is not probs:
+                results[f"{base}calibrated_probabilities"] = calibrated_probs
+
+        return results
 
     def _calibrate_probabilities(
         self,

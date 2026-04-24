@@ -35,7 +35,6 @@ import torch
 import torch.nn as nn
 
 from ..checkpointing.checkpoint_manager import CheckpointManager
-from ..multitask.multitask_output import MultiTaskOutput
 from src.utils import move_to_device
 
 logger = logging.getLogger(__name__)
@@ -216,22 +215,24 @@ class TrainingStep:
     def _extract_loss(self, outputs: Any) -> torch.Tensor:
 
         if isinstance(outputs, dict):
-
-            multitask_output = outputs.get("multitask_output")
-
-            if isinstance(multitask_output, MultiTaskOutput):
-
-                if multitask_output.loss is None:
-                    raise RuntimeError("MultiTaskOutput exists but loss missing")
-
-                return multitask_output.loss
-
-            if "loss" not in outputs:
+            loss = outputs.get("loss")
+            if loss is None:
                 raise RuntimeError("Model output dict must contain 'loss'")
+            if not isinstance(loss, torch.Tensor):
+                raise RuntimeError(
+                    f"'loss' must be a Tensor, got {type(loss).__name__}"
+                )
+            if not torch.isfinite(loss):
+                raise RuntimeError(
+                    f"Non-finite loss detected: {loss.item()}"
+                )
+            if loss.item() > 1e4:
+                raise RuntimeError(
+                    f"Exploding loss detected: {loss.item():.2f}"
+                )
+            return loss
 
-            return outputs["loss"]
-
-        if hasattr(outputs, "loss"):
+        if hasattr(outputs, "loss") and outputs.loss is not None:
             return outputs.loss
 
         raise RuntimeError("Unable to extract loss from model output")

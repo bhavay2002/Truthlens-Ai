@@ -164,10 +164,25 @@ def binary_classification_loss(
     )
 
 
+MULTICLASS_TASKS: frozenset = frozenset({"bias", "ideology", "propaganda"})
+MULTILABEL_TASKS: frozenset = frozenset({"narrative", "narrative_frame", "emotion"})
+
+
+def get_task_type(task: str) -> str:
+    """Return 'multiclass' or 'multilabel' for a known task name."""
+    if task in MULTICLASS_TASKS:
+        return "multiclass"
+    if task in MULTILABEL_TASKS:
+        return "multilabel"
+    raise ValueError(f"Unknown task: {task!r}")
+
+
 def multiclass_classification_loss(
     logits: torch.Tensor,
     targets: torch.Tensor,
+    ignore_index: int = -100,
 ) -> torch.Tensor:
+    """Cross-entropy loss with -100 masking support."""
 
     if targets.dim() == 2:
         targets = targets.argmax(dim=1)
@@ -176,16 +191,22 @@ def multiclass_classification_loss(
         if logits.dim() != 2:
             raise RuntimeError("Multi-class logits must be 2D")
 
+    valid_mask = targets.ne(ignore_index)
+    if not valid_mask.any():
+        return logits.sum() * 0.0
+
     return F.cross_entropy(
-        logits.float(),  # AMP safety
-        targets.long()
+        logits[valid_mask].float(),
+        targets[valid_mask].long(),
     )
 
 
 def multilabel_classification_loss(
     logits: torch.Tensor,
     targets: torch.Tensor,
+    ignore_index: float = -100.0,
 ) -> torch.Tensor:
+    """BCE loss with per-element -100 masking support."""
 
     targets = targets.float()
 
@@ -195,10 +216,41 @@ def multilabel_classification_loss(
                 f"Multi-label shape mismatch: logits {logits.shape} vs targets {targets.shape}"
             )
 
-    return F.binary_cross_entropy_with_logits(
-        logits.float(),  # AMP safety
-        targets
+    valid_mask = targets.ne(ignore_index)
+    if not valid_mask.any():
+        return logits.sum() * 0.0
+
+    safe_targets = torch.where(valid_mask, targets, torch.zeros_like(targets))
+    raw_loss = F.binary_cross_entropy_with_logits(
+        logits.float(),
+        safe_targets,
+        reduction="none",
     )
+    masked_loss = raw_loss * valid_mask.float()
+    return masked_loss.sum() / valid_mask.sum().clamp_min(1)
+
+
+def compute_task_loss(
+    task: str,
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+) -> torch.Tensor:
+    """Unified loss router — picks the correct loss function for a task.
+
+    Parameters
+    ----------
+    task:
+        One of the six TruthLens task names.
+    logits:
+        Raw model logits (not softmaxed/sigmoided).
+    labels:
+        Ground-truth labels.  -100 entries are masked out automatically.
+    """
+    if task in MULTICLASS_TASKS:
+        return multiclass_classification_loss(logits, labels)
+    if task in MULTILABEL_TASKS:
+        return multilabel_classification_loss(logits, labels)
+    raise ValueError(f"Unknown task: {task!r}")
 
 
 def regression_loss(

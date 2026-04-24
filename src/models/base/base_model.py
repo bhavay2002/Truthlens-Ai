@@ -84,10 +84,14 @@ class BaseModel(nn.Module, ABC):
         """
         Returns the device where the model resides.
         """
-        for tensor in self.parameters():
-            return tensor.device
-        for tensor in self.buffers():
-            return tensor.device
+        try:
+            return next(self.parameters()).device
+        except StopIteration:
+            pass
+        try:
+            return next(self.buffers()).device
+        except StopIteration:
+            pass
         return self._device
 
     def num_parameters(self, trainable_only: bool = True) -> int:
@@ -166,18 +170,20 @@ class BaseModel(nn.Module, ABC):
             checkpoint = torch.load(path, map_location=map_location, weights_only=False)
             _lr = self.load_state_dict(checkpoint["model_state_dict"], strict=False)
             if _lr.missing_keys:
-                raise RuntimeError(
-                    f"[CHECKPOINT ERROR] Missing keys: {_lr.missing_keys}"
+                logger.warning(
+                    "[CHECKPOINT] Missing keys (new heads or params not in ckpt): %s",
+                    _lr.missing_keys,
                 )
             if _lr.unexpected_keys:
-                raise RuntimeError(
-                    f"[CHECKPOINT ERROR] Unexpected keys: {_lr.unexpected_keys}"
+                logger.warning(
+                    "[CHECKPOINT] Unexpected keys (ckpt has params not in model): %s",
+                    _lr.unexpected_keys,
                 )
 
             if optimizer and checkpoint.get("optimizer_state_dict"):
                 optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
-            logger.info("Checkpoint loaded successfully with full parameter match: %s", path)
+            logger.info("Checkpoint loaded from %s", path)
 
             return checkpoint.get("metadata", {})
 
@@ -202,6 +208,67 @@ class BaseModel(nn.Module, ABC):
             param.requires_grad = True
 
         logger.info("All model parameters unfrozen.")
+
+    def freeze_encoder(self) -> None:
+        """Freeze shared encoder parameters only (heads remain trainable)."""
+        if not hasattr(self, "encoder"):
+            raise AttributeError(f"{self.__class__.__name__} has no 'encoder' attribute")
+        for p in self.encoder.parameters():
+            p.requires_grad = False
+        logger.info("Encoder frozen.")
+
+    def unfreeze_encoder(self) -> None:
+        """Unfreeze shared encoder parameters."""
+        if not hasattr(self, "encoder"):
+            raise AttributeError(f"{self.__class__.__name__} has no 'encoder' attribute")
+        for p in self.encoder.parameters():
+            p.requires_grad = True
+        logger.info("Encoder unfrozen.")
+
+    def freeze_head(self, task: str) -> None:
+        """Freeze a single task head by name."""
+        heads = getattr(self, "task_heads", None)
+        if heads is None or task not in heads:
+            head_attr = f"{task}_head"
+            head = getattr(self, head_attr, None)
+            if head is None:
+                raise ValueError(f"No head found for task {task!r}")
+            for p in head.parameters():
+                p.requires_grad = False
+        else:
+            for p in heads[task].parameters():
+                p.requires_grad = False
+        logger.info("Head '%s' frozen.", task)
+
+    @property
+    def model_type(self) -> str:
+        """Return 'multitask' if task_heads/heads exist, else 'single_task'."""
+        if hasattr(self, "task_heads") or hasattr(self, "heads"):
+            return "multitask"
+        return "single_task"
+
+    def get_tasks(self) -> list:
+        """Return registered task names, or [] for single-task models."""
+        if hasattr(self, "task_heads"):
+            return list(self.task_heads.keys())
+        if hasattr(self, "heads"):
+            return list(self.heads.keys())
+        return []
+
+    def parameter_breakdown(self) -> Dict[str, int]:
+        """Return parameter counts per component (encoder + each head)."""
+        result: Dict[str, int] = {}
+        if hasattr(self, "encoder"):
+            result["encoder"] = sum(
+                p.numel() for p in self.encoder.parameters()
+            )
+        if hasattr(self, "task_heads"):
+            for name, head in self.task_heads.items():
+                result[f"head_{name}"] = sum(p.numel() for p in head.parameters())
+        elif hasattr(self, "heads"):
+            for name, head in self.heads.items():
+                result[f"head_{name}"] = sum(p.numel() for p in head.parameters())
+        return result
 
     def summary(self) -> Dict[str, Any]:
         """

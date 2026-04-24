@@ -254,12 +254,6 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
         # Loss functions
         # ----------------------------------------------------
 
-        self.loss_ce = LossFactory.create(
-            LossConfig(loss_type="multi_class", label_smoothing=0.1)
-        )
-        self.loss_bce = LossFactory.create(
-            LossConfig(loss_type="multi_label")
-        )
         self.multitask_loss = MultiTaskLoss.from_task_settings(
             {
                 "bias": {"task_type": "multi_class", "weight": config.bias_weight},
@@ -301,7 +295,7 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
             input_ids=input_ids,
             attention_mask=attention_mask,
         )
-        return encoder_outputs["pooled_output"]
+        return encoder_outputs["sequence_output"][:, 0, :]
 
     def configure_task_ensembles(
         self,
@@ -412,7 +406,26 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         labels: Optional[Dict[str, torch.Tensor]] = None,
+        task: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """Forward pass for the multi-task model.
+
+        Parameters
+        ----------
+        input_ids, attention_mask:
+            Standard transformer inputs.
+        labels:
+            Optional dict mapping task name → label tensor. When provided,
+            loss is computed inside the model.
+        task:
+            When set to a task name (e.g. ``"bias"``), only that head is
+            executed and only that task's loss is computed.  This is the
+            task-wise training path — one head per forward pass, shared
+            encoder updated by a single clean gradient.
+
+            When ``None`` (default, inference path), all heads run and
+            the combined multi-task loss is computed if labels are given.
+        """
 
         pooled = self.encode(input_ids=input_ids, attention_mask=attention_mask)
 
@@ -420,8 +433,9 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
         temperature = torch.clamp(self.temperature.exp(), 0.5, 5.0)
 
         # ----------------------------------------------------
-        # Task heads
+        # Task heads — skip heads not selected by `task`
         # ----------------------------------------------------
+        _run_all = task is None
 
         bias_logits = None
         ideology_logits = None
@@ -437,44 +451,50 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
         ideology_preds = None
         propaganda_preds = None
 
-        if self.bias_head is not None:
+        if self.bias_head is not None and (_run_all or task == "bias"):
             if self.bias_ensemble is not None:
                 bias_logits = self._extract_ensemble_logits(self.bias_ensemble(pooled))
             else:
                 bias_logits = self._extract_logits_safe(self.bias_head(pooled))
-            bias_logits = bias_logits / temperature
+            if not self.training:
+                bias_logits = bias_logits / temperature
 
-        if self.ideology_head is not None:
+        if self.ideology_head is not None and (_run_all or task == "ideology"):
             if self.ideology_ensemble is not None:
                 ideology_logits = self._extract_ensemble_logits(
                     self.ideology_ensemble(pooled)
                 )
             else:
                 ideology_logits = self._extract_logits_safe(self.ideology_head(pooled))
-            ideology_logits = ideology_logits / temperature
+            if not self.training:
+                ideology_logits = ideology_logits / temperature
 
-        if self.propaganda_head is not None:
+        if self.propaganda_head is not None and (_run_all or task == "propaganda"):
             if self.propaganda_ensemble is not None:
                 propaganda_logits = self._extract_ensemble_logits(
                     self.propaganda_ensemble(pooled)
                 )
             else:
                 propaganda_logits = self._extract_logits_safe(self.propaganda_head(pooled))
-            propaganda_logits = propaganda_logits / temperature
+            if not self.training:
+                propaganda_logits = propaganda_logits / temperature
 
-        if self.narrative_head is not None:
+        if self.narrative_head is not None and (_run_all or task == "narrative"):
             narrative_outputs = self.narrative_head(pooled)
-            narrative_outputs["logits"] = narrative_outputs["logits"] / temperature
+            if not self.training:
+                narrative_outputs["logits"] = narrative_outputs["logits"] / temperature
 
-        if self.narrative_frame_head is not None:
+        if self.narrative_frame_head is not None and (_run_all or task == "narrative_frame"):
             narrative_frame_outputs = self.narrative_frame_head(pooled)
-            narrative_frame_outputs["logits"] = (
-                narrative_frame_outputs["logits"] / temperature
-            )
+            if not self.training:
+                narrative_frame_outputs["logits"] = (
+                    narrative_frame_outputs["logits"] / temperature
+                )
 
-        if self.emotion_head is not None:
+        if self.emotion_head is not None and (_run_all or task == "emotion"):
             emotion_outputs = self.emotion_head(pooled)
-            emotion_outputs["logits"] = emotion_outputs["logits"] / temperature
+            if not self.training:
+                emotion_outputs["logits"] = emotion_outputs["logits"] / temperature
 
         def _compute_probs_and_preds() -> None:
             nonlocal bias_probs, ideology_probs, propaganda_probs
@@ -601,39 +621,88 @@ class MultiTaskTruthLensModel(MultiTaskBaseModel):
             )
 
         # ----------------------------------------------------
-        # Loss
+        # Loss — single-task fast path (training) / multi-task (inference)
         # ----------------------------------------------------
 
         if labels is not None:
-            logits_for_loss: Dict[str, torch.Tensor] = {}
-            if bias_logits is not None and "bias" in labels:
-                logits_for_loss["bias"] = bias_logits
-            if ideology_logits is not None and "ideology" in labels:
-                logits_for_loss["ideology"] = ideology_logits
-            if propaganda_logits is not None and "propaganda" in labels:
-                logits_for_loss["propaganda"] = propaganda_logits
-            if narrative_outputs is not None and "narrative" in labels:
-                logits_for_loss["narrative"] = narrative_outputs["logits"]
-            if narrative_frame_outputs is not None and "narrative_frame" in labels:
-                logits_for_loss["narrative_frame"] = narrative_frame_outputs["logits"]
-            if emotion_outputs is not None and "emotion" in labels:
-                logits_for_loss["emotion"] = emotion_outputs["logits"]
+            active_tasks = list(labels.keys())
 
-            available_labels: Dict[str, torch.Tensor] = {}
-            for key in logits_for_loss:
-                if key in labels:
-                    available_labels[key] = labels[key].to(pooled.device)
+            if self.training and task is not None:
+                # Single-task training: route through the fast path.
+                # Only one head was executed so logits_for_loss is trivial.
+                logits_for_loss: Dict[str, torch.Tensor] = {}
+                if task == "bias" and bias_logits is not None:
+                    logits_for_loss["bias"] = bias_logits
+                elif task == "ideology" and ideology_logits is not None:
+                    logits_for_loss["ideology"] = ideology_logits
+                elif task == "propaganda" and propaganda_logits is not None:
+                    logits_for_loss["propaganda"] = propaganda_logits
+                elif task == "narrative" and narrative_outputs is not None:
+                    logits_for_loss["narrative"] = narrative_outputs["logits"]
+                elif task == "narrative_frame" and narrative_frame_outputs is not None:
+                    logits_for_loss["narrative_frame"] = narrative_frame_outputs["logits"]
+                elif task == "emotion" and emotion_outputs is not None:
+                    logits_for_loss["emotion"] = emotion_outputs["logits"]
 
-            if available_labels:
-                total_loss, task_losses = self.multitask_loss(
-                    logits=logits_for_loss,
-                    labels=available_labels,
-                )
-                multitask_output.loss = total_loss
-                multitask_output.task_losses = task_losses
-                outputs["loss"] = total_loss
-                outputs["task_losses"] = task_losses
-                outputs["loss_breakdown"] = task_losses
+                if logits_for_loss and task in labels:
+                    available_labels = {task: labels[task].to(pooled.device)}
+                    total_loss, task_losses = self.multitask_loss(
+                        logits=logits_for_loss,
+                        labels=available_labels,
+                    )
+                    if not torch.isfinite(total_loss):
+                        raise RuntimeError(
+                            f"NaN/inf loss detected for task '{task}'"
+                        )
+                    if total_loss.item() > 1e4:
+                        raise RuntimeError(
+                            f"Exploding loss detected for task '{task}': "
+                            f"{total_loss.item():.2f}"
+                        )
+                    outputs["loss"] = total_loss
+                    outputs["task_losses"] = task_losses
+
+                    if self.training:
+                        active_logits = logits_for_loss.get(task)
+                        return {
+                            "loss": total_loss,
+                            "task_losses": task_losses,
+                            "logits": active_logits,
+                        }
+
+            else:
+                # Multi-task path: used during inference/validation where all
+                # heads ran (task is None).
+                logits_for_loss = {}
+                if bias_logits is not None and "bias" in labels:
+                    logits_for_loss["bias"] = bias_logits
+                if ideology_logits is not None and "ideology" in labels:
+                    logits_for_loss["ideology"] = ideology_logits
+                if propaganda_logits is not None and "propaganda" in labels:
+                    logits_for_loss["propaganda"] = propaganda_logits
+                if narrative_outputs is not None and "narrative" in labels:
+                    logits_for_loss["narrative"] = narrative_outputs["logits"]
+                if narrative_frame_outputs is not None and "narrative_frame" in labels:
+                    logits_for_loss["narrative_frame"] = narrative_frame_outputs["logits"]
+                if emotion_outputs is not None and "emotion" in labels:
+                    logits_for_loss["emotion"] = emotion_outputs["logits"]
+
+                available_labels: Dict[str, torch.Tensor] = {
+                    key: labels[key].to(pooled.device)
+                    for key in logits_for_loss
+                    if key in labels
+                }
+
+                if available_labels:
+                    total_loss, task_losses = self.multitask_loss(
+                        logits=logits_for_loss,
+                        labels=available_labels,
+                    )
+                    multitask_output.loss = total_loss
+                    multitask_output.task_losses = task_losses
+                    outputs["loss"] = total_loss
+                    outputs["task_losses"] = task_losses
+                    outputs["loss_breakdown"] = task_losses
 
         outputs["multitask_output"] = multitask_output
 

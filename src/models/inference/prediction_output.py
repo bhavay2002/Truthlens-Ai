@@ -30,6 +30,30 @@ from typing import Dict, Optional, Any
 
 import torch
 
+_MULTICLASS_TASKS: frozenset = frozenset({"bias", "ideology", "propaganda"})
+_MULTILABEL_TASKS: frozenset = frozenset({"narrative", "narrative_frame", "emotion"})
+_VALID_TASKS: frozenset = _MULTICLASS_TASKS | _MULTILABEL_TASKS
+
+
+def _validate_task(task: str) -> None:
+    if task not in _VALID_TASKS:
+        raise ValueError(
+            f"Unknown task {task!r}. Valid tasks: {sorted(_VALID_TASKS)}"
+        )
+
+
+def _compute_confidence(
+    task: str,
+    probabilities: Optional[torch.Tensor],
+) -> Optional[torch.Tensor]:
+    if probabilities is None:
+        return None
+    if task in _MULTICLASS_TASKS:
+        return probabilities.max(dim=-1).values
+    if task in _MULTILABEL_TASKS:
+        return probabilities.mean(dim=-1)
+    return None
+
 
 @dataclass
 class TaskPrediction:
@@ -144,6 +168,31 @@ class PredictionOutput:
     def fast_from_raw(cls, raw_outputs: Dict[str, Any]) -> Dict[str, Any]:
         return raw_outputs
 
+    @classmethod
+    def from_single_task(
+        cls,
+        task: str,
+        outputs: Dict[str, Any],
+        *,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> "PredictionOutput":
+        """Build a ``PredictionOutput`` from a flat single-task output dict.
+
+        Avoids the string-splitting logic of ``from_raw_outputs`` and
+        auto-computes confidence from the probability tensor.
+        """
+        _validate_task(task)
+        structured = cls(metadata=metadata)
+        probs = outputs.get("probabilities")
+        structured.add_task(
+            task_name=task,
+            logits=outputs.get("logits"),
+            probabilities=probs,
+            predictions=outputs.get("predictions"),
+            confidence=outputs.get("confidence") or _compute_confidence(task, probs),
+        )
+        return structured
+
     def add_task(
         self,
         task_name: str,
@@ -155,7 +204,13 @@ class PredictionOutput:
     ) -> None:
         """
         Add prediction results for a specific task.
+        Auto-computes confidence from probabilities when not supplied.
         """
+        if confidence is None and probabilities is not None:
+            try:
+                confidence = _compute_confidence(task_name, probabilities)
+            except ValueError:
+                pass
 
         self.tasks[task_name] = TaskPrediction(
             logits=logits,
@@ -179,12 +234,13 @@ class PredictionOutput:
         """
         Convert prediction output to dictionary representation.
         """
-        tasks = self.tasks
-        result = {
-            "tasks": {name: vars(task) for name, task in tasks.items()}
+        result: Dict[str, Any] = {
+            "tasks": {name: task.to_dict() for name, task in self.tasks.items()}
         }
-
         if self.metadata:
             result["metadata"] = self.metadata
-
         return result
+
+    def to_lightweight(self) -> Dict[str, Any]:
+        """Return a minimal dict: task name → predictions tensor only."""
+        return {name: task.predictions for name, task in self.tasks.items()}

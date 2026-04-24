@@ -64,8 +64,59 @@ def training_precision(
 # METRICS
 # ---------------------------------------------------------
 
+MULTICLASS_TASKS: frozenset = frozenset({"bias", "ideology", "propaganda"})
+MULTILABEL_TASKS: frozenset = frozenset({"narrative", "narrative_frame", "emotion"})
+
+
+def get_task_type(task: str) -> str:
+    """Return 'multiclass' or 'multilabel' for a known task name."""
+    if task in MULTICLASS_TASKS:
+        return "multiclass"
+    if task in MULTILABEL_TASKS:
+        return "multilabel"
+    raise ValueError(f"Unknown task: {task!r}")
+
+
+def compute_predictions(task: str, logits: torch.Tensor) -> torch.Tensor:
+    """Return argmax (multiclass) or sigmoid>0.5 (multilabel) predictions."""
+    if task in MULTICLASS_TASKS:
+        return torch.argmax(logits, dim=1)
+    if task in MULTILABEL_TASKS:
+        return (torch.sigmoid(logits) > 0.5).int()
+    raise ValueError(f"Unknown task: {task!r}")
+
+
+def validate_loss(loss: torch.Tensor) -> None:
+    """Raise if loss is non-finite or exploding."""
+    if not torch.isfinite(loss):
+        raise RuntimeError(f"Non-finite loss detected: {loss.item()}")
+    if loss.item() > 1e4:
+        raise RuntimeError(f"Exploding loss detected: {loss.item():.2f}")
+
+
+def extract_task_from_batch(batch: Dict[str, Any]) -> str:
+    """Extract the 'task' string from a batch dict. Raises if missing."""
+    task = batch.get("task")
+    if task is None:
+        raise ValueError("Batch missing required 'task' field")
+    if not isinstance(task, str):
+        raise TypeError(f"batch['task'] must be str, got {type(task)}")
+    return task
+
+
+def validate_single_task_batch(batch: Dict[str, Any]) -> None:
+    """Assert that a batch has the required single-task structure."""
+    required = ("input_ids", "attention_mask", "labels", "task")
+    for key in required:
+        if key not in batch:
+            raise ValueError(f"Batch missing required key: {key!r}")
+    if not isinstance(batch["task"], str):
+        raise TypeError("batch['task'] must be a string")
+
+
 @dataclass
 class TrainingMetrics:
+    task_losses: Dict[str, float] = field(default_factory=dict)
     losses: Dict[str, float] = field(default_factory=dict)
     step: int = 0
     epoch: int = 0
@@ -75,8 +126,15 @@ class TrainingMetrics:
             raise TypeError("Metric name must be a string")
         if not isinstance(value, (float, int)):
             raise TypeError("Metric value must be numeric")
-
         self.losses[name] = float(value)
+
+    def update_task(self, task: str, loss: float) -> None:
+        self.task_losses[task] = float(loss)
+
+    def average_loss(self) -> float:
+        if not self.task_losses:
+            return 0.0
+        return sum(self.task_losses.values()) / len(self.task_losses)
 
     def to_dict(self) -> Dict[str, float]:
         return dict(self.losses)
@@ -164,6 +222,9 @@ def zero_gradients(optimizer: torch.optim.Optimizer) -> None:
 
 def compute_batch_size(batch: Any) -> int:
 
+    if isinstance(batch, dict) and "input_ids" in batch:
+        return batch["input_ids"].shape[0]
+
     if isinstance(batch, torch.Tensor):
         if batch.ndim == 0:
             return 1
@@ -171,15 +232,13 @@ def compute_batch_size(batch: Any) -> int:
 
     if isinstance(batch, dict):
         for value in batch.values():
-            size = compute_batch_size(value)
-            if size > 0:
-                return size
+            if isinstance(value, torch.Tensor) and value.ndim > 0:
+                return value.shape[0]
 
     if isinstance(batch, (list, tuple)):
         for value in batch:
-            size = compute_batch_size(value)
-            if size > 0:
-                return size
+            if isinstance(value, torch.Tensor) and value.ndim > 0:
+                return value.shape[0]
 
     raise RuntimeError("Unable to determine batch size")
 
