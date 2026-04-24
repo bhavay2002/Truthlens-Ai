@@ -687,6 +687,26 @@ def load_data():
                 f"{split_name} split missing required columns: {missing_cols}"
             )
 
+        # P1 — Warn on unexpected extra columns so header drift is visible.
+        extra_cols = [c for c in df.columns if c not in _required_columns]
+        if extra_cols:
+            logger.warning(
+                "[SCHEMA] %s split has %d unexpected columns not in the required schema "
+                "(first 10: %s). Verify the CSV header hasn't shifted.",
+                split_name, len(extra_cols), extra_cols[:10],
+            )
+
+        # P3 — Warn if the total column count differs from the expected schema
+        # count; this is a lightweight signal that the file was re-exported with
+        # a different header before the explicit missing-column check catches it.
+        if len(df.columns) != len(_required_columns):
+            logger.warning(
+                "[SCHEMA] %s split column count %d differs from expected %d. "
+                "Missing=%s Extra=%s",
+                split_name, len(df.columns), len(_required_columns),
+                missing_cols, extra_cols,
+            )
+
         for col, allowed_values in _label_allowed.items():
             df[col] = _strict_int_series(
                 df[col],
@@ -731,6 +751,54 @@ def load_data():
             raise RuntimeError(
                 f"Split '{split_name}' is empty after dropping empty-text rows; "
                 f"check the input CSV's text column ('{TEXT_COLUMN}')."
+            )
+
+    # P2 — Per-row task-availability masks.
+    # A row that has no label coverage across every task contributes zero
+    # gradient signal and can silently inflate the "rows seen" counter.
+    # Compute a boolean coverage mask per task, count valid tasks per row,
+    # and drop fully unlabelled rows from all splits before any sampler runs.
+    _TASK_MASK_COLS: dict[str, list[str]] = {
+        "bias":       [BIAS_LABEL],
+        "ideology":   [IDEOLOGY_LABEL],
+        "propaganda": [PROPAGANDA_LABEL],
+        "narrative":  ["hero", "villain", "victim"],
+        "frame":      list(FRAME_COLUMNS),
+        "emotion":    list(EMOTION_COLUMNS),
+    }
+    for split_name, _df in (("train", train_df), ("val", val_df), ("test", test_df)):
+        _mask_col_names: list[str] = []
+        for task_name, task_cols in _TASK_MASK_COLS.items():
+            present = [c for c in task_cols if c in _df.columns]
+            mc = f"{task_name}_mask"
+            _mask_col_names.append(mc)
+            if present:
+                _df[mc] = _df[present].notna().any(axis=1).astype(np.int8)
+            else:
+                _df[mc] = np.int8(0)
+
+        _df["valid_task_count"] = _df[_mask_col_names].sum(axis=1)
+        _zero_rows = int((_df["valid_task_count"] == 0).sum())
+        if _zero_rows:
+            logger.warning(
+                "[TASK MASK] %s: %d rows have zero label coverage across all tasks "
+                "(%.2f%% of split) — dropping them.",
+                split_name, _zero_rows, 100.0 * _zero_rows / max(1, len(_df)),
+            )
+            _df.drop(_df.index[_df["valid_task_count"] == 0], inplace=True)
+            _df.reset_index(drop=True, inplace=True)
+
+        if len(_df) == 0:
+            raise RuntimeError(
+                f"Split '{split_name}' is empty after removing zero-coverage rows. "
+                "All rows lacked any task label. Check annotation files."
+            )
+
+        for task_name in _TASK_MASK_COLS:
+            _cov = float(_df[f"{task_name}_mask"].mean())
+            logger.info(
+                "[TASK MASK] %s/%s coverage=%.1f%%",
+                split_name, task_name, 100.0 * _cov,
             )
 
     logger.info(

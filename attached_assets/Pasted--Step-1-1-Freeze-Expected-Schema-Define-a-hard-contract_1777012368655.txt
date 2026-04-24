@@ -1,0 +1,147 @@
+✅ Step 1.1 — Freeze Expected Schema
+
+Define a hard contract:
+
+EXPECTED_COLUMNS = [
+    "text",
+    "bias_label",
+    "ideology_label",
+    "propaganda_label",
+    "hero", "villain", "victim",
+    # + all emotion columns
+]
+✅ Step 1.2 — Strict Schema Validation
+def validate_schema(df):
+    missing = set(EXPECTED_COLUMNS) - set(df.columns)
+    extra = set(df.columns) - set(EXPECTED_COLUMNS)
+
+    if missing:
+        raise ValueError(f"[SCHEMA ERROR] Missing columns: {missing}")
+    if extra:
+        print(f"[WARNING] Extra columns detected: {extra}")
+✅ Step 1.3 — Detect Column Shift (CRITICAL)
+
+Column shift = silent killer.
+
+def detect_shift(df):
+    sample = df.iloc[0]
+
+    print("\n🔍 SAMPLE ROW CHECK")
+    for col in EXPECTED_COLUMNS:
+        val = sample.get(col, None)
+        print(f"{col:20} → {str(val)[:50]}")
+🚨 What to look for:
+text contains numbers → ❌ shifted
+labels contain long strings → ❌ shifted
+multiple labels identical → ❌ merged columns
+✅ Step 1.4 — Hard Type Enforcement
+def enforce_types(df):
+    df['text'] = df['text'].astype(str)
+
+    label_cols = [c for c in df.columns if 'label' in c or c in ['hero','villain','victim']]
+    
+    for col in label_cols:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+✅ Step 1.5 — Alignment Assertion (FAIL FAST)
+def assert_alignment(df):
+    for col in ['bias_label', 'ideology_label', 'propaganda_label']:
+        invalid = df[col].dropna().apply(lambda x: x not in [0,1,2])
+        if invalid.any():
+            raise ValueError(f"[ALIGNMENT ERROR] Invalid values in {col}")
+🔥 PRIORITY 2 — Row-Level Label Consistency
+🎯 Goal
+
+Avoid multi-task contamination per sample
+
+✅ Step 2.1 — Compute Task Availability Vector
+TASK_COLS = {
+    "bias": ["bias_label"],
+    "ideology": ["ideology_label"],
+    "propaganda": ["propaganda_label"],
+    "narrative": ["hero","villain","victim"],
+}
+def compute_task_mask(row):
+    mask = {}
+    for task, cols in TASK_COLS.items():
+        mask[task] = any(pd.notna(row[c]) for c in cols)
+    return mask
+✅ Step 2.2 — Add Mask Columns
+for task, cols in TASK_COLS.items():
+    df[f"{task}_mask"] = df[cols].notna().any(axis=1).astype(int)
+✅ Step 2.3 — Detect Broken Rows
+df['valid_task_count'] = df[[f"{t}_mask" for t in TASK_COLS]].sum(axis=1)
+
+broken = df[df['valid_task_count'] == 0]
+
+print(f"🚨 Rows with NO labels: {len(broken)}")
+
+👉 Drop them:
+
+df = df[df['valid_task_count'] > 0]
+✅ Step 2.4 — Distribution Sanity Check
+for task in TASK_COLS:
+    print(task, df[f"{task}_mask"].mean())
+🔥 PRIORITY 3 — Bulletproof CSV Parsing
+🎯 Goal
+
+Eliminate row corruption + delimiter ambiguity
+
+✅ Step 3.1 — Safe Loader (Production Version)
+def robust_read_csv(path):
+    return pd.read_csv(
+        path,
+        engine="python",              # safer for messy CSV
+        quoting=1,                    # QUOTE_MINIMAL
+        escapechar="\\",
+        on_bad_lines="warn",
+        sep=",",
+    )
+✅ Step 3.2 — Detect Broken Rows BEFORE Parsing
+def detect_raw_issues(path):
+    with open(path, 'r', encoding='utf-8') as f:
+        for i, line in enumerate(f):
+            if line.count('"') % 2 != 0:
+                print(f"Unbalanced quotes at line {i}")
+✅ Step 3.3 — Column Count Validation
+def validate_column_count(df):
+    expected = len(EXPECTED_COLUMNS)
+    actual = len(df.columns)
+
+    if actual != expected:
+        raise ValueError(f"[COLUMN MISMATCH] Expected {expected}, got {actual}")
+🔥 PRIORITY 4 — Proper Multi-Task Training Design
+🚫 Problem
+
+Your dataset is partially labeled → NOT IID across tasks
+
+✅ Option A — Task-Specific Batching (BEST)
+🔧 Dataset Split by Task
+task_datasets = {}
+
+for task in TASK_COLS:
+    task_datasets[task] = df[df[f"{task}_mask"] == 1]
+🔧 Training Loop
+for step in range(num_steps):
+    task = random.choice(list(task_datasets.keys()))
+    batch = sample_batch(task_datasets[task])
+
+    outputs = model(batch['input_ids'])
+
+    loss = compute_loss(task, outputs, batch)
+    loss.backward()
+✅ Option B — Masked Loss (MANDATORY)
+def masked_loss(logits, labels, mask):
+    loss = criterion(logits, labels)
+    loss = loss * mask
+    return loss.sum() / (mask.sum() + 1e-8)
+✅ Step 4.3 — Per-task Loss Scaling
+loss = (
+    w_bias * loss_bias +
+    w_ideology * loss_ideology +
+    w_prop * loss_prop
+)
+
+👉 Set weights based on:
+
+inverse frequency
+or manual tuning
