@@ -1,25 +1,3 @@
-"""
-File Name: bias_profile_builder.py
-Module: Bias Analysis - Profile Construction
-Description:
-    Builds a structured bias profile from multiple analytical components used
-    in the TruthLens AI system. The module aggregates bias features, ideology
-    predictions, emotion signals, discourse indicators, and narrative features
-    into a unified bias profile representation that can be used for downstream
-    analysis, reporting, or model input.
-
-Dependencies:
-    logging
-    typing
-    numpy
-
-Inputs:
-    Dictionaries containing outputs from various analytical modules
-
-Outputs:
-    Structured bias profile dictionary and optional numerical feature vector
-"""
-
 from __future__ import annotations
 
 import logging
@@ -29,6 +7,7 @@ from typing import Any, Dict, List
 
 import numpy as np
 
+from src.analysis.feature_schema import get_schema
 
 logger = logging.getLogger(__name__)
 
@@ -47,24 +26,19 @@ class BiasProfileConfig:
     ideology_weight: float = 0.6
 
     normalize_values: bool = True
-    normalization_method: str = "minmax"   # minmax | zscore
+    normalization_method: str = "minmax"  # minmax | zscore
+
+    clip_values: bool = True
+    clip_range: tuple[float, float] = (0.0, 1.0)
+
+    global_normalization: bool = True
 
 
 # ---------------------------------------------------------
-# Bias Profile Builder
+# Builder
 # ---------------------------------------------------------
 
 class BiasProfileBuilder:
-
-    """
-    Aggregates signals from multiple analysis modules
-    into a structured bias profile used throughout TruthLens.
-
-    The profile supports:
-    - interpretable analytics
-    - ML feature vectors
-    - explainability layers
-    """
 
     PROFILE_SECTIONS = (
         "bias",
@@ -75,52 +49,67 @@ class BiasProfileBuilder:
     )
 
     def __init__(self, config: BiasProfileConfig | None = None) -> None:
-
         self.config = config or BiasProfileConfig()
-
         logger.info("BiasProfileBuilder initialized")
 
-    # -----------------------------------------------------
-    # Public API
     # -----------------------------------------------------
 
     def build_profile(
         self,
-        bias_features: Dict[str, float],
-        emotion_features: Dict[str, float],
-        narrative_features: Dict[str, float],
-        discourse_features: Dict[str, float],
-        ideology_predictions: Dict[str, float],
+        *,
+        bias: Dict[str, float],
+        emotion: Dict[str, float],
+        narrative: Dict[str, float],
+        discourse: Dict[str, float],
+        ideology: Dict[str, float],
     ) -> Dict[str, Any]:
 
-        bias = self._sanitize_numeric_dict(bias_features)
-        emotion = self._sanitize_numeric_dict(emotion_features)
-        narrative = self._sanitize_numeric_dict(narrative_features)
-        discourse = self._sanitize_numeric_dict(discourse_features)
-        ideology = self._sanitize_numeric_dict(ideology_predictions)
-
         profile = {
-
             "metadata": {
                 "created_at": int(time.time()),
                 "sections": list(self.PROFILE_SECTIONS),
+                "weights": {
+                    "bias": self.config.bias_weight,
+                    "emotion": self.config.emotion_weight,
+                    "narrative": self.config.narrative_weight,
+                    "discourse": self.config.discourse_weight,
+                    "ideology": self.config.ideology_weight,
+                },
             },
-
-            "bias": bias,
-            "emotion": emotion,
-            "narrative": narrative,
-            "discourse": discourse,
-            "ideology": ideology,
+            "bias": self._process_section(bias),
+            "emotion": self._process_section(emotion),
+            "narrative": self._process_section(narrative),
+            "discourse": self._process_section(discourse),
+            "ideology": self._process_section(ideology),
         }
 
-        profile["metrics"] = self._compute_profile_metrics(profile)
+        # 🔥 GLOBAL NORMALIZATION (CRITICAL)
+        if self.config.global_normalization:
+            profile = self._global_normalize(profile)
 
+        profile["metrics"] = self._compute_profile_metrics(profile)
         profile["bias_score"] = self._compute_bias_score(profile)
 
         return profile
 
     # -----------------------------------------------------
-    # Input sanitation
+    # Processing Pipeline
+    # -----------------------------------------------------
+
+    def _process_section(self, data: Dict[str, Any]) -> Dict[str, float]:
+
+        data = self._sanitize_numeric_dict(data)
+
+        if self.config.normalize_values:
+            data = self._normalize_values(data)
+
+        if self.config.clip_values:
+            data = self._clip_values(data)
+
+        return data
+
+    # -----------------------------------------------------
+    # Sanitization (STRONG)
     # -----------------------------------------------------
 
     def _sanitize_numeric_dict(self, data: Dict[str, Any]) -> Dict[str, float]:
@@ -128,20 +117,21 @@ class BiasProfileBuilder:
         if not isinstance(data, dict):
             raise ValueError("Input must be dictionary")
 
-        sanitized = {}
+        cleaned = {}
 
         for k, v in data.items():
 
             if isinstance(v, (int, float, np.number)):
-                sanitized[k] = float(v)
+                v = float(v)
+
+                if np.isnan(v) or np.isinf(v):
+                    v = 0.0
             else:
-                sanitized[k] = 0.0
+                v = 0.0
 
-        if self.config.normalize_values and sanitized:
+            cleaned[k] = v
 
-            sanitized = self._normalize_values(sanitized)
-
-        return sanitized
+        return cleaned
 
     # -----------------------------------------------------
     # Normalization
@@ -149,10 +139,10 @@ class BiasProfileBuilder:
 
     def _normalize_values(self, data: Dict[str, float]) -> Dict[str, float]:
 
-        values = np.array(list(data.values()), dtype=np.float32)
-
-        if values.size == 0:
+        if not data:
             return data
+
+        values = np.array(list(data.values()), dtype=np.float32)
 
         if self.config.normalization_method == "zscore":
 
@@ -162,9 +152,9 @@ class BiasProfileBuilder:
             if std < 1e-9:
                 return data
 
-            normalized = (values - mean) / std
+            norm = (values - mean) / std
 
-        else:
+        else:  # minmax
 
             min_v = values.min()
             max_v = values.max()
@@ -172,26 +162,75 @@ class BiasProfileBuilder:
             if max_v - min_v < 1e-9:
                 return data
 
-            normalized = (values - min_v) / (max_v - min_v)
+            norm = (values - min_v) / (max_v - min_v)
 
-        return {k: float(v) for k, v in zip(data.keys(), normalized)}
+        return {k: float(v) for k, v in zip(data.keys(), norm)}
 
     # -----------------------------------------------------
-    # Profile Metrics
+    # Global Normalization (NEW)
+    # -----------------------------------------------------
+
+    def _global_normalize(self, profile: Dict[str, Any]) -> Dict[str, Any]:
+
+        all_values = []
+
+        for section in self.PROFILE_SECTIONS:
+            all_values.extend(profile[section].values())
+
+        if not all_values:
+            return profile
+
+        arr = np.array(all_values, dtype=np.float32)
+
+        min_v = arr.min()
+        max_v = arr.max()
+
+        if max_v - min_v < 1e-9:
+            return profile
+
+        def normalize_section(section_data):
+            return {
+                k: float((v - min_v) / (max_v - min_v))
+                for k, v in section_data.items()
+            }
+
+        for section in self.PROFILE_SECTIONS:
+            profile[section] = normalize_section(profile[section])
+
+        return profile
+
+    # -----------------------------------------------------
+    # Clipping
+    # -----------------------------------------------------
+
+    def _clip_values(self, data: Dict[str, float]) -> Dict[str, float]:
+
+        low, high = self.config.clip_range
+
+        return {
+            k: float(np.clip(v, low, high))
+            for k, v in data.items()
+        }
+
+    # -----------------------------------------------------
+    # Metrics
     # -----------------------------------------------------
 
     def _compute_profile_metrics(self, profile: Dict[str, Any]) -> Dict[str, float]:
 
-        ideology_values = list(profile["ideology"].values())
+        ideology_vals = np.array(
+            list(profile["ideology"].values()),
+            dtype=np.float32,
+        )
 
-        if ideology_values:
+        if ideology_vals.size > 0:
 
-            arr = np.array(ideology_values, dtype=np.float32)
-            arr = np.clip(arr, 0.0, None)
-            total = float(arr.sum())
+            ideology_vals = np.clip(ideology_vals, 0.0, None)
+            total = float(ideology_vals.sum())
 
-            if total > 0.0:
-                p = arr / total
+            if total > 0:
+                p = ideology_vals / total
+
                 entropy = float(-np.sum(p * np.log(p + 1e-9)))
                 dominance = float(np.max(p))
             else:
@@ -199,62 +238,48 @@ class BiasProfileBuilder:
                 dominance = 0.0
 
         else:
-
             entropy = 0.0
             dominance = 0.0
 
-        bias_values = list(profile["bias"].values())
+        bias_vals = np.array(
+            list(profile["bias"].values()),
+            dtype=np.float32,
+        )
 
-        variance = float(np.var(bias_values)) if bias_values else 0.0
+        variance = float(np.var(bias_vals)) if bias_vals.size > 0 else 0.0
 
         return {
-
             "bias_variance": variance,
-            "ideology_entropy": float(entropy),
+            "ideology_entropy": entropy,
             "ideology_dominance": dominance,
         }
 
     # -----------------------------------------------------
-    # Bias Score
+    # Bias Score (CALIBRATED)
     # -----------------------------------------------------
 
     def _compute_bias_score(self, profile: Dict[str, Any]) -> float:
 
-        values: List[float] = []
+        weighted_values: List[float] = []
 
-        values.extend(
-            v * self.config.bias_weight
-            for v in profile["bias"].values()
-        )
+        def add(section, weight):
+            weighted_values.extend(v * weight for v in section.values())
 
-        values.extend(
-            v * self.config.emotion_weight
-            for v in profile["emotion"].values()
-        )
+        add(profile["bias"], self.config.bias_weight)
+        add(profile["emotion"], self.config.emotion_weight)
+        add(profile["narrative"], self.config.narrative_weight)
+        add(profile["discourse"], self.config.discourse_weight)
+        add(profile["ideology"], self.config.ideology_weight)
 
-        values.extend(
-            v * self.config.narrative_weight
-            for v in profile["narrative"].values()
-        )
-
-        values.extend(
-            v * self.config.discourse_weight
-            for v in profile["discourse"].values()
-        )
-
-        values.extend(
-            v * self.config.ideology_weight
-            for v in profile["ideology"].values()
-        )
-
-        if not values:
+        if not weighted_values:
             return 0.0
 
-        return float(np.mean(values))
+        score = float(np.mean(weighted_values))
 
+        return float(np.clip(score, 0.0, 1.0))
 
 # ---------------------------------------------------------
-# Vector Conversion
+# Vector Conversion (SCHEMA-STABLE)
 # ---------------------------------------------------------
 
 def bias_profile_vector(profile: Dict[str, Any]) -> np.ndarray:
@@ -262,24 +287,23 @@ def bias_profile_vector(profile: Dict[str, Any]) -> np.ndarray:
     if not isinstance(profile, dict):
         raise ValueError("profile must be dictionary")
 
-    ordered_sections = (
-        "bias",
-        "emotion",
-        "narrative",
-        "discourse",
-        "ideology",
-    )
+    sections = {
+        "bias": "framing",
+        "emotion": "emotion_target",
+        "narrative": "framing",
+        "discourse": "discourse_coherence",
+        "ideology": "ideology",
+    }
 
     values: List[float] = []
 
-    for section in ordered_sections:
+    for section, schema_name in sections.items():
 
+        keys = get_schema(schema_name)
         data = profile.get(section, {})
 
-        if isinstance(data, dict):
-
-            for key in sorted(data.keys()):
-                values.append(float(data[key]))
+        for k in keys:
+            values.append(float(data.get(k, 0.0)))
 
     if not values:
         raise ValueError("profile contains no numeric values")

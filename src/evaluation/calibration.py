@@ -1,190 +1,185 @@
+"""
+File: calibration.py
+"""
+
 from __future__ import annotations
 
 import logging
-from pathlib import Path
-from typing import Iterable, Tuple
+from typing import Iterable, Dict, Any, Optional
 
 import numpy as np
-import matplotlib.pyplot as plt
 import torch
+import torch.nn as nn
+import torch.optim as optim
 
 from src.models.calibration import CalibrationMetricConfig, CalibrationMetrics
 
 logger = logging.getLogger(__name__)
 
+EPS = 1e-12
+
 
 # =========================================================
 # VALIDATION
 # =========================================================
+def _validate_inputs(y_true, probs):
+    y = np.asarray(y_true)
+    p = np.asarray(probs)
 
-def _validate_inputs(
-    y_true: Iterable,
-    probs: Iterable
-) -> Tuple[np.ndarray, np.ndarray]:
+    if y.shape[0] != p.shape[0]:
+        raise ValueError("Mismatch in samples")
 
-    labels = np.asarray(y_true)
-
-    if labels.ndim != 1:
-        raise ValueError("y_true must be 1D")
-
-    if labels.size == 0:
-        raise ValueError("y_true cannot be empty")
-
-    if not np.issubdtype(labels.dtype, np.integer):
-        raise ValueError("y_true must contain integer class labels")
-
-    labels = labels.astype(np.int64)
-
-    probs_arr = np.asarray(probs, dtype=np.float64)
-
-    if probs_arr.shape[0] != labels.shape[0]:
-        raise ValueError("y_true and probs must have same length")
-
-    # sanitize probabilities
-    probs_arr = np.nan_to_num(probs_arr, nan=0.0, posinf=1.0, neginf=0.0)
-
-    if np.any(probs_arr < 0) or np.any(probs_arr > 1):
-        raise ValueError("Probabilities must be within [0, 1]")
-
-    return labels, probs_arr
-
-
-def _validate_bins(n_bins: int) -> None:
-    if not isinstance(n_bins, int) or n_bins <= 0:
-        raise ValueError("n_bins must be a positive integer")
-
-
-def _auto_bins(n_samples: int) -> int:
-    """
-    Adaptive bin selection for ECE.
-
-    - Lower bound: 5 bins
-    - Upper bound: 30 bins
-    - Uses sqrt heuristic for stability
-    """
-    return max(5, min(int(np.sqrt(n_samples)), 30))
+    return y, p
 
 
 # =========================================================
-# PROBABILITY NORMALIZATION
+# TEMPERATURE SCALING (NEW 🔥)
 # =========================================================
+class TemperatureScaler(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.temperature = nn.Parameter(torch.ones(1))
 
-def _normalize_probs(probs: np.ndarray) -> np.ndarray:
-    if probs.ndim == 2:
-        row_sums = probs.sum(axis=1, keepdims=True)
-        row_sums = np.where(row_sums == 0, 1.0, row_sums)
-        probs = probs / row_sums
-    return probs
+    def forward(self, logits):
+        return logits / self.temperature
 
 
-def _to_probs_2d(labels: np.ndarray, probs_arr: np.ndarray) -> np.ndarray:
+def fit_temperature(logits, labels, max_iter=50):
+    logits = torch.tensor(logits, dtype=torch.float32)
+    labels = torch.tensor(labels, dtype=torch.long)
 
-    if probs_arr.ndim == 1:
-        if np.unique(labels).size > 2:
-            raise ValueError("1D probabilities only valid for binary classification")
-        probs_arr = np.stack([1.0 - probs_arr, probs_arr], axis=1)
+    model = TemperatureScaler()
 
-    elif probs_arr.ndim != 2:
-        raise ValueError("probs must be 1D or 2D")
+    optimizer = optim.LBFGS([model.temperature], lr=0.01, max_iter=max_iter)
 
-    probs_arr = _normalize_probs(probs_arr)
+    def loss_fn():
+        optimizer.zero_grad()
+        scaled_logits = model(logits)
+        loss = nn.CrossEntropyLoss()(scaled_logits, labels)
+        loss.backward()
+        return loss
 
-    n_classes = np.unique(labels).size
+    optimizer.step(loss_fn)
 
-    if probs_arr.shape[1] < n_classes:
-        raise ValueError("Probability columns fewer than number of label classes")
+    T = model.temperature.item()
 
-    return probs_arr
+    logger.info(f"[CALIBRATION] Learned temperature: {T:.4f}")
+
+    return T
+
+
+def apply_temperature(logits, T):
+    return logits / T
 
 
 # =========================================================
-# ECE
+# ACTIVATIONS
 # =========================================================
+def softmax(x):
+    e = np.exp(x - np.max(x, axis=1, keepdims=True))
+    return e / e.sum(axis=1, keepdims=True)
 
-def expected_calibration_error(
-    y_true: Iterable,
-    probs: Iterable,
-    n_bins: int | None = None
-) -> float:
 
-    labels, probs_arr = _validate_inputs(y_true, probs)
+def sigmoid(x):
+    return 1 / (1 + np.exp(-x))
 
-    if n_bins is None:
-        n_bins = _auto_bins(len(labels))
-    else:
-        _validate_bins(n_bins)
 
-    probs_2d = _to_probs_2d(labels, probs_arr)
+# =========================================================
+# CLASS-WISE ECE (NEW 🔥)
+# =========================================================
+def classwise_ece(y_true, probs, n_bins=10):
+    y, p = _validate_inputs(y_true, probs)
+
+    num_classes = p.shape[1]
+    results = {}
+
+    for c in range(num_classes):
+        y_binary = (y == c).astype(int)
+        p_class = p[:, c]
+
+        ece = expected_calibration_error(y_binary, p_class, n_bins)
+        results[f"class_{c}"] = ece
+
+    return results
+
+
+# =========================================================
+# MAIN ECE
+# =========================================================
+def expected_calibration_error(y_true, probs, n_bins=10):
+    y, p = _validate_inputs(y_true, probs)
 
     metric = CalibrationMetrics(CalibrationMetricConfig(n_bins=n_bins))
 
     ece = metric.expected_calibration_error(
-        torch.from_numpy(probs_2d.astype(np.float32)),
-        torch.from_numpy(labels),
+        torch.from_numpy(p.astype(np.float32)),
+        torch.from_numpy(y),
     )
 
-    # ensure float output
-    if isinstance(ece, torch.Tensor):
-        ece = float(ece.item())
-
-    logger.info("Expected Calibration Error (ECE): %.6f", ece)
-
-    return float(ece)
+    return float(ece.item() if isinstance(ece, torch.Tensor) else ece)
 
 
 # =========================================================
-# RELIABILITY DIAGRAM
+# FULL CALIBRATION PIPELINE (UPGRADED 🔥)
 # =========================================================
-
-def plot_reliability_diagram(
+def compute_calibration(
+    logits: Optional[np.ndarray],
     y_true: Iterable,
-    probs: Iterable,
-    save_path: str | Path,
-    n_bins: int | None = None
-) -> Path:
+    task_type: str,
+    *,
+    apply_temp_scaling: bool = True,
+    n_bins: int = 10,
+) -> Dict[str, Any]:
 
-    labels, probs_arr = _validate_inputs(y_true, probs)
+    y_true = np.asarray(y_true)
 
-    if n_bins is None:
-        n_bins = _auto_bins(len(labels))
+    if logits is None:
+        raise ValueError("logits required for calibration pipeline")
+
+    # ---------------------------
+    # TEMPERATURE SCALING
+    # ---------------------------
+    if apply_temp_scaling and task_type != "multilabel":
+        T = fit_temperature(logits, y_true)
+        logits = apply_temperature(logits, T)
     else:
-        _validate_bins(n_bins)
+        T = None
 
-    probs_2d = _to_probs_2d(labels, probs_arr)
+    # ---------------------------
+    # PROBS
+    # ---------------------------
+    if task_type == "multiclass":
+        probs = softmax(logits)
+    elif task_type == "binary":
+        probs = sigmoid(logits)
+    else:
+        probs = sigmoid(logits)
 
-    metric = CalibrationMetrics(CalibrationMetricConfig(n_bins=n_bins))
+    results = {}
 
-    stats = metric.reliability_statistics(
-        torch.from_numpy(probs_2d.astype(np.float32)),
-        torch.from_numpy(labels),
-    )
+    # ---------------------------
+    # GLOBAL ECE
+    # ---------------------------
+    if task_type == "multilabel":
+        results["ece"] = float(
+            np.mean([
+                expected_calibration_error(y_true[:, i], probs[:, i], n_bins)
+                for i in range(probs.shape[1])
+            ])
+        )
+    else:
+        results["ece"] = expected_calibration_error(y_true, probs, n_bins)
 
-    prob_true = np.asarray(stats["bin_accuracy"], dtype=np.float64)
-    prob_pred = np.asarray(stats["bin_confidence"], dtype=np.float64)
+    # ---------------------------
+    # CLASS-WISE ECE
+    # ---------------------------
+    if probs.ndim == 2:
+        results["classwise_ece"] = classwise_ece(y_true, probs, n_bins)
 
-    # remove NaNs (empty bins)
-    mask = np.isfinite(prob_true) & np.isfinite(prob_pred)
-    prob_true = prob_true[mask]
-    prob_pred = prob_pred[mask]
+    # ---------------------------
+    # TEMPERATURE
+    # ---------------------------
+    if T is not None:
+        results["temperature"] = float(T)
 
-    output_path = Path(save_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # isolated figure (no global side effects)
-    fig, ax = plt.subplots(figsize=(6, 6))
-
-    ax.plot(prob_pred, prob_true, marker="o", label="Model")
-    ax.plot([0, 1], [0, 1], linestyle="--", label="Perfect Calibration")
-
-    ax.set_xlabel("Confidence")
-    ax.set_ylabel("Accuracy")
-    ax.set_title("Reliability Diagram")
-    ax.legend()
-
-    fig.tight_layout()
-    fig.savefig(output_path)
-    plt.close(fig)
-
-    logger.info("Reliability diagram saved to %s", output_path)
-
-    return output_path
+    return results

@@ -1,0 +1,211 @@
+# src/analysis/schemas/output_models.py
+
+from __future__ import annotations
+
+from typing import Dict, Any
+from pydantic import BaseModel, Field
+import numpy as np
+
+from src.analysis.feature_schema import (
+    RHETORICAL_DEVICE_KEYS,
+    ARGUMENT_MINING_KEYS,
+    CONTEXT_OMISSION_KEYS,
+    DISCOURSE_COHERENCE_KEYS,
+    EMOTION_TARGET_KEYS,
+    FRAMING_KEYS,
+    INFORMATION_DENSITY_KEYS,
+    INFORMATION_OMISSION_KEYS,
+    IDEOLOGICAL_LANGUAGE_KEYS,
+    NARRATIVE_CONFLICT_KEYS,
+    NARRATIVE_PROPAGATION_KEYS,
+    NARRATIVE_TEMPORAL_KEYS,
+    SOURCE_ATTRIBUTION_KEYS,
+    PROPAGANDA_PATTERN_KEYS,
+    make_vector,
+)
+
+
+# =========================================================
+# Base Model
+# =========================================================
+
+class FeatureModel(BaseModel):
+    """Base class for all feature models"""
+
+    def to_dict(self) -> Dict[str, float]:
+        return self.model_dump()
+
+    def to_vector(self, keys) -> np.ndarray:
+        return make_vector(self.model_dump(), keys)
+
+
+# =========================================================
+# Individual Feature Models
+# =========================================================
+
+class RhetoricalFeatures(FeatureModel):
+    rhetoric_exaggeration_score: float = 0.0
+    rhetoric_loaded_language_score: float = 0.0
+    rhetoric_emotional_appeal_score: float = 0.0
+    rhetoric_fear_appeal_score: float = 0.0
+    rhetoric_intensifier_ratio: float = 0.0
+    rhetoric_scapegoating_score: float = 0.0
+    rhetoric_false_dilemma_score: float = 0.0
+    rhetoric_punctuation_score: float = 0.0
+
+    def vector(self):
+        return self.to_vector(RHETORICAL_DEVICE_KEYS)
+
+
+class ArgumentFeatures(FeatureModel):
+    argument_claim_ratio: float = 0.0
+    argument_premise_ratio: float = 0.0
+    argument_support_ratio: float = 0.0
+    argument_contrast_ratio: float = 0.0
+    argument_rebuttal_ratio: float = 0.0
+    argument_verb_density: float = 0.0
+    argument_clause_density: float = 0.0
+    argument_complexity: float = 0.0
+
+    def vector(self):
+        return self.to_vector(ARGUMENT_MINING_KEYS)
+
+
+class ContextFeatures(FeatureModel):
+    context_vague_reference_ratio: float = 0.0
+    context_attribution_ratio: float = 0.0
+    context_evidence_ratio: float = 0.0
+    context_uncertainty_ratio: float = 0.0
+    context_quote_ratio: float = 0.0
+    context_entity_ratio: float = 0.0
+    context_entity_type_diversity: float = 0.0
+    context_grounding_score: float = 0.0
+
+    def vector(self):
+        return self.to_vector(CONTEXT_OMISSION_KEYS)
+
+
+class DiscourseFeatures(FeatureModel):
+    sentence_coherence: float = 0.0
+    topic_drift: float = 0.0
+    narrative_continuity: float = 0.0
+    discourse_transition_ratio: float = 0.0
+
+    def vector(self):
+        return self.to_vector(DISCOURSE_COHERENCE_KEYS)
+
+
+class EmotionFeatures(FeatureModel):
+    emotion_target_diversity: float = 0.0
+    emotion_target_focus: float = 0.0
+    emotion_expression_ratio: float = 0.0
+    emotion_type_diversity: float = 0.0
+    dominant_emotion_strength: float = 0.0
+
+    def vector(self):
+        return self.to_vector(EMOTION_TARGET_KEYS)
+
+
+class FramingFeatures(FeatureModel):
+    frame_conflict_score: float = 0.0
+    frame_economic_score: float = 0.0
+    frame_moral_score: float = 0.0
+    frame_human_interest_score: float = 0.0
+    frame_security_score: float = 0.0
+    frame_dominance_score: float = 0.0
+    frame_diversity_score: float = 0.0
+
+    def vector(self):
+        return self.to_vector(FRAMING_KEYS)
+
+
+class InformationFeatures(FeatureModel):
+    factual_density: float = 0.0
+    opinion_density: float = 0.0
+    claim_density: float = 0.0
+    rhetorical_density: float = 0.0
+    emotion_density: float = 0.0
+    modal_density: float = 0.0
+    rhetorical_punctuation_density: float = 0.0
+    information_emotion_ratio: float = 0.0
+    information_emotion_ratio_normalized: float = 0.0
+
+    def vector(self):
+        return self.to_vector(INFORMATION_DENSITY_KEYS)
+
+
+class IdeologyFeatures(FeatureModel):
+    liberty_language_ratio: float = 0.0
+    equality_language_ratio: float = 0.0
+    tradition_language_ratio: float = 0.0
+    anti_elite_language_ratio: float = 0.0
+    liberty_vs_equality_balance: float = 0.0
+    ideology_phrase_density: float = 0.0
+
+    def vector(self):
+        return self.to_vector(IDEOLOGICAL_LANGUAGE_KEYS)
+
+
+class SourceAttributionFeatures(FeatureModel):
+    expert_attribution_ratio: float = 0.0
+    anonymous_source_ratio: float = 0.0
+    credibility_indicator_ratio: float = 0.0
+    attribution_verb_ratio: float = 0.0
+    quotation_ratio: float = 0.0
+    named_source_ratio: float = 0.0
+    source_credibility_balance: float = 0.0
+
+    def vector(self):
+        return self.to_vector(SOURCE_ATTRIBUTION_KEYS)
+
+
+# =========================================================
+# Aggregated Models
+# =========================================================
+
+class PropagandaFeatures(FeatureModel):
+    fear_propaganda_score: float = 0.0
+    scapegoating_score: float = 0.0
+    polarization_score: float = 0.0
+    emotional_amplification_score: float = 0.0
+    narrative_imbalance_score: float = 0.0
+
+    def vector(self):
+        return self.to_vector(PROPAGANDA_PATTERN_KEYS)
+
+
+class BiasProfile(BaseModel):
+    bias: Dict[str, float]
+    emotion: Dict[str, float]
+    narrative: Dict[str, float]
+    discourse: Dict[str, float]
+    ideology: Dict[str, float]
+    metrics: Dict[str, float]
+    bias_score: float
+
+
+# =========================================================
+# Pipeline Output
+# =========================================================
+
+class PipelineOutput(BaseModel):
+    rhetorical: Dict[str, float] = Field(default_factory=dict)
+    argument: Dict[str, float] = Field(default_factory=dict)
+    context: Dict[str, float] = Field(default_factory=dict)
+    discourse: Dict[str, float] = Field(default_factory=dict)
+    emotion: Dict[str, float] = Field(default_factory=dict)
+    framing: Dict[str, float] = Field(default_factory=dict)
+    information: Dict[str, float] = Field(default_factory=dict)
+    ideology: Dict[str, float] = Field(default_factory=dict)
+    source: Dict[str, float] = Field(default_factory=dict)
+
+
+# =========================================================
+# Final System Output
+# =========================================================
+
+class FullAnalysisOutput(BaseModel):
+    features: PipelineOutput
+    profile: BiasProfile
+    propaganda: PropagandaFeatures
+    meta: Dict[str, Any] = Field(default_factory=dict)

@@ -1,23 +1,5 @@
 """
-File Name: pdf_report.py
-Module: TruthLens AI - PDF Evaluation Report
-Description:
-    Generates a structured PDF report from TruthLens evaluation results.
-    The report includes task-level metrics and overall summary metrics.
-    Designed for experiment documentation, research artifacts, and
-    reproducible evaluation reports.
-Dependencies:
-    reportlab.platypus
-    reportlab.lib.styles
-    reportlab.lib.units
-    pathlib
-    logging
-    typing
-Inputs:
-    report: dictionary containing evaluation results
-    output_path: path where the PDF report will be saved
-Outputs:
-    PDF report file
+File: pdf_report.py
 """
 
 from __future__ import annotations
@@ -26,136 +8,137 @@ import logging
 from pathlib import Path
 from typing import Dict, Any
 
-try:
-    from reportlab.platypus import (
-        SimpleDocTemplate,
-        Paragraph,
-        Spacer,
-        Table,
-        TableStyle,
-    )
-    from reportlab.lib.styles import getSampleStyleSheet
-    from reportlab.lib.units import inch
-    from reportlab.lib import colors
-except ImportError:  # pragma: no cover - optional dependency
-    SimpleDocTemplate = None
-    Paragraph = None
-    Spacer = None
-    Table = None
-    TableStyle = None
-    getSampleStyleSheet = None
-    inch = None
-    colors = None
-
+from reportlab.platypus import (
+    SimpleDocTemplate,
+    Paragraph,
+    Spacer,
+    Table,
+    TableStyle,
+)
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.lib import colors
 
 logger = logging.getLogger(__name__)
 
 
-def _ensure_reportlab() -> None:
-    if SimpleDocTemplate is None:
-        raise RuntimeError(
-            "ReportLab is not installed. Install 'reportlab' to generate PDF reports."
-        )
+# =========================================================
+# TABLE UTILS
+# =========================================================
+def dict_to_table(data: Dict[str, Any]):
 
+    rows = [["Metric", "Value"]]
 
-def _validate_report(report: Dict[str, Any]) -> None:
-    """
-    Validate report structure.
-    """
+    for k, v in data.items():
+        if isinstance(v, dict):
+            rows.append([k, ""])
+            for sub_k, sub_v in v.items():
+                rows.append([f"  {sub_k}", str(sub_v)])
+        else:
+            rows.append([k, str(v)])
 
-    if not isinstance(report, dict):
-        raise TypeError("Report must be a dictionary.")
-
-    if "tasks" not in report:
-        raise ValueError("Report must contain 'tasks' section.")
-
-
-def _metrics_table(metrics: Dict[str, Any]):
-    """
-    Convert metrics dictionary into a ReportLab table.
-    """
-
-    _ensure_reportlab()
-
-    data = [["Metric", "Value"]]
-
-    for key, value in metrics.items():
-        data.append([str(key), str(value)])
-
-    table = Table(data, colWidths=[3 * inch, 3 * inch])
+    table = Table(rows, colWidths=[3 * inch, 3 * inch])
 
     table.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ]
-        )
+        TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ])
     )
 
     return table
 
 
-def generate_pdf_report(
-    report: Dict[str, Any],
-    output_path: str | Path
-) -> Path:
-    """
-    Generate PDF evaluation report.
-    """
+# =========================================================
+# SECTION RENDERERS
+# =========================================================
+def render_tasks(elements, tasks, styles):
+    elements.append(Paragraph("Task Performance", styles["Heading1"]))
+    elements.append(Spacer(1, 10))
 
-    _validate_report(report)
-    _ensure_reportlab()
+    for task, metrics in tasks.items():
+        elements.append(Paragraph(f"Task: {task}", styles["Heading2"]))
+        elements.append(dict_to_table(metrics))
+        elements.append(Spacer(1, 12))
+
+
+def render_summary(elements, summary, styles):
+    elements.append(Paragraph("Overall Summary", styles["Heading1"]))
+    elements.append(dict_to_table(summary))
+    elements.append(Spacer(1, 12))
+
+
+def render_section(elements, title, data, styles):
+    if not data:
+        return
+
+    elements.append(Paragraph(title, styles["Heading1"]))
+    elements.append(dict_to_table(data))
+    elements.append(Spacer(1, 12))
+
+
+# =========================================================
+# MAIN
+# =========================================================
+def generate_pdf_report(report: Dict[str, Any], output_path):
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     styles = getSampleStyleSheet()
-
     elements = []
 
-    elements.append(
-        Paragraph("TruthLens AI Evaluation Report", styles["Title"])
-    )
-
+    # Title
+    elements.append(Paragraph("TruthLens AI Evaluation Report", styles["Title"]))
     elements.append(Spacer(1, 20))
 
-    tasks = report.get("tasks", {})
+    # ---------------------------
+    # TASKS
+    # ---------------------------
+    render_tasks(elements, report.get("tasks", {}), styles)
 
-    for task, metrics in tasks.items():
-
-        elements.append(
-            Paragraph(f"Task: {task}", styles["Heading2"])
-        )
-
-        if isinstance(metrics, dict):
-            elements.append(_metrics_table(metrics))
-        else:
-            elements.append(
-                Paragraph(str(metrics), styles["BodyText"])
-            )
-
-        elements.append(Spacer(1, 16))
-
+    # ---------------------------
+    # SUMMARY
+    # ---------------------------
     if "summary" in report:
+        render_summary(elements, report["summary"], styles)
 
-        elements.append(
-            Paragraph("Overall Summary", styles["Heading2"])
-        )
+    # ---------------------------
+    # CALIBRATION
+    # ---------------------------
+    render_section(
+        elements,
+        "Calibration",
+        report.get("calibration"),
+        styles
+    )
 
-        elements.append(
-            _metrics_table(report["summary"])
-        )
+    # ---------------------------
+    # UNCERTAINTY
+    # ---------------------------
+    render_section(
+        elements,
+        "Uncertainty",
+        report.get("uncertainty"),
+        styles
+    )
 
-        elements.append(Spacer(1, 16))
+    # ---------------------------
+    # TASK CORRELATION
+    # ---------------------------
+    render_section(
+        elements,
+        "Task Correlation",
+        report.get("task_correlation"),
+        styles
+    )
 
-    try:
-        doc = SimpleDocTemplate(str(output_path))
-        doc.build(elements)
-        logger.info("PDF evaluation report generated at %s", output_path)
-    except Exception as exc:
-        logger.exception("Failed to generate PDF report")
-        raise RuntimeError("PDF report generation failed") from exc
+    # ---------------------------
+    # BUILD PDF
+    # ---------------------------
+    doc = SimpleDocTemplate(str(output_path))
+    doc.build(elements)
+
+    logger.info("PDF report generated: %s", output_path)
 
     return output_path

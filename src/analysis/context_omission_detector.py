@@ -1,306 +1,160 @@
-"""
-File Name: context_omission_detector.py
-Module: Discourse Analysis - Context Omission Detection
-Description:
-    Detects potential context omission patterns in text for the TruthLens AI
-    system. The module analyzes linguistic signals that often indicate that
-    important contextual information may be missing, simplified, or selectively
-    presented. It examines discourse cues such as vague references, missing
-    attribution, limited evidence markers, and abrupt claims without supporting
-    context.
-
-Dependencies:
-    logging
-    typing
-    collections
-    numpy
-    spacy
-    re
-
-Inputs:
-    Raw text string
-
-Outputs:
-    Dictionary of context omission features and optional numerical vector
-"""
+# src/analysis/context_omission_detector.py
 
 from __future__ import annotations
 
 import logging
 import re
-from collections import Counter
-from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict
 
 import numpy as np
-from spacy.language import Language
-from spacy.tokens import Doc
 
-from src.analysis._nlp import get_nlp
-from src.analysis._text_features import (
-    extract_alpha_lemmas,
-    build_counter,
-)
+from src.analysis.base_analyzer import BaseAnalyzer
+from src.analysis.feature_context import FeatureContext
+from src.analysis._text_features import term_ratio, phrase_match_count, normalize_lexicon_terms
 from src.analysis.feature_schema import CONTEXT_OMISSION_KEYS, make_vector
 
 logger = logging.getLogger(__name__)
 
 
-# ------------------------------------------------------------
-# Configuration
-# ------------------------------------------------------------
-
-@dataclass(slots=True)
-class ContextOmissionConfig:
-
-    spacy_model: str = "en_core_web_sm"
-    disable_components: tuple = ()
-    normalize_ratios: bool = True
-
-
-# ------------------------------------------------------------
-# Detector
-# ------------------------------------------------------------
-
-class ContextOmissionDetector:
-
-    # ----------------------------------------------------
-    # Vague references (unverifiable sources)
-    # ----------------------------------------------------
+class ContextOmissionDetector(BaseAnalyzer):
 
     VAGUE_REFERENCES = {
-
         "they","people","many","some","others",
         "experts","critics","sources","analysts",
         "officials","insiders","observers",
         "commentators","reportedly","allegedly",
-
         "authorities","investigators","researchers",
         "witnesses","participants","leaders",
         "lawmakers","politicians","administration",
-
         "supporters","opponents","activists",
         "analysts say","critics say","supporters say",
         "many believe","some claim","others argue",
-
         "it is said","it is believed","it is thought",
         "rumor","rumors","speculation"
     }
 
-    # ----------------------------------------------------
-    # Attribution signals (source referencing)
-    # ----------------------------------------------------
-
     ATTRIBUTION_MARKERS = {
-
-        "according","according to",
-        "reported","reports","reportedly",
-        "stated","state","stating",
-        "claimed","claim","claims",
-        "said","say","says",
-        "noted","notes",
-        "explained","explain",
-        "announced","announce",
-        "revealed","reveal",
-        "confirmed","confirm",
-        "suggested","suggest",
-
-        "told","told reporters",
-        "wrote","writes",
-        "indicated","indicates",
-        "acknowledged","acknowledges",
-        "commented","comments",
-        "warned","warns"
+        "according","according to","reported","reports","reportedly",
+        "stated","state","stating","claimed","claim","claims",
+        "said","say","says","noted","notes",
+        "explained","explain","announced","announce",
+        "revealed","reveal","confirmed","confirm",
+        "suggested","suggest","told","wrote","writes",
+        "indicated","acknowledged","commented","warned"
     }
-
-    # ----------------------------------------------------
-    # Evidence signals (empirical grounding)
-    # ----------------------------------------------------
 
     EVIDENCE_MARKERS = {
-
-        "data","dataset",
-        "study","studies",
-        "report","reports",
-        "research","researchers",
-        "analysis","analysis shows",
-        "evidence","empirical evidence",
-        "statistics","statistical",
-        "survey","poll","polling",
-        "experiment","experiments",
-        "findings","results","outcomes",
-
-        "according to data",
-        "according to research",
-        "research suggests",
-        "research shows",
-        "data indicates",
-        "data suggests",
-        "statistics indicate",
-        "analysis indicates",
-        "evidence suggests"
+        "data","dataset","study","studies","report","reports",
+        "research","analysis","evidence","statistics",
+        "survey","poll","experiment","findings","results",
+        "according to data","according to research",
+        "research suggests","data indicates",
+        "statistics indicate","evidence suggests"
     }
 
-    # ----------------------------------------------------
-    # Uncertainty / speculation signals
-    # ----------------------------------------------------
-
     UNCERTAINTY_MARKERS = {
-
         "allegedly","reportedly","apparently",
-        "possibly","potentially",
-        "likely","unlikely",
-        "rumored","rumour","rumor",
-        "speculation","speculative",
-
-        "suggests","appears","seems",
-        "may","might","could",
-        "can","possibly","perhaps",
-
-        "it appears","it seems",
-        "it is possible",
-        "it is believed",
-        "it is thought",
-        "it remains unclear"
+        "possibly","potentially","likely",
+        "rumor","speculation","suggests",
+        "appears","seems","may","might",
+        "could","perhaps","it seems","it appears",
+        "it is possible","it remains unclear"
     }
 
     QUOTE_PATTERN = re.compile(r'"')
 
-    def __init__(self, config: ContextOmissionConfig | None = None):
-
-        self.config = config or ContextOmissionConfig()
-
-        self.nlp: Language = get_nlp(
-            self.config.spacy_model,
-            disable=self.config.disable_components,
-        )
-
-        logger.info(
-            "ContextOmissionDetector initialized | model=%s",
-            self.config.spacy_model
-        )
+    def __init__(self):
+        # Normalize phrases once (important)
+        self.vague_phrases = normalize_lexicon_terms(self.VAGUE_REFERENCES)
+        self.evidence_phrases = normalize_lexicon_terms(self.EVIDENCE_MARKERS)
 
     # ------------------------------------------------------------
 
-    def analyze(self, text: str, return_vector: bool = False):
+    def analyze(self, ctx: FeatureContext) -> Dict[str, float]:
 
-        if not isinstance(text, str):
-            raise TypeError("text must be a string")
-
-        text = text.strip()
-
-        if not text:
-            features = {k: 0.0 for k in CONTEXT_OMISSION_KEYS}
-            return (
-                features,
-                make_vector(features, CONTEXT_OMISSION_KEYS),
-            ) if return_vector else features
-
-        doc: Doc = self.nlp(text)
-        return self.analyze_doc(doc)
-
-    # ------------------------------------------------------------
-
-    def analyze_doc(self, doc: Doc) -> Dict[str, float]:
-        """Compute context omission features from a pre-built spaCy Doc.
-
-        Args:
-            doc: A processed spaCy Doc instance.
-
-        Returns:
-            Dictionary of context omission feature names to float values.
-        """
-
-        tokens = extract_alpha_lemmas(doc)
-        token_counts = build_counter(tokens)
-        n_tokens = len(tokens)
+        if ctx.n_tokens == 0:
+            return self._empty_features()
 
         features: Dict[str, float] = {}
 
-        vague_hits = self._count_lexicon_hits(doc.text, tokens, self.VAGUE_REFERENCES)
-        attribution_hits = self._count_lexicon_hits(doc.text, tokens, self.ATTRIBUTION_MARKERS)
-        evidence_hits = self._count_lexicon_hits(doc.text, tokens, self.EVIDENCE_MARKERS)
-        uncertainty_hits = self._count_lexicon_hits(doc.text, tokens, self.UNCERTAINTY_MARKERS)
-
-        features["context_vague_reference_ratio"] = float(vague_hits / max(n_tokens, 1))
-        features["context_attribution_ratio"] = float(attribution_hits / max(n_tokens, 1))
-        features["context_evidence_ratio"] = float(evidence_hits / max(n_tokens, 1))
-        features["context_uncertainty_ratio"] = float(uncertainty_hits / max(n_tokens, 1))
-
-        features["context_quote_ratio"] = self._quote_ratio(doc.text)
-
-        features.update(self._entity_context_features(doc))
-
-        # contextual grounding score
-        features["context_grounding_score"] = (
-            float(
-                np.clip(
-                    0.5 * features["context_evidence_ratio"]
-                    + 0.5 * features["context_entity_ratio"],
-                    0.0,
-                    1.0,
-                )
-            )
+        #  Fast token-based ratios
+        features["context_vague_reference_ratio"] = term_ratio(
+            ctx.token_counts, ctx.n_tokens, self.VAGUE_REFERENCES
         )
 
-        logger.debug("Context omission features computed")
+        features["context_attribution_ratio"] = term_ratio(
+            ctx.token_counts, ctx.n_tokens, self.ATTRIBUTION_MARKERS
+        )
+
+        features["context_uncertainty_ratio"] = term_ratio(
+            ctx.token_counts, ctx.n_tokens, self.UNCERTAINTY_MARKERS
+        )
+
+        #  Phrase-based (cached regex)
+        features["context_evidence_ratio"] = self._phrase_ratio(
+            ctx.text_lower, ctx.n_tokens, self.evidence_phrases
+        )
+
+        #  Quote density
+        features["context_quote_ratio"] = self._quote_ratio(ctx.text_lower, ctx.n_tokens)
+
+        #  Entity features (reuse doc)
+        features.update(self._entity_context_features(ctx))
+
+        #  Grounding score
+        features["context_grounding_score"] = float(
+            np.clip(
+                0.5 * features["context_evidence_ratio"]
+                + 0.5 * features["context_entity_ratio"],
+                0.0,
+                1.0,
+            )
+        )
 
         return features
 
     # ------------------------------------------------------------
-    # Lexical ratios (retained in case subclasses call this method)
-    # ------------------------------------------------------------
 
-    def _term_ratio(
-        self,
-        token_counts: Counter,
-        tokens: List[str],
-        lexicon: set,
-    ) -> float:
-
-        if not tokens:
-            return 0.0
-
-        hits = sum(token_counts[t] for t in lexicon if t in token_counts)
-
-        return float(hits / max(len(tokens), 1))
-
-    def _count_lexicon_hits(self, text: str, tokens: List[str], lexicon: set[str]) -> int:
-        token_counts = Counter(tokens)
-        text_lower = text.lower()
-        hits = 0
-
-        for term in lexicon:
-            if " " in term:
-                hits += text_lower.count(term)
-            else:
-                hits += token_counts.get(term, 0)
-
-        return hits
-
-    def _quote_ratio(self, text: str) -> float:
-
-        quote_count = len(self.QUOTE_PATTERN.findall(text))
-
-        return float(quote_count / max(len(text.split()), 1))
+    def _phrase_ratio(self, text_lower: str, n_tokens: int, phrases: set) -> float:
+        hits = phrase_match_count(text_lower, phrases)
+        return float(hits / n_tokens)
 
     # ------------------------------------------------------------
 
-    def _entity_context_features(self, doc: Doc) -> Dict[str, float]:
+    def _quote_ratio(self, text_lower: str, n_tokens: int) -> float:
+        quotes = len(self.QUOTE_PATTERN.findall(text_lower))
+        return float(quotes / max(n_tokens, 1))
 
-        entities = list(doc.ents)
+    # ------------------------------------------------------------
+
+    def _entity_context_features(self, ctx: FeatureContext) -> Dict[str, float]:
+
+        doc = ctx.doc
 
         total_tokens = max(len(doc), 1)
 
-        entity_ratio = len(entities) / total_tokens
+        entity_count = len(doc.ents)
+        entity_ratio = entity_count / total_tokens
 
-        entity_types = Counter(ent.label_ for ent in entities)
-
-        diversity = len(entity_types)
+        entity_types = {ent.label_ for ent in doc.ents}
 
         return {
             "context_entity_ratio": float(entity_ratio),
-            "context_entity_type_diversity": float(diversity),
+            "context_entity_type_diversity": float(len(entity_types)),
+        }
+
+    # ------------------------------------------------------------
+
+    def _empty_features(self) -> Dict[str, float]:
+        return {
+            "context_vague_reference_ratio": 0.0,
+            "context_attribution_ratio": 0.0,
+            "context_evidence_ratio": 0.0,
+            "context_uncertainty_ratio": 0.0,
+            "context_quote_ratio": 0.0,
+            "context_entity_ratio": 0.0,
+            "context_entity_type_diversity": 0.0,
+            "context_grounding_score": 0.0,
         }
 
 
@@ -309,5 +163,4 @@ class ContextOmissionDetector:
 # ------------------------------------------------------------
 
 def context_feature_vector(features: Dict[str, float]) -> np.ndarray:
-
     return make_vector(features, CONTEXT_OMISSION_KEYS)

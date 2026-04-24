@@ -1,204 +1,188 @@
-"""
-File Name: score_normalizer.py
-Module: TruthLens AI - Aggregation Score Normalizer
-Description:
-    Provides normalization utilities for signals produced by different
-    TruthLens subsystems before aggregation.
-
-    Since analysis modules may output values on different scales
-    (e.g., emotion intensity 0–5, graph centrality 0–100, bias score 0–1),
-    this module standardizes them using multiple normalization techniques.
-
-    Supported normalization methods:
-        • Min-Max normalization
-        • Z-score normalization
-        • Robust scaling (median / IQR)
-        • Score clipping 
-
-Dependencies:
-    logging
-    typing
-    numpy
-
-Inputs:
-    numeric score vectors or iterables
-
-Outputs:
-    normalized numpy arrays
-"""
-
 from __future__ import annotations
 
 import logging
-from typing import Iterable
+from typing import Iterable, Optional, Dict, Any, Union
 
 import numpy as np
+
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
 
 
 logger = logging.getLogger(__name__)
 
-
 EPS = 1e-12
 
 
-def _to_array(values: Iterable[float]) -> np.ndarray:
-    """Convert input to numpy array with validation.
+ArrayLike = Union[np.ndarray, "torch.Tensor"]
 
-    Non-finite values (NaN / ±inf) that can originate from upstream analysis
-    modules are replaced with 0.0 and logged as a warning rather than raising
-    an exception, keeping the pipeline alive.
+
+# =========================
+# BASE NORMALIZER
+# =========================
+class ScoreNormalizer:
+    """
+    Production-grade normalizer supporting:
+    - fit / transform paradigm
+    - numpy + torch
+    - strict validation
     """
 
-    try:
-        arr = np.asarray(list(values), dtype=np.float32)
-    except Exception as exc:
-        raise TypeError("values must be numeric iterable") from exc
-
-    if arr.size == 0:
-        raise ValueError("values cannot be empty")
-
-    if not np.isfinite(arr).all():
-        logger.warning(
-            "Non-finite values detected in normalizer input; replacing with 0.0"
-        )
-        arr = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=0.0)
-
-    return arr
-
-
-def normalize_minmax(
-    values: Iterable[float],
-    *,
-    feature_range: tuple[float, float] = (0.0, 1.0),
-) -> np.ndarray:
-    """
-    Apply Min-Max normalization.
-
-    x' = (x - min) / (max - min)
-    """
-
-    arr = _to_array(values)
-
-    if (
-        not isinstance(feature_range, tuple)
-        or len(feature_range) != 2
-        or not all(isinstance(x, (int, float)) for x in feature_range)
+    def __init__(
+        self,
+        method: str = "minmax",
+        *,
+        strict: bool = False,
+        feature_range: tuple[float, float] = (0.0, 1.0),
     ):
-        raise TypeError("feature_range must be a tuple of two numeric values")
+        self.method = method.lower()
+        self.strict = strict
+        self.feature_range = feature_range
 
-    a, b = float(feature_range[0]), float(feature_range[1])
-    if not np.isfinite([a, b]).all():
-        raise ValueError("feature_range values must be finite")
-    if not a < b:
-        raise ValueError("feature_range must satisfy a < b")
+        self.fitted = False
+        self.stats: Dict[str, Any] = {}
 
-    vmin = float(np.min(arr))
-    vmax = float(np.max(arr))
+        logger.info("[Normalizer] Initialized | method=%s", self.method)
 
-    if abs(vmax - vmin) < EPS:
-        logger.warning("Min-max normalization encountered constant values")
-        midpoint = (a + b) / 2.0
-        return np.full_like(arr, fill_value=midpoint, dtype=np.float32)
+    # =========================
+    # UTIL
+    # =========================
+    def _to_array(self, values: Iterable[float]) -> np.ndarray:
+        try:
+            arr = np.asarray(list(values), dtype=np.float32)
+        except Exception as exc:
+            raise TypeError("values must be numeric iterable") from exc
 
-    norm = (arr - vmin) / (vmax - vmin)
-    norm = norm * (b - a) + a
+        if arr.size == 0:
+            raise ValueError("values cannot be empty")
 
-    return norm.astype(np.float32)
+        if not np.isfinite(arr).all():
+            msg = "Non-finite values detected"
+            if self.strict:
+                raise ValueError(msg)
+            logger.warning("[Normalizer] %s → applying safe fallback", msg)
+            arr = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=0.0)
+
+        return arr
+
+    def _to_tensor(self, arr: np.ndarray, like: ArrayLike):
+        if TORCH_AVAILABLE and isinstance(like, torch.Tensor):
+            return torch.from_numpy(arr).to(like.device)
+        return arr
+
+    # =========================
+    # FIT
+    # =========================
+    def fit(self, values: Iterable[float]) -> "ScoreNormalizer":
+        arr = self._to_array(values)
+
+        if self.method == "minmax":
+            self.stats["min"] = float(np.min(arr))
+            self.stats["max"] = float(np.max(arr))
+
+        elif self.method == "zscore":
+            self.stats["mean"] = float(np.mean(arr))
+            self.stats["std"] = float(np.std(arr))
+
+        elif self.method == "robust":
+            self.stats["median"] = float(np.median(arr))
+            self.stats["q1"] = float(np.percentile(arr, 25))
+            self.stats["q3"] = float(np.percentile(arr, 75))
+
+        else:
+            raise ValueError(f"Unsupported method: {self.method}")
+
+        self.fitted = True
+        logger.info("[Normalizer] Fitted | stats=%s", self.stats)
+
+        return self
+
+    # =========================
+    # TRANSFORM
+    # =========================
+    def transform(self, values: ArrayLike) -> ArrayLike:
+        if not self.fitted:
+            raise RuntimeError("Normalizer must be fitted before transform")
+
+        is_tensor = TORCH_AVAILABLE and isinstance(values, torch.Tensor)
+
+        arr = values.detach().cpu().numpy() if is_tensor else self._to_array(values)
+
+        if self.method == "minmax":
+            vmin = self.stats["min"]
+            vmax = self.stats["max"]
+
+            if abs(vmax - vmin) < EPS:
+                result = np.zeros_like(arr)
+            else:
+                a, b = self.feature_range
+                norm = (arr - vmin) / (vmax - vmin)
+                result = norm * (b - a) + a
+
+        elif self.method == "zscore":
+            mean = self.stats["mean"]
+            std = self.stats["std"]
+
+            if std < EPS:
+                result = np.zeros_like(arr)
+            else:
+                result = (arr - mean) / std
+
+        elif self.method == "robust":
+            median = self.stats["median"]
+            iqr = self.stats["q3"] - self.stats["q1"]
+
+            if abs(iqr) < EPS:
+                result = np.zeros_like(arr)
+            else:
+                result = (arr - median) / iqr
+
+        else:
+            raise ValueError(f"Unsupported method: {self.method}")
+
+        return self._to_tensor(result.astype(np.float32), values)
+
+    # =========================
+    # FIT + TRANSFORM
+    # =========================
+    def fit_transform(self, values: Iterable[float]) -> np.ndarray:
+        return self.fit(values).transform(values)
+
+    # =========================
+    # SERIALIZATION
+    # =========================
+    def state_dict(self) -> Dict[str, Any]:
+        return {
+            "method": self.method,
+            "stats": self.stats,
+            "feature_range": self.feature_range,
+        }
+
+    def load_state_dict(self, state: Dict[str, Any]) -> None:
+        self.method = state["method"]
+        self.stats = state["stats"]
+        self.feature_range = tuple(state["feature_range"])
+        self.fitted = True
 
 
-def normalize_zscore(values: Iterable[float]) -> np.ndarray:
-    """
-    Apply Z-score normalization.
-
-    z = (x - μ) / σ
-    """
-
-    arr = _to_array(values)
-
-    mean = float(np.mean(arr))
-    std = float(np.std(arr))
-
-    if std < EPS:
-        logger.warning("Z-score normalization encountered zero std")
-        return np.zeros_like(arr)
-
-    norm = (arr - mean) / std
-
-    return norm.astype(np.float32)
+# =========================
+# ADVANCED UTILITIES
+# =========================
+def log_scale(values: Iterable[float]) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float32)
+    return np.log1p(arr)
 
 
-def normalize_robust(values: Iterable[float]) -> np.ndarray:
-    """
-    Apply robust scaling using median and IQR.
-
-    x' = (x - median) / IQR
-    """
-
-    arr = _to_array(values)
-
-    median = float(np.median(arr))
-    q1 = float(np.percentile(arr, 25))
-    q3 = float(np.percentile(arr, 75))
-
-    iqr = q3 - q1
-
-    if abs(iqr) < EPS:
-        logger.warning("Robust scaling encountered zero IQR")
-        return np.zeros_like(arr)
-
-    norm = (arr - median) / iqr
-
-    return norm.astype(np.float32)
+def percentile_clip(values: Iterable[float], low=1, high=99) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float32)
+    lo = np.percentile(arr, low)
+    hi = np.percentile(arr, high)
+    return np.clip(arr, lo, hi)
 
 
-def clip_scores(
-    values: Iterable[float],
-    *,
-    min_value: float = 0.0,
-    max_value: float = 1.0,
-) -> np.ndarray:
-    """
-    Clip values to specified range.
-    """
-
-    if min_value > max_value:
-        raise ValueError("min_value must be <= max_value")
-
-    arr = _to_array(values)
-
-    clipped = np.clip(arr, min_value, max_value)
-
-    return clipped.astype(np.float32)
-
-
-def normalize_pipeline(
-    values: Iterable[float],
-    *,
-    method: str = "minmax",
-) -> np.ndarray:
-    """
-    Normalize values using selected method.
-
-    Supported methods:
-        minmax
-        zscore
-        robust
-    """
-
-    if not isinstance(method, str):
-        raise TypeError("method must be a string")
-
-    method = method.lower()
-
-    if method == "minmax":
-        return normalize_minmax(values)
-
-    if method == "zscore":
-        return normalize_zscore(values)
-
-    if method == "robust":
-        return normalize_robust(values)
-
-    raise ValueError(
-        f"Unsupported normalization method: {method}"
-    )
+def sigmoid_calibration(values: Iterable[float]) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float32)
+    return 1 / (1 + np.exp(-arr))

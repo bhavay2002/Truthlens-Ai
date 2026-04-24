@@ -1,22 +1,5 @@
 """
-File Name: report_writer.py
-Module: TruthLens AI - Evaluation Reports
-Description:
-    Utilities for writing structured evaluation reports produced by the
-    TruthLens evaluation pipeline. Supports JSON serialization, automatic
-    directory creation, validation of report structure, and safe file writes.
-    Designed for compatibility with dashboards, experiment tracking systems,
-    and research artifacts.
-Dependencies:
-    json
-    logging
-    pathlib
-    typing
-Inputs:
-    report: Dictionary containing evaluation results
-    path: Destination file path for the report
-Outputs:
-    Persisted JSON evaluation report
+File: report_writer.py
 """
 
 from __future__ import annotations
@@ -24,72 +7,132 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Dict, Any
+import json
+import datetime
 
-from src.utils import create_folder, save_json
-from src.visualization.visualize import plot_feature_importance
-
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
 
-def _validate_report(report: Dict[str, Any]) -> None:
-    """
-    Validate report structure before saving.
-    """
+# =========================================================
+# SAFE SERIALIZATION
+# =========================================================
+def _make_serializable(obj):
+    if isinstance(obj, dict):
+        return {k: _make_serializable(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_make_serializable(v) for v in obj]
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif hasattr(obj, "item"):
+        return obj.item()
+    else:
+        return obj
 
+
+# =========================================================
+# VALIDATION
+# =========================================================
+def _validate_report(report: Dict[str, Any]):
     if not isinstance(report, dict):
-        raise TypeError("Report must be a dictionary.")
-
-    if "tasks" not in report:
-        logger.warning("Report missing 'tasks' section.")
-
-    if "summary" not in report:
-        logger.warning("Report missing 'summary' section.")
+        raise TypeError("Report must be dict")
 
 
+# =========================================================
+# PLOT HELPERS
+# =========================================================
+def _plot_bar(data: Dict[str, float], save_path: Path):
+
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots()
+    ax.bar(data.keys(), data.values())
+    plt.xticks(rotation=45)
+    fig.tight_layout()
+    fig.savefig(save_path)
+    plt.close(fig)
+
+
+# =========================================================
+# MAIN
+# =========================================================
 def save_report(
     report: Dict[str, Any],
     path: str | Path,
     generate_plots: bool = True,
 ) -> Path:
-    """
-    Save evaluation report to disk in JSON format.
-    """
 
     _validate_report(report)
 
-    output_path = Path(path)
+    base_path = Path(path)
+    base_path.parent.mkdir(parents=True, exist_ok=True)
 
-    try:
-        create_folder(output_path.parent)
-        save_json(report, output_path, indent=4)
+    # ---------------------------
+    # ADD METADATA
+    # ---------------------------
+    report["metadata"] = {
+        "timestamp": datetime.datetime.utcnow().isoformat(),
+    }
 
-        logger.info("Evaluation report saved to %s", output_path)
+    # ---------------------------
+    # SAFE SERIALIZATION
+    # ---------------------------
+    safe_report = _make_serializable(report)
 
-        summary = report.get("summary")
-        if generate_plots and isinstance(summary, dict):
-            numeric_summary = {
-                k: float(v)
-                for k, v in summary.items()
-                if isinstance(v, (int, float))
-            }
-            if numeric_summary:
-                figure_path = output_path.parent / "evaluation_summary_metrics.png"
-                try:
-                    plot_feature_importance(
-                        features=list(numeric_summary.keys()),
-                        scores=list(numeric_summary.values()),
-                        top_k=min(20, len(numeric_summary)),
-                        save_path=figure_path,
-                    )
-                except Exception:
-                    logger.warning(
-                        "Summary plot generation failed; JSON report still saved.",
-                        exc_info=True,
-                    )
+    # ---------------------------
+    # SAVE JSON
+    # ---------------------------
+    with open(base_path, "w") as f:
+        json.dump(safe_report, f, indent=4)
 
-    except Exception as exc:
-        logger.exception("Failed to save evaluation report")
-        raise RuntimeError("Report writing failed") from exc
+    logger.info("Saved report JSON: %s", base_path)
 
-    return output_path
+    if not generate_plots:
+        return base_path
+
+    # ---------------------------
+    # CREATE STRUCTURE
+    # ---------------------------
+    plots_dir = base_path.parent / "plots"
+    plots_dir.mkdir(exist_ok=True)
+
+    # ---------------------------
+    # SUMMARY PLOT
+    # ---------------------------
+    summary = report.get("summary", {})
+    numeric_summary = {
+        k: float(v) for k, v in summary.items() if isinstance(v, (int, float))
+    }
+
+    if numeric_summary:
+        _plot_bar(numeric_summary, plots_dir / "summary.png")
+
+    # ---------------------------
+    # PER TASK PLOTS
+    # ---------------------------
+    tasks = report.get("tasks", {})
+
+    for task, metrics in tasks.items():
+
+        numeric = {
+            k: float(v)
+            for k, v in metrics.items()
+            if isinstance(v, (int, float))
+        }
+
+        if numeric:
+            _plot_bar(numeric, plots_dir / f"{task}_metrics.png")
+
+    # ---------------------------
+    # CALIBRATION PLOTS (IF EXISTS)
+    # ---------------------------
+    calibration = report.get("calibration", {})
+
+    for task, val in calibration.items():
+        if isinstance(val, (int, float)):
+            _plot_bar({task: val}, plots_dir / f"{task}_calibration.png")
+
+    logger.info("Report artifacts generated")
+
+    return base_path

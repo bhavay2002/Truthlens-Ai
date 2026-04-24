@@ -1,106 +1,132 @@
 """
-File Name: task_correlation.py
-Module: TruthLens AI - Task Correlation
-Description:
-    Utilities for analyzing statistical relationships between predictions of
-    multiple tasks in the TruthLens multi-task system. Computes correlation
-    matrices across task outputs and supports exporting the matrix for
-    reporting, diagnostics, and research analysis.
-Dependencies:
-    numpy
-    pandas
-    pathlib
-    logging
-    typing
-Inputs:
-    predictions: dictionary or dataframe containing task predictions
-    path: file path where the correlation matrix should be saved
-Outputs:
-    pandas DataFrame representing the task correlation matrix
+File: task_correlation.py
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Literal
 
+import numpy as np
 import pandas as pd
-
 
 logger = logging.getLogger(__name__)
 
 
-def _validate_predictions(predictions: Dict[str, Any] | pd.DataFrame) -> pd.DataFrame:
-    """
-    Validate and convert predictions into a DataFrame.
-    """
-
+# =========================================================
+# VALIDATION
+# =========================================================
+def _to_dataframe(predictions: Dict[str, Any] | pd.DataFrame) -> pd.DataFrame:
     if isinstance(predictions, pd.DataFrame):
         df = predictions.copy()
     elif isinstance(predictions, dict):
         df = pd.DataFrame(predictions)
     else:
-        raise TypeError(
-            "predictions must be a dictionary or pandas DataFrame."
-        )
+        raise TypeError("predictions must be dict or DataFrame")
 
     if df.empty:
-        raise ValueError("Prediction data cannot be empty.")
+        raise ValueError("Empty predictions")
 
     if df.shape[1] < 2:
-        raise ValueError(
-            "At least two tasks are required to compute correlations."
-        )
+        raise ValueError("Need at least 2 tasks")
 
     return df
 
 
+# =========================================================
+# PROBABILITY FLATTENING
+# =========================================================
+def _flatten_predictions(predictions: Dict[str, Any]) -> pd.DataFrame:
+    flat = {}
+
+    for task, values in predictions.items():
+        arr = np.asarray(values)
+
+        if arr.ndim == 1:
+            flat[task] = arr
+
+        elif arr.ndim == 2:
+            # multilabel or probabilities
+            for i in range(arr.shape[1]):
+                flat[f"{task}_{i}"] = arr[:, i]
+
+        else:
+            raise ValueError(f"Unsupported shape for {task}")
+
+    return pd.DataFrame(flat)
+
+
+# =========================================================
+# MAIN CORRELATION
+# =========================================================
 def compute_task_correlation(
-    predictions: Dict[str, Any] | pd.DataFrame
+    predictions: Dict[str, Any] | pd.DataFrame,
+    *,
+    use_probabilities: bool = True,
+    method: Literal["pearson", "spearman"] = "pearson",
 ) -> pd.DataFrame:
-    """
-    Compute correlation matrix between task predictions.
-    """
 
-    df = _validate_predictions(predictions)
+    logger.info("Computing advanced task correlation")
 
-    logger.info("Computing task correlation matrix")
+    if isinstance(predictions, dict) and use_probabilities:
+        df = _flatten_predictions(predictions)
+    else:
+        df = _to_dataframe(predictions)
 
-    try:
-        df_num = df.apply(pd.to_numeric, errors="coerce")
-        usable = df_num.dropna(axis=1, how="all")
-        if usable.shape[1] < 2:
-            raise ValueError(
-                "Need at least two numeric task columns for correlation."
-            )
-        corr = usable.corr(method="pearson")
-    except Exception as exc:
-        logger.exception("Failed to compute correlation matrix")
-        raise RuntimeError("Correlation computation failed") from exc
+    df = df.apply(pd.to_numeric, errors="coerce")
+    df = df.dropna(axis=1, how="all")
+
+    if df.shape[1] < 2:
+        raise ValueError("Insufficient numeric data")
+
+    corr = df.corr(method=method)
 
     return corr
 
 
+# =========================================================
+# TASK-LEVEL AGGREGATION
+# =========================================================
+def aggregate_task_correlation(corr: pd.DataFrame) -> pd.DataFrame:
+    """
+    Aggregate label-level correlations into task-level.
+    """
+
+    task_map = {}
+
+    for col in corr.columns:
+        task = col.split("_")[0]
+        task_map.setdefault(task, []).append(col)
+
+    agg = pd.DataFrame(index=task_map.keys(), columns=task_map.keys())
+
+    for t1, cols1 in task_map.items():
+        for t2, cols2 in task_map.items():
+
+            vals = []
+            for c1 in cols1:
+                for c2 in cols2:
+                    vals.append(corr.loc[c1, c2])
+
+            agg.loc[t1, t2] = np.mean(vals)
+
+    return agg.astype(float)
+
+
+# =========================================================
+# SAVE
+# =========================================================
 def save_correlation_matrix(
     corr: pd.DataFrame,
     path: str | Path
 ) -> Path:
-    """
-    Save correlation matrix to CSV.
-    """
 
-    if not isinstance(corr, pd.DataFrame):
-        raise TypeError("corr must be a pandas DataFrame.")
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
 
-    output_path = Path(path)
+    corr.to_csv(path)
 
-    try:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        corr.to_csv(output_path)
-        logger.info("Correlation matrix saved to %s", output_path)
-    except Exception as exc:
-        logger.exception("Failed to save correlation matrix")
-        raise RuntimeError("Saving correlation matrix failed") from exc
+    logger.info("Saved correlation matrix: %s", path)
 
-    return output_path
+    return path

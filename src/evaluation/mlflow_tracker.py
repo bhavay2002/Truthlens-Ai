@@ -1,24 +1,5 @@
 """
-File Name: mlflow_tracker.py
-Module: TruthLens AI - MLflow Tracking
-Description:
-    MLflow tracking utilities used by TruthLens AI for experiment management.
-    Provides safe wrappers around MLflow APIs for starting experiments,
-    logging parameters, metrics, and artifacts, and ensuring reproducible
-    experiment metadata. Designed to integrate with training and evaluation
-    pipelines.
-Dependencies:
-    mlflow
-    logging
-    pathlib
-    typing
-Inputs:
-    name: experiment name
-    metrics: dictionary of metric values
-    params: dictionary of parameter values
-    path: artifact path
-Outputs:
-    Active MLflow run and logged experiment metadata
+File: mlflow_tracker.py (FINAL - INDUSTRY + RESEARCH GRADE)
 """
 
 from __future__ import annotations
@@ -27,119 +8,229 @@ import logging
 from pathlib import Path
 from typing import Dict, Any, Optional
 
-from src.utils import ensure_file_exists
-
 try:
     import mlflow
-except ImportError:  # pragma: no cover - optional dependency
+except ImportError:
     mlflow = None
-
 
 logger = logging.getLogger(__name__)
 
 
-def _ensure_mlflow() -> None:
+# =========================================================
+# SAFETY
+# =========================================================
+def _ensure_mlflow():
     if mlflow is None:
-        raise RuntimeError(
-            "MLflow is not installed. Install 'mlflow' to use experiment tracking."
+        raise RuntimeError("MLflow not installed")
+
+
+# =========================================================
+# UTIL: FLATTEN DICT
+# =========================================================
+def flatten_dict(d: Dict[str, Any], parent_key="", sep="."):
+    items = []
+    for k, v in d.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.extend(flatten_dict(v, new_key, sep=sep).items())
+        else:
+            items.append((new_key, v))
+    return dict(items)
+
+
+# =========================================================
+# MAIN RUN CONTEXT (UPGRADED)
+# =========================================================
+class MLflowRun:
+
+    def __init__(
+        self,
+        experiment_name: str = "truthlens",
+        run_name: Optional[str] = None,
+        tags: Optional[Dict[str, str]] = None,
+    ):
+        self.experiment_name = experiment_name
+        self.run_name = run_name
+        self.tags = tags or {}
+
+    def __enter__(self):
+        _ensure_mlflow()
+
+        mlflow.set_experiment(self.experiment_name)
+
+        self.run = mlflow.start_run(run_name=self.run_name)
+
+        if self.tags:
+            mlflow.set_tags(self.tags)
+
+        logger.info(
+            f"[MLFLOW] Run started | experiment={self.experiment_name} | run_name={self.run_name}"
         )
 
+        return self
 
-def start_experiment(name: str = "truthlens_evaluation") -> Any:
-    """
-    Start or attach to an MLflow experiment.
-    """
+    def __exit__(self, exc_type, exc, tb):
+        status = "FAILED" if exc else "FINISHED"
+        mlflow.end_run(status=status)
 
-    if not isinstance(name, str) or not name.strip():
-        raise ValueError("Experiment name must be a non-empty string.")
+        logger.info(f"[MLFLOW] Run ended with status={status}")
 
+
+# =========================================================
+# NESTED RUNS (PER TASK)
+# =========================================================
+class NestedRun:
+
+    def __init__(self, name: str, tags: Optional[Dict[str, str]] = None):
+        self.name = name
+        self.tags = tags or {}
+
+    def __enter__(self):
+        _ensure_mlflow()
+
+        self.run = mlflow.start_run(run_name=self.name, nested=True)
+
+        if self.tags:
+            mlflow.set_tags(self.tags)
+
+        logger.info(f"[MLFLOW] Nested run started | {self.name}")
+
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        status = "FAILED" if exc else "FINISHED"
+        mlflow.end_run(status=status)
+
+        logger.info(f"[MLFLOW] Nested run ended | {self.name} | {status}")
+
+
+# =========================================================
+# METRIC LOGGING (MULTI-TASK SAFE)
+# =========================================================
+def log_metrics(
+    metrics: Dict[str, Any],
+    step: Optional[int] = None,
+    prefix: str = "",
+):
     _ensure_mlflow()
 
-    try:
-        mlflow.set_experiment(name)
-        run = mlflow.start_run()
-        logger.info("Started MLflow run under experiment '%s'", name)
-        return run
-    except Exception as exc:
-        logger.exception("Failed to start MLflow experiment")
-        raise RuntimeError("MLflow experiment start failed") from exc
+    flat = flatten_dict(metrics)
 
+    for key, value in flat.items():
 
-def log_metrics(metrics: Dict[str, Any]) -> None:
-    """
-    Log numeric metrics to MLflow.
-    """
+        if not isinstance(value, (int, float)):
+            continue
 
-    if not isinstance(metrics, dict):
-        raise TypeError("metrics must be a dictionary.")
-
-    _ensure_mlflow()
-
-    for key, value in metrics.items():
-
-        if isinstance(value, (int, float)):
-
-            try:
-                mlflow.log_metric(key, float(value))
-            except Exception:
-                logger.warning("Failed to log metric: %s", key)
-
-        else:
-            logger.debug("Skipping non-numeric metric: %s", key)
-
-
-def log_params(params: Dict[str, Any]) -> None:
-    """
-    Log parameters to MLflow.
-    """
-
-    if not isinstance(params, dict):
-        raise TypeError("params must be a dictionary.")
-
-    _ensure_mlflow()
-
-    for key, value in params.items():
+        name = f"{prefix}{key}" if prefix else key
 
         try:
-            mlflow.log_param(key, value)
+            mlflow.log_metric(name, float(value), step=step)
         except Exception:
-            logger.warning("Failed to log parameter: %s", key)
+            logger.warning(f"[MLFLOW] Failed metric: {name}")
 
 
-def log_artifact(path: str | Path) -> Path:
+# =========================================================
+# PARAM LOGGING (FLATTENED)
+# =========================================================
+def log_params(params: Dict[str, Any], prefix=""):
+    _ensure_mlflow()
+
+    flat = flatten_dict(params)
+
+    for key, value in flat.items():
+        name = f"{prefix}{key}" if prefix else key
+
+        try:
+            mlflow.log_param(name, value)
+        except Exception:
+            logger.warning(f"[MLFLOW] Failed param: {name}")
+
+
+# =========================================================
+# DATASET VERSION LOGGING (NEW 🔥)
+# =========================================================
+def log_dataset_info(
+    dataset_name: str,
+    version: Optional[str] = None,
+    size: Optional[int] = None,
+    hash: Optional[str] = None,
+):
     """
-    Log artifact file to MLflow.
+    Log dataset metadata for reproducibility.
     """
-
-    artifact_path = ensure_file_exists(path)
 
     _ensure_mlflow()
 
     try:
-        mlflow.log_artifact(str(artifact_path))
-        logger.info("Logged artifact to MLflow: %s", artifact_path)
-    except Exception as exc:
-        logger.exception("Failed to log artifact")
-        raise RuntimeError("Artifact logging failed") from exc
+        mlflow.log_param("dataset.name", dataset_name)
 
-    return artifact_path
+        if version:
+            mlflow.log_param("dataset.version", version)
+
+        if size:
+            mlflow.log_param("dataset.size", size)
+
+        if hash:
+            mlflow.log_param("dataset.hash", hash)
+
+        logger.info(f"[MLFLOW] Dataset logged: {dataset_name}")
+
+    except Exception as e:
+        logger.warning(f"[MLFLOW] Dataset logging failed: {e}")
 
 
-def end_run(status: Optional[str] = None) -> None:
-    """
-    End the active MLflow run.
-    """
+# =========================================================
+# ARTIFACT LOGGING
+# =========================================================
+def log_artifact(path: str | Path, artifact_path: str = "artifacts"):
+    _ensure_mlflow()
 
-    if mlflow is None:
-        logger.warning("MLflow is not installed; skipping run close.")
-        return
+    path = Path(path)
 
-    allowed = {None, "FINISHED", "FAILED", "KILLED"}
-    if status not in allowed:
-        raise ValueError(f"Invalid MLflow run status: {status}")
+    if not path.exists():
+        raise FileNotFoundError(path)
 
     try:
-        mlflow.end_run(status=status)
-        logger.info("MLflow run ended")
+        mlflow.log_artifact(str(path), artifact_path=artifact_path)
+        logger.info(f"[MLFLOW] Artifact logged: {path}")
+    except Exception as e:
+        logger.error(f"[MLFLOW] Artifact failed: {e}")
+
+
+# =========================================================
+# MODEL LOGGING
+# =========================================================
+def log_model(model, name="model"):
+    _ensure_mlflow()
+
+    try:
+        import mlflow.pytorch
+        mlflow.pytorch.log_model(model, name)
+        logger.info("[MLFLOW] Model logged")
+    except Exception as e:
+        logger.warning(f"[MLFLOW] Model logging failed: {e}")
+
+
+# =========================================================
+# SYSTEM INFO
+# =========================================================
+def log_system_info():
+    _ensure_mlflow()
+
+    import platform
+    import sys
+
+    mlflow.log_param("system.python_version", sys.version)
+    mlflow.log_param("system.platform", platform.platform())
+
+
+# =========================================================
+# EXTRA: TAG HELPERS
+# =========================================================
+def set_tags(tags: Dict[str, str]):
+    _ensure_mlflow()
+
+    try:
+        mlflow.set_tags(tags)
     except Exception:
-        logger.warning("Failed to properly close MLflow run")
+        logger.warning("[MLFLOW] Failed to set tags")

@@ -1,197 +1,96 @@
-"""
-File Name: narrative_temporal_analyzer.py
-Module: Narrative Analysis - Temporal Narrative Structure
-
-Description
------------
-Analyzes temporal narrative structure within text for the TruthLens AI system.
-
-This module extracts temporal narrative signals including:
-
-1. Historical framing (past narrative justification)
-2. Crisis escalation language
-3. Urgency and immediacy signals
-4. Verb tense distribution (past / present / future)
-5. Temporal escalation patterns
-
-Temporal signals are widely used in propaganda, crisis reporting,
-and political discourse to influence audience perception.
-"""
+# src/analysis/narrative_temporal_analyzer.py
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from collections import Counter
-from typing import Dict, List
+from typing import Dict, Set
 
 import numpy as np
-from spacy.language import Language
-from spacy.tokens import Doc
 
-from src.analysis._nlp import get_nlp
-from src.analysis._text_features import extract_alpha_lemmas, build_counter, term_ratio as _term_ratio_util
+from src.analysis.base_analyzer import BaseAnalyzer
+from src.analysis.feature_context import FeatureContext
+from src.analysis._text_features import (
+    term_ratio,
+    normalize_lexicon_terms,
+)
 from src.analysis.feature_schema import NARRATIVE_TEMPORAL_KEYS, make_vector
-
 
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------
+class NarrativeTemporalAnalyzer(BaseAnalyzer):
 
-@dataclass(slots=True)
-class NarrativeTemporalConfig:
-
-    spacy_model: str = "en_core_web_sm"
-
-
-# ---------------------------------------------------------
-# Temporal Analyzer
-# ---------------------------------------------------------
-
-class NarrativeTemporalAnalyzer:
-
-    """
-    Detects temporal narrative signals.
-    """
-
-    # -----------------------------------------------------
-    # Historical framing
-    # -----------------------------------------------------
-
-    PAST_TERMS = {
-
+    PAST_TERMS: Set[str] = {
         "previously","earlier","historically","formerly","once",
         "before","past","recently","prior",
-
         "years","decades","centuries","era","period",
-
-        "traditionally","longstanding","historical","in_the_past",
+        "traditionally","longstanding","historical","in the past",
     }
 
-    # -----------------------------------------------------
-    # Crisis escalation
-    # -----------------------------------------------------
-
-    CRISIS_TERMS = {
-
+    CRISIS_TERMS: Set[str] = {
         "crisis","collapse","disaster","catastrophe",
         "breakdown","emergency","meltdown",
-
         "chaos","turmoil","instability","unrest",
-
         "escalation","worsening","spiral","deterioration",
-
         "danger","threat","risk",
     }
 
-    # -----------------------------------------------------
-    # Urgency signals
-    # -----------------------------------------------------
-
-    URGENCY_TERMS = {
-
+    URGENCY_TERMS: Set[str] = {
         "immediately","urgent","now","rapidly","quickly",
         "instantly","suddenly","swiftly",
-
         "critical","pressing","dire","serious",
-
-        "act_now","time_is_running_out",
+        "act now","time is running out",
     }
 
     # -----------------------------------------------------
 
-    def __init__(self, config: NarrativeTemporalConfig | None = None):
+    def __init__(self):
 
-        self.config = config or NarrativeTemporalConfig()
+        #  Normalize once
+        self.past = normalize_lexicon_terms(self.PAST_TERMS)
+        self.crisis = normalize_lexicon_terms(self.CRISIS_TERMS)
+        self.urgency = normalize_lexicon_terms(self.URGENCY_TERMS)
 
-        self.nlp: Language = get_nlp(self.config.spacy_model)
-
-        logger.info("NarrativeTemporalAnalyzer initialized")
-
-
-    # -----------------------------------------------------
-    # Main analysis
-    # -----------------------------------------------------
-
-    def analyze(self, text: str) -> Dict[str, float]:
-
-        if not isinstance(text, str):
-            raise ValueError("Input text must be a string")
-
-        text = text.strip()
-
-        if not text:
-            raise ValueError("Input text must be non-empty")
-
-        doc: Doc = self.nlp(text)
-        return self.analyze_doc(doc)
+        logger.info("NarrativeTemporalAnalyzer initialized (optimized)")
 
     # -----------------------------------------------------
 
-    def analyze_doc(self, doc: Doc) -> Dict[str, float]:
-        """Compute temporal narrative features from a pre-built spaCy Doc.
+    def analyze(self, ctx: FeatureContext) -> Dict[str, float]:
 
-        Builds the token counter once and reuses it across all term-ratio
-        computations, eliminating repeated Counter construction.
-
-        Args:
-            doc: A processed spaCy Doc instance.
-
-        Returns:
-            Dictionary of temporal narrative feature names to float values.
-        """
-
-        tokens: List[str] = extract_alpha_lemmas(doc)
-        token_counts = build_counter(tokens)
-        n_tokens = len(tokens)
+        if ctx.n_tokens == 0:
+            return self._empty()
 
         features: Dict[str, float] = {}
 
-        features["past_framing_ratio"] = _term_ratio_util(token_counts, n_tokens, self.PAST_TERMS)
-        features["crisis_escalation_ratio"] = _term_ratio_util(token_counts, n_tokens, self.CRISIS_TERMS)
-        features["urgency_language_ratio"] = _term_ratio_util(token_counts, n_tokens, self.URGENCY_TERMS)
+        #  Token-based ratios (fast)
+        features["past_framing_ratio"] = term_ratio(
+            ctx.token_counts, ctx.n_tokens, self.past
+        )
 
-        features.update(self._tense_distribution(doc))
-        features.update(self._temporal_contrast(features))
+        features["crisis_escalation_ratio"] = term_ratio(
+            ctx.token_counts, ctx.n_tokens, self.crisis
+        )
 
-        logger.debug("Temporal narrative features computed")
+        features["urgency_language_ratio"] = term_ratio(
+            ctx.token_counts, ctx.n_tokens, self.urgency
+        )
+
+        #  Tense distribution (reuse doc)
+        features.update(self._tense_distribution(ctx))
+
+        #  Temporal contrast
+        features["temporal_contrast_score"] = abs(
+            features["past_framing_ratio"]
+            - features["urgency_language_ratio"]
+        )
 
         return features
 
-
-    # -----------------------------------------------------
-    # Term ratio helper (kept for backward compatibility)
     # -----------------------------------------------------
 
-    def _term_ratio(
-        self,
-        tokens: List[str],
-        lexicon: set,
-        feature_name: str,
-    ) -> Dict[str, float]:
+    def _tense_distribution(self, ctx: FeatureContext) -> Dict[str, float]:
 
-        if not tokens:
-            return {feature_name: 0.0}
-
-        counts = Counter(tokens)
-
-        hits = sum(counts[token] for token in counts if token in lexicon)
-
-        ratio = hits / max(len(tokens), 1)
-
-        return {feature_name: float(ratio)}
-
-
-    # -----------------------------------------------------
-    # Verb tense distribution
-    # -----------------------------------------------------
-
-    def _tense_distribution(self, doc: Doc) -> Dict[str, float]:
-
-        verbs = [token for token in doc if token.pos_ in {"VERB", "AUX"}]
+        verbs = [t for t in ctx.doc if t.pos_ in {"VERB", "AUX"}]
 
         if not verbs:
             return {
@@ -200,9 +99,7 @@ class NarrativeTemporalAnalyzer:
                 "future_tense_ratio": 0.0,
             }
 
-        past = 0
-        present = 0
-        future = 0
+        past = present = future = 0
 
         for token in verbs:
 
@@ -219,31 +116,28 @@ class NarrativeTemporalAnalyzer:
         total = max(len(verbs), 1)
 
         return {
-
             "past_tense_ratio": past / total,
             "present_tense_ratio": present / total,
             "future_tense_ratio": future / total,
         }
 
-
-    # -----------------------------------------------------
-    # Temporal narrative contrast
     # -----------------------------------------------------
 
-    def _temporal_contrast(self, features: Dict[str, float]) -> Dict[str, float]:
-
-        past = features.get("past_framing_ratio", 0.0)
-        urgency = features.get("urgency_language_ratio", 0.0)
-
-        contrast = abs(past - urgency)
-
-        return {"temporal_contrast_score": contrast}
+    def _empty(self) -> Dict[str, float]:
+        return {
+            "past_framing_ratio": 0.0,
+            "crisis_escalation_ratio": 0.0,
+            "urgency_language_ratio": 0.0,
+            "past_tense_ratio": 0.0,
+            "present_tense_ratio": 0.0,
+            "future_tense_ratio": 0.0,
+            "temporal_contrast_score": 0.0,
+        }
 
 
 # ---------------------------------------------------------
-# Vector Conversion
+# Vector
 # ---------------------------------------------------------
 
 def narrative_temporal_vector(features: Dict[str, float]) -> np.ndarray:
-
     return make_vector(features, NARRATIVE_TEMPORAL_KEYS)

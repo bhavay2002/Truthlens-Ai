@@ -1,154 +1,172 @@
-"""
-File Name: weight_manager.py
-Module: TruthLens AI - Aggregation Weight Manager
-Description:
-    Manages dynamic scoring weights used by the TruthLens aggregation system.
-    Instead of hardcoding weights inside scoring modules, this component loads,
-    validates, normalizes, and optionally adjusts weights from configuration.
-
-    This enables flexible experimentation and tuning of the TruthLens scoring
-    engine without modifying source code.
-
-Dependencies:
-    logging
-    typing
-    pathlib
-    json
-    numpy
-
-Inputs:
-    configuration file containing scoring weights
-
-Outputs:
-    validated and normalized weight dictionaries
-"""
-
 from __future__ import annotations
 
 import json
 import logging
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+from threading import RLock
 
 import numpy as np
 
 
 logger = logging.getLogger(__name__)
 
+
 DEFAULT_WEIGHTS: Dict[str, float] = {
-    # Manipulation group (additive, normalised to sum=1)
     "bias": 0.40,
     "emotion": 0.30,
     "narrative": 0.20,
     "analysis_influence_manipulation": 0.10,
-    # Credibility group (additive terms only; penalty excluded from normalisation)
+
     "discourse": 0.55,
     "graph": 0.35,
     "analysis_influence_credibility": 0.10,
-    # Standalone penalty — used as subtraction, not normalised with group
+
     "credibility_bias_penalty": 0.20,
-    # Final composite (normalised to sum=1)
+
     "final_credibility": 0.5,
     "final_manipulation": 0.3,
     "final_ideology": 0.2,
 }
 
-ALLOWED_WEIGHT_KEYS = set(DEFAULT_WEIGHTS.keys())
 
 WEIGHT_GROUPS = {
     "manipulation": ("bias", "emotion", "narrative", "analysis_influence_manipulation"),
-    # credibility_bias_penalty is used as a *subtraction* in the scoring
-    # formula; normalising it together with additive terms would corrupt the
-    # formula semantics.  Exclude it from group normalisation so it retains
-    # its absolute value.
     "credibility": ("discourse", "graph", "analysis_influence_credibility"),
     "final": ("final_credibility", "final_manipulation", "final_ideology"),
 }
 
 
 class WeightManager:
-    def __init__(self, weights: Dict[str, float] | None = None) -> None:
+
+    def __init__(
+        self,
+        weights: Optional[Dict[str, float]] = None,
+        *,
+        version: str = "v1",
+        frozen: bool = False,
+    ) -> None:
+
+        self._lock = RLock()
+        self.version = version
+        self.frozen = frozen
+
         self.weights = (weights or DEFAULT_WEIGHTS).copy()
-        self._cached_weights: Dict[str, float] | None = None
         self._validate_weights(self.weights)
         self._normalize_weights()
 
-    def load_weights_from_config(self, config_path: str | Path) -> Dict[str, float]:
-        config_path = Path(config_path)
-        if not config_path.exists():
-            raise FileNotFoundError(f"Weight config not found: {config_path}")
+        logger.info(
+            "[WeightManager] Initialized | version=%s frozen=%s",
+            self.version,
+            self.frozen,
+        )
 
-        try:
+    # =========================
+    # LOAD
+    # =========================
+    def load_weights_from_config(self, config_path: str | Path) -> Dict[str, float]:
+        with self._lock:
+
+            if self.frozen:
+                raise RuntimeError("Weights are frozen and cannot be modified")
+
+            config_path = Path(config_path)
+
             with config_path.open("r", encoding="utf-8") as f:
                 loaded = json.load(f)
-        except Exception as exc:
-            logger.exception("Failed to load weight configuration")
-            raise RuntimeError("Weight configuration loading failed") from exc
 
-        if not isinstance(loaded, dict):
-            raise ValueError("Weight configuration must be a dictionary")
+            if not isinstance(loaded, dict):
+                raise ValueError("Weight configuration must be a dictionary")
 
-        merged = self.weights.copy()
-        merged.update(loaded)
+            merged = self.weights.copy()
+            merged.update(loaded)
 
-        self._validate_weights(merged)
-        self.weights = merged
-        self._normalize_weights()
+            self._validate_weights(merged)
+            self.weights = merged
+            self._normalize_weights()
 
-        logger.info("Weights loaded from config: %s", config_path)
-        return self.weights.copy()
+            logger.info(
+                "[WeightManager] Loaded config | path=%s version=%s",
+                config_path,
+                self.version,
+            )
 
+            return self.get_weights()
+
+    # =========================
+    # VALIDATION
+    # =========================
     def _validate_weights(self, weights: Dict[str, Any]) -> None:
-        if not isinstance(weights, dict) or not weights:
-            raise ValueError("Weights must be a non-empty dictionary")
-
-        unknown_keys = set(weights.keys()) - ALLOWED_WEIGHT_KEYS
-        if unknown_keys:
-            raise ValueError(f"Unknown weight keys: {sorted(unknown_keys)}")
-
         for key, value in weights.items():
             if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise TypeError(f"Weight '{key}' must be numeric (non-boolean), got {type(value).__name__}")
-            fval = float(value)
-            if not np.isfinite(fval):
-                raise ValueError(f"Weight '{key}' must be finite, got {value}")
-            if fval < 0:
-                raise ValueError(f"Weight '{key}' cannot be negative")
+                raise TypeError(f"Weight '{key}' must be numeric")
+            if not np.isfinite(value) or value < 0:
+                raise ValueError(f"Invalid weight '{key}': {value}")
 
-    def _normalize_group(self, group_name: str) -> None:
-        keys = WEIGHT_GROUPS[group_name]
-        present = [k for k in keys if k in self.weights]
-        if not present:
-            return
+    # =========================
+    # NORMALIZATION
+    # =========================
+    def _normalize_group(self, keys):
+        values = np.array([self.weights[k] for k in keys], dtype=np.float64)
+        total = np.sum(values)
 
-        values = np.array([self.weights[k] for k in present], dtype=np.float64)
-        total = float(np.sum(values))
-        if total == 0:
-            raise ValueError(f"Sum of weights in group '{group_name}' cannot be zero")
+        if total <= 0:
+            raise ValueError(f"Invalid weight group: {keys}")
 
         normalized = values / total
-        for key, val in zip(present, normalized):
-            self.weights[key] = float(val)
 
-    def _normalize_weights(self) -> None:
-        for group_name in WEIGHT_GROUPS:
-            self._normalize_group(group_name)
-        self._cached_weights = self.weights.copy()
+        for k, v in zip(keys, normalized):
+            self.weights[k] = float(v)
 
+    def _normalize_weights(self):
+        for group in WEIGHT_GROUPS.values():
+            self._normalize_group(group)
+
+        logger.debug("[WeightManager] Normalized weights: %s", self.weights)
+
+    # =========================
+    # ADJUST
+    # =========================
     def adjust_weight(self, key: str, value: float) -> Dict[str, float]:
-        if key not in ALLOWED_WEIGHT_KEYS:
-            raise KeyError(f"Unknown weight key: '{key}'")
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
-            raise ValueError("Weight value must be non-negative numeric (non-boolean)")
+        with self._lock:
 
-        self.weights[key] = float(value)
-        self._validate_weights(self.weights)
-        self._normalize_weights()
+            if self.frozen:
+                raise RuntimeError("Weights are frozen")
 
-        logger.info("Weight adjusted: %s=%s", key, value)
-        return self.weights.copy()
+            self.weights[key] = float(value)
 
+            self._validate_weights(self.weights)
+            self._normalize_weights()
+
+            logger.info("[WeightManager] Adjusted %s=%s", key, value)
+
+            return self.get_weights()
+
+    # =========================
+    # CONFIDENCE-AWARE WEIGHTS
+    # =========================
+    def get_weighted(self, confidence: Optional[Dict[str, float]] = None) -> Dict[str, float]:
+        with self._lock:
+
+            weights = self.weights.copy()
+
+            if confidence:
+                for k, conf in confidence.items():
+                    if k in weights:
+                        weights[k] *= float(np.clip(conf, 0.0, 1.0))
+
+                # renormalize groups after confidence scaling
+                for group in WEIGHT_GROUPS.values():
+                    total = sum(weights[k] for k in group)
+                    if total > 0:
+                        for k in group:
+                            weights[k] /= total
+
+            return weights
+
+    # =========================
+    # ACCESS
+    # =========================
     def get_weights(self) -> Dict[str, float]:
-        if self._cached_weights is None:
-            self._cached_weights = self.weights.copy()
-        return self._cached_weights.copy()
+        with self._lock:
+            return self.weights.copy()

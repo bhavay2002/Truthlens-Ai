@@ -1,356 +1,185 @@
-"""
-File Name: narrative_role_extractor.py
-Module: Narrative Analysis - Narrative Role Extraction
-Description:
-    Extracts narrative roles (Hero, Villain, Victim) from text for the TruthLens AI system.
-    
-    This module detects actor roles using:
-    
-    1. Narrative action lexicons
-    2. Dependency-based actor relations
-    3. Passive voice victim detection
-    4. Named entity resolution
-    
-    Roles help downstream modules detect propaganda narratives such as:
-    
-    Hero → protects → Victim
-    Villain → harms → Victim
-    Hero ↔ Villain conflict
-
-Dependencies:
-    logging
-    typing
-    dataclasses
-    collections
-    numpy
-    spacy
-
-Inputs:
-    Raw text string
-
-Outputs:
-    Dictionary containing hero_entities, villain_entities, victim_entities
-    and optional numerical vector representation
-"""
+# src/analysis/narrative_role_extractor.py
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from typing import Dict, List, Set
+from typing import Dict, List, Set, Optional
 
 import numpy as np
-from spacy.language import Language
-from spacy.tokens import Doc, Token
 
-from src.analysis._nlp import get_nlp
+from src.analysis.base_analyzer import BaseAnalyzer
+from src.analysis.feature_context import FeatureContext
 
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------
+class NarrativeRoleExtractor(BaseAnalyzer):
 
-@dataclass(slots=True)
-class NarrativeRoleConfig:
-    spacy_model: str = "en_core_web_sm"
-
-
-# ---------------------------------------------------------
-# Role Extractor
-# ---------------------------------------------------------
-
-class NarrativeRoleExtractor:
-
-    """
-    Extracts Hero / Villain / Victim narrative roles.
-    """
-
-    HERO_TERMS ={
-
-    # Protection / defense
-    "protect",
-    "defend",
-    "shield",
-    "guard",
-    "secure",
-    "rescue",
-    "save",
-
-    # Assistance / support
-    "help",
-    "aid",
-    "assist",
-    "support",
-    "relieve",
-    "provide",
-    "deliver",
-
-    # Leadership / guidance
-    "lead",
-    "guide",
-    "champion",
-    "represent",
-    "advocate",
-
-    # Resistance against harm
-    "fight_for",
-    "stand_for",
-    "stand_with",
-    "defend_rights",
-    "protect_rights",
-
-    # Humanitarian actions
-    "rebuild",
-    "restore",
-    "stabilize",
-    "reform",
-
-        
+    HERO_TERMS = {
+        "protect","defend","shield","guard","secure",
+        "rescue","save","help","aid","assist","support",
+        "lead","guide","champion","advocate",
+        "rebuild","restore","stabilize","reform",
+        "fight for","stand for","stand with",
     }
 
     VILLAIN_TERMS = {
-        
-    # Physical aggression
-    "attack",
-    "assault",
-    "bomb",
-    "invade",
-    "raid",
-    "strike",
-    "kill",
-    "destroy",
-
-    # Harm / damage
-    "harm",
-    "injure",
-    "damage",
-    "target",
-
-    # Oppression / exploitation
-    "exploit",
-    "abuse",
-    "oppress",
-    "suppress",
-    "control",
-    "dominate",
-
-    # Political aggression
-    "corrupt",
-    "manipulate",
-    "rig",
-    "undermine",
-    "destabilize",
-
-    # Threat / intimidation
-    "threaten",
-    "intimidate",
-    "coerce",
-    "pressure",
-
-    # Blame / accusation
-    "blame",
-    "accuse",
-    "condemn",
-
+        "attack","assault","bomb","invade","raid","strike",
+        "kill","destroy","harm","injure",
+        "exploit","abuse","oppress","suppress",
+        "corrupt","manipulate","undermine",
+        "threaten","intimidate","coerce",
+        "blame","accuse","condemn",
     }
 
     VICTIM_TERMS = {
-       
-    # Direct harm
-    "hurt",
-    "injure",
-    "kill",
-    "attack",
-    "harm",
-
-    # Suffering
-    "suffer",
-    "struggle",
-    "endure",
-    "experience",
-
-    # Damage or loss
-    "lose",
-    "damage",
-    "destroy",
-
-    # Targeting
-    "target",
-    "attack",
-    "persecute",
-
-    # Displacement / crisis
-    "displace",
-    "evacuate",
-    "flee",
-    "escape",
-
-    # Economic / social impact
-    "affect",
-    "impact",
-    "burden",
-
+        "hurt","injure","kill","attack","harm",
+        "suffer","struggle","endure",
+        "lose","damage","destroy",
+        "target","persecute",
+        "displace","flee","escape",
+        "affect","impact","burden",
     }
 
-    def __init__(self, config: NarrativeRoleConfig | None = None):
-
-        self.config = config or NarrativeRoleConfig()
-
-        self.nlp: Language = get_nlp(self.config.spacy_model)
-
-        logger.info("NarrativeRoleExtractor initialized")
-
-    # -----------------------------------------------------
-    # Main Analysis
     # -----------------------------------------------------
 
-    def analyze(self, text: str) -> Dict[str, List[str]]:
+    def __init__(self):
+        self.hero_terms = self._normalize(self.HERO_TERMS)
+        self.villain_terms = self._normalize(self.VILLAIN_TERMS)
+        self.victim_terms = self._normalize(self.VICTIM_TERMS)
 
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError("Input text must be non-empty")
-
-        doc: Doc = self.nlp(text)
-        return self.analyze_doc(doc)
+        logger.info("NarrativeRoleExtractor initialized (optimized)")
 
     # -----------------------------------------------------
 
-    def analyze_doc(self, doc: Doc) -> Dict[str, List[str]]:
-        """Extract narrative roles from a pre-built spaCy Doc.
+    def analyze(self, ctx: FeatureContext) -> Dict[str, List[str]]:
 
-        Args:
-            doc: A processed spaCy Doc instance.
-
-        Returns:
-            Dictionary with ``hero_entities``, ``villain_entities``, and
-            ``victim_entities`` lists.
-        """
         hero_entities: Set[str] = set()
         villain_entities: Set[str] = set()
         victim_entities: Set[str] = set()
 
-        for token in doc:
+        for token in ctx.doc:
 
             lemma = token.lemma_.lower()
 
-            # ---------------- HERO ----------------
-            if lemma in self.HERO_TERMS:
+            # HERO
+            if lemma in self.hero_terms:
+                self._assign_roles(token, hero_entities, victim_entities)
 
-                subject = self._get_subject(token)
+            # VILLAIN
+            elif lemma in self.villain_terms:
+                self._assign_roles(token, villain_entities, victim_entities)
+
+            # VICTIM
+            elif lemma in self.victim_terms:
                 obj = self._get_object(token)
-
-                if subject:
-                    hero_entities.add(subject)
-
                 if obj:
                     victim_entities.add(obj)
 
-            # ---------------- VILLAIN ----------------
-            elif lemma in self.VILLAIN_TERMS:
-
-                subject = self._get_subject(token)
-                obj = self._get_object(token)
-
-                if subject:
-                    villain_entities.add(subject)
-
-                if obj:
-                    victim_entities.add(obj)
-
-            # ---------------- VICTIM ----------------
-            elif lemma in self.VICTIM_TERMS:
-
-                obj = self._get_object(token)
-
-                if obj:
-                    victim_entities.add(obj)
-
-            # ---------------- PASSIVE VOICE ----------------
+            # Passive victim detection
             if token.dep_ == "nsubjpass":
-                entity = self._normalize_entity(token)
+                entity = self._resolve_entity(token)
                 if entity:
                     victim_entities.add(entity)
 
-        features: Dict[str, List[str]] = {
+        return {
             "hero_entities": sorted(hero_entities),
             "villain_entities": sorted(villain_entities),
             "victim_entities": sorted(victim_entities),
         }
 
-        logger.debug("Narrative roles extracted")
-
-        return features
-
-
-    # -----------------------------------------------------
-    # Dependency helpers
     # -----------------------------------------------------
 
-    def _get_subject(self, token: Token) -> str | None:
+    def _assign_roles(
+        self,
+        token,
+        actor_set: Set[str],
+        victim_set: Set[str],
+    ):
+        subject = self._get_subject(token)
+        obj = self._get_object(token)
 
+        if subject:
+            actor_set.add(subject)
+
+        if obj:
+            victim_set.add(obj)
+
+    # -----------------------------------------------------
+
+    def _get_subject(self, token) -> Optional[str]:
         for child in token.children:
             if child.dep_ in {"nsubj", "nsubjpass"}:
-                return self._normalize_entity(child)
-
+                return self._resolve_entity(child)
         return None
 
+    # -----------------------------------------------------
 
-    def _get_object(self, token: Token) -> str | None:
-
+    def _get_object(self, token) -> Optional[str]:
         for child in token.children:
             if child.dep_ in {"dobj", "pobj", "obj"}:
-                return self._normalize_entity(child)
+                return self._resolve_entity(child)
+        return None
+
+    # -----------------------------------------------------
+
+    def _resolve_entity(self, token) -> Optional[str]:
+
+        # Named entity span
+        if token.ent_iob_ in {"B", "I"}:
+            span = token.doc[token.left_edge.i : token.right_edge.i + 1]
+            if span.text.strip():
+                return span.text.lower()
+
+        # Compound noun phrases
+        if token.pos_ in {"NOUN", "PROPN"}:
+            return token.lemma_.lower()
+
+        # Fallback to head
+        if token.head and token.head != token:
+            return token.head.lemma_.lower()
 
         return None
 
+    # -----------------------------------------------------
 
-    def _normalize_entity(self, token: Token) -> str | None:
-        if token.ent_iob_ in {"B", "I"} and token.ent_type_:
-            span = token.doc[token.left_edge.i: token.right_edge.i + 1]
-            if span.text.strip():
-                return span.text.lower().strip()
+    def _normalize(self, terms: Set[str]) -> Set[str]:
+        return {t.replace("_", " ").lower() for t in terms}
 
-        if token.pos_ in {"PROPN", "NOUN"}:
-            return token.lemma_.lower().strip()
+    # -----------------------------------------------------
 
-        head = token.head
-        if head.ent_iob_ in {"B", "I"} and head.ent_type_:
-            span = head.doc[head.left_edge.i: head.right_edge.i + 1]
-            if span.text.strip():
-                return span.text.lower().strip()
+    def role_scores(self, features: Dict[str, List[str]]) -> Dict[str, float]:
 
-        return None
+        heroes = len(features.get("hero_entities", []))
+        villains = len(features.get("villain_entities", []))
+        victims = len(features.get("victim_entities", []))
+
+        total = max(heroes + villains + victims, 1)
+
+        return {
+            "hero_ratio": heroes / total,
+            "villain_ratio": villains / total,
+            "victim_ratio": victims / total,
+            "hero_vs_villain": heroes - villains,
+        }
 
 
 # ---------------------------------------------------------
-# Vector Representation
+# Vector
 # ---------------------------------------------------------
 
 def narrative_role_vector(features: Dict[str, List[str]]) -> np.ndarray:
-    """
-    Convert narrative roles into vector form.
 
-    Vector structure:
-        [num_heroes, num_villains, num_victims, role_balance]
-    """
-
-    heroes = features.get("hero_entities", [])
-    villains = features.get("villain_entities", [])
-    victims = features.get("victim_entities", [])
-
-    num_heroes = len(heroes)
-    num_villains = len(villains)
-    num_victims = len(victims)
-
-    role_balance = num_heroes - num_villains
+    heroes = len(features.get("hero_entities", []))
+    villains = len(features.get("villain_entities", []))
+    victims = len(features.get("victim_entities", []))
 
     return np.array(
         [
-            float(num_heroes),
-            float(num_villains),
-            float(num_victims),
-            float(role_balance),
+            float(heroes),
+            float(villains),
+            float(victims),
+            float(heroes - villains),
         ],
         dtype=np.float32,
     )

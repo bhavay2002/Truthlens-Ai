@@ -1,91 +1,35 @@
-"""
-File Name: rhetorical_device_detector.py
-Module: Discourse Analysis - Rhetorical Device Detection
-Description:
-    Detects rhetorical persuasion techniques in text for the TruthLens AI system.
-    The module identifies linguistic signals commonly associated with persuasive
-    rhetoric used in propaganda, political messaging, and biased discourse.
+# src/analysis/rhetorical_device_detector.py
 
-    The detector focuses on rhetorical patterns including exaggeration,
-    loaded language, emotional appeal, fear appeal, scapegoating, and
-    false dilemmas. These features help quantify persuasive intensity and
-    manipulation strategies present in text.
-
-Dependencies:
-    logging
-    typing
-    dataclasses
-    collections
-    numpy
-    spacy
-    re
-
-Inputs:
-    Raw text string
-
-Outputs:
-    Rhetorical feature dictionary and optional numerical vector
-"""
 from __future__ import annotations
 
 import logging
 import re
-from collections import Counter
-from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, Set
 
 import numpy as np
-from spacy.language import Language
-from spacy.tokens import Doc
 
-from src.analysis._nlp import get_nlp
+from src.analysis.base_analyzer import BaseAnalyzer
+from src.analysis.feature_context import FeatureContext
 from src.analysis._text_features import (
-    extract_alpha_lemmas,
-    build_counter,
+    term_ratio,
     phrase_match_count,
     normalize_lexicon_terms,
 )
 from src.analysis.feature_schema import RHETORICAL_DEVICE_KEYS, make_vector
 
-
 logger = logging.getLogger(__name__)
 
 
-# ------------------------------------------------------------
-# Configuration
-# ------------------------------------------------------------
-
-@dataclass(slots=True)
-class RhetoricalDeviceConfig:
-
-    spacy_model: str = "en_core_web_sm"
-    disable_components: tuple = ()
-
-
-# ------------------------------------------------------------
-# Detector
-# ------------------------------------------------------------
-
-class RhetoricalDeviceDetector:
-
-    # ----------------------------------------------------
-    # Exaggeration / hyperbole
-    # ----------------------------------------------------
+class RhetoricalDeviceDetector(BaseAnalyzer):
 
     EXAGGERATION_TERMS = {
-
         "always","never","everyone","nobody",
         "completely","totally","absolutely",
         "entirely","undeniably","inevitably",
         "catastrophe","disaster","collapse"
     }
 
-    # ----------------------------------------------------
-    # Loaded ideological language
-    # ----------------------------------------------------
-
     LOADED_LANGUAGE_TERMS = {
-
         "corrupt","traitor","radical",
         "extreme","dangerous","evil",
         "outrageous","shocking","disgrace",
@@ -93,42 +37,23 @@ class RhetoricalDeviceDetector:
         "fraud","agenda","indoctrination"
     }
 
-    # ----------------------------------------------------
-    # Emotional appeal
-    # ----------------------------------------------------
-
     EMOTIONAL_APPEAL_TERMS = {
-
         "heartbreaking","tragic","devastating",
         "hope","fear","anger","rage",
         "pain","suffering","panic",
         "anxiety","outrage","despair"
     }
 
-    # ----------------------------------------------------
-    # Fear appeals
-    # ----------------------------------------------------
-
     FEAR_APPEAL_TERMS = {
-
         "threat","danger","risk","crisis",
         "attack","collapse","terror",
         "invasion","emergency","catastrophe"
     }
 
-    # ----------------------------------------------------
-    # Intensifiers
-    # ----------------------------------------------------
-
     INTENSIFIERS = {
-
         "very","extremely","highly",
         "incredibly","really","so","too"
     }
-
-    # ----------------------------------------------------
-    # Phrase patterns
-    # ----------------------------------------------------
 
     SCAPEGOAT_PATTERNS = {
         "they are responsible",
@@ -149,171 +74,89 @@ class RhetoricalDeviceDetector:
 
     RHETORICAL_PUNCT_PATTERN = re.compile(r"[!?]+")
 
-    # ----------------------------------------------------
+    # -----------------------------------------------------
 
-    def __init__(self, config: RhetoricalDeviceConfig | None = None):
+    def __init__(self):
 
-        self.config = config or RhetoricalDeviceConfig()
+        # 🔥 Normalize ONCE
+        self.exaggeration = normalize_lexicon_terms(self.EXAGGERATION_TERMS)
+        self.loaded = normalize_lexicon_terms(self.LOADED_LANGUAGE_TERMS)
+        self.emotional = normalize_lexicon_terms(self.EMOTIONAL_APPEAL_TERMS)
+        self.fear = normalize_lexicon_terms(self.FEAR_APPEAL_TERMS)
+        self.intensifiers = normalize_lexicon_terms(self.INTENSIFIERS)
 
-        self.nlp: Language = get_nlp(
-            self.config.spacy_model,
-            disable=self.config.disable_components,
-        )
+        self.scapegoat_patterns = normalize_lexicon_terms(self.SCAPEGOAT_PATTERNS)
+        self.false_dilemma_patterns = normalize_lexicon_terms(self.FALSE_DILEMMA_PATTERNS)
 
-        self._exaggeration_terms = {t.replace("_", " ") for t in self.EXAGGERATION_TERMS}
-        self._loaded_language_terms = {t.replace("_", " ") for t in self.LOADED_LANGUAGE_TERMS}
-        self._emotional_appeal_terms = {t.replace("_", " ") for t in self.EMOTIONAL_APPEAL_TERMS}
-        self._fear_appeal_terms = {t.replace("_", " ") for t in self.FEAR_APPEAL_TERMS}
-        self._intensifiers = {t.replace("_", " ") for t in self.INTENSIFIERS}
+        logger.info("RhetoricalDeviceDetector initialized (optimized)")
 
-        logger.info(
-            "RhetoricalDeviceDetector initialized | model=%s",
-            self.config.spacy_model,
-        )
+    # -----------------------------------------------------
 
-    # ------------------------------------------------------------
-    # Main analysis
-    # ------------------------------------------------------------
+    def analyze(self, ctx: FeatureContext) -> Dict[str, float]:
 
-    def analyze(self, text: str) -> Dict[str, float]:
-
-        if not isinstance(text, str):
-            raise ValueError("Input text must be a string")
-
-        text = text.strip()
-
-        if not text:
-            raise ValueError("Input text must be non-empty")
-
-        doc: Doc = self.nlp(text)
-        return self.analyze_doc(doc)
-
-    # ------------------------------------------------------------
-
-    def analyze_doc(self, doc: Doc) -> Dict[str, float]:
-        """Compute rhetorical device features from a pre-built spaCy Doc.
-
-        Builds the token counter once and reuses it across all term-ratio
-        computations, and uses word-boundary-aware phrase matching.
-
-        Args:
-            doc: A processed spaCy Doc instance.
-
-        Returns:
-            Dictionary of rhetorical device feature names to float values.
-        """
-
-        tokens: List[str] = extract_alpha_lemmas(doc)
-        token_counts = build_counter(tokens)
-        n_tokens = len(tokens)
+        if ctx.n_tokens == 0:
+            return self._empty()
 
         features: Dict[str, float] = {}
 
-        text_lower = doc.text.lower()
-        features["rhetoric_exaggeration_score"] = self._lexicon_ratio(
-            token_counts, n_tokens, text_lower, self._exaggeration_terms
-        )
-        features["rhetoric_loaded_language_score"] = self._lexicon_ratio(
-            token_counts, n_tokens, text_lower, self._loaded_language_terms
-        )
-        features["rhetoric_emotional_appeal_score"] = self._lexicon_ratio(
-            token_counts, n_tokens, text_lower, self._emotional_appeal_terms
-        )
-        features["rhetoric_fear_appeal_score"] = self._lexicon_ratio(
-            token_counts, n_tokens, text_lower, self._fear_appeal_terms
-        )
-        features["rhetoric_intensifier_ratio"] = self._lexicon_ratio(
-            token_counts, n_tokens, text_lower, self._intensifiers
-        )
+        features["rhetoric_exaggeration_score"] = self._score(ctx, self.exaggeration)
+        features["rhetoric_loaded_language_score"] = self._score(ctx, self.loaded)
+        features["rhetoric_emotional_appeal_score"] = self._score(ctx, self.emotional)
+        features["rhetoric_fear_appeal_score"] = self._score(ctx, self.fear)
+        features["rhetoric_intensifier_ratio"] = self._score(ctx, self.intensifiers)
 
-        features.update(self._pattern_score(doc.text, self.SCAPEGOAT_PATTERNS, "rhetoric_scapegoating_score"))
-        features.update(self._pattern_score(doc.text, self.FALSE_DILEMMA_PATTERNS, "rhetoric_false_dilemma_score"))
+        features["rhetoric_scapegoating_score"] = self._pattern(ctx, self.scapegoat_patterns)
+        features["rhetoric_false_dilemma_score"] = self._pattern(ctx, self.false_dilemma_patterns)
 
-        features.update(self._rhetorical_punctuation(doc.text))
+        features["rhetoric_punctuation_score"] = self._punctuation(ctx)
 
         return features
 
-    # ------------------------------------------------------------
-    # Lexical ratios (kept for backward compatibility)
-    # ------------------------------------------------------------
+    # -----------------------------------------------------
 
-    def _term_ratio(
-        self,
-        tokens: List[str],
-        lexicon: set,
-        feature_name: str,
-    ) -> Dict[str, float]:
+    def _score(self, ctx: FeatureContext, lexicon: Set[str]) -> float:
 
-        if not tokens:
-            return {feature_name: 0.0}
+        token_ratio = term_ratio(ctx.token_counts, ctx.n_tokens, lexicon)
 
-        counts = Counter(tokens)
+        phrase_hits = phrase_match_count(ctx.text_lower, lexicon)
+        phrase_ratio = phrase_hits / max(ctx.n_tokens, 1)
 
-        hits = sum(
-            counts[token] for token in counts
-            if token in lexicon
-        )
+        return float(np.clip(token_ratio + phrase_ratio, 0.0, 1.0))
 
-        ratio = hits / max(len(tokens), 1)
+    # -----------------------------------------------------
 
-        return {feature_name: float(ratio)}
+    def _pattern(self, ctx: FeatureContext, patterns: Set[str]) -> float:
 
-    # ------------------------------------------------------------
-    # Phrase pattern detection
-    # ------------------------------------------------------------
+        hits = phrase_match_count(ctx.text_lower, patterns)
 
-    def _pattern_score(
-        self,
-        text: str,
-        patterns: set,
-        feature_name: str,
-    ) -> Dict[str, float]:
+        return float(hits / max(ctx.n_tokens, 1))
 
-        text_lower = text.lower()
+    # -----------------------------------------------------
 
-        hits = phrase_match_count(text_lower, normalize_lexicon_terms(patterns))
+    def _punctuation(self, ctx: FeatureContext) -> float:
 
-        length = max(len(text.split()), 1)
+        matches = self.RHETORICAL_PUNCT_PATTERN.findall(ctx.text_lower)
 
-        score = hits / length
+        return float(len(matches) / max(ctx.n_tokens, 1))
 
-        return {feature_name: float(score)}
+    # -----------------------------------------------------
 
-    # ------------------------------------------------------------
-    # Rhetorical punctuation
-    # ------------------------------------------------------------
-
-    def _rhetorical_punctuation(self, text: str) -> Dict[str, float]:
-
-        matches = self.RHETORICAL_PUNCT_PATTERN.findall(text)
-
-        length = max(len(text.split()), 1)
-
-        score = len(matches) / length
-
-        return {"rhetoric_punctuation_score": float(score)}
-
-    def _lexicon_ratio(
-        self,
-        token_counts: Counter,
-        n_tokens: int,
-        text_lower: str,
-        lexicon: set,
-    ) -> float:
-        hits = 0
-        for term in lexicon:
-            if " " in term:
-                hits += text_lower.count(term)
-            else:
-                hits += token_counts.get(term, 0)
-
-        return float(hits / max(n_tokens, 1))
+    def _empty(self) -> Dict[str, float]:
+        return {
+            "rhetoric_exaggeration_score": 0.0,
+            "rhetoric_loaded_language_score": 0.0,
+            "rhetoric_emotional_appeal_score": 0.0,
+            "rhetoric_fear_appeal_score": 0.0,
+            "rhetoric_intensifier_ratio": 0.0,
+            "rhetoric_scapegoating_score": 0.0,
+            "rhetoric_false_dilemma_score": 0.0,
+            "rhetoric_punctuation_score": 0.0,
+        }
 
 
 # ------------------------------------------------------------
-# Feature vector conversion
+# Vector conversion
 # ------------------------------------------------------------
 
 def rhetorical_feature_vector(features: Dict[str, float]) -> np.ndarray:
-
     return make_vector(features, RHETORICAL_DEVICE_KEYS)
