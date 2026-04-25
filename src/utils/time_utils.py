@@ -1,175 +1,187 @@
-"""
-File Name: time_utils.py
-Module: src.utils
-Description:
-    Time utilities for TruthLens AI.
-
-    Provides helpers for generating timestamps, retrieving current
-    datetime values, measuring runtime for functions, and supporting
-    experiment timing utilities used in training, evaluation, and
-    experiment tracking pipelines.
-
-Author: TruthLens Engineering
-Date: 2026-04-03
-Dependencies:
-    - Python 3.10+
-
-Inputs:
-    - Callable functions
-    - Runtime parameters
-
-Outputs:
-    - Timestamp strings
-    - datetime objects
-    - execution runtime measurements
-"""
-
 from __future__ import annotations
 
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Callable, Any, Tuple, TypeVar
+from typing import Callable, Any, Tuple, TypeVar, Optional, Dict
 
-
-# ---------------------------------------------------------
-# Logging
-# ---------------------------------------------------------
+import torch
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------
-# Type Definitions
-# ---------------------------------------------------------
 
 T = TypeVar("T")
 
 
-# ---------------------------------------------------------
-# Timestamp Generator
-# ---------------------------------------------------------
+# =========================================================
+# GLOBAL PROFILING SWITCH
+# =========================================================
 
+_PROFILING_ENABLED: bool = False
+
+
+def enable_profiling(enabled: bool = True) -> None:
+    """
+    Enable / disable profiling globally.
+    """
+    global _PROFILING_ENABLED
+    _PROFILING_ENABLED = enabled
+
+
+def is_profiling_enabled() -> bool:
+    return _PROFILING_ENABLED
+
+
+# =========================================================
+# TIMESTAMP
+# =========================================================
 
 def timestamp() -> str:
-    """
-    Return formatted timestamp string.
-
-    Returns
-    -------
-    str
-        Timestamp in format YYYY-MM-DD_HH-MM-SS (UTC)
-    """
-
     return datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
 
 
-# ---------------------------------------------------------
-# Current Datetime
-# ---------------------------------------------------------
-
-
 def current_datetime() -> datetime:
-    """
-    Return current datetime object (UTC).
-
-    Returns
-    -------
-    datetime
-    """
-
     return datetime.now(timezone.utc)
 
 
-# ---------------------------------------------------------
-# Runtime Measurement
-# ---------------------------------------------------------
+# =========================================================
+# GPU SYNC (CRITICAL)
+# =========================================================
 
+def _sync_if_needed():
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
+# =========================================================
+# FUNCTION TIMER
+# =========================================================
 
 def measure_runtime(
     func: Callable[..., T],
     *args: Any,
+    sync_cuda: bool = True,
+    log: bool = False,
     **kwargs: Any,
 ) -> Tuple[T, float]:
-    """
-    Measure execution time of a function.
 
-    Parameters
-    ----------
-    func : Callable
-        Function to execute.
+    if not _PROFILING_ENABLED:
+        return func(*args, **kwargs), 0.0
 
-    Returns
-    -------
-    Tuple[T, float]
-        (result, runtime_seconds)
-    """
+    if sync_cuda:
+        _sync_if_needed()
 
-    start_time = time.perf_counter()
+    start = time.perf_counter()
 
     try:
         result = func(*args, **kwargs)
     except Exception:
-        logger.exception(
-            "Error occurred during execution of '%s'",
-            getattr(func, "__name__", "unknown_function"),
-        )
+        logger.exception("Error in %s", getattr(func, "__name__", "unknown"))
         raise
 
-    end_time = time.perf_counter()
+    if sync_cuda:
+        _sync_if_needed()
 
-    runtime = end_time - start_time
+    runtime = time.perf_counter() - start
 
-    logger.info(
-        "Function '%s' executed in %.6f seconds",
-        getattr(func, "__name__", "unknown_function"),
-        runtime,
-    )
+    if log:
+        logger.debug(
+            "Runtime | function=%s | time=%.6f",
+            getattr(func, "__name__", "unknown"),
+            runtime,
+        )
 
     return result, runtime
 
 
-# ---------------------------------------------------------
-# Simple Timer Utility
-# ---------------------------------------------------------
+# =========================================================
+# DECORATOR
+# =========================================================
 
+def timeit(sync_cuda: bool = True):
+    def decorator(func: Callable[..., T]):
+        def wrapper(*args, **kwargs):
+            if not _PROFILING_ENABLED:
+                return func(*args, **kwargs)
+
+            _, runtime = measure_runtime(
+                func, *args, sync_cuda=sync_cuda, log=True, **kwargs
+            )
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+# =========================================================
+# CONTEXT TIMER
+# =========================================================
 
 class Timer:
-    """
-    Lightweight timer utility for measuring code blocks.
+    def __init__(
+        self,
+        name: Optional[str] = None,
+        *,
+        sync_cuda: bool = True,
+        logger_enabled: bool = True,
+    ):
+        self.name = name or "timer"
+        self.sync_cuda = sync_cuda
+        self.logger_enabled = logger_enabled
+        self._start: Optional[float] = None
+        self.elapsed: Optional[float] = None
 
-    Example
-    -------
-    timer = Timer()
-    timer.start()
-    ...
-    elapsed = timer.stop()
-    """
+    def __enter__(self):
+        if not _PROFILING_ENABLED:
+            return self
 
-    def __init__(self) -> None:
-        self._start: float | None = None
+        if self.sync_cuda:
+            _sync_if_needed()
 
-    def start(self) -> None:
-        """Start timer."""
         self._start = time.perf_counter()
+        return self
 
-    def stop(self) -> float:
-        """
-        Stop timer and return elapsed seconds.
+    def __exit__(self, exc_type, exc, tb):
+        if not _PROFILING_ENABLED or self._start is None:
+            return
 
-        Returns
-        -------
-        float
-            Elapsed runtime in seconds.
-        """
+        if self.sync_cuda:
+            _sync_if_needed()
 
-        if self._start is None:
-            raise RuntimeError("Timer was not started")
+        self.elapsed = time.perf_counter() - self._start
 
-        elapsed = time.perf_counter() - self._start
+        if self.logger_enabled:
+            logger.debug(
+                "Timer | name=%s | elapsed=%.6f",
+                self.name,
+                self.elapsed,
+            )
 
-        logger.debug("Timer stopped: %.6f seconds", elapsed)
 
-        self._start = None
+# =========================================================
+# MULTI-TIMER (AGGREGATION)
+# =========================================================
 
-        return elapsed
+class MultiTimer:
+    def __init__(self):
+        self.times: Dict[str, list[float]] = {}
+
+    def add(self, name: str, value: float):
+        if not _PROFILING_ENABLED:
+            return
+
+        self.times.setdefault(name, []).append(value)
+
+    def summary(self) -> Dict[str, float]:
+        return {
+            k: sum(v) / len(v)
+            for k, v in self.times.items()
+            if v
+        }
+
+    def total(self) -> Dict[str, float]:
+        return {
+            k: sum(v)
+            for k, v in self.times.items()
+        }
+
+    def reset(self):
+        self.times.clear()

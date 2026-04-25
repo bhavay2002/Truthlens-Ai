@@ -1,60 +1,80 @@
 """
-File Name: config_loader.py
-Module: src.utils
-Description:
-    Production-grade YAML configuration loader for TruthLens AI.
+File: config_loader.py
+Location: src/utils/
 
-    This module provides utilities for loading, validating, and accessing
-    configuration values defined in YAML files. It supports deterministic
-    configuration loading, nested key retrieval, path resolution, and
-    conversion of configuration dictionaries into structured dataclasses.
+Production-grade multi-task configuration loader for TruthLens.
 
-Author: TruthLens Engineering
-Date: 2026-04-03
-Dependencies:
-    - Python 3.10+
-    - PyYAML
-
-Inputs:
-    - YAML configuration file
-
-Outputs:
-    - Parsed configuration dictionary
-    - Dataclass-based configuration objects
-    - Resolved filesystem paths
+Supports:
+- N-task architecture
+- Per-task datasets
+- Task-aware model config
+- Sampling strategies
+- Encoder control
+- Strong validation
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from copy import deepcopy
-from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Dict, Any, Optional
+from functools import lru_cache
+from copy import deepcopy
 
 import yaml
-
-
-# ---------------------------------------------------------
-# Logging
-# ---------------------------------------------------------
 
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------
-# Project Root
-# ---------------------------------------------------------
+# =========================================================
+# PROJECT ROOT
+# =========================================================
 
-PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "config.yaml"
 
-DEFAULT_CONFIG_PATH: Path = PROJECT_ROOT / "config" / "config.yaml"
+
+# =========================================================
+# CONSTANTS
+# =========================================================
+
+VALID_TASK_TYPES = {"binary", "multiclass", "multilabel"}
 
 
-# ---------------------------------------------------------
-# Configuration Dataclasses
-# ---------------------------------------------------------
+# =========================================================
+# DATACLASSES
+# =========================================================
+
+@dataclass(slots=True)
+class TaskDatasetConfig:
+    train_path: Path
+    validation_path: Optional[Path]
+    test_path: Optional[Path]
+    text_column: str = "text"
+    label_column: str = "label"
+
+
+@dataclass(slots=True)
+class TaskConfig:
+    name: str
+    task_type: str
+    num_labels: int
+    dataset: TaskDatasetConfig
+
+
+@dataclass(slots=True)
+class EncoderConfig:
+    name: str
+    pretrained_model: Optional[str]
+    hidden_size: int
+    freeze_epochs: int = 0
+    layerwise_lr_decay: Optional[float] = None
+
+
+@dataclass(slots=True)
+class ModelConfig:
+    encoder: EncoderConfig
 
 
 @dataclass(slots=True)
@@ -64,23 +84,14 @@ class TrainingConfig:
     learning_rate: float
     gradient_accumulation_steps: int = 1
     device: str = "auto"
+    max_grad_norm: float = 1.0
+    fp16: bool = False
 
 
 @dataclass(slots=True)
-class DatasetConfig:
-    train_path: Path
-    validation_path: Path
-    test_path: Path
-    text_column: str = "text"
-    label_column: str = "label"
-
-
-@dataclass(slots=True)
-class ModelConfig:
-    name: str
-    pretrained_model: Optional[str] = None
-    hidden_size: Optional[int] = None
-    num_labels: Optional[int] = None
+class SamplingConfig:
+    strategy: str = "uniform"
+    temperature: float = 1.0
 
 
 @dataclass(slots=True)
@@ -93,251 +104,151 @@ class ExperimentConfig:
 @dataclass(slots=True)
 class AppConfig:
     model: ModelConfig
-    dataset: DatasetConfig
+    tasks: Dict[str, TaskConfig]
     training: TrainingConfig
+    sampling: SamplingConfig
     experiment: ExperimentConfig
 
 
-# ---------------------------------------------------------
-# Path Resolver
-# ---------------------------------------------------------
-
+# =========================================================
+# PATH RESOLUTION
+# =========================================================
 
 def _resolve_path(path_value: str | Path) -> Path:
-    """
-    Convert relative paths from configuration files into absolute paths.
-
-    Parameters
-    ----------
-    path_value : str | Path
-        Path value from YAML configuration.
-
-    Returns
-    -------
-    Path
-        Absolute filesystem path.
-    """
-
-    path_obj = Path(path_value)
-
-    if path_obj.is_absolute():
-        return path_obj
-
-    return (PROJECT_ROOT / path_obj).resolve()
+    path = Path(path_value)
+    return path if path.is_absolute() else (PROJECT_ROOT / path).resolve()
 
 
-# ---------------------------------------------------------
-# Configuration Loader
-# ---------------------------------------------------------
-
+# =========================================================
+# YAML LOADER
+# =========================================================
 
 @lru_cache(maxsize=4)
 def load_config(config_path: str | Path | None = None) -> Dict[str, Any]:
-    """
-    Load YAML configuration file.
+    path = _resolve_path(config_path or DEFAULT_CONFIG_PATH)
 
-    Uses LRU caching to prevent repeated disk reads.
+    if not path.exists():
+        raise FileNotFoundError(f"Config not found: {path}")
 
-    Parameters
-    ----------
-    config_path : Optional[str | Path]
-        Path to configuration file.
+    logger.info("Loading config from %s", path)
 
-    Returns
-    -------
-    Dict[str, Any]
-        Parsed configuration dictionary.
-
-    Raises
-    ------
-    FileNotFoundError
-        If configuration file does not exist.
-
-    yaml.YAMLError
-        If YAML parsing fails.
-    """
-
-    resolved_path = _resolve_path(config_path or DEFAULT_CONFIG_PATH)
-
-    if not resolved_path.exists():
-        raise FileNotFoundError(f"Configuration file not found: {resolved_path}")
-
-    logger.info("Loading configuration from %s", resolved_path)
-
-    config: Dict[str, Any]
     try:
-        with resolved_path.open("r", encoding="utf-8") as config_file:
-            config = yaml.safe_load(config_file) or {}
-    except yaml.YAMLError as exc:
-        logger.exception("Failed to parse YAML configuration")
-        raise RuntimeError("Invalid YAML configuration file") from exc
-    except OSError as exc:
-        logger.exception("Failed to read configuration file")
-        raise RuntimeError(f"Unable to read config file: {resolved_path}") from exc
+        with path.open("r", encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
+    except yaml.YAMLError as e:
+        raise RuntimeError("Invalid YAML") from e
 
-    # Defensive copy to avoid accidental mutation of cached object.
     return deepcopy(config)
 
 
-# ---------------------------------------------------------
-# Nested Config Access
-# ---------------------------------------------------------
+# =========================================================
+# VALIDATION
+# =========================================================
 
-
-def get_config_value(
-    config: Dict[str, Any],
-    *keys: str,
-    default: Any = None,
-) -> Any:
-    """
-    Retrieve nested configuration value safely.
-
-    Parameters
-    ----------
-    config : Dict[str, Any]
-        Loaded configuration dictionary
-    keys : str
-        Nested keys
-    default : Any
-        Default value if key path is missing
-
-    Returns
-    -------
-    Any
-        Retrieved configuration value
-    """
-
-    current: Any = config
-
-    for key in keys:
-        if not isinstance(current, dict) or key not in current:
-            return default
-
-        current = current[key]
-
-    return current
-
-
-# ---------------------------------------------------------
-# Path Retrieval
-# ---------------------------------------------------------
-
-
-def get_path(
-    config: Dict[str, Any],
-    *keys: str,
-    default: str | Path,
-) -> Path:
-    """
-    Retrieve path value from configuration and resolve it.
-
-    Parameters
-    ----------
-    config : Dict[str, Any]
-        Configuration dictionary
-    keys : str
-        Nested config keys
-    default : str | Path
-        Default path
-
-    Returns
-    -------
-    Path
-        Absolute path
-    """
-
-    value = get_config_value(config, *keys, default=default)
-
-    return _resolve_path(value)
-
-
-# ---------------------------------------------------------
-# Config Validation
-# ---------------------------------------------------------
-
-
-def _validate_required_keys(config: Dict[str, Any], required: list[str]) -> None:
-    """
-    Validate presence of required top-level configuration keys.
-
-    Parameters
-    ----------
-    config : Dict[str, Any]
-        Loaded configuration
-    required : list[str]
-        Required keys
-    """
-
-    missing = [key for key in required if key not in config]
-
+def _validate_required(config: Dict[str, Any], keys: list[str]):
+    missing = [k for k in keys if k not in config]
     if missing:
-        raise ValueError(f"Missing required config sections: {missing}")
+        raise ValueError(f"Missing required keys: {missing}")
 
 
-# ---------------------------------------------------------
-# Dataclass Conversion
-# ---------------------------------------------------------
+def _validate_task(name: str, cfg: Dict[str, Any]):
+    if "type" not in cfg:
+        raise ValueError(f"{name}: missing type")
 
+    if cfg["type"] not in VALID_TASK_TYPES:
+        raise ValueError(f"{name}: invalid task type")
+
+    if "num_labels" not in cfg:
+        raise ValueError(f"{name}: missing num_labels")
+
+    if cfg["num_labels"] <= 0:
+        raise ValueError(f"{name}: num_labels must be > 0")
+
+    if "dataset" not in cfg:
+        raise ValueError(f"{name}: missing dataset config")
+
+
+# =========================================================
+# MAIN LOADER
+# =========================================================
 
 def load_app_config(config_path: str | Path | None = None) -> AppConfig:
-    """
-    Load configuration and convert to structured dataclasses.
-
-    Parameters
-    ----------
-    config_path : Optional[str | Path]
-
-    Returns
-    -------
-    AppConfig
-        Fully structured application configuration
-    """
-
     config = load_config(config_path)
 
-    _validate_required_keys(config, ["model", "data", "training"])
+    _validate_required(config, ["model", "tasks", "training"])
 
-    data_section = config["data"]
-    dataset_cfg = DatasetConfig(
-        train_path=_resolve_path(data_section.get("train_path", "data/splits/train.csv")),
-        validation_path=_resolve_path(data_section.get("validation_path", "data/splits/validation.csv")),
-        test_path=_resolve_path(data_section.get("test_path", "data/splits/test.csv")),
-        text_column=data_section.get("text_column", "text"),
-        label_column=data_section.get("label_column", "label"),
+    # ---------------- MODEL ----------------
+    encoder_cfg = config["model"].get("encoder", {})
+
+    model = ModelConfig(
+        encoder=EncoderConfig(
+            name=encoder_cfg.get("name", "roberta-base"),
+            pretrained_model=encoder_cfg.get("pretrained_model"),
+            hidden_size=encoder_cfg.get("hidden_size", 768),
+            freeze_epochs=encoder_cfg.get("freeze_epochs", 0),
+            layerwise_lr_decay=encoder_cfg.get("layerwise_lr_decay"),
+        )
     )
 
-    model_section = config["model"]
-    encoder_section = model_section.get("encoder", {})
-    model_name = encoder_section.get("name") or model_section.get("name", "roberta-base")
-    model_cfg = ModelConfig(
-        name=model_name,
-        pretrained_model=encoder_section.get("tokenizer_name") or model_section.get("pretrained_model"),
-        hidden_size=model_section.get("hidden_size"),
-        num_labels=model_section.get("num_labels"),
+    # ---------------- TASKS ----------------
+    tasks: Dict[str, TaskConfig] = {}
+
+    for name, cfg in config["tasks"].items():
+        _validate_task(name, cfg)
+
+        ds = cfg["dataset"]
+
+        dataset = TaskDatasetConfig(
+            train_path=_resolve_path(ds["train_path"]),
+            validation_path=_resolve_path(ds["validation_path"]) if ds.get("validation_path") else None,
+            test_path=_resolve_path(ds["test_path"]) if ds.get("test_path") else None,
+            text_column=ds.get("text_column", "text"),
+            label_column=ds.get("label_column", "label"),
+        )
+
+        tasks[name] = TaskConfig(
+            name=name,
+            task_type=cfg["type"],
+            num_labels=cfg["num_labels"],
+            dataset=dataset,
+        )
+
+    # ---------------- TRAINING ----------------
+    t = config["training"]
+
+    training = TrainingConfig(
+        batch_size=t["batch_size"],
+        epochs=t["epochs"],
+        learning_rate=t["learning_rate"],
+        gradient_accumulation_steps=t.get("gradient_accumulation_steps", 1),
+        device=t.get("device", "auto"),
+        max_grad_norm=t.get("max_grad_norm", 1.0),
+        fp16=t.get("fp16", False),
     )
 
-    training_cfg = TrainingConfig(
-        batch_size=config["training"]["batch_size"],
-        epochs=config["training"]["epochs"],
-        learning_rate=config["training"]["learning_rate"],
-        gradient_accumulation_steps=config["training"].get(
-            "gradient_accumulation_steps", 1
-        ),
-        device=config["training"].get("device", "auto"),
+    # ---------------- SAMPLING ----------------
+    s = config.get("task_sampling", {})
+
+    sampling = SamplingConfig(
+        strategy=s.get("strategy", "uniform"),
+        temperature=s.get("temperature", 1.0),
     )
 
-    experiment_section = config.get("experiment", {})
-    experiment_cfg = ExperimentConfig(
-        seed=experiment_section.get("seed", config["training"].get("seed", 42)),
-        output_dir=_resolve_path(experiment_section.get("output_dir", "models")),
-        experiment_name=experiment_section.get("experiment_name", "truthlens"),
+    # ---------------- EXPERIMENT ----------------
+    e = config.get("experiment", {})
+
+    experiment = ExperimentConfig(
+        seed=e.get("seed", 42),
+        output_dir=_resolve_path(e.get("output_dir", "outputs")),
+        experiment_name=e.get("experiment_name", "truthlens"),
     )
 
-    logger.info("Configuration successfully loaded and validated")
+    logger.info("Loaded config | tasks=%d", len(tasks))
 
     return AppConfig(
-        model=model_cfg,
-        dataset=dataset_cfg,
-        training=training_cfg,
-        experiment=experiment_cfg,
+        model=model,
+        tasks=tasks,
+        training=training,
+        sampling=sampling,
+        experiment=experiment,
     )

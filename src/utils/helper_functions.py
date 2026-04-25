@@ -1,190 +1,156 @@
-"""
-File Name: helper_functions.py
-Module: src.utils
-Description:
-    General-purpose helper utilities used across the TruthLens AI system.
-
-    This module provides small reusable utilities for filesystem management,
-    safe directory creation, file validation, and common path operations.
-    All functions are designed to be robust, reusable, and safe for
-    production ML pipelines.
-
-Author: TruthLens Engineering
-Date: 2026-04-03
-Dependencies:
-    - Python 3.10+
-
-Inputs:
-    - File paths
-    - Directory paths
-
-Outputs:
-    - Validated Path objects
-    - Created directories
-"""
-
 from __future__ import annotations
 
 import logging
+import os
+import shutil
+import tempfile
 from pathlib import Path
-from typing import Iterable
-
-
-# ---------------------------------------------------------
-# Logging
-# ---------------------------------------------------------
+from typing import Iterable, Union
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------
-# Create Folder
-# ---------------------------------------------------------
+PathLike = Union[str, Path]
 
 
-def create_folder(path: str | Path) -> Path:
-    """
-    Create directory if it does not exist.
+# =========================================================
+# PATH UTILITIES
+# =========================================================
 
-    Parameters
-    ----------
-    path : str | Path
-        Directory path.
+def to_path(path: PathLike) -> Path:
+    if isinstance(path, Path):
+        return path.resolve()
 
-    Returns
-    -------
-    Path
-        Created or existing directory path.
+    if not isinstance(path, str):
+        raise TypeError(f"Expected str or Path, got {type(path).__name__}")
 
-    Raises
-    ------
-    RuntimeError
-        If directory creation fails.
-    """
-
-    try:
-        path_obj = Path(path)
-        path_obj.mkdir(parents=True, exist_ok=True)
-
-        logger.debug("Directory ensured: %s", path_obj)
-
-        return path_obj
-
-    except Exception as exc:
-        logger.exception("Failed to create directory: %s", path)
-        raise RuntimeError(f"Unable to create directory: {path}") from exc
+    return Path(path).resolve()
 
 
-# ---------------------------------------------------------
-# Ensure Multiple Folders
-# ---------------------------------------------------------
+# =========================================================
+# DIRECTORY CREATION (DDP SAFE)
+# =========================================================
+
+def create_folder(path: PathLike, retries: int = 3) -> Path:
+    path_obj = to_path(path)
+
+    for attempt in range(retries):
+        try:
+            path_obj.mkdir(parents=True, exist_ok=True)
+            return path_obj
+        except OSError as e:
+            logger.warning("Retry mkdir (%d/%d): %s", attempt + 1, retries, path_obj)
+            if attempt == retries - 1:
+                raise RuntimeError(f"Failed to create directory: {path_obj}") from e
+
+    return path_obj
 
 
-def ensure_directories(paths: Iterable[str | Path]) -> list[Path]:
-    """
-    Ensure multiple directories exist.
-
-    Parameters
-    ----------
-    paths : Iterable[str | Path]
-        List of directory paths.
-
-    Returns
-    -------
-    list[Path]
-        List of created/validated directory paths.
-    """
-
-    created_paths: list[Path] = []
-
-    for path in paths:
-        created_paths.append(create_folder(path))
-
-    return created_paths
+def ensure_directories(paths: Iterable[PathLike]) -> list[Path]:
+    return [create_folder(p) for p in paths]
 
 
-# ---------------------------------------------------------
-# Validate File Exists
-# ---------------------------------------------------------
+# =========================================================
+# FILE VALIDATION
+# =========================================================
 
-
-def ensure_file_exists(path: str | Path) -> Path:
-    """
-    Validate that a file exists.
-
-    Parameters
-    ----------
-    path : str | Path
-        File path.
-
-    Returns
-    -------
-    Path
-        Validated file path.
-
-    Raises
-    ------
-    FileNotFoundError
-        If file does not exist.
-    """
-
-    path_obj = Path(path)
+def ensure_file_exists(path: PathLike) -> Path:
+    path_obj = to_path(path)
 
     if not path_obj.exists() or not path_obj.is_file():
-        logger.error("File does not exist: %s", path_obj)
         raise FileNotFoundError(f"File not found: {path_obj}")
 
     return path_obj
 
 
-# ---------------------------------------------------------
-# Safe Path Conversion
-# ---------------------------------------------------------
+def ensure_files_exist(paths: Iterable[PathLike]) -> list[Path]:
+    return [ensure_file_exists(p) for p in paths]
 
 
-def to_path(path: str | Path) -> Path:
-    """
-    Convert string or Path-like object to Path.
+# =========================================================
+# ATOMIC WRITE (CRITICAL FOR ML SYSTEMS)
+# =========================================================
 
-    Parameters
-    ----------
-    path : str | Path
+def atomic_write(file_path: PathLike, data: bytes) -> Path:
+    path = to_path(file_path)
+    tmp_dir = path.parent
 
-    Returns
-    -------
-    Path
-    """
+    create_folder(tmp_dir)
 
-    if isinstance(path, Path):
-        return path
+    with tempfile.NamedTemporaryFile(delete=False, dir=tmp_dir) as tmp:
+        tmp.write(data)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp_path = Path(tmp.name)
 
-    if not isinstance(path, str):
-        raise TypeError(
-            f"path must be str or Path, got {type(path).__name__}"
-        )
+    tmp_path.replace(path)  # atomic rename
 
-    return Path(path)
+    return path
 
 
-# ---------------------------------------------------------
-# File Size Utility
-# ---------------------------------------------------------
+# =========================================================
+# FILE SIZE + DISK UTILITIES
+# =========================================================
 
-
-def get_file_size(path: str | Path) -> int:
-    """
-    Get file size in bytes.
-
-    Parameters
-    ----------
-    path : str | Path
-
-    Returns
-    -------
-    int
-        File size in bytes.
-    """
-
+def get_file_size(path: PathLike) -> int:
     file_path = ensure_file_exists(path)
-
     return file_path.stat().st_size
+
+
+def get_directory_size(path: PathLike) -> int:
+    path_obj = to_path(path)
+
+    if not path_obj.exists():
+        return 0
+
+    total = 0
+    for p in path_obj.rglob("*"):
+        if p.is_file():
+            total += p.stat().st_size
+
+    return total
+
+
+# =========================================================
+# SAFE DELETE
+# =========================================================
+
+def safe_delete(path: PathLike) -> None:
+    path_obj = to_path(path)
+
+    if not path_obj.exists():
+        return
+
+    if path_obj.is_file():
+        path_obj.unlink()
+        logger.debug("Deleted file: %s", path_obj)
+        return
+
+    shutil.rmtree(path_obj)
+    logger.debug("Deleted directory: %s", path_obj)
+
+
+# =========================================================
+# TEMP DIRECTORY (FOR PIPELINES)
+# =========================================================
+
+def create_temp_dir(prefix: str = "tmp_") -> Path:
+    path = Path(tempfile.mkdtemp(prefix=prefix))
+    return path.resolve()
+
+
+# =========================================================
+# PATH VALIDATION (STRICT)
+# =========================================================
+
+def assert_is_directory(path: PathLike) -> Path:
+    p = to_path(path)
+    if not p.exists() or not p.is_dir():
+        raise NotADirectoryError(f"Not a directory: {p}")
+    return p
+
+
+def assert_is_file(path: PathLike) -> Path:
+    p = to_path(path)
+    if not p.exists() or not p.is_file():
+        raise FileNotFoundError(f"Not a file: {p}")
+    return p

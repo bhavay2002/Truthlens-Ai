@@ -1,163 +1,189 @@
-"""
-File Name: logging_utils.py
-Module: src.utils
-Description:
-    Logging configuration utilities for TruthLens AI.
-
-    This module provides centralized logging configuration for the
-    entire application. It supports console logging, optional file
-    logging, structured formatting, and safeguards against duplicate
-    handlers.
-
-    Designed for use across training pipelines, inference services,
-    and evaluation scripts.
-
-Author: TruthLens Engineering
-Date: 2026-04-03
-Dependencies:
-    - Python 3.10+
-
-Inputs:
-    - Logging level
-    - Optional log file path
-
-Outputs:
-    - Configured Python logging system
-"""
-
 from __future__ import annotations
 
+import json
 import logging
 import sys
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any
+from logging.handlers import RotatingFileHandler
+from threading import Lock
+
+from src.utils.distributed_utils import is_primary
 
 
-# ---------------------------------------------------------
-# Logging Formatter
-# ---------------------------------------------------------
+# =========================================================
+# GLOBAL CONTEXT (THREAD-SAFE)
+# =========================================================
+
+_GLOBAL_CONTEXT: Dict[str, Any] = {}
+_CONTEXT_LOCK = Lock()
 
 
-def _create_formatter() -> logging.Formatter:
+def set_global_context(**kwargs) -> None:
     """
-    Create standardized logging formatter.
+    Set global logging context.
 
-    Returns
-    -------
-    logging.Formatter
+    Example:
+        set_global_context(experiment_id="exp_123", epoch=1)
     """
+    with _CONTEXT_LOCK:
+        _GLOBAL_CONTEXT.update(kwargs)
 
+
+def clear_global_context() -> None:
+    """Clear all global context."""
+    with _CONTEXT_LOCK:
+        _GLOBAL_CONTEXT.clear()
+
+
+def get_global_context() -> Dict[str, Any]:
+    with _CONTEXT_LOCK:
+        return dict(_GLOBAL_CONTEXT)
+
+
+# =========================================================
+# FORMATTERS
+# =========================================================
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        log_record = {
+            "time": self.formatTime(record, "%Y-%m-%d %H:%M:%S"),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+
+        # Inject global context
+        log_record.update(get_global_context())
+
+        # Inject per-call extra
+        if hasattr(record, "extra"):
+            log_record.update(record.extra)
+
+        return json.dumps(log_record, ensure_ascii=False)
+
+
+def _create_text_formatter():
     return logging.Formatter(
-        fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+        "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        "%Y-%m-%d %H:%M:%S",
     )
 
 
-# ---------------------------------------------------------
-# Configure Logging
-# ---------------------------------------------------------
-
+# =========================================================
+# CONFIGURATION
+# =========================================================
 
 def configure_logging(
     level: int = logging.INFO,
     log_file: Optional[str | Path] = None,
+    *,
+    json_logging: bool = False,
 ) -> None:
-    """
-    Configure application-wide logging.
 
-    Parameters
-    ----------
-    level : int
-        Logging level (e.g., logging.INFO).
+    root = logging.getLogger()
+    root.setLevel(level)
 
-    log_file : Optional[str | Path]
-        Optional file path for persistent logs.
-    """
+    formatter = JsonFormatter() if json_logging else _create_text_formatter()
 
-    root_logger = logging.getLogger()
-    root_logger.setLevel(level)
+    _setup_stream(root, formatter)
 
-    formatter = _create_formatter()
-
-    _ensure_stream_handler(root_logger, formatter)
-
-    if log_file is not None:
-        _ensure_file_handler(root_logger, formatter, log_file)
+    if log_file:
+        _setup_file(root, formatter, log_file)
 
 
-# ---------------------------------------------------------
-# Stream Handler
-# ---------------------------------------------------------
+def _setup_stream(logger, formatter):
+    if any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
+        return
+
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
 
 
-def _ensure_stream_handler(
+def _setup_file(logger, formatter, log_file):
+    path = Path(log_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    handler = RotatingFileHandler(
+        path,
+        maxBytes=50 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+        delay=True,
+    )
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+
+# =========================================================
+# STRUCTURED LOGGING API
+# =========================================================
+
+def log_event(
     logger: logging.Logger,
-    formatter: logging.Formatter,
+    message: str,
+    *,
+    level: int = logging.INFO,
+    **extra: Any,
 ) -> None:
-    """
-    Ensure console logging handler exists.
 
-    Parameters
-    ----------
-    logger : logging.Logger
-    formatter : logging.Formatter
-    """
+    if not is_primary():
+        return
 
-    has_stream_handler = any(
-        isinstance(handler, logging.StreamHandler)
-        and not isinstance(handler, logging.FileHandler)
-        for handler in logger.handlers
+    logger.log(level, message, extra={"extra": extra})
+
+
+# =========================================================
+# TRAINING LOGGING
+# =========================================================
+
+def log_training_step(
+    logger: logging.Logger,
+    step: int,
+    task: str,
+    loss: float,
+    lr: float,
+):
+
+    log_event(
+        logger,
+        "training_step",
+        step=step,
+        task=task,
+        loss=round(loss, 6),
+        lr=lr,
     )
 
-    if not has_stream_handler:
-        stream_handler = logging.StreamHandler(sys.stdout)
-        stream_handler.setFormatter(formatter)
 
-        logger.addHandler(stream_handler)
-
-
-# ---------------------------------------------------------
-# File Handler
-# ---------------------------------------------------------
-
-
-def _ensure_file_handler(
+def log_epoch_summary(
     logger: logging.Logger,
-    formatter: logging.Formatter,
-    log_file: str | Path,
-) -> None:
-    """
-    Ensure file logging handler exists.
+    epoch: int,
+    metrics: Dict[str, Any],
+):
 
-    Parameters
-    ----------
-    logger : logging.Logger
-    formatter : logging.Formatter
-    log_file : str | Path
-    """
-
-    log_path = Path(log_file)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-
-    resolved_log_path = log_path.resolve()
-
-    has_matching_file_handler = any(
-        isinstance(handler, logging.FileHandler)
-        and Path(handler.baseFilename).resolve() == resolved_log_path
-        for handler in logger.handlers
+    log_event(
+        logger,
+        "epoch_summary",
+        epoch=epoch,
+        metrics=metrics,
     )
 
-    if not has_matching_file_handler:
-        # m3: rotate to bound disk usage; delay=True so the file isn't created
-        # until the first record is written.
-        file_handler = RotatingFileHandler(
-            log_path,
-            maxBytes=50 * 1024 * 1024,
-            backupCount=5,
-            encoding="utf-8",
-            delay=True,
-        )
-        file_handler.setFormatter(formatter)
 
-        logger.addHandler(file_handler)
+# =========================================================
+# INFERENCE LOGGING
+# =========================================================
+
+def log_prediction(
+    logger: logging.Logger,
+    task: str,
+    confidence: float,
+):
+
+    log_event(
+        logger,
+        "prediction",
+        task=task,
+        confidence=confidence,
+    )

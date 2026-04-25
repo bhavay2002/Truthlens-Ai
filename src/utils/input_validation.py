@@ -1,49 +1,29 @@
-"""
-File Name: input_validation.py
-Module: src.utils
-Description:
-    Input validation utilities for TruthLens AI.
-
-    This module provides reusable validation functions to ensure
-    data integrity across the ML pipeline. It includes validation
-    for pandas DataFrames, scalar parameters, and text inputs used
-    throughout training, inference, and preprocessing pipelines.
-
-Author: TruthLens Engineering
-Date: 2026-04-03
-Dependencies:
-    - Python 3.10+
-    - pandas
-
-Inputs:
-    - DataFrames
-    - text inputs
-    - numeric parameters
-
-Outputs:
-    - validated values
-    - raised exceptions for invalid inputs
-"""
-
 from __future__ import annotations
 
 import logging
-from typing import Iterable, Sequence, Any
+from typing import Iterable, Sequence, Any, Dict, Optional
 
 import pandas as pd
-
-
-# ---------------------------------------------------------
-# Logging
-# ---------------------------------------------------------
+import numpy as np
+import torch
 
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------
-# DataFrame Validation
-# ---------------------------------------------------------
+# =========================================================
+# GLOBAL VALIDATION SWITCH
+# =========================================================
 
+VALIDATION_ENABLED = True
+
+
+def _skip_validation():
+    return not VALIDATION_ENABLED
+
+
+# =========================================================
+# DATAFRAME SCHEMA VALIDATION
+# =========================================================
 
 def ensure_dataframe(
     df: pd.DataFrame,
@@ -51,206 +31,166 @@ def ensure_dataframe(
     name: str = "df",
     required_columns: Iterable[str] = (),
     min_rows: int = 1,
+    dtypes: Optional[Dict[str, str]] = None,
 ) -> None:
-    """
-    Validate pandas DataFrame input.
 
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Input DataFrame to validate.
-
-    name : str
-        Variable name used in error messages.
-
-    required_columns : Iterable[str]
-        Columns that must exist in the DataFrame.
-
-    min_rows : int
-        Minimum number of rows required.
-
-    Raises
-    ------
-    TypeError
-        If input is not a DataFrame.
-
-    ValueError
-        If DataFrame is empty or missing required columns.
-    """
-
-    if min_rows < 1:
-        raise ValueError("min_rows must be >= 1")
+    if _skip_validation():
+        return
 
     if not isinstance(df, pd.DataFrame):
-        logger.error("%s must be a pandas DataFrame", name)
-        raise TypeError(f"{name} must be a pandas DataFrame")
+        raise TypeError(f"{name} must be DataFrame")
 
     if len(df) < min_rows:
-        logger.error("%s contains fewer than %d rows", name, min_rows)
-        raise ValueError(f"{name} must contain at least {min_rows} row(s)")
+        raise ValueError(f"{name} must have >= {min_rows} rows")
 
-    missing_columns = set(required_columns) - set(df.columns)
+    # -----------------------------
+    # Required columns
+    # -----------------------------
+    missing = set(required_columns) - set(df.columns)
+    if missing:
+        raise ValueError(f"{name} missing columns: {missing}")
 
-    if missing_columns:
-        logger.error("%s missing required columns: %s", name, missing_columns)
-        raise ValueError(
-            f"{name} is missing required columns: {sorted(missing_columns)}"
-        )
+    # -----------------------------
+    # DTYPE VALIDATION (NEW)
+    # -----------------------------
+    if dtypes:
+        for col, expected_dtype in dtypes.items():
+            if col not in df.columns:
+                continue
+
+            actual = str(df[col].dtype)
+
+            if expected_dtype not in actual:
+                raise TypeError(
+                    f"{name}.{col} expected dtype {expected_dtype}, got {actual}"
+                )
 
 
-# ---------------------------------------------------------
-# Positive Integer Validation
-# ---------------------------------------------------------
+# =========================================================
+# LABEL VALIDATION (UPGRADED)
+# =========================================================
+
+def validate_labels(
+    labels: Any,
+    task_type: str,
+    num_labels: int,
+) -> None:
+
+    if _skip_validation():
+        return
+
+    if isinstance(labels, torch.Tensor):
+        labels = labels.detach().cpu().numpy()
+
+    labels = np.asarray(labels)
+
+    # -----------------------------
+    # BINARY
+    # -----------------------------
+    if task_type == "binary":
+        unique = np.unique(labels)
+        if not set(unique).issubset({0, 1}):
+            raise ValueError(f"Binary labels must be 0/1, got {unique}")
+
+    # -----------------------------
+    # MULTICLASS
+    # -----------------------------
+    elif task_type == "multiclass":
+        if labels.ndim != 1:
+            raise ValueError("Multiclass labels must be 1D")
+
+        if labels.min() < 0 or labels.max() >= num_labels:
+            raise ValueError(
+                f"Labels must be in [0, {num_labels-1}]"
+            )
+
+    # -----------------------------
+    # MULTILABEL
+    # -----------------------------
+    elif task_type == "multilabel":
+        if labels.ndim != 2:
+            raise ValueError("Multilabel must be [B, num_labels]")
+
+        if labels.shape[1] != num_labels:
+            raise ValueError("Incorrect label dimension")
+
+        unique = np.unique(labels)
+        if not set(unique).issubset({0, 1}):
+            raise ValueError("Multilabel must be binary (0/1)")
+
+    else:
+        raise ValueError(f"Unknown task_type: {task_type}")
 
 
-def ensure_positive_int(
-    value: int,
+# =========================================================
+# TENSOR VALIDATION (ENHANCED)
+# =========================================================
+
+def validate_tensor(
+    tensor: torch.Tensor,
     *,
     name: str,
-    min_value: int = 1,
-) -> int:
-    """
-    Ensure integer parameter is valid.
-
-    Parameters
-    ----------
-    value : int
-        Value to validate.
-
-    name : str
-        Parameter name.
-
-    min_value : int
-        Minimum allowed value.
-
-    Returns
-    -------
-    int
-        Validated integer.
-
-    Raises
-    ------
-    TypeError
-        If value is not an integer.
-
-    ValueError
-        If value is below minimum.
-    """
-
-    if isinstance(value, bool) or not isinstance(value, int):
-        logger.error("%s must be an integer", name)
-        raise TypeError(f"{name} must be an integer")
-
-    if value < min_value:
-        logger.error("%s must be >= %d", name, min_value)
-        raise ValueError(f"{name} must be >= {min_value}")
-
-    return value
-
-
-# ---------------------------------------------------------
-# Text Column Validation
-# ---------------------------------------------------------
-
-
-def ensure_non_empty_text_column(
-    df: pd.DataFrame,
-    text_column: str,
-    *,
-    name: str = "df",
+    expected_dim: int | None = None,
+    dtype: torch.dtype | None = None,
 ) -> None:
-    """
-    Ensure dataset text column exists and contains valid text.
 
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Dataset.
+    if _skip_validation():
+        return
 
-    text_column : str
-        Column containing text.
+    if not isinstance(tensor, torch.Tensor):
+        raise TypeError(f"{name} must be tensor")
 
-    name : str
-        Variable name for error reporting.
+    if expected_dim and tensor.dim() != expected_dim:
+        raise ValueError(f"{name} must have dim={expected_dim}")
 
-    Raises
-    ------
-    ValueError
-        If column missing or contains only empty values.
-    """
+    if dtype and tensor.dtype != dtype:
+        raise TypeError(f"{name} expected dtype {dtype}, got {tensor.dtype}")
 
-    if text_column not in df.columns:
-        logger.error("%s does not contain column '%s'", name, text_column)
-        raise ValueError(
-            f"{name} does not contain text column '{text_column}'"
-        )
+    if torch.isnan(tensor).any():
+        raise ValueError(f"{name} contains NaN")
 
-    def _normalize(value: Any) -> str:
-        if value is None:
-            return ""
-
-        try:
-            if bool(pd.isna(value)):
-                return ""
-        except Exception:
-            pass
-
-        return str(value).strip()
-
-    if df[text_column].map(_normalize).eq("").all():
-        logger.error("%s.%s contains only empty values", name, text_column)
-        raise ValueError(f"{name}.{text_column} cannot be entirely empty")
+    if torch.isinf(tensor).any():
+        raise ValueError(f"{name} contains Inf")
 
 
-# ---------------------------------------------------------
-# Single Text Validation
-# ---------------------------------------------------------
+# =========================================================
+# BATCH VALIDATION (ENHANCED)
+# =========================================================
+
+def validate_batch(batch: Dict[str, Any]) -> None:
+
+    if _skip_validation():
+        return
+
+    required = {"input_ids", "attention_mask", "labels", "task"}
+
+    missing = required - set(batch.keys())
+    if missing:
+        raise ValueError(f"Batch missing keys: {missing}")
+
+    validate_tensor(batch["input_ids"], name="input_ids", expected_dim=2)
+    validate_tensor(batch["attention_mask"], name="attention_mask", expected_dim=2)
+
+    if not isinstance(batch["task"], str):
+        raise TypeError("task must be string")
 
 
-def ensure_non_empty_text(
-    text: str,
-    *,
-    name: str = "text",
-) -> str:
-    """
-    Validate single text input.
+# =========================================================
+# TEXT VALIDATION
+# =========================================================
 
-    Parameters
-    ----------
-    text : str
-        Input text.
+def ensure_non_empty_text(text: str, *, name: str = "text") -> str:
 
-    name : str
-        Variable name.
-
-    Returns
-    -------
-    str
-        Validated text.
-
-    Raises
-    ------
-    TypeError
-        If input is not a string.
-
-    ValueError
-        If text is empty.
-    """
+    if _skip_validation():
+        return text
 
     if not isinstance(text, str):
-        logger.error("%s must be a string", name)
-        raise TypeError(f"{name} must be a string")
+        raise TypeError(f"{name} must be string")
 
     if not text.strip():
-        logger.error("%s cannot be empty", name)
         raise ValueError(f"{name} cannot be empty")
 
     return text
-
-
-# ---------------------------------------------------------
-# Text List Validation
-# ---------------------------------------------------------
 
 
 def ensure_non_empty_text_list(
@@ -258,69 +198,30 @@ def ensure_non_empty_text_list(
     *,
     name: str = "texts",
 ) -> list[str]:
-    """
-    Validate list of text inputs.
 
-    Parameters
-    ----------
-    texts : Sequence[str] | Iterable[str]
-        Iterable of text values.
-
-    name : str
-        Variable name.
-
-    Returns
-    -------
-    list[str]
-        Normalized list of text values.
-
-    Raises
-    ------
-    ValueError
-        If list is empty or contains only empty strings.
-    """
+    if _skip_validation():
+        return list(texts)
 
     if texts is None:
-        logger.error("%s cannot be None", name)
         raise ValueError(f"{name} cannot be None")
 
     if isinstance(texts, (str, bytes)):
-        iterable: Iterable[Any] = [texts]
-    else:
-        try:
-            iterable = iter(texts)
-        except TypeError as exc:
-            logger.exception("Invalid iterable for %s", name)
-            raise TypeError(
-                f"{name} must be an iterable of text values"
-            ) from exc
+        texts = [texts]
 
-    text_list: list[str] = []
+    normalized = []
 
-    for item in iterable:
-        if item is None:
-            text_list.append("")
+    for t in texts:
+        if t is None:
+            normalized.append("")
             continue
 
-        try:
-            if bool(pd.isna(item)):
-                text_list.append("")
-                continue
-        except Exception:
-            pass
-
-        if isinstance(item, (bytes, bytearray)):
-            text_list.append(bytes(item).decode("utf-8", errors="ignore"))
+        if isinstance(t, (bytes, bytearray)):
+            normalized.append(t.decode("utf-8", errors="ignore"))
             continue
 
-        text_list.append(str(item))
+        normalized.append(str(t))
 
-    if not text_list:
-        logger.error("%s cannot be empty", name)
+    if not normalized or all(not t.strip() for t in normalized):
         raise ValueError(f"{name} cannot be empty")
 
-    if all(not item.strip() for item in text_list):
-        logger.error("%s contains only empty text", name)
-        raise ValueError(f"{name} cannot be entirely empty")
-
-    return text_list
+    return normalized

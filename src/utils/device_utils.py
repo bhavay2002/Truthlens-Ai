@@ -7,31 +7,94 @@ from contextlib import nullcontext
 
 import torch
 
+from src.utils.distributed_utils import is_primary  # ✅ centralized
+
 logger = logging.getLogger(__name__)
 
 
 # =========================================================
-# Device Detection
+# DEVICE SETUP (DDP SAFE)
 # =========================================================
 
-def get_device(prefer_gpu: bool = True) -> torch.device:
+def get_device(
+    prefer_gpu: bool = True,
+    local_rank: int | None = None,
+) -> torch.device:
+    """
+    Resolve device and bind process (DDP-safe).
+    """
 
+    # -----------------------------
+    # DDP MODE (CRITICAL)
+    # -----------------------------
+    if local_rank is not None and torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)  # 🔥 REQUIRED
+
+        device = torch.device(f"cuda:{local_rank}")
+
+        logger.info(
+            "Using DDP device | local_rank=%d | device=%s",
+            local_rank,
+            device,
+        )
+
+        return device
+
+    # -----------------------------
+    # SINGLE GPU
+    # -----------------------------
     if prefer_gpu and torch.cuda.is_available():
-        return torch.device("cuda")
+        device = torch.device("cuda")
+        logger.info("Using CUDA device")
+        return device
 
+    # -----------------------------
+    # MPS (Apple Silicon)
+    # -----------------------------
     if prefer_gpu and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        return torch.device("mps")
+        device = torch.device("mps")
+        logger.info("Using MPS device")
+        return device
 
+    # -----------------------------
+    # CPU
+    # -----------------------------
+    logger.info("Using CPU device")
     return torch.device("cpu")
 
 
+def setup_device(local_rank: int | None = None) -> torch.device:
+    """
+    Unified device setup entrypoint.
+    """
+    device = get_device(local_rank=local_rank)
+
+    if torch.cuda.is_available():
+        logger.info(
+            "GPU count=%d | current_device=%d",
+            torch.cuda.device_count(),
+            torch.cuda.current_device(),
+        )
+
+    return device
+
+
 # =========================================================
-# AMP Utilities
+# PERFORMANCE FLAGS
+# =========================================================
+
+def enable_performance_optimizations():
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+
+
+# =========================================================
+# AMP + SCALER
 # =========================================================
 
 def get_autocast_dtype() -> torch.dtype:
     if torch.cuda.is_available():
-        # bf16 preferred on modern GPUs
         return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     return torch.float32
 
@@ -39,37 +102,37 @@ def get_autocast_dtype() -> torch.dtype:
 def autocast_context():
     if torch.cuda.is_available():
         return torch.autocast("cuda", dtype=get_autocast_dtype())
-    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        return nullcontext()
-    if hasattr(torch, "autocast") and _cpu_supports_bf16():
-        try:
-            return torch.autocast("cpu", dtype=torch.bfloat16)
-        except Exception:
-            return nullcontext()
     return nullcontext()
 
 
+def get_grad_scaler(enabled: bool = True) -> torch.cuda.amp.GradScaler:
+    return torch.cuda.amp.GradScaler(enabled=enabled and torch.cuda.is_available())
+
+
+# =========================================================
+# INFERENCE CONTEXT
+# =========================================================
+
+def inference_context():
+    return torch.no_grad()
+
+
+# =========================================================
+# CPU BF16 SUPPORT
+# =========================================================
+
 def _cpu_supports_bf16() -> bool:
-    if not hasattr(torch.backends, "cpu"):
-        return False
-
-    if hasattr(torch.backends.cpu, "has_bf16"):
-        if torch.backends.cpu.has_bf16:
-            return True
-
     try:
         if platform.system() == "Linux":
-            with open("/proc/cpuinfo", "r", encoding="utf-8") as cpuinfo_file:
-                cpuinfo = cpuinfo_file.read().lower()
-            return "avx512_bf16" in cpuinfo or "amx_bf16" in cpuinfo
+            with open("/proc/cpuinfo", "r") as f:
+                return "bf16" in f.read().lower()
     except Exception:
-        return False
-
+        pass
     return False
 
 
 # =========================================================
-# Fast Tensor Movement
+# TENSOR MOVE
 # =========================================================
 
 def move_tensor(
@@ -97,14 +160,11 @@ def move_tensor(
         and tensor.is_pinned()
     )
 
-    if dtype is not None:
-        return tensor.to(device, non_blocking=use_non_blocking, dtype=dtype)
-
-    return tensor.to(device, non_blocking=use_non_blocking)
+    return tensor.to(device, non_blocking=use_non_blocking, dtype=dtype)
 
 
 # =========================================================
-# Recursive Movement (Optimized)
+# RECURSIVE MOVE (TASK SAFE)
 # =========================================================
 
 def move_to_device(
@@ -119,7 +179,6 @@ def move_to_device(
     if obj is None:
         return None
 
-    # Tensor
     if isinstance(obj, torch.Tensor):
         return move_tensor(
             obj,
@@ -129,54 +188,34 @@ def move_to_device(
             dtype=dtype,
         )
 
-    # Model
-    if isinstance(obj, torch.nn.Module):
-        return obj.to(device=device, dtype=dtype)
-
-    # Dict
     if isinstance(obj, dict):
         return {
-            k: move_to_device(
-                v,
-                device,
-                non_blocking=non_blocking,
-                pin_memory=pin_memory,
-                dtype=dtype,
-            )
+            k: move_to_device(v, device, non_blocking=non_blocking, pin_memory=pin_memory, dtype=dtype)
+            if isinstance(v, (torch.Tensor, dict, list, tuple))
+            else v  # do not move strings like "task"
             for k, v in obj.items()
         }
 
-    # List
     if isinstance(obj, list):
         return [
-            move_to_device(
-                v,
-                device,
-                non_blocking=non_blocking,
-                pin_memory=pin_memory,
-                dtype=dtype,
-            )
+            move_to_device(v, device, non_blocking=non_blocking, pin_memory=pin_memory, dtype=dtype)
             for v in obj
         ]
 
-    # Tuple
     if isinstance(obj, tuple):
         return tuple(
-            move_to_device(
-                v,
-                device,
-                non_blocking=non_blocking,
-                pin_memory=pin_memory,
-                dtype=dtype,
-            )
+            move_to_device(v, device, non_blocking=non_blocking, pin_memory=pin_memory, dtype=dtype)
             for v in obj
         )
+
+    if isinstance(obj, torch.nn.Module):
+        return obj.to(device=device)
 
     return obj
 
 
 # =========================================================
-# Batch Optimization
+# BATCH MOVE
 # =========================================================
 
 def move_batch(
@@ -185,23 +224,21 @@ def move_batch(
     *,
     pin_memory: bool = False,
     non_blocking: bool = True,
-    dtype: torch.dtype | None = None,
 ) -> Dict[str, Any]:
 
-    return {
-        k: move_to_device(
-            v,
-            device,
-            non_blocking=non_blocking,
-            pin_memory=pin_memory,
-            dtype=dtype,
-        )
-        for k, v in batch.items()
-    }
+    if not isinstance(batch, dict):
+        raise TypeError("Batch must be dict")
+
+    return move_to_device(
+        batch,
+        device,
+        non_blocking=non_blocking,
+        pin_memory=pin_memory,
+    )
 
 
 # =========================================================
-# GPU Utilities
+# GPU UTILITIES
 # =========================================================
 
 def gpu_memory_summary(device_index: int = 0) -> str:
@@ -209,83 +246,23 @@ def gpu_memory_summary(device_index: int = 0) -> str:
     if not torch.cuda.is_available():
         return "GPU not available"
 
-    count = torch.cuda.device_count()
-    if device_index >= count:
-        raise ValueError(f"Invalid GPU index {device_index}")
-
     allocated = torch.cuda.memory_allocated(device_index) / 1024**3
-    reserved = torch.cuda.memory_reserved(device_index) / 1024**3
     total = torch.cuda.get_device_properties(device_index).total_memory / 1024**3
 
-    return (
-        f"GPU {device_index} | "
-        f"Allocated: {allocated:.2f}GB | "
-        f"Reserved: {reserved:.2f}GB | "
-        f"Total: {total:.2f}GB"
-    )
+    return f"GPU {device_index} | {allocated:.2f}/{total:.2f} GB"
 
 
 def get_gpu_count() -> int:
     return torch.cuda.device_count() if torch.cuda.is_available() else 0
 
 
-def set_cuda_device(index: int):
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA not available")
-    count = torch.cuda.device_count()
-    if index < 0 or index >= count:
-        raise ValueError(
-            f"CUDA device index out of range: {index}, available: 0..{count - 1}"
-        )
-    torch.cuda.set_device(index)
-
-
 # =========================================================
-# Distributed Helpers
+# PROCESS ROLE (DELEGATED)
 # =========================================================
 
 def is_primary_process() -> bool:
-    return (
-        not torch.distributed.is_available()
-        or not torch.distributed.is_initialized()
-        or torch.distributed.get_rank() == 0
-    )
-
-
-# =========================================================
-# Device Summary
-# =========================================================
-
-def device_name(device: torch.device | None = None) -> str:
-    """Return a human-readable name for the current compute device."""
-    device = device or get_device()
-
-    if device.type == "cuda":
-        try:
-            idx = device.index if device.index is not None else 0
-            return torch.cuda.get_device_name(idx)
-        except Exception:
-            return "CUDA GPU"
-
-    if device.type == "mps":
-        return "Apple MPS"
-
-    return "CPU"
-
-
-def device_summary(device: torch.device | None = None) -> Dict[str, Any]:
-    device = device or get_device()
-
-    summary = {
-        "device": str(device),
-        "device_name": device_name(device),
-        "gpu_count": get_gpu_count(),
-        "cuda": torch.cuda.is_available(),
-    }
-
-    if device.type == "cuda":
-        idx = device.index if device.index is not None else 0
-        props = torch.cuda.get_device_properties(idx)
-        summary["gpu_memory_gb"] = round(props.total_memory / 1024**3, 2)
-
-    return summary
+    """
+    Backward-compatible alias.
+    Prefer: src.utils.distributed_utils.is_primary
+    """
+    return is_primary()

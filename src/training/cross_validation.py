@@ -1,393 +1,244 @@
-"""
-File Name: cross_validation.py
-Module: TruthLens AI - Training Cross Validation
-Description:
-    Stratified cross-validation utilities for TruthLens training pipelines.
-    Designed to work with HuggingFace Trainer pipelines or custom training
-    functions returning (trainer, eval_dataset).
-
-Dependencies:
-    inspect
-    logging
-    typing
-    numpy
-    pandas
-    sklearn.model_selection
-    src.utils.input_validation
-    src.utils.settings
-
-Inputs:
-    df: pandas DataFrame containing training data
-    train_function: callable returning (trainer, eval_dataset)
-    n_splits: number of folds
-    text_column: text column name
-    label_column: label column name
-    params: optional training parameters
-    metric_name: metric to extract from trainer.evaluate
-    random_state: random seed
-
-Outputs:
-    dictionary containing cross-validation metrics and statistics
-"""
-
 from __future__ import annotations
 
-import torch
+import logging
 import gc
 import os
-from concurrent.futures import ThreadPoolExecutor
-
-import inspect
-import logging
+import json
 from typing import Any, Callable, Dict, List
 
 import numpy as np
 import pandas as pd
+import torch
+
 from sklearn.model_selection import StratifiedKFold
 
-from src.utils.input_validation import (
-    ensure_dataframe,
-    ensure_non_empty_text_column,
-    ensure_positive_int,
-)
+# Multilabel stratification
+try:
+    from skmultilearn.model_selection import IterativeStratification
+    HAS_ITERATIVE = True
+except ImportError:
+    HAS_ITERATIVE = False
+
+from src.config.task_config import TASK_CONFIG, get_task_type, is_multilabel
+from src.training.checkpointing import save_checkpoint_v2
 from src.utils.settings import load_settings
-from src.models.training.training_utils import TrainingMetrics
-from src.features.dataset_feature_generator import DatasetFeatureGenerator
-from src.features.feature_schema_validator import FeatureSchemaValidator
-from src.features.feature_statistics import FeatureStatistics
-from src.training.checkpointing import list_checkpoints
 
 logger = logging.getLogger(__name__)
 SETTINGS = load_settings()
 
 
+# =========================================================
+#  METRIC RESOLUTION
+# =========================================================
 
+def _resolve_metric(task: str, metrics: Dict[str, Any]) -> float:
+    task_type = get_task_type(task)
 
-_UNIFIED_LABEL_CANDIDATES = (
-    "bias_label",
-    "ideology_label",
-    "propaganda_label",
-    "frame",
-)
+    if task_type == "multilabel":
+        candidates = ["micro_f1", "eval_micro_f1"]
+    elif task_type == "multiclass":
+        candidates = ["accuracy", "eval_accuracy"]
+    else:
+        candidates = ["f1", "eval_f1"]
 
-
-def _resolve_label_column(
-    df: pd.DataFrame,
-    label_column: str,
-) -> str:
-    """
-    Resolve the label column for cross-validation.
-    """
-
-    if label_column in df.columns:
-        return label_column
-
-    if label_column != "label":
-        raise ValueError(
-            f"Label column '{label_column}' not found in dataframe."
-        )
-
-    for candidate in _UNIFIED_LABEL_CANDIDATES:
-        if candidate in df.columns:
-            logger.info(
-                "Column 'label' not found. Using '%s' as label column.",
-                candidate,
-            )
-            return candidate
-
-    raise ValueError(
-        "No valid label column found. Expected 'label' or one of "
-        f"{list(_UNIFIED_LABEL_CANDIDATES)}."
-    )
-
-
-def _prepare_training_frame(
-    df: pd.DataFrame,
-    *,
-    label_column: str,
-) -> pd.DataFrame:
-    """
-    Ensure training frame contains column 'label'.
-    """
-
-    if label_column == "label":
-        return df
-
-    prepared = df.copy()
-    prepared["label"] = prepared[label_column]
-    return prepared
-
-
-def _resolve_metric(
-    metrics: Dict[str, Any],
-    metric_name: str,
-) -> float:
-    """
-    Resolve desired metric from trainer output dictionary.
-    """
-
-    if not isinstance(metrics, dict):
-        raise TypeError(
-            "trainer.evaluate(...) must return a dictionary."
-        )
-
-    candidates = [
-        metric_name,
-        f"eval_{metric_name}",
-        "eval_loss",
-        "loss",
-    ]
+    candidates += ["eval_loss"]
 
     for key in candidates:
         if key in metrics:
             return float(metrics[key])
 
-    raise KeyError(
-        f"Metric '{metric_name}' not found in metrics: "
-        f"{sorted(metrics.keys())}"
-    )
+    raise KeyError(f"[{task}] metric not found")
 
 
-def _run_feature_diagnostics(texts: list[str], label: str = "") -> None:
-    """
-    Compute feature statistics and validate schema for a text corpus.
+# =========================================================
+#  STRATIFICATION
+# =========================================================
 
-    Uses DatasetFeatureGenerator to extract a feature matrix from the
-    provided texts, FeatureStatistics to surface the dataset summary and
-    any constant (zero-variance) features, and FeatureSchemaValidator to
-    confirm that all feature vectors match the inferred schema.
+def _build_splits(df, task, label_column, n_splits, seed):
 
-    Runs non-fatally — any error is captured as a warning so it does not
-    interrupt the cross-validation loop.
+    if is_multilabel(task) and HAS_ITERATIVE:
+        y = np.vstack(df[label_column].values)
 
-    Parameters
-    ----------
-    texts : list[str]
-        Raw article texts from the working dataframe.
-    label : str
-        Descriptive tag used in log messages (e.g. "cross-validation dataset").
-    """
-    try:
-        from src.pipelines.feature_pipeline import FeaturePipeline
-        from src.pipelines.batch_feature_pipeline import BatchFeaturePipeline
-
-        tag = f" [{label}]" if label else ""
-        logger.info("Running feature diagnostics%s | samples=%d", tag, len(texts))
-
-        batch_pipeline = BatchFeaturePipeline(pipeline=FeaturePipeline())
-        generator = DatasetFeatureGenerator(pipeline=batch_pipeline)
-        _, feature_names = generator.generate(texts)
-
-        contexts = generator._build_contexts(texts)
-        feature_dicts = batch_pipeline._sequential_extract(contexts)
-
-        stats = FeatureStatistics()
-        summary = stats.dataset_summary(feature_dicts)
-        logger.info(
-            "Feature diagnostics%s | samples=%d features=%d mean_variance=%.6f",
-            tag,
-            int(summary["num_samples"]),
-            int(summary["num_features"]),
-            summary["mean_variance"],
+        stratifier = IterativeStratification(
+            n_splits=n_splits,
+            order=1,
         )
 
-        constant = stats.detect_constant_features(feature_dicts)
-        if constant:
-            logger.warning(
-                "Detected %d constant feature(s)%s: %s",
-                len(constant),
-                tag,
-                constant[:10],
-            )
+        return list(stratifier.split(np.zeros(len(y)), y))
 
-        validator = FeatureSchemaValidator(
-            expected_features=feature_names,
-            strict=False,
-            allow_missing=True,
-            allow_extra=True,
-        )
-        validator.validate_batch(feature_dicts[:min(5, len(feature_dicts))])
-        logger.info(
-            "Feature schema validated%s | schema_features=%d",
-            tag,
-            validator.schema_summary()["num_features"],
-        )
-
-    except Exception as _diag_exc:
-        logger.warning("Feature diagnostics skipped (non-fatal): %s", _diag_exc)
-
-def cross_validate_model(
-    df: pd.DataFrame,
-    train_function: Callable[..., tuple[Any, Any]],
-    n_splits: int | None = None,
-    *,
-    text_column: str = "text",
-    label_column: str = "label",
-    params: Dict[str, Any] | None = None,
-    metric_name: str | None = None,
-    random_state: int | None = None,
-    checkpoint_root: str | None = None,
-    use_parallel: bool = False,  # 🔥 NEW
-) -> Dict[str, Any]:
-
-    resolved_label_column = _resolve_label_column(df, label_column)
-
-    ensure_dataframe(
-        df,
-        name="df",
-        required_columns=[text_column, resolved_label_column],
-        min_rows=3,
-    )
-
-    working_df = df[df[resolved_label_column].notna()].reset_index(drop=True)
-
-    ensure_non_empty_text_column(working_df, text_column, name="working_df")
-
-    effective_splits = (
-        n_splits
-        if n_splits is not None
-        else SETTINGS.training.cross_validation_splits
-    )
-    ensure_positive_int(effective_splits, name="n_splits")
-
-    min_class_count = int(working_df[resolved_label_column].value_counts().min())
-    if effective_splits > min_class_count:
-        raise ValueError(
-            f"n_splits={effective_splits} exceeds minimum class frequency={min_class_count}"
-        )
-
-    effective_metric = metric_name or SETTINGS.training.cross_validation_metric
-
-    effective_seed = (
-        SETTINGS.training.seed if random_state is None else random_state
-    )
+    # fallback
+    y = df[label_column].values
 
     skf = StratifiedKFold(
-        n_splits=effective_splits,
+        n_splits=n_splits,
         shuffle=True,
-        random_state=effective_seed,
+        random_state=seed,
     )
 
-    _run_feature_diagnostics(
-        working_df[text_column].tolist(),
-        label="cross-validation dataset",
-    )
+    return list(skf.split(df, y))
 
-    train_sig = inspect.signature(train_function)
 
-    supports_params = "params" in train_sig.parameters
-    supports_text_column = "text_column" in train_sig.parameters
-    supports_validation_df = "validation_df" in train_sig.parameters
-    supports_test_df = "test_df" in train_sig.parameters
+# =========================================================
+#  EARLY STOPPING WRAPPER
+# =========================================================
 
-    fold_scores: List[float] = []
-    fold_metrics = TrainingMetrics()
+class EarlyStopper:
+    def __init__(self, patience=2):
+        self.best = -np.inf
+        self.counter = 0
+        self.patience = patience
 
-    cache: Dict[Any, float] = {}
+    def step(self, score):
+        if score > self.best:
+            self.best = score
+            self.counter = 0
+            return False
+        else:
+            self.counter += 1
+            return self.counter >= self.patience
 
-    def run_fold(fold, train_idx, val_idx):
 
-        fold_train_df = working_df.iloc[train_idx].reset_index(drop=True)
-        fold_val_df = working_df.iloc[val_idx].reset_index(drop=True)
+# =========================================================
+#  SINGLE TASK CV
+# =========================================================
 
-        fold_train_df = _prepare_training_frame(
-            fold_train_df,
-            label_column=resolved_label_column,
+def cross_validate_task(
+    *,
+    task: str,
+    df: pd.DataFrame,
+    train_function: Callable[..., Any],
+    text_column: str = "text",
+    label_column: str = "label",
+    n_splits: int | None = None,
+    random_state: int | None = None,
+    checkpoint_root: str | None = None,
+    ddp_rank: int | None = None,
+) -> Dict[str, Any]:
+
+    splits = n_splits or SETTINGS.training.cross_validation_splits
+    seed = random_state or SETTINGS.training.seed
+
+    splits_idx = _build_splits(df, task, label_column, splits, seed)
+
+    fold_scores = []
+    stopper = EarlyStopper(patience=2)
+
+    for fold, (train_idx, val_idx) in enumerate(splits_idx, start=1):
+
+        #  DDP: shard folds
+        if ddp_rank is not None and fold % torch.distributed.get_world_size() != ddp_rank:
+            continue
+
+        train_df = df.iloc[train_idx].reset_index(drop=True)
+        val_df = df.iloc[val_idx].reset_index(drop=True)
+
+        trainer = train_function(
+            train_df=train_df,
+            validation_df=val_df,
+            task=task,
         )
 
-        fold_val_df = _prepare_training_frame(
-            fold_val_df,
-            label_column=resolved_label_column,
-        )
+        with torch.no_grad():
+            metrics = trainer.evaluate(task=task)
 
-        train_kwargs: Dict[str, Any] = {}
+        score = _resolve_metric(task, metrics)
+        fold_scores.append(score)
 
-        if supports_params:
-            train_kwargs["params"] = params
+        logger.info("[Task=%s] Fold %d score=%.4f", task, fold, score)
 
-        if supports_text_column:
-            train_kwargs["text_column"] = text_column
+        # -----------------------------
+        # CHECKPOINT
+        # -----------------------------
+        if checkpoint_root:
+            save_checkpoint_v2(
+                model=trainer.model,
+                checkpoint_dir=os.path.join(
+                    checkpoint_root,
+                    f"{task}/fold_{fold}"
+                ),
+                epoch=trainer.state.epoch,
+                step=trainer.state.global_step,
+                task_schema=TASK_CONFIG,
+            )
 
-        if supports_validation_df:
-            train_kwargs["validation_df"] = fold_val_df
+        # -----------------------------
+        # EARLY STOPPING
+        # -----------------------------
+        if stopper.step(score):
+            logger.info("[Task=%s] Early stopping triggered", task)
+            break
 
-        if supports_test_df:
-            train_kwargs["test_df"] = fold_val_df
-
-        cache_key = (fold, tuple(sorted((params or {}).items())))
-        if cache_key in cache:
-            return cache[cache_key]
-
-        trainer, eval_dataset = train_function(
-            fold_train_df,
-            **train_kwargs,
-        )
-
-        with torch.no_grad():  
-            metrics = trainer.evaluate(eval_dataset)
-
-        score = _resolve_metric(metrics, effective_metric)
-
-        model_ref = getattr(trainer, "model", None)
+        # cleanup
         del trainer
-        del eval_dataset
-        if model_ref is not None:
-            del model_ref
-
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        torch.cuda.empty_cache()
         gc.collect()
 
-        logger.info(
-            "[Fold %d/%d] %s=%.4f",
-            fold,
-            effective_splits,
-            effective_metric,
-            score,
+    return {
+        "task": task,
+        "fold_scores": fold_scores,
+        "mean": float(np.mean(fold_scores)),
+        "std": float(np.std(fold_scores)),
+    }
+
+
+# =========================================================
+#  DASHBOARD
+# =========================================================
+
+def build_dashboard(results: Dict[str, Any], save_path=None):
+
+    dashboard = {
+        "tasks": {},
+        "global": {}
+    }
+
+    all_scores = []
+
+    for task, res in results.items():
+        dashboard["tasks"][task] = {
+            "mean": res["mean"],
+            "std": res["std"],
+        }
+        all_scores.append(res["mean"])
+
+    dashboard["global"]["mean"] = float(np.mean(all_scores))
+    dashboard["global"]["std"] = float(np.std(all_scores))
+
+    if save_path:
+        with open(save_path, "w") as f:
+            json.dump(dashboard, f, indent=2)
+
+    return dashboard
+
+
+# =========================================================
+#  MULTI-TASK CV
+# =========================================================
+
+def cross_validate_all_tasks(
+    *,
+    datasets: Dict[str, pd.DataFrame],
+    train_function: Callable[..., Any],
+    checkpoint_root: str | None = None,
+    ddp: bool = False,
+) -> Dict[str, Any]:
+
+    results = {}
+
+    ddp_rank = None
+    if ddp and torch.distributed.is_initialized():
+        ddp_rank = torch.distributed.get_rank()
+
+    for task, df in datasets.items():
+
+        logger.info("==== Running CV for %s ====", task)
+
+        results[task] = cross_validate_task(
+            task=task,
+            df=df,
+            train_function=train_function,
+            checkpoint_root=checkpoint_root,
+            ddp_rank=ddp_rank,
         )
 
-        cache[cache_key] = score
-        return score
-
-    splits = list(skf.split(working_df[text_column], working_df[resolved_label_column]))
-
-    if use_parallel and torch.cuda.is_available():
-        logger.warning("CUDA detected: disabling threaded cross-validation for stability.")
-        use_parallel = False
-
-    if use_parallel:
-        with ThreadPoolExecutor(max_workers=min(2, os.cpu_count() or 1)) as executor:
-            results = list(
-                executor.map(
-                    lambda x: run_fold(x[0] + 1, x[1][0], x[1][1]),
-                    enumerate(splits),
-                )
-            )
-        fold_scores.extend(results)
-    else:
-        for fold, (train_idx, val_idx) in enumerate(splits, start=1):
-            score = run_fold(fold, train_idx, val_idx)
-            fold_scores.append(score)
-
-    for i, score in enumerate(fold_scores, start=1):
-        fold_metrics.update(f"fold_{i}", score)
-
-    mean_score = float(np.mean(fold_scores))
-    std_score = float(np.std(fold_scores))
-
-    available_checkpoints: list[str] = []
-    if isinstance(checkpoint_root, str) and checkpoint_root.strip():
-        available_checkpoints = [
-            str(p) for p in list_checkpoints(checkpoint_root)
-        ]
-
-    return {
-        "metric_name": effective_metric,
-        "fold_scores": fold_scores,
-        "fold_metrics": fold_metrics.to_dict(),
-        "mean_score": mean_score,
-        "std_score": std_score,
-        "n_splits": effective_splits,
-        "label_column": resolved_label_column,
-        "available_checkpoints": available_checkpoints,
-    }
+    return results

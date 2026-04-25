@@ -1,154 +1,163 @@
 """
 File: task_config.py
+Location: src/config/
 
-Central task registry for TruthLens multi-task system.
-Defines task types, output dimensions, losses, thresholds,
-and evaluation behavior.
+Production-grade task registry for multi-task system.
+
+This module:
+- Builds task registry from YAML config
+- Validates task definitions
+- Provides fast lookup helpers
+- Acts as SINGLE runtime source of truth
+
+NOTE:
+YAML config is the only source of truth.
 """
 
 from __future__ import annotations
 
-from typing import Dict, Any
+import logging
+from dataclasses import dataclass
+from typing import Dict
+
+from src.utils.config_loader import load_app_config
+
+logger = logging.getLogger(__name__)
 
 
 # =========================================================
-# TASK CONFIG (SINGLE SOURCE OF TRUTH)
+# TASK DATACLASS (STRICT CONTRACT)
 # =========================================================
-TASK_CONFIG: Dict[str, Dict[str, Any]] = {
 
-    # -----------------------------------------------------
-    # BIAS DETECTION
-    # -----------------------------------------------------
-    "bias": {
-        "type": "binary",
-        "num_classes": 2,
-        "loss": "bce",
-        "loss_weight": 1.0,
-        "threshold": 0.5,
-    },
-
-    # -----------------------------------------------------
-    # IDEOLOGY CLASSIFICATION
-    # -----------------------------------------------------
-    "ideology": {
-        "type": "multiclass",
-        "num_classes": 3,
-        "loss": "cross_entropy",
-        "loss_weight": 1.0,
-    },
-
-    # -----------------------------------------------------
-    # PROPAGANDA DETECTION
-    # -----------------------------------------------------
-    "propaganda": {
-        "type": "binary",
-        "num_classes": 2,
-        "loss": "bce",
-        "loss_weight": 1.0,
-        "threshold": 0.5,
-    },
-
-    # -----------------------------------------------------
-    # EMOTION (MULTILABEL)
-    # -----------------------------------------------------
-    "emotion": {
-        "type": "multilabel",
-        "num_labels": 20,
-        "loss": "bce",
-        "loss_weight": 2.0,
-        "threshold": 0.5,
-        "auto_threshold": True,  # enables tuning
-    },
-
-    # -----------------------------------------------------
-    # SENTIMENT
-    # -----------------------------------------------------
-    "sentiment": {
-        "type": "multiclass",
-        "num_classes": 3,
-        "loss": "cross_entropy",
-        "loss_weight": 1.0,
-    },
-
-    # -----------------------------------------------------
-    # NARRATIVE FRAME (MULTILABEL)
-    # -----------------------------------------------------
-    "narrative_frame": {
-        "type": "multilabel",
-        "num_labels": 10,
-        "loss": "bce",
-        "loss_weight": 2.0,
-        "threshold": 0.5,
-    },
-}
+@dataclass(slots=True, frozen=True)
+class TaskDefinition:
+    name: str
+    task_type: str
+    num_labels: int
+    loss: str
+    loss_weight: float
+    threshold: float
+    auto_threshold: bool
 
 
 # =========================================================
-# VALIDATION (CRITICAL)
+# INTERNAL REGISTRY
 # =========================================================
-def validate_task_config():
 
-    for task, cfg in TASK_CONFIG.items():
-
-        if "type" not in cfg:
-            raise ValueError(f"{task}: missing type")
-
-        if cfg["type"] == "multiclass" and "num_classes" not in cfg:
-            raise ValueError(f"{task}: num_classes required")
-
-        if cfg["type"] == "multilabel" and "num_labels" not in cfg:
-            raise ValueError(f"{task}: num_labels required")
-
-        if "loss" not in cfg:
-            raise ValueError(f"{task}: missing loss")
-
-        if "loss_weight" not in cfg:
-            raise ValueError(f"{task}: missing loss_weight")
-
-
-# Run validation on import
-validate_task_config()
+_TASK_REGISTRY: Dict[str, TaskDefinition] = {}
 
 
 # =========================================================
-# HELPERS (USED EVERYWHERE)
+# VALIDATION
 # =========================================================
+
+VALID_TASK_TYPES = {"binary", "multiclass", "multilabel"}
+VALID_LOSSES = {"bce", "cross_entropy"}
+
+
+def _validate_task(task: TaskDefinition):
+
+    if task.task_type not in VALID_TASK_TYPES:
+        raise ValueError(f"{task.name}: invalid task_type")
+
+    if task.num_labels <= 0:
+        raise ValueError(f"{task.name}: num_labels must be > 0")
+
+    if task.loss not in VALID_LOSSES:
+        raise ValueError(f"{task.name}: invalid loss")
+
+    if task.loss_weight <= 0:
+        raise ValueError(f"{task.name}: loss_weight must be > 0")
+
+    if task.task_type == "multilabel" and task.threshold <= 0:
+        raise ValueError(f"{task.name}: invalid threshold")
+
+
+# =========================================================
+# REGISTRY BUILDER
+# =========================================================
+
+def _build_registry():
+
+    config = load_app_config()
+
+    for task_name, task_cfg in config.tasks.items():
+
+        # ---- derive defaults intelligently ----
+        if task_cfg.task_type == "multilabel":
+            loss = "bce"
+        elif task_cfg.task_type == "binary":
+            loss = "bce"
+        else:
+            loss = "cross_entropy"
+
+        definition = TaskDefinition(
+            name=task_name,
+            task_type=task_cfg.task_type,
+            num_labels=task_cfg.num_labels,
+            loss=loss,
+            loss_weight=1.0,
+            threshold=0.5,
+            auto_threshold=(task_cfg.task_type == "multilabel"),
+        )
+
+        _validate_task(definition)
+
+        _TASK_REGISTRY[task_name] = definition
+
+    if not _TASK_REGISTRY:
+        raise RuntimeError("Task registry is empty")
+
+    logger.info("Task registry initialized | %d tasks", len(_TASK_REGISTRY))
+
+
+# Build on import (safe due to caching)
+_build_registry()
+
+
+# =========================================================
+# PUBLIC API (USED ACROSS SYSTEM)
+# =========================================================
+
+def get_task(task: str) -> TaskDefinition:
+    return _TASK_REGISTRY[task]
+
+
+def get_all_tasks():
+    return list(_TASK_REGISTRY.keys())
+
+
 def get_task_type(task: str) -> str:
-    return TASK_CONFIG[task]["type"]
+    return _TASK_REGISTRY[task].task_type
 
 
 def get_output_dim(task: str) -> int:
-    cfg = TASK_CONFIG[task]
-
-    if cfg["type"] == "multilabel":
-        return cfg["num_labels"]
-
-    return cfg.get("num_classes", 1)
+    return _TASK_REGISTRY[task].num_labels
 
 
 def get_loss_name(task: str) -> str:
-    return TASK_CONFIG[task]["loss"]
+    return _TASK_REGISTRY[task].loss
 
 
 def get_loss_weight(task: str) -> float:
-    return float(TASK_CONFIG[task].get("loss_weight", 1.0))
+    return _TASK_REGISTRY[task].loss_weight
 
 
 def get_threshold(task: str) -> float:
-    return float(TASK_CONFIG[task].get("threshold", 0.5))
+    return _TASK_REGISTRY[task].threshold
 
 
 def use_auto_threshold(task: str) -> bool:
-    return bool(TASK_CONFIG[task].get("auto_threshold", False))
+    return _TASK_REGISTRY[task].auto_threshold
 
 
 def is_multilabel(task: str) -> bool:
-    return TASK_CONFIG[task]["type"] == "multilabel"
+    return _TASK_REGISTRY[task].task_type == "multilabel"
 
 
 def is_binary(task: str) -> bool:
-    return TASK_CONFIG[task]["type"] == "binary"
+    return _TASK_REGISTRY[task].task_type == "binary"
 
 
 def is_multiclass(task: str) -> bool:
-    return TASK_CONFIG[task]["type"] == "multiclass"
+    return _TASK_REGISTRY[task].task_type == "multiclass"

@@ -1,27 +1,3 @@
-"""
-File Name: seed_utils.py
-Module: src.utils
-Description:
-    Utilities for controlling randomness and ensuring reproducibility
-    across machine learning experiments in TruthLens AI.
-
-    This module sets deterministic seeds for Python, NumPy, and PyTorch
-    and configures backend behavior to minimize nondeterminism during
-    model training and inference.
-
-Author: TruthLens Engineering
-Date: 2026-04-03
-Dependencies: 
-    - Python 3.10+
-    - numpy
-    - torch
-
-Inputs:
-    - Seed integer
-
-Outputs:
-    - Deterministic random state across supported libraries
-"""
 from __future__ import annotations
 
 import logging
@@ -36,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 # =========================================================
-# Main Seed Function
+# MAIN ENTRY
 # =========================================================
 
 def set_seed(
@@ -45,52 +21,36 @@ def set_seed(
     deterministic: Optional[bool] = None,
     enable_tf32: bool = True,
     matmul_precision: str = "high",
-) -> None:
+    rank: int = 0,
+) -> int:
     """
-    Set global seed + configure backend for performance or determinism.
+    Set global seed with DDP support.
 
-    Parameters
-    ----------
-    seed : int
-        Random seed
-
-    deterministic : bool
-        True  -> reproducible but slower
-        False -> faster (recommended for training)
-
-    enable_tf32 : bool
-        Enable TensorFloat-32 (Ampere+ GPUs)
-
-    matmul_precision : str
-        "high" | "medium" | "highest"
+    Returns
+    -------
+    int
+        Final seed used (seed + rank)
     """
 
     if not isinstance(seed, int):
         raise TypeError("seed must be int")
 
-    if matmul_precision not in {"high", "medium", "highest"}:
-        raise ValueError("matmul_precision must be one of: 'high', 'medium', 'highest'")
+    final_seed = seed + rank
 
     # -----------------------------
     # Core Seeding
     # -----------------------------
-
-    random.seed(seed)
-    os.environ["PYTHONHASHSEED"] = str(seed)
-    np.random.seed(seed)
-
-    torch.manual_seed(seed)
+    random.seed(final_seed)
+    np.random.seed(final_seed)
+    torch.manual_seed(final_seed)
 
     if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
+        torch.cuda.manual_seed(final_seed)
+        torch.cuda.manual_seed_all(final_seed)
 
     # -----------------------------
-    # Backend Config
+    # Determinism
     # -----------------------------
-
-    # Resolve from env when caller didn't pass an explicit value.
-    # TRUTHLENS_DETERMINISTIC=1 forces reproducible (slower) mode.
     if deterministic is None:
         deterministic = os.environ.get("TRUTHLENS_DETERMINISTIC", "0") == "1"
 
@@ -100,102 +60,100 @@ def set_seed(
         _set_fast_mode(enable_tf32, matmul_precision)
 
     logger.info(
-        "Seed set to %d | deterministic=%s",
+        "Seed initialized | base=%d | rank=%d | final=%d | deterministic=%s",
         seed,
-        deterministic
+        rank,
+        final_seed,
+        deterministic,
     )
+
+    return final_seed
 
 
 # =========================================================
-# Deterministic Mode
+# DETERMINISTIC MODE
 # =========================================================
 
 def _set_deterministic():
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-    # Recommended for stronger CUDA determinism
     os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
     try:
         torch.use_deterministic_algorithms(True)
     except Exception:
-        pass
+        logger.warning("Deterministic algorithms not fully supported")
 
     logger.debug("Deterministic mode enabled")
 
 
 # =========================================================
-# Fast Mode (IMPORTANT)
+# FAST MODE
 # =========================================================
 
 def _set_fast_mode(enable_tf32: bool, matmul_precision: str):
-
-    # cuDNN auto-tuner
     torch.backends.cudnn.benchmark = True
     torch.backends.cudnn.deterministic = False
 
-    # TF32 (huge speedup on Ampere+)
     if torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = enable_tf32
         torch.backends.cudnn.allow_tf32 = enable_tf32
 
-    # Matmul precision (PyTorch 2+)
     try:
         torch.set_float32_matmul_precision(matmul_precision)
     except Exception:
-        pass
+        logger.warning("Matmul precision setting not supported")
 
     logger.debug(
-        "Fast mode enabled | TF32=%s | matmul_precision=%s",
+        "Fast mode | TF32=%s | precision=%s",
         enable_tf32,
         matmul_precision,
     )
 
 
 # =========================================================
-# DataLoader Worker Seed
+# FULL REPRO MODE (RESEARCH)
+# =========================================================
+
+def enable_full_reproducibility(seed: int = 42, rank: int = 0):
+    """
+    Strict reproducibility mode for research.
+    """
+    return set_seed(
+        seed,
+        deterministic=True,
+        enable_tf32=False,
+        matmul_precision="highest",
+        rank=rank,
+    )
+
+
+# =========================================================
+# DATALOADER SUPPORT
 # =========================================================
 
 def seed_worker(worker_id: int):
-
     worker_seed = torch.initial_seed() % 2**32
-
     np.random.seed(worker_seed)
     random.seed(worker_seed)
-
-    # Optional: torch seed for worker
     torch.manual_seed(worker_seed)
 
-    logger.debug("Worker seed initialized: %d", worker_seed)
-
-
-# =========================================================
-# Generator (IMPORTANT for DataLoader)
-# =========================================================
 
 def create_generator(seed: int) -> torch.Generator:
-    """
-    Create torch Generator for reproducible DataLoader.
-    """
     g = torch.Generator()
     g.manual_seed(seed)
     return g
 
 
 # =========================================================
-# Seed State Debugging
+# DEBUG / TRACKING
 # =========================================================
 
-def get_seed_state() -> dict[str, Optional[int]]:
-
-    state = {
-        "python_hash_seed": os.environ.get("PYTHONHASHSEED"),
+def get_seed_state() -> dict:
+    return {
+        "python_seed": os.environ.get("PYTHONHASHSEED"),
         "torch_seed": torch.initial_seed(),
-        "cuda_available": torch.cuda.is_available(),
+        "cuda": torch.cuda.is_available(),
+        "deterministic": torch.backends.cudnn.deterministic,
     }
-
-    if torch.cuda.is_available():
-        state["cuda_seed"] = torch.cuda.initial_seed()
-
-    return state
