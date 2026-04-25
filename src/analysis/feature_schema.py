@@ -130,6 +130,47 @@ PROPAGANDA_PATTERN_KEYS = [
     "narrative_imbalance_score",
 ]
 
+INFORMATION_OMISSION_KEYS = [
+    "missing_counterargument_score",
+    "one_sided_framing_score",
+    "incomplete_evidence_score",
+    "claim_evidence_imbalance",
+]
+
+NARRATIVE_CONFLICT_KEYS = [
+    "conflict_verb_ratio",
+    "opposition_marker_ratio",
+    "polarization_ratio",
+    "conflict_exclamation_ratio",
+    "conflict_question_ratio",
+]
+
+NARRATIVE_PROPAGATION_KEYS = [
+    "violent_conflict_ratio",
+    "political_conflict_ratio",
+    "discursive_conflict_ratio",
+    "institutional_conflict_ratio",
+    "coercion_conflict_ratio",
+    "opposition_marker_ratio",
+    "polarization_ratio",
+    "conflict_phrase_ratio",
+    "hero_villain_conflict_score",
+    "villain_victim_harm_score",
+    "hero_victim_protection_score",
+    "conflict_exclamation_ratio",
+    "conflict_question_ratio",
+]
+
+NARRATIVE_TEMPORAL_KEYS = [
+    "past_framing_ratio",
+    "crisis_escalation_ratio",
+    "urgency_language_ratio",
+    "past_tense_ratio",
+    "present_tense_ratio",
+    "future_tense_ratio",
+    "temporal_contrast_score",
+]
+
 
 # 🔥 REGISTER ALL
 register_schema("argument_mining", ARGUMENT_MINING_KEYS)
@@ -142,6 +183,10 @@ register_schema("information_density", INFORMATION_DENSITY_KEYS)
 register_schema("ideology", IDEOLOGICAL_LANGUAGE_KEYS)
 register_schema("source", SOURCE_ATTRIBUTION_KEYS)
 register_schema("propaganda", PROPAGANDA_PATTERN_KEYS)
+register_schema("information_omission", INFORMATION_OMISSION_KEYS)
+register_schema("narrative_conflict", NARRATIVE_CONFLICT_KEYS)
+register_schema("narrative_propagation", NARRATIVE_PROPAGATION_KEYS)
+register_schema("narrative_temporal", NARRATIVE_TEMPORAL_KEYS)
 
 
 # ---------------------------------------------------------------------------

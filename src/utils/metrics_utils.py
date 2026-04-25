@@ -227,3 +227,38 @@ def reduce_metrics_across_processes(
     (Integrate with distributed_utils if needed)
     """
     return metrics
+
+
+# =========================================================
+# GENERIC HELPERS (re-exported from src.utils)
+# =========================================================
+
+def safe_mean(values, default: float = 0.0) -> float:
+    """Mean of a sequence, returning ``default`` for empty / non-finite input."""
+    if values is None:
+        return float(default)
+
+    arr = _to_numpy(values).astype(float, copy=False).ravel()
+    arr = arr[np.isfinite(arr)]
+
+    if arr.size == 0:
+        return float(default)
+
+    return float(arr.mean())
+
+
+def normalize_score(value, *, lo: float = 0.0, hi: float = 1.0) -> float:
+    """Clamp ``value`` into the closed interval ``[lo, hi]``."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return float(lo)
+
+    if not np.isfinite(v):
+        return float(lo)
+
+    if v < lo:
+        return float(lo)
+    if v > hi:
+        return float(hi)
+    return v

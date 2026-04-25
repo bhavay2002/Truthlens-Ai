@@ -225,3 +225,42 @@ def ensure_non_empty_text_list(
         raise ValueError(f"{name} cannot be empty")
 
     return normalized
+
+
+def ensure_non_empty_text_column(
+    df: pd.DataFrame,
+    column: str,
+    *,
+    name: str = "df",
+) -> pd.DataFrame:
+    """Validate that ``column`` exists in ``df`` and contains non-empty text."""
+    if _skip_validation():
+        return df
+
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError(f"{name} must be DataFrame")
+
+    if column not in df.columns:
+        raise ValueError(f"{name} missing column: {column!r}")
+
+    series = df[column].astype(str).str.strip()
+    if series.eq("").all():
+        raise ValueError(f"{name}.{column} cannot be entirely empty")
+
+    return df
+
+
+def ensure_positive_int(value: Any, *, name: str = "value") -> int:
+    """Coerce ``value`` to a positive ``int`` or raise ``ValueError``."""
+    if _skip_validation() and isinstance(value, int):
+        return value
+
+    try:
+        ivalue = int(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{name} must be an integer, got {type(value).__name__}") from exc
+
+    if ivalue <= 0:
+        raise ValueError(f"{name} must be > 0, got {ivalue}")
+
+    return ivalue

@@ -205,6 +205,15 @@ The following files were created during Replit migration to resolve missing modu
 - `src/models/ensemble/weighted_ensemble.py` — WeightedEnsembleModel / WeightedEnsembleConfig
 - `src/models/ensemble/stacking_ensemble.py` — StackingEnsembleModel / StackingEnsembleConfig
 
+### Replit Agent → Replit migration (April 2026)
+- Installed missing Python deps via pip: `portalocker`, `spacy`, `sentence-transformers`, `datasets`, `mlflow` (torch/transformers/fastapi/uvicorn already present).
+- Added `src/analysis/integration_runner.py` with `AnalysisIntegrationRunner.analyze_text(text)` aggregating all 15 single-text analyzers.
+- Added missing utility helpers to `src/utils/`: `device_summary` / `device_name` / `set_cuda_device` (`device_utils.py`), `ensure_non_empty_text_column` / `ensure_positive_int` (`input_validation.py`), `safe_mean` / `normalize_score` (`metrics_utils.py`).
+- Rewrote `src/utils/settings.py` to load `config/config.yaml` as a nested AttrDict so dotted access (`SETTINGS.model.path`, `SETTINGS.paths.tfidf_vectorizer_path`, `SETTINGS.api.*`, `SETTINGS.inference.*`, `SETTINGS.training.text_column`) works without the legacy `tasks` requirement.
+- Added missing schema key lists to `src/analysis/feature_schema.py`: `INFORMATION_OMISSION_KEYS`, `NARRATIVE_CONFLICT_KEYS`, `NARRATIVE_PROPAGATION_KEYS`, `NARRATIVE_TEMPORAL_KEYS` (registered in the schema registry).
+- Made `ScoreExplainer.__init__` tolerate `model=None` / `tokenizer=None`, and added a profile-only `explain_profile(profile, top_k)` method so `AggregationPipeline` no longer crashes on construction.
+- App listens on `0.0.0.0:5000`; the `Start application` workflow boots cleanly and `GET /` returns the endpoint index.
+
 ## Multi-Task Training Playbook (applied)
 All four phases of the misinformation multi-task playbook + corrections are wired in
 and ON by default. Set the corresponding env var to `0` to disable any one.

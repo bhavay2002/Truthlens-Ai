@@ -34,8 +34,8 @@ class ScoreExplainer:
 
     def __init__(
         self,
-        model: nn.Module,
-        tokenizer: Any,
+        model: Optional[nn.Module] = None,
+        tokenizer: Any = None,
         *,
         method: str = "integrated_gradients",
         device: Optional[str] = None,
@@ -45,8 +45,61 @@ class ScoreExplainer:
         self.method = method
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
-        self.model.to(self.device)
-        self.model.eval()
+        if self.model is not None:
+            self.model.to(self.device)
+            self.model.eval()
+
+    # =========================================================
+    # PROFILE-BASED EXPLANATION (no model required)
+    # =========================================================
+    def explain_profile(
+        self,
+        profile: Dict[str, Any],
+        *,
+        top_k: int = 5,
+    ) -> Dict[str, Any]:
+        """Lightweight, profile-only explanation.
+
+        Returns the top contributing sections/features by absolute score.
+        Used when no model+tokenizer pair is available (e.g. aggregation-only
+        runs).
+        """
+        contributions: List[Dict[str, Any]] = []
+
+        if isinstance(profile, dict):
+            for section, payload in profile.items():
+                if isinstance(payload, dict):
+                    for feature, value in payload.items():
+                        try:
+                            score = float(value)
+                        except (TypeError, ValueError):
+                            continue
+                        contributions.append({
+                            "section": section,
+                            "feature": feature,
+                            "importance": score,
+                            "direction": "positive" if score >= 0 else "negative",
+                        })
+                else:
+                    try:
+                        score = float(payload)
+                    except (TypeError, ValueError):
+                        continue
+                    contributions.append({
+                        "section": section,
+                        "feature": section,
+                        "importance": score,
+                        "direction": "positive" if score >= 0 else "negative",
+                    })
+
+        contributions.sort(key=lambda c: abs(c["importance"]), reverse=True)
+        top = contributions[:top_k]
+
+        return {
+            "method": self.method,
+            "top_contributors": top,
+            "num_features": len(contributions),
+        }
 
     # =========================================================
     # INTEGRATED GRADIENTS

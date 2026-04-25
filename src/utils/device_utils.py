@@ -266,3 +266,64 @@ def is_primary_process() -> bool:
     Prefer: src.utils.distributed_utils.is_primary
     """
     return is_primary()
+
+
+# =========================================================
+# DEVICE SUMMARY HELPERS
+# =========================================================
+
+def device_name(device: torch.device | str | None = None) -> str:
+    """Return a human-readable name for ``device`` (defaults to current)."""
+    if device is None:
+        device = get_device(prefer_gpu=True)
+    if isinstance(device, str):
+        device = torch.device(device)
+    if device.type == "cuda" and torch.cuda.is_available():
+        idx = device.index if device.index is not None else torch.cuda.current_device()
+        try:
+            return torch.cuda.get_device_name(idx)
+        except Exception:
+            return f"cuda:{idx}"
+    if device.type == "mps":
+        return "Apple MPS"
+    return "CPU"
+
+
+def device_summary(device: torch.device | str | None = None) -> Dict[str, Any]:
+    """Return a structured summary of the active compute device."""
+    if device is None:
+        device = get_device(prefer_gpu=True)
+    elif isinstance(device, str):
+        device = torch.device(device)
+
+    summary: Dict[str, Any] = {
+        "type": device.type,
+        "name": device_name(device),
+        "torch_version": torch.__version__,
+        "platform": platform.platform(),
+        "cuda_available": torch.cuda.is_available(),
+        "gpu_count": get_gpu_count(),
+    }
+
+    if device.type == "cuda" and torch.cuda.is_available():
+        idx = device.index if device.index is not None else torch.cuda.current_device()
+        try:
+            props = torch.cuda.get_device_properties(idx)
+            summary.update(
+                {
+                    "device_index": idx,
+                    "total_memory_gb": round(props.total_memory / 1024**3, 2),
+                    "compute_capability": f"{props.major}.{props.minor}",
+                    "memory_summary": gpu_memory_summary(idx),
+                }
+            )
+        except Exception:
+            pass
+
+    return summary
+
+
+def set_cuda_device(index: int) -> None:
+    """Bind the current process to ``cuda:index`` when CUDA is available."""
+    if torch.cuda.is_available():
+        torch.cuda.set_device(int(index))
