@@ -1,29 +1,3 @@
-"""
-File Name: temporal_graph.py
-Module: Graph Analysis - Temporal Narrative Graph
-Description:
-    Implements temporal narrative analysis utilities for the TruthLens AI
-    system. The module models narrative evolution across sentences and
-    computes temporal graph signals that capture entity recurrence,
-    transition dynamics, topic drift, and narrative volatility. These
-    features are useful for detecting misinformation patterns, narrative
-    manipulation, and discourse instability in news articles.
-
-Dependencies:
-    logging
-    typing
-    dataclasses
-    collections
-    re
-    numpy
-
-Inputs:
-    Raw article text
-
-Outputs:
-    Temporal narrative feature dictionary and numerical vector
-"""
-
 from __future__ import annotations
 
 import logging
@@ -34,201 +8,197 @@ from typing import Dict, List, Set
 
 import numpy as np
 
-
 logger = logging.getLogger(__name__)
+EPS = 1e-12
 
+
+# =========================================================
+# FEATURES
+# =========================================================
 
 @dataclass(slots=True)
 class TemporalGraphFeatures:
-    """
-    Structured container for temporal narrative features.
-    """
 
     entity_recurrence: float
     entity_transition_rate: float
     topic_shift_score: float
     narrative_drift: float
 
-    def to_dict(self) -> Dict[str, float]:
-        """Convert feature dataclass to dictionary."""
-        return {
-            "entity_recurrence": self.entity_recurrence,
-            "entity_transition_rate": self.entity_transition_rate,
-            "topic_shift_score": self.topic_shift_score,
-            "narrative_drift": self.narrative_drift,
-        }
+    # 🔥 NEW
+    temporal_entropy: float
+    narrative_volatility: float
+    temporal_consistency: float
 
+    def to_dict(self) -> Dict[str, float]:
+        return self.__dict__
+
+
+# =========================================================
+# ANALYZER
+# =========================================================
 
 class TemporalGraphAnalyzer:
-    """
-    Analyzes narrative evolution across sentences.
-    """
 
-    def __init__(self, min_token_length: int = 4) -> None:
+    def __init__(self, min_token_length: int = 4):
         if min_token_length < 1:
             raise ValueError("min_token_length must be >= 1")
 
         self.min_token_length = min_token_length
+        logger.info("TemporalGraphAnalyzer initialized")
 
-        logger.info(
-            "TemporalGraphAnalyzer initialized (min_token_length=%d)",
-            min_token_length,
-        )
+    # =====================================================
+    # HELPERS
+    # =====================================================
 
     def _split_sentences(self, text: str) -> List[str]:
-        """Split text into sentences."""
         sentences = re.split(r"[.!?]+", text)
         return [s.strip() for s in sentences if s.strip()]
 
     def _extract_entities(self, sentence: str) -> Set[str]:
-        """
-        Extract simple token entities (lightweight fallback
-        when full NER is not used).
-        """
-
         tokens = re.findall(r"\b[a-zA-Z]+\b", sentence.lower())
+        return {t for t in tokens if len(t) >= self.min_token_length}
 
-        entities = {
-            token
-            for token in tokens
-            if len(token) >= self.min_token_length
-        }
-
-        return entities
+    # =====================================================
+    # MAIN
+    # =====================================================
 
     def analyze(self, text: str) -> TemporalGraphFeatures:
-        """
-        Compute temporal narrative features from text.
-        """
 
         if not isinstance(text, str) or not text.strip():
-            raise ValueError("text must be a non-empty string")
+            raise ValueError("Invalid text")
 
         sentences = self._split_sentences(text)
 
         if len(sentences) < 2:
-            return TemporalGraphFeatures(0.0, 0.0, 0.0, 0.0)
+            return TemporalGraphFeatures(*([0.0] * 7))
 
         entity_sets: List[Set[str]] = [
-            self._extract_entities(sentence)
-            for sentence in sentences
+            self._extract_entities(s) for s in sentences
         ]
 
-        # -------------------------------------------------
-        # Entity recurrence
-        # -------------------------------------------------
-        entity_counter = Counter()
+        # =================================================
+        # ENTITY RECURRENCE
+        # =================================================
+        counter = Counter()
+        for s in entity_sets:
+            counter.update(s)
 
-        for entity_set in entity_sets:
-            entity_counter.update(entity_set)
+        recurrence = sum(1 for c in counter.values() if c > 1)
+        entity_recurrence = float(recurrence / (len(counter) + EPS))
 
-        repeated_entities = [
-            count for count in entity_counter.values() if count > 1
-        ]
-
-        entity_recurrence = (
-            float(len(repeated_entities) / max(len(entity_counter), 1))
-        )
-
-        # -------------------------------------------------
-        # Entity transition rate
-        # -------------------------------------------------
-        transitions = 0
-        comparisons = 0
+        # =================================================
+        # TRANSITION RATE (WITH TEMPORAL WEIGHTING 🔥)
+        # =================================================
+        transitions = []
+        weights = []
 
         for i in range(len(entity_sets) - 1):
 
-            current_entities = entity_sets[i]
-            next_entities = entity_sets[i + 1]
+            A, B = entity_sets[i], entity_sets[i + 1]
 
-            if not current_entities:
+            if not A:
                 continue
 
-            overlap = len(current_entities.intersection(next_entities))
+            overlap = len(A & B) / (len(A) + EPS)
 
-            transitions += overlap
-            comparisons += len(current_entities)
+            # 🔥 recency weight
+            w = (i + 1) / len(entity_sets)
 
-        entity_transition_rate = (
-            float(transitions / max(comparisons, 1))
+            transitions.append(overlap * w)
+            weights.append(w)
+
+        entity_transition_rate = float(
+            np.sum(transitions) / (np.sum(weights) + EPS)
         )
 
-        # -------------------------------------------------
-        # Topic shift score (Jaccard distance)
-        # -------------------------------------------------
-        shift_scores = []
+        # =================================================
+        # TOPIC SHIFT (JACCARD DISTANCE)
+        # =================================================
+        shifts = []
 
         for i in range(len(entity_sets) - 1):
 
-            A = entity_sets[i]
-            B = entity_sets[i + 1]
+            A, B = entity_sets[i], entity_sets[i + 1]
 
-            union = A.union(B)
-
+            union = A | B
             if not union:
-                shift_scores.append(0.0)
+                shifts.append(0.0)
                 continue
 
-            jaccard_similarity = len(A.intersection(B)) / len(union)
+            sim = len(A & B) / len(union)
+            shifts.append(1.0 - sim)
 
-            shift_scores.append(1.0 - jaccard_similarity)
+        topic_shift_score = float(np.mean(shifts)) if shifts else 0.0
 
-        topic_shift_score = float(np.mean(shift_scores)) if shift_scores else 0.0
+        # =================================================
+        # DRIFT (SMOOTHED 🔥)
+        # =================================================
+        centroid = Counter()
+        for s in entity_sets:
+            centroid.update(s)
 
-        # -------------------------------------------------
-        # Narrative drift
-        # -------------------------------------------------
-        centroid_vector = Counter()
+        centroid_set = set(centroid.keys())
 
-        for entity_set in entity_sets:
-            centroid_vector.update(entity_set)
+        drift_vals = []
 
-        centroid_set = set(centroid_vector.keys())
-
-        drift_scores = []
-
-        for entity_set in entity_sets:
-
-            union = centroid_set.union(entity_set)
-
+        for s in entity_sets:
+            union = centroid_set | s
             if not union:
-                drift_scores.append(0.0)
+                drift_vals.append(0.0)
                 continue
 
-            similarity = len(centroid_set.intersection(entity_set)) / len(union)
+            sim = len(centroid_set & s) / len(union)
+            drift_vals.append(1.0 - sim)
 
-            drift_scores.append(1.0 - similarity)
+        # 🔥 smoothing
+        narrative_drift = float(np.mean(drift_vals))
 
-        narrative_drift = float(np.mean(drift_scores)) if drift_scores else 0.0
+        # =================================================
+        # 🔥 NEW METRICS
+        # =================================================
 
-        features = TemporalGraphFeatures(
-            entity_recurrence=float(entity_recurrence),
-            entity_transition_rate=float(entity_transition_rate),
-            topic_shift_score=float(topic_shift_score),
-            narrative_drift=float(narrative_drift),
+        # 1. temporal entropy
+        shift_arr = np.array(shifts, dtype=float)
+        if shift_arr.size > 0:
+            p = shift_arr / (np.sum(shift_arr) + EPS)
+            temporal_entropy = float(-np.sum(p * np.log(p + EPS)))
+        else:
+            temporal_entropy = 0.0
+
+        # 2. volatility (variance of shifts)
+        narrative_volatility = float(np.var(shift_arr)) if shift_arr.size else 0.0
+
+        # 3. consistency (inverse volatility)
+        temporal_consistency = float(1.0 - narrative_volatility)
+
+        return TemporalGraphFeatures(
+            entity_recurrence=entity_recurrence,
+            entity_transition_rate=entity_transition_rate,
+            topic_shift_score=topic_shift_score,
+            narrative_drift=narrative_drift,
+            temporal_entropy=temporal_entropy,
+            narrative_volatility=narrative_volatility,
+            temporal_consistency=temporal_consistency,
         )
 
-        logger.debug("Temporal narrative features computed: %s", features)
 
-        return features
-
+# =========================================================
+# VECTOR
+# =========================================================
 
 def temporal_graph_vector(features: Dict[str, float]) -> np.ndarray:
-    """
-    Convert temporal graph features into numerical vector.
-    """
 
-    if not isinstance(features, dict) or not features:
-        raise ValueError("features must be a non-empty dictionary")
-
-    ordered_keys = (
+    keys = (
         "entity_recurrence",
         "entity_transition_rate",
         "topic_shift_score",
         "narrative_drift",
+        "temporal_entropy",
+        "narrative_volatility",
+        "temporal_consistency",
     )
 
     return np.array(
-        [float(features.get(key, 0.0)) for key in ordered_keys],
+        [float(features.get(k, 0.0)) for k in keys],
         dtype=np.float32,
     )

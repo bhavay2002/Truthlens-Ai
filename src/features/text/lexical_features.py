@@ -1,7 +1,4 @@
-"""
-File Name: lexical_features.py
-Module: Text Feature Engineering - Lexical Features
-"""
+# src/features/lexical_features.py
 
 from __future__ import annotations
 
@@ -17,65 +14,131 @@ from src.features.base.feature_registry import register_feature
 
 logger = logging.getLogger(__name__)
 
+EPS = 1e-8
+MAX_CLIP = 1.0
+
+
+# ---------------------------------------------------------
+# Tokenization
+# ---------------------------------------------------------
 
 def _tokenize(text: str) -> List[str]:
-    if not isinstance(text, str):
-        raise ValueError("Input text must be a string")
     return re.findall(r"\b\w+\b", text.lower())
 
+
+# ---------------------------------------------------------
+# Feature
+# ---------------------------------------------------------
 
 @dataclass
 @register_feature
 class LexicalFeatures(BaseFeature):
+
     name: str = "lexical_features"
-    description: str = "Lexical richness and vocabulary diversity metrics"
+    group: str = "lexical"
+    description: str = "Advanced lexical richness and diversity features"
 
-    def _compute_features(self, tokens: List[str]) -> Dict[str, float]:
-        if not tokens:
-            return {
-                "vocabulary_size": 0.0,
-                "hapax_legomena_ratio": 0.0,
-                "hapax_dislegomena_ratio": 0.0,
-                "lexical_density": 0.0,
-                "average_word_length": 0.0,
-            }
-
-        tokens_arr = np.asarray(tokens, dtype=str)
-        token_count = tokens_arr.size
-        unique_tokens, counts = np.unique(tokens_arr, return_counts=True)
-        word_lengths = np.char.str_len(tokens_arr)
-
-        vocabulary_size = unique_tokens.size
-        hapax_legomena = np.count_nonzero(counts == 1)
-        hapax_dislegomena = np.count_nonzero(counts == 2)
-
-        return {
-            "vocabulary_size": float(vocabulary_size),
-            "hapax_legomena_ratio": float(hapax_legomena / token_count),
-            "hapax_dislegomena_ratio": float(hapax_dislegomena / token_count),
-            "lexical_density": float(vocabulary_size / token_count),
-            "average_word_length": float(word_lengths.mean()),
-        }
+    # -----------------------------------------------------
 
     def extract(self, context: FeatureContext) -> Dict[str, float]:
-        if not isinstance(context.text, str):
-            raise TypeError("FeatureContext.text must be a string")
-        if not context.text.strip():
+
+        text = context.text.strip()
+        if not text:
             return {}
 
-        tokens = context.tokens or _tokenize(context.text)
-        if not tokens:
-            logger.warning("No tokens extracted from text")
-            return self._compute_features([])
+        tokens = context.tokens or _tokenize(text)
+        n = len(tokens)
 
-        features = self._compute_features(tokens)
+        if n == 0:
+            return self._empty()
 
-        logger.debug(
-            "Lexical features extracted | tokens=%d vocab=%d",
-            len(tokens),
-            int(features["vocabulary_size"]),
-        )
-        return features
+        tokens_arr = np.array(tokens, dtype=str)
+        unique, counts = np.unique(tokens_arr, return_counts=True)
 
-    def extract_batch(self, contexts: List[FeatureContext]) -> List[Dict[str, float]]:
-        return [self.extract(context) for context in contexts]
+        vocab_size = len(unique)
+
+        # -------------------------
+        # BASIC RATIOS
+        # -------------------------
+
+        ttr = vocab_size / (n + EPS)
+
+        # Corrected TTR (better for length variation)
+        cttr = vocab_size / np.sqrt(2 * n + EPS)
+
+        hapax_1 = np.sum(counts == 1)
+        hapax_2 = np.sum(counts == 2)
+
+        hapax_ratio = hapax_1 / (n + EPS)
+        dislegomena_ratio = hapax_2 / (n + EPS)
+
+        # -------------------------
+        # ENTROPY (CRITICAL)
+        # -------------------------
+
+        probs = counts / (n + EPS)
+
+        entropy_raw = -np.sum(probs * np.log(probs + EPS))
+        entropy = entropy_raw / (np.log(len(probs) + EPS))
+
+        # -------------------------
+        # SIMPSON DIVERSITY
+        # -------------------------
+
+        simpson = 1.0 - np.sum(probs ** 2)
+
+        # -------------------------
+        # YULE'S K (ADVANCED)
+        # -------------------------
+
+        freq_sq_sum = np.sum(counts ** 2)
+        yule_k = (freq_sq_sum - n) / (n ** 2 + EPS)
+
+        # -------------------------
+        # WORD LENGTH STATS
+        # -------------------------
+
+        lengths = np.char.str_len(tokens_arr)
+
+        avg_len = float(np.mean(lengths))
+        std_len = float(np.std(lengths))
+
+        # -------------------------
+        # OUTPUT
+        # -------------------------
+
+        return {
+            "lex_vocab_ttr": self._safe(ttr),
+            "lex_vocab_cttr": self._safe(cttr),
+
+            "lex_hapax_ratio": self._safe(hapax_ratio),
+            "lex_dislegomena_ratio": self._safe(dislegomena_ratio),
+
+            "lex_entropy": self._safe(entropy),
+            "lex_simpson_diversity": self._safe(simpson),
+
+            "lex_yule_k": self._safe(yule_k),
+
+            "lex_avg_word_length": self._safe(avg_len / 20.0),  # normalized
+            "lex_std_word_length": self._safe(std_len / 10.0),
+        }
+
+    # -----------------------------------------------------
+
+    def _empty(self) -> Dict[str, float]:
+        return {
+            "lex_vocab_ttr": 0.0,
+            "lex_vocab_cttr": 0.0,
+            "lex_hapax_ratio": 0.0,
+            "lex_dislegomena_ratio": 0.0,
+            "lex_entropy": 0.0,
+            "lex_simpson_diversity": 0.0,
+            "lex_yule_k": 0.0,
+            "lex_avg_word_length": 0.0,
+            "lex_std_word_length": 0.0,
+        }
+
+    def _safe(self, v: float) -> float:
+        if not np.isfinite(v):
+            return 0.0
+        return float(np.clip(v, 0.0, MAX_CLIP))

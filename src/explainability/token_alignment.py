@@ -1,11 +1,16 @@
 from __future__ import annotations
 
-from typing import List, Sequence, Tuple, Literal
+from typing import List, Sequence, Tuple, Literal, Dict, Any
 import numpy as np
 
 
 AggregationMethod = Literal["mean", "sum", "max"]
-SPECIAL_TOKENS = {"[CLS]", "[SEP]", "<s>", "</s>", "[PAD]", "<pad>"}
+
+SPECIAL_TOKENS = {
+    "[CLS]", "[SEP]", "<s>", "</s>", "[PAD]", "<pad>"
+}
+
+EPS = 1e-12
 
 
 def align_tokens(
@@ -13,69 +18,59 @@ def align_tokens(
     scores: Sequence[float],
     tokenizer_type: str = "wordpiece",
     aggregation: AggregationMethod = "mean",
-) -> Tuple[List[str], List[float]]:
-    """
-    Align subword tokens into full words and aggregate their scores.
 
-    Supports:
-        - WordPiece (##)
-        - SentencePiece (▁)
+    # 🔥 NEW FEATURES
+    normalize: bool = False,
+    clip: bool = False,
+    max_tokens: int | None = None,
+    return_structured: bool = False,
+    return_variance: bool = False,
+) -> Tuple[List[str], List[float]] | Dict[str, Any]:
 
-    Adds:
-        - NaN/inf safety
-        - configurable aggregation
-        - stable merging
-    """
-
-    # --------------------------------------------------
+    # ==================================================
     # VALIDATION
-    # --------------------------------------------------
-
-    if not isinstance(tokens, Sequence) or not isinstance(scores, Sequence):
-        raise TypeError("tokens and scores must be sequences")
+    # ==================================================
 
     if len(tokens) != len(scores):
         raise ValueError("tokens and scores must match in length")
 
     if tokenizer_type not in {"wordpiece", "sentencepiece"}:
-        raise ValueError("tokenizer_type must be 'wordpiece' or 'sentencepiece'")
+        raise ValueError("invalid tokenizer_type")
 
     if aggregation not in {"mean", "sum", "max"}:
-        raise ValueError("aggregation must be 'mean', 'sum', or 'max'")
+        raise ValueError("invalid aggregation")
 
     if len(tokens) == 0:
-        return [], []
+        return [] if not return_structured else {"tokens": [], "importance": []}
 
-    # --------------------------------------------------
-    # AGGREGATION FUNCTION
-    # --------------------------------------------------
+    # ==================================================
+    # AGG FUNCTION
+    # ==================================================
 
-    def agg(values: List[float]) -> float:
+    def agg(values: List[float]) -> Tuple[float, float]:
         arr = np.array(values, dtype=np.float32)
-        # Neutralize only non-finite values. Do NOT clip magnitude here:
-        # SHAP / IG / LIME scores may legitimately be signed and exceed [0, 1].
         arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
 
         if aggregation == "mean":
-            return float(np.mean(arr))
+            val = float(np.mean(arr))
         elif aggregation == "sum":
-            return float(np.sum(arr))
-        elif aggregation == "max":
-            # Absolute-max preserves the largest-magnitude signal (and its sign).
-            idx = int(np.argmax(np.abs(arr)))
-            return float(arr[idx])
+            val = float(np.sum(arr))
+        else:
+            val = float(arr[np.argmax(np.abs(arr))])
 
-        return float(np.mean(arr))  # fallback
+        variance = float(np.var(arr)) if len(arr) > 1 else 0.0
+        return val, variance
 
-    # --------------------------------------------------
-    # MAIN LOGIC
-    # --------------------------------------------------
+    # ==================================================
+    # MERGE
+    # ==================================================
 
     merged_tokens: List[str] = []
     merged_scores: List[float] = []
+    merged_variance: List[float] = []
 
-    current_token_parts: List[str] = []
-    current_scores: List[float] = []
+    parts: List[str] = []
+    vals: List[float] = []
 
     for token, score in zip(tokens, scores):
 
@@ -84,10 +79,7 @@ def align_tokens(
 
         token = str(token).strip()
 
-        if token in SPECIAL_TOKENS:
-            continue
-
-        if not token:
+        if not token or token in SPECIAL_TOKENS:
             continue
 
         try:
@@ -98,60 +90,95 @@ def align_tokens(
         if not np.isfinite(score):
             score = 0.0
 
-        # -------------------------------
-        # WORDPIECE
-        # -------------------------------
+        # ---------------- WORDPIECE ----------------
         if tokenizer_type == "wordpiece":
 
             if token.startswith("##"):
-                piece = token[2:]
-                if piece:
-                    current_token_parts.append(piece)
-                    current_scores.append(score)
+                parts.append(token[2:])
+                vals.append(score)
                 continue
 
-            # new token
-            if current_token_parts:
-                merged_tokens.append("".join(current_token_parts))
-                merged_scores.append(agg(current_scores))
+            if parts:
+                val, var = agg(vals)
+                merged_tokens.append("".join(parts))
+                merged_scores.append(val)
+                merged_variance.append(var)
 
-            current_token_parts = [token]
-            current_scores = [score]
+            parts = [token]
+            vals = [score]
 
-        # -------------------------------
-        # SENTENCEPIECE
-        # -------------------------------
+        # ---------------- SENTENCEPIECE ----------------
         else:
 
             if token.startswith("▁"):
-                # flush previous
-                if current_token_parts:
-                    merged_tokens.append("".join(current_token_parts))
-                    merged_scores.append(agg(current_scores))
+                if parts:
+                    val, var = agg(vals)
+                    merged_tokens.append("".join(parts))
+                    merged_scores.append(val)
+                    merged_variance.append(var)
 
-                piece = token[1:]
-                current_token_parts = [piece] if piece else []
-                current_scores = [score] if piece else []
+                parts = [token[1:]]
+                vals = [score]
 
             else:
-                if not current_token_parts:
-                    current_token_parts = [token]
-                    current_scores = [score]
-                else:
-                    current_token_parts.append(token)
-                    current_scores.append(score)
+                parts.append(token)
+                vals.append(score)
 
-    # --------------------------------------------------
-    # FINAL FLUSH
-    # --------------------------------------------------
+    # final flush
+    if parts:
+        val, var = agg(vals)
+        merged_tokens.append("".join(parts))
+        merged_scores.append(val)
+        merged_variance.append(var)
 
-    if current_token_parts:
-        merged_tokens.append("".join(current_token_parts))
-        merged_scores.append(agg(current_scores))
+    # ==================================================
+    # NORMALIZATION 🔥
+    # ==================================================
 
-    # Final NaN/Inf safety only — preserve sign and magnitude.
-    merged_scores = [
-        float(s) if np.isfinite(s) else 0.0 for s in merged_scores
-    ]
+    scores_arr = np.array(merged_scores, dtype=float)
 
-    return merged_tokens, merged_scores
+    if normalize:
+        scores_arr = np.abs(scores_arr)
+        scores_arr = scores_arr / (np.sum(scores_arr) + EPS)
+
+    if clip:
+        scores_arr = np.clip(scores_arr, 0.0, 1.0)
+
+    # ==================================================
+    # TOKEN LIMIT 🔥
+    # ==================================================
+
+    if max_tokens is not None and len(scores_arr) > max_tokens:
+        idx = np.argsort(np.abs(scores_arr))[::-1][:max_tokens]
+        merged_tokens = [merged_tokens[i] for i in idx]
+        scores_arr = scores_arr[idx]
+        merged_variance = [merged_variance[i] for i in idx]
+
+    scores_list = scores_arr.tolist()
+
+    # ==================================================
+    # OUTPUT MODES 🔥
+    # ==================================================
+
+    if return_structured:
+
+        structured = [
+            {"token": t, "importance": float(s)}
+            for t, s in zip(merged_tokens, scores_list)
+        ]
+
+        result = {
+            "tokens": merged_tokens,
+            "importance": scores_list,
+            "structured": structured,
+        }
+
+        if return_variance:
+            result["variance"] = merged_variance
+
+        return result
+
+    if return_variance:
+        return merged_tokens, scores_list, merged_variance
+
+    return merged_tokens, scores_list

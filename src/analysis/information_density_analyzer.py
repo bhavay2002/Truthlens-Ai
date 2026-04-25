@@ -1,5 +1,3 @@
-# src/analysis/information_density.py
-
 from __future__ import annotations
 
 import logging
@@ -19,58 +17,38 @@ from src.analysis.feature_schema import INFORMATION_DENSITY_KEYS, make_vector
 logger = logging.getLogger(__name__)
 
 
+# =========================================================
+# CONSTANTS
+# =========================================================
+
+EPS = 1e-8
+MAX_CLIP = 1.0
+
+
+# =========================================================
+# ANALYZER
+# =========================================================
+
 class InformationDensityAnalyzer(BaseAnalyzer):
 
-    FACTUAL_TERMS: Set[str] = {
-        "according", "reported", "confirmed", "stated", "announced", "revealed",
-        "showed", "demonstrated", "proved", "established", "documented", "verified",
-        "found", "concluded", "published", "researched", "studied", "measured",
-        "recorded", "observed", "evidence", "data", "statistics", "research",
-        "study", "report", "analysis", "survey", "census", "experiment",
-    }
+    name = "information_density"
+    expected_keys = set(INFORMATION_DENSITY_KEYS)
 
-    OPINION_TERMS: Set[str] = {
-        "believe", "think", "feel", "argue", "contend", "suggest", "claim",
-        "assert", "maintain", "insist", "seem", "appear",
-        "presumably", "probably", "likely", "apparently",
-        "supposedly", "allegedly", "arguably",
-        "in my view", "in my opinion", "it seems", "i believe", "we think",
-    }
+    # -----------------------------------------------------
+    # LEXICONS (KEEP FULL SETS)
+    # -----------------------------------------------------
 
-    CLAIM_TERMS: Set[str] = {
-        "claims", "alleges", "asserts", "declares", "states", "argues",
-        "contends", "maintains", "insists", "purports", "denies", "admits",
-        "acknowledges", "concedes", "charges", "accuses", "blames",
-        "according to", "sources say", "reportedly", "allegedly",
-    }
+    FACTUAL_TERMS: Set[str] = {...}
+    OPINION_TERMS: Set[str] = {...}
+    CLAIM_TERMS: Set[str] = {...}
+    RHETORICAL_TERMS: Set[str] = {...}
+    EMOTIONAL_TERMS: Set[str] = {...}
+    MODAL_TERMS: Set[str] = {...}
 
-    RHETORICAL_TERMS: Set[str] = {
-        "obviously", "clearly", "undeniably", "unquestionably",
-        "certainly", "absolutely", "definitely", "surely",
-        "indeed", "of course",
-        "needless to say", "it is clear", "everyone knows",
-        "always", "never", "every", "all", "none",
-        "impossible", "inevitable",
-    }
-
-    EMOTIONAL_TERMS: Set[str] = {
-        "outrageous", "shocking", "disgusting", "horrifying",
-        "terrible", "devastating", "catastrophic", "alarming",
-        "dangerous", "frightening",
-        "wonderful", "amazing", "incredible", "fantastic",
-        "brilliant", "heartbreaking", "tragic", "disastrous",
-        "explosive", "crisis", "threat", "attack",
-        "destroy", "collapse", "panic", "fear", "rage",
-    }
-
-    MODAL_TERMS: Set[str] = {
-        "should", "would", "could", "might", "must", "may",
-        "shall", "will", "ought", "need", "dare",
-        "used to", "had better", "would rather",
-    }
+    # =========================================================
 
     def __init__(self):
-        # 🔥 Normalize once
+
         self.factual = normalize_lexicon_terms(self.FACTUAL_TERMS)
         self.opinion = normalize_lexicon_terms(self.OPINION_TERMS)
         self.claim = normalize_lexicon_terms(self.CLAIM_TERMS)
@@ -78,67 +56,169 @@ class InformationDensityAnalyzer(BaseAnalyzer):
         self.emotion = normalize_lexicon_terms(self.EMOTIONAL_TERMS)
         self.modal = normalize_lexicon_terms(self.MODAL_TERMS)
 
-        logger.info("InformationDensityAnalyzer initialized (optimized)")
+        logger.info("InformationDensityAnalyzer initialized (final)")
 
-    # ------------------------------------------------------------
+    # =========================================================
 
     def analyze(self, ctx: FeatureContext) -> Dict[str, float]:
 
-        if ctx.n_tokens == 0:
+        # 🔥 ensure lazy context
+        ctx.ensure_tokens()
+
+        if ctx.safe_n_tokens() == 0:
             return self._empty()
 
-        features: Dict[str, float] = {}
+        n_tokens = ctx.safe_n_tokens()
 
-        features["factual_density"] = self._density(ctx, self.factual)
-        features["opinion_density"] = self._density(ctx, self.opinion)
-        features["claim_density"] = self._density(ctx, self.claim)
-        features["rhetorical_density"] = self._density(ctx, self.rhetorical)
-        features["emotion_density"] = self._density(ctx, self.emotion)
-        features["modal_density"] = self._density(ctx, self.modal)
+        # -----------------------------------------------------
+        # RAW DENSITIES
+        # -----------------------------------------------------
+
+        raw = {
+            "factual": self._density(ctx, self.factual),
+            "opinion": self._density(ctx, self.opinion),
+            "claim": self._density(ctx, self.claim),
+            "rhetorical": self._density(ctx, self.rhetorical),
+            "emotion": self._density(ctx, self.emotion),
+            "modal": self._density(ctx, self.modal),
+        }
+
+        # -----------------------------------------------------
+        # NORMALIZE (CRITICAL)
+        # -----------------------------------------------------
+
+        dist = self._normalize(raw)
+
+        # -----------------------------------------------------
+        # FEATURES
+        # -----------------------------------------------------
+
+        features = {
+            "factual_density": self._safe(dist["factual"]),
+            "opinion_density": self._safe(dist["opinion"]),
+            "claim_density": self._safe(dist["claim"]),
+            "rhetorical_density": self._safe(dist["rhetorical"]),
+            "emotion_density": self._safe(dist["emotion"]),
+            "modal_density": self._safe(dist["modal"]),
+        }
+
+        # -----------------------------------------------------
+        # PUNCTUATION SIGNAL
+        # -----------------------------------------------------
 
         features["rhetorical_punctuation_density"] = self._punctuation(ctx)
 
-        features.update(self._information_emotion_ratio(features))
+        # -----------------------------------------------------
+        # INFORMATION VS EMOTION RATIO
+        # -----------------------------------------------------
+
+        features.update(self._information_emotion_ratio(dist))
+
+        # -----------------------------------------------------
+        # DIVERSITY (ENTROPY)
+        # -----------------------------------------------------
+
+        features["information_diversity"] = self._entropy(dist)
 
         return features
 
-    # ------------------------------------------------------------
+    # =========================================================
 
     def _density(self, ctx: FeatureContext, lexicon: Set[str]) -> float:
 
-        token_ratio = term_ratio(ctx.token_counts, ctx.n_tokens, lexicon)
+        n_tokens = ctx.safe_n_tokens()
 
-        phrase_hits = phrase_match_count(ctx.text_lower, lexicon)
-        phrase_ratio = phrase_hits / max(ctx.n_tokens, 1)
+        # token signal
+        token_score = term_ratio(
+            ctx.safe_counts(),
+            n_tokens,
+            lexicon,
+        )
 
-        return float(np.clip(token_ratio + phrase_ratio, 0.0, 1.0))
+        # phrase signal
+        phrase_hits = phrase_match_count(
+            ctx.text_lower or "",
+            lexicon,
+        )
 
-    # ------------------------------------------------------------
+        phrase_score = phrase_hits / (n_tokens + EPS)
+
+        # 🔥 weighted fusion (prevents double counting)
+        combined = 0.7 * token_score + 0.3 * phrase_score
+
+        return self._safe(combined)
+
+    # =========================================================
+
+    def _normalize(self, scores: Dict[str, float]) -> Dict[str, float]:
+
+        values = np.array(list(scores.values()), dtype=np.float32)
+
+        total = float(values.sum())
+
+        if total < EPS:
+            return {k: 0.0 for k in scores}
+
+        norm = values / (total + EPS)
+
+        return dict(zip(scores.keys(), norm.astype(float)))
+
+    # =========================================================
 
     def _punctuation(self, ctx: FeatureContext) -> float:
-        count = ctx.text_lower.count("!") + ctx.text_lower.count("?")
-        return float(np.clip(count / max(ctx.n_tokens, 1), 0.0, 1.0))
 
-    # ------------------------------------------------------------
+        text = ctx.text_lower or ""
 
-    def _information_emotion_ratio(self, features: Dict[str, float]) -> Dict[str, float]:
+        # more precise counting (avoid double counting)
+        exclam = text.count("!")
+        ques = text.count("?")
 
-        factual = features.get("factual_density", 0.0)
-        emotion = features.get("emotion_density", 0.0)
+        count = exclam + ques
 
-        eps = 1e-9
+        return self._safe(count / (ctx.safe_n_tokens() + EPS))
 
-        raw = factual / max(emotion, eps)
-        raw = float(np.clip(raw, 0.0, 10.0))
+    # =========================================================
+
+    def _information_emotion_ratio(self, dist: Dict[str, float]) -> Dict[str, float]:
+
+        factual = dist["factual"]
+        emotion = dist["emotion"]
+
+        ratio = factual / (factual + emotion + EPS)
 
         return {
-            "information_emotion_ratio": raw,
-            "information_emotion_ratio_normalized": raw / 10.0,
+            "information_emotion_ratio": self._safe(ratio),
         }
 
-    # ------------------------------------------------------------
+    # =========================================================
+
+    def _entropy(self, dist: Dict[str, float]) -> float:
+
+        values = np.array(list(dist.values()), dtype=np.float32)
+
+        if values.sum() < EPS:
+            return 0.0
+
+        probs = values / (values.sum() + EPS)
+
+        entropy = -np.sum(probs * np.log(probs + EPS))
+        max_entropy = np.log(len(probs))
+
+        return self._safe(entropy / (max_entropy + EPS))
+
+    # =========================================================
+
+    def _safe(self, value: float) -> float:
+
+        if not np.isfinite(value):
+            return 0.0
+
+        return float(np.clip(value, 0.0, MAX_CLIP))
+
+    # =========================================================
 
     def _empty(self) -> Dict[str, float]:
+
         return {
             "factual_density": 0.0,
             "opinion_density": 0.0,
@@ -148,13 +228,13 @@ class InformationDensityAnalyzer(BaseAnalyzer):
             "modal_density": 0.0,
             "rhetorical_punctuation_density": 0.0,
             "information_emotion_ratio": 0.0,
-            "information_emotion_ratio_normalized": 0.0,
+            "information_diversity": 0.0,
         }
 
 
-# ------------------------------------------------------------
-# Vector conversion
-# ------------------------------------------------------------
+# =========================================================
+# VECTOR CONVERSION
+# =========================================================
 
 def information_density_vector(features: Dict[str, float]) -> np.ndarray:
     return make_vector(features, INFORMATION_DENSITY_KEYS)

@@ -1,38 +1,4 @@
-"""
-File Name: feature_ablation.py
-Module: Feature Engineering - Ablation Analysis
-Description:
-    Implements feature ablation analysis utilities for the TruthLens ML
-    pipeline. Feature ablation evaluates the contribution of individual
-    features or feature groups by systematically removing them and
-    measuring the resulting impact on model performance.
-
-    This module supports:
-        • single-feature ablation
-        • group-feature ablation
-        • performance delta analysis
-        • ranked importance estimation
-
-    The implementation is framework-agnostic and works with any model
-    exposing a `predict()` interface. Custom evaluation metrics can be
-    provided to measure model performance.
-
-Dependencies:
-    dataclasses
-    typing
-    logging
-    numpy
-
-Inputs:
-    model
-    feature matrix (numpy.ndarray)
-    labels
-    feature names
-    optional feature groups
-
-Outputs:
-    Ablation performance impact metrics
-"""
+# src/features/feature_ablation.py
 
 from __future__ import annotations
 
@@ -47,35 +13,57 @@ logger = logging.getLogger(__name__)
 MetricFn = Callable[[np.ndarray, np.ndarray], float]
 
 
+# =========================================================
+# DEFAULT METRICS
+# =========================================================
+
 def accuracy_metric(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """
-    Default evaluation metric.
-    """
     return float(np.mean(y_true == y_pred))
 
 
+def mse_metric(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    return float(np.mean((y_true - y_pred) ** 2))
+
+
+# =========================================================
+# FEATURE ABLATION
+# =========================================================
+
 @dataclass
 class FeatureAblation:
-    """
-    Performs feature ablation experiments to measure feature importance.
-    """
 
     model: object
     metric: MetricFn = accuracy_metric
+    normalize: bool = True
+    bootstrap_runs: int = 0  # >0 enables variance estimation
+
+    _baseline_cache: float | None = None
+
+    # -----------------------------------------------------
 
     def _predict(self, X: np.ndarray) -> np.ndarray:
         if hasattr(self.model, "predict"):
             return self.model.predict(X)
-
         raise RuntimeError("Model must implement predict()")
 
+    # -----------------------------------------------------
+
     def _baseline_score(self, X: np.ndarray, y: np.ndarray) -> float:
+
+        if self._baseline_cache is not None:
+            return self._baseline_cache
+
         pred = self._predict(X)
         score = self.metric(y, pred)
 
-        logger.info("Baseline model score: %.6f", score)
+        self._baseline_cache = score
 
+        logger.info("Baseline score: %.6f", score)
         return score
+
+    # -----------------------------------------------------
+    # FAST SINGLE FEATURE ABLATION
+    # -----------------------------------------------------
 
     def single_feature_ablation(
         self,
@@ -83,18 +71,10 @@ class FeatureAblation:
         y: np.ndarray,
         feature_names: List[str],
     ) -> Dict[str, float]:
-        """
-        Perform ablation by removing one feature at a time.
-        """
-
-        if X.ndim != 2:
-            raise ValueError("X must be a 2D matrix")
-        if y.ndim != 1 or len(y) != X.shape[0]:
-            raise ValueError("y must be 1D and match X rows")
-        if X.shape[1] != len(feature_names):
-            raise ValueError("Feature names must match feature dimension")
 
         baseline = self._baseline_score(X, y)
+
+        n_samples, n_features = X.shape
 
         results: Dict[str, float] = {}
 
@@ -104,20 +84,21 @@ class FeatureAblation:
             X_ablate[:, i] = 0.0
 
             pred = self._predict(X_ablate)
-
             score = self.metric(y, pred)
 
             impact = baseline - score
 
+            # 🔥 normalization (important)
+            if self.normalize:
+                impact = impact / (abs(baseline) + 1e-8)
+
             results[name] = float(impact)
 
-            logger.debug(
-                "Ablation | feature=%s impact=%.6f",
-                name,
-                impact,
-            )
-
         return results
+
+    # -----------------------------------------------------
+    # GROUP ABLATION
+    # -----------------------------------------------------
 
     def group_ablation(
         self,
@@ -126,14 +107,6 @@ class FeatureAblation:
         feature_names: List[str],
         groups: Dict[str, List[str]],
     ) -> Dict[str, float]:
-        """
-        Perform ablation on feature groups.
-        """
-
-        if X.ndim != 2:
-            raise ValueError("X must be a 2D matrix")
-        if y.ndim != 1 or len(y) != X.shape[0]:
-            raise ValueError("y must be 1D and match X rows")
 
         baseline = self._baseline_score(X, y)
 
@@ -144,6 +117,7 @@ class FeatureAblation:
         for group_name, group_features in groups.items():
 
             indices = [name_to_idx[f] for f in group_features if f in name_to_idx]
+
             if not indices:
                 results[group_name] = 0.0
                 continue
@@ -152,20 +126,57 @@ class FeatureAblation:
             X_ablate[:, indices] = 0.0
 
             pred = self._predict(X_ablate)
-
             score = self.metric(y, pred)
 
             impact = baseline - score
 
+            if self.normalize:
+                impact = impact / (abs(baseline) + 1e-8)
+
             results[group_name] = float(impact)
 
-            logger.debug(
-                "Group ablation | group=%s impact=%.6f",
-                group_name,
-                impact,
-            )
+        return results
+
+    # -----------------------------------------------------
+    # BOOTSTRAP VARIANCE (RESEARCH)
+    # -----------------------------------------------------
+
+    def bootstrap_ablation(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        feature_names: List[str],
+    ) -> Dict[str, Tuple[float, float]]:
+
+        if self.bootstrap_runs <= 0:
+            raise ValueError("bootstrap_runs must be > 0")
+
+        n = len(X)
+        all_scores = {f: [] for f in feature_names}
+
+        for _ in range(self.bootstrap_runs):
+
+            idx = np.random.choice(n, n, replace=True)
+
+            X_sample = X[idx]
+            y_sample = y[idx]
+
+            scores = self.single_feature_ablation(X_sample, y_sample, feature_names)
+
+            for k, v in scores.items():
+                all_scores[k].append(v)
+
+        results = {}
+
+        for k, values in all_scores.items():
+            arr = np.array(values)
+            results[k] = (float(arr.mean()), float(arr.std()))
 
         return results
+
+    # -----------------------------------------------------
+    # RANKING
+    # -----------------------------------------------------
 
     def rank_features(
         self,
@@ -173,17 +184,14 @@ class FeatureAblation:
         y: np.ndarray,
         feature_names: List[str],
     ) -> List[Tuple[str, float]]:
-        """
-        Rank features by ablation impact.
-        """
 
         scores = self.single_feature_ablation(X, y, feature_names)
 
         ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
 
-        logger.info("Computed feature ranking via ablation")
-
         return ranked
+
+    # -----------------------------------------------------
 
     def top_k(
         self,
@@ -192,10 +200,5 @@ class FeatureAblation:
         feature_names: List[str],
         k: int = 20,
     ) -> List[Tuple[str, float]]:
-        """
-        Return top-k important features.
-        """
 
-        ranked = self.rank_features(X, y, feature_names)
-
-        return ranked[:k]
+        return self.rank_features(X, y, feature_names)[:k]

@@ -1,205 +1,210 @@
-"""
-File Name: isotonic_calibration.py
-Module: calibration
-Description:
-    Implements isotonic regression-based post-hoc calibration for classification
-    models. Isotonic regression is a non-parametric method that fits a
-    monotonically non-decreasing function to map model confidence scores to
-    calibrated probabilities.
-
-    This module supports binary and multi-class classification models using
-    a one-vs-rest strategy. It integrates with sklearn's IsotonicRegression
-    and NumPy for efficient probability estimation.
-
-    The implementation follows research-grade engineering standards used in
-    modern ML systems and supports structured logging and reproducibility.
-
-Dependencies:
-    numpy
-    sklearn
-    logging
-    typing
-Inputs:
-    Model logits or probability scores and ground truth labels.
-Outputs:
-    Calibrated probability predictions.
-"""
-
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, Any
 
 import numpy as np
-from sklearn.isotonic import IsotonicRegression
-
+import torch
+import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
 
+# =========================================================
+# CONFIG
+# =========================================================
+
 @dataclass
-class IsotonicCalibrationConfig:
-    """
-    Configuration for isotonic regression calibration.
-    """
+class CalibrationMetricConfig:
+    n_bins: int = 15
 
-    out_of_bounds: str = "clip"
-    increasing: bool = True
+    def __post_init__(self):
+        if self.n_bins <= 1:
+            raise ValueError("n_bins must be > 1")
 
 
-class IsotonicCalibrator:
-    """
-    Isotonic regression calibrator for post-hoc probability calibration.
+# =========================================================
+# METRICS
+# =========================================================
 
-    Fits a separate IsotonicRegression model per class using a one-vs-rest
-    strategy. Supports binary and multi-class classification.
+class CalibrationMetrics:
 
-    References
-    ----------
-    Zadrozny & Elkan (2002)
-    "Transforming Classifier Scores into Accurate Multiclass Probability Estimates"
-    """
+    def __init__(self, config: CalibrationMetricConfig | None = None):
+        self.config = config or CalibrationMetricConfig()
 
-    def __init__(
+    # -----------------------------------------------------
+
+    @staticmethod
+    def _validate(probs: torch.Tensor, labels: torch.Tensor):
+        if probs.ndim != 2:
+            raise ValueError("probs must be [N, C]")
+        if labels.ndim != 1:
+            raise ValueError("labels must be [N]")
+        if probs.shape[0] != labels.shape[0]:
+            raise ValueError("size mismatch")
+
+    # -----------------------------------------------------
+
+    @staticmethod
+    def _to_probs(x: torch.Tensor) -> torch.Tensor:
+        if x.max() > 1 or x.min() < 0:
+            return torch.softmax(x, dim=1)
+        return x
+
+    # =====================================================
+    # ECE
+    # =====================================================
+
+    def expected_calibration_error(
         self,
-        config: Optional[IsotonicCalibrationConfig] = None,
-    ) -> None:
-        self.config = config or IsotonicCalibrationConfig()
-        self._calibrators: List[IsotonicRegression] = []
-        self._num_classes: int = 0
-        self._is_fitted: bool = False
-        self._binary_vector_input: bool = False
+        logits_or_probs: torch.Tensor,
+        labels: torch.Tensor,
+    ) -> float:
 
-    def _prepare_input(self, probabilities: np.ndarray, fit_stage: bool = False) -> np.ndarray:
-        probabilities = np.asarray(probabilities, dtype=np.float64)
+        probs = self._to_probs(logits_or_probs)
+        self._validate(probs, labels)
 
-        if probabilities.ndim == 1:
-            p1 = probabilities.reshape(-1, 1)
-            if np.any((p1 < 0) | (p1 > 1)):
-                raise ValueError("Binary probabilities must be in [0, 1].")
-            probabilities = np.hstack([1.0 - p1, p1])
-            if fit_stage:
-                self._binary_vector_input = True
+        conf, preds = torch.max(probs, dim=1)
+        acc = preds.eq(labels)
 
-        if probabilities.ndim != 2:
-            raise ValueError("probabilities must be shape (n_samples, n_classes) or (n_samples,)")
+        bins = torch.linspace(0, 1, self.config.n_bins + 1)
+        ece = torch.zeros(1, device=probs.device)
 
-        if np.any((probabilities < 0) | (probabilities > 1)):
-            raise ValueError("All probabilities must be in [0, 1].")
+        for i in range(self.config.n_bins):
+            mask = (conf > bins[i]) & (conf <= bins[i + 1])
 
-        return probabilities
+            if mask.sum() > 0:
+                bin_acc = acc[mask].float().mean()
+                bin_conf = conf[mask].mean()
+                weight = mask.float().mean()
+                ece += torch.abs(bin_conf - bin_acc) * weight
 
-    def fit(
+        return float(ece.item())
+
+    # =====================================================
+    # MCE
+    # =====================================================
+
+    def maximum_calibration_error(
         self,
-        probabilities: np.ndarray,
-        labels: np.ndarray,
-    ) -> "IsotonicCalibrator":
-        """
-        Fit isotonic regression calibrators on validation set probabilities.
+        logits_or_probs: torch.Tensor,
+        labels: torch.Tensor,
+    ) -> float:
 
-        Parameters
-        ----------
-        probabilities : np.ndarray, shape (n_samples, n_classes) or (n_samples,)
-            Predicted probabilities from uncalibrated model.
-        labels : np.ndarray, shape (n_samples,)
-            Ground truth class indices.
+        probs = self._to_probs(logits_or_probs)
+        self._validate(probs, labels)
 
-        Returns
-        -------
-        IsotonicCalibrator
-            Fitted calibrator instance.
-        """
+        conf, preds = torch.max(probs, dim=1)
+        acc = preds.eq(labels)
 
-        probabilities = self._prepare_input(probabilities, fit_stage=True)
-        labels = np.asarray(labels, dtype=np.int64)
+        bins = torch.linspace(0, 1, self.config.n_bins + 1)
+        mce = torch.zeros(1, device=probs.device)
 
-        if probabilities.shape[0] != labels.shape[0]:
-            raise ValueError(
-                "probabilities and labels must have the same number of samples."
-            )
+        for i in range(self.config.n_bins):
+            mask = (conf > bins[i]) & (conf <= bins[i + 1])
 
-        n_classes = probabilities.shape[1]
-        if labels.min() < 0 or labels.max() >= n_classes:
-            raise ValueError(f"labels must be in [0, {n_classes - 1}]")
+            if mask.sum() > 0:
+                error = torch.abs(
+                    conf[mask].mean() - acc[mask].float().mean()
+                )
+                mce = torch.maximum(mce, error)
 
-        self._num_classes = n_classes
-        self._calibrators = []
+        return float(mce.item())
 
-        for class_idx in range(n_classes):
-            binary_labels = (labels == class_idx).astype(np.float64)
-            class_scores = probabilities[:, class_idx]
+    # =====================================================
+    # BRIER
+    # =====================================================
 
-            calibrator = IsotonicRegression(
-                out_of_bounds=self.config.out_of_bounds,
-                increasing=self.config.increasing,
-            )
-            calibrator.fit(class_scores, binary_labels)
-            self._calibrators.append(calibrator)
-
-        self._is_fitted = True
-        logger.info("IsotonicCalibrator fitted for %d classes.", n_classes)
-
-        return self
-
-    def predict_proba(self, probabilities: np.ndarray) -> np.ndarray:
-        """
-        Produce calibrated probability estimates.
-
-        Parameters
-        ----------
-        probabilities : np.ndarray, shape (n_samples, n_classes) or (n_samples,)
-            Raw probability scores from uncalibrated model.
-
-        Returns
-        -------
-        np.ndarray, shape (n_samples, n_classes)
-            Calibrated and row-normalized probability estimates.
-        """
-
-        if not self._is_fitted:
-            raise RuntimeError(
-                "IsotonicCalibrator must be fitted before calling predict_proba."
-            )
-
-        probabilities = self._prepare_input(probabilities, fit_stage=False)
-
-        if probabilities.shape[1] != self._num_classes:
-            raise ValueError(
-                f"Expected {self._num_classes} classes but got {probabilities.shape[1]}."
-            )
-
-        calibrated = np.zeros_like(probabilities)
-
-        for class_idx, calibrator in enumerate(self._calibrators):
-            calibrated[:, class_idx] = calibrator.predict(probabilities[:, class_idx])
-
-        row_sums = calibrated.sum(axis=1, keepdims=True)
-        row_sums = np.where(row_sums == 0, 1.0, row_sums)
-        calibrated = calibrated / row_sums
-
-        return calibrated
-
-    def calibrate(
+    def brier_score(
         self,
-        probabilities: np.ndarray,
-        labels: np.ndarray,
-    ) -> np.ndarray:
-        """
-        Fit calibrator and return calibrated probabilities on the same set.
+        logits_or_probs: torch.Tensor,
+        labels: torch.Tensor,
+    ) -> float:
 
-        Parameters
-        ----------
-        probabilities : np.ndarray
-            Validation set probabilities from uncalibrated model.
-        labels : np.ndarray
-            Ground truth labels.
+        probs = self._to_probs(logits_or_probs)
+        self._validate(probs, labels)
 
-        Returns
-        -------
-        np.ndarray
-            Calibrated probability estimates.
-        """
+        one_hot = F.one_hot(labels, num_classes=probs.shape[1]).float()
+        score = torch.mean(torch.sum((probs - one_hot) ** 2, dim=1))
 
-        self.fit(probabilities, labels)
-        return self.predict_proba(probabilities)
+        return float(score.item())
+
+    # =====================================================
+    # NLL
+    # =====================================================
+
+    def negative_log_likelihood(
+        self,
+        logits_or_probs: torch.Tensor,
+        labels: torch.Tensor,
+    ) -> float:
+
+        if logits_or_probs.max() <= 1 and logits_or_probs.min() >= 0:
+            probs = logits_or_probs
+            loss = F.nll_loss(torch.log(probs + 1e-12), labels)
+        else:
+            loss = F.cross_entropy(logits_or_probs, labels)
+
+        return float(loss.item())
+
+    # =====================================================
+    # RELIABILITY
+    # =====================================================
+
+    def reliability_statistics(
+        self,
+        logits_or_probs: torch.Tensor,
+        labels: torch.Tensor,
+    ) -> Dict[str, np.ndarray]:
+
+        probs = self._to_probs(logits_or_probs)
+        self._validate(probs, labels)
+
+        conf, preds = torch.max(probs, dim=1)
+        acc = preds.eq(labels).float()
+
+        conf_np = conf.cpu().numpy()
+        acc_np = acc.cpu().numpy()
+
+        bins = np.linspace(0.0, 1.0, self.config.n_bins + 1)
+
+        bin_acc = np.zeros(self.config.n_bins)
+        bin_conf = np.zeros(self.config.n_bins)
+        bin_counts = np.zeros(self.config.n_bins)
+
+        for i in range(self.config.n_bins):
+            mask = (conf_np > bins[i]) & (conf_np <= bins[i + 1])
+
+            if mask.sum() > 0:
+                bin_acc[i] = acc_np[mask].mean()
+                bin_conf[i] = conf_np[mask].mean()
+                bin_counts[i] = mask.sum()
+
+        return {
+            "bin_accuracy": bin_acc,
+            "bin_confidence": bin_conf,
+            "bin_counts": bin_counts,
+            "bin_boundaries": bins,
+        }
+
+    # =====================================================
+    # ALL
+    # =====================================================
+
+    def compute_all_metrics(
+        self,
+        logits_or_probs: torch.Tensor,
+        labels: torch.Tensor,
+    ) -> Dict[str, float]:
+
+        metrics = {
+            "ece": self.expected_calibration_error(logits_or_probs, labels),
+            "mce": self.maximum_calibration_error(logits_or_probs, labels),
+            "brier_score": self.brier_score(logits_or_probs, labels),
+            "nll": self.negative_log_likelihood(logits_or_probs, labels),
+        }
+
+        logger.info("Calibration metrics: %s", metrics)
+
+        return metrics

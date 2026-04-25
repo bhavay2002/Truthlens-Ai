@@ -1,7 +1,3 @@
-"""
-File: mlflow_tracker.py (FINAL - INDUSTRY + RESEARCH GRADE)
-"""
-
 from __future__ import annotations
 
 import logging
@@ -13,20 +9,24 @@ try:
 except ImportError:
     mlflow = None
 
+from src.utils.device_utils import is_primary_process
+
 logger = logging.getLogger(__name__)
 
 
 # =========================================================
 # SAFETY
 # =========================================================
+
 def _ensure_mlflow():
     if mlflow is None:
         raise RuntimeError("MLflow not installed")
 
 
 # =========================================================
-# UTIL: FLATTEN DICT
+# FLATTEN
 # =========================================================
+
 def flatten_dict(d: Dict[str, Any], parent_key="", sep="."):
     items = []
     for k, v in d.items():
@@ -39,8 +39,9 @@ def flatten_dict(d: Dict[str, Any], parent_key="", sep="."):
 
 
 # =========================================================
-# MAIN RUN CONTEXT (UPGRADED)
+# RUN CONTEXT
 # =========================================================
+
 class MLflowRun:
 
     def __init__(
@@ -56,63 +57,41 @@ class MLflowRun:
     def __enter__(self):
         _ensure_mlflow()
 
-        mlflow.set_experiment(self.experiment_name)
+        if not is_primary_process():
+            return self
 
+        mlflow.set_experiment(self.experiment_name)
         self.run = mlflow.start_run(run_name=self.run_name)
 
         if self.tags:
             mlflow.set_tags(self.tags)
 
-        logger.info(
-            f"[MLFLOW] Run started | experiment={self.experiment_name} | run_name={self.run_name}"
-        )
-
+        logger.info(f"[MLFLOW] Run started: {self.run_name}")
         return self
 
     def __exit__(self, exc_type, exc, tb):
+        if not is_primary_process():
+            return
+
         status = "FAILED" if exc else "FINISHED"
         mlflow.end_run(status=status)
 
-        logger.info(f"[MLFLOW] Run ended with status={status}")
+        logger.info(f"[MLFLOW] Run ended: {status}")
 
 
 # =========================================================
-# NESTED RUNS (PER TASK)
+# MULTI-TASK METRIC LOGGING (FIXED)
 # =========================================================
-class NestedRun:
 
-    def __init__(self, name: str, tags: Optional[Dict[str, str]] = None):
-        self.name = name
-        self.tags = tags or {}
-
-    def __enter__(self):
-        _ensure_mlflow()
-
-        self.run = mlflow.start_run(run_name=self.name, nested=True)
-
-        if self.tags:
-            mlflow.set_tags(self.tags)
-
-        logger.info(f"[MLFLOW] Nested run started | {self.name}")
-
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        status = "FAILED" if exc else "FINISHED"
-        mlflow.end_run(status=status)
-
-        logger.info(f"[MLFLOW] Nested run ended | {self.name} | {status}")
-
-
-# =========================================================
-# METRIC LOGGING (MULTI-TASK SAFE)
-# =========================================================
-def log_metrics(
+def log_task_metrics(
+    task: str,
     metrics: Dict[str, Any],
     step: Optional[int] = None,
-    prefix: str = "",
 ):
     _ensure_mlflow()
+
+    if not is_primary_process():
+        return
 
     flat = flatten_dict(metrics)
 
@@ -121,7 +100,7 @@ def log_metrics(
         if not isinstance(value, (int, float)):
             continue
 
-        name = f"{prefix}{key}" if prefix else key
+        name = f"{task}.{key}"
 
         try:
             mlflow.log_metric(name, float(value), step=step)
@@ -130,10 +109,31 @@ def log_metrics(
 
 
 # =========================================================
-# PARAM LOGGING (FLATTENED)
+# GLOBAL METRICS
 # =========================================================
+
+def log_metrics(metrics: Dict[str, Any], step: Optional[int] = None):
+    _ensure_mlflow()
+
+    if not is_primary_process():
+        return
+
+    flat = flatten_dict(metrics)
+
+    for key, value in flat.items():
+        if isinstance(value, (int, float)):
+            mlflow.log_metric(key, float(value), step=step)
+
+
+# =========================================================
+# PARAMS
+# =========================================================
+
 def log_params(params: Dict[str, Any], prefix=""):
     _ensure_mlflow()
+
+    if not is_primary_process():
+        return
 
     flat = flatten_dict(params)
 
@@ -147,66 +147,96 @@ def log_params(params: Dict[str, Any], prefix=""):
 
 
 # =========================================================
-# DATASET VERSION LOGGING (NEW 🔥)
+# DATASET INFO
 # =========================================================
-def log_dataset_info(
-    dataset_name: str,
-    version: Optional[str] = None,
-    size: Optional[int] = None,
-    hash: Optional[str] = None,
-):
-    """
-    Log dataset metadata for reproducibility.
-    """
 
+def log_dataset_info(name: str, size=None, version=None, hash=None):
     _ensure_mlflow()
 
-    try:
-        mlflow.log_param("dataset.name", dataset_name)
+    if not is_primary_process():
+        return
 
-        if version:
-            mlflow.log_param("dataset.version", version)
-
-        if size:
-            mlflow.log_param("dataset.size", size)
-
-        if hash:
-            mlflow.log_param("dataset.hash", hash)
-
-        logger.info(f"[MLFLOW] Dataset logged: {dataset_name}")
-
-    except Exception as e:
-        logger.warning(f"[MLFLOW] Dataset logging failed: {e}")
+    mlflow.log_param("dataset.name", name)
+    if size:
+        mlflow.log_param("dataset.size", size)
+    if version:
+        mlflow.log_param("dataset.version", version)
+    if hash:
+        mlflow.log_param("dataset.hash", hash)
 
 
 # =========================================================
-# ARTIFACT LOGGING
+# ARTIFACTS (STRUCTURED)
 # =========================================================
-def log_artifact(path: str | Path, artifact_path: str = "artifacts"):
+
+def log_artifact(path: str | Path, artifact_path: str):
     _ensure_mlflow()
+
+    if not is_primary_process():
+        return
 
     path = Path(path)
 
     if not path.exists():
         raise FileNotFoundError(path)
 
-    try:
-        mlflow.log_artifact(str(path), artifact_path=artifact_path)
-        logger.info(f"[MLFLOW] Artifact logged: {path}")
-    except Exception as e:
-        logger.error(f"[MLFLOW] Artifact failed: {e}")
+    mlflow.log_artifact(str(path), artifact_path=artifact_path)
 
 
 # =========================================================
-# MODEL LOGGING
+# EVALUATION LOGGING (NEW 🔥)
 # =========================================================
-def log_model(model, name="model"):
+
+def log_evaluation_report(report: Dict[str, Any]):
     _ensure_mlflow()
+
+    if not is_primary_process():
+        return
+
+    # save temporary json
+    tmp_path = Path("temp_eval.json")
+
+    import json
+    with tmp_path.open("w") as f:
+        json.dump(report, f, indent=2)
+
+    mlflow.log_artifact(str(tmp_path), artifact_path="evaluation")
+
+    tmp_path.unlink(missing_ok=True)
+
+
+# =========================================================
+# MODEL LOGGING (FIXED 🔥)
+# =========================================================
+
+def log_model(model, tokenizer=None, config=None, name="model"):
+    _ensure_mlflow()
+
+    if not is_primary_process():
+        return
 
     try:
         import mlflow.pytorch
+
         mlflow.pytorch.log_model(model, name)
-        logger.info("[MLFLOW] Model logged")
+
+        # Save tokenizer
+        if tokenizer:
+            tok_path = Path("tokenizer")
+            tokenizer.save_pretrained(tok_path)
+            mlflow.log_artifacts(str(tok_path), artifact_path="tokenizer")
+
+        # Save config
+        if config:
+            cfg_path = Path("config.json")
+            import json
+            with cfg_path.open("w") as f:
+                json.dump(config, f, indent=2)
+
+            mlflow.log_artifact(str(cfg_path), artifact_path="config")
+
+        logger.info("[MLFLOW] Model + tokenizer + config logged")
+
     except Exception as e:
         logger.warning(f"[MLFLOW] Model logging failed: {e}")
 
@@ -214,23 +244,15 @@ def log_model(model, name="model"):
 # =========================================================
 # SYSTEM INFO
 # =========================================================
+
 def log_system_info():
     _ensure_mlflow()
+
+    if not is_primary_process():
+        return
 
     import platform
     import sys
 
-    mlflow.log_param("system.python_version", sys.version)
+    mlflow.log_param("system.python", sys.version)
     mlflow.log_param("system.platform", platform.platform())
-
-
-# =========================================================
-# EXTRA: TAG HELPERS
-# =========================================================
-def set_tags(tags: Dict[str, str]):
-    _ensure_mlflow()
-
-    try:
-        mlflow.set_tags(tags)
-    except Exception:
-        logger.warning("[MLFLOW] Failed to set tags")

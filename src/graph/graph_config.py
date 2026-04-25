@@ -1,26 +1,3 @@
-"""
-File Name: graph_config.py
-Module: Graph Analysis - Graph Configuration Management
-Description:
-    Defines configuration structures and utilities for the graph subsystem
-    in the TruthLens AI system. The module integrates with the central YAML
-    configuration system and converts graph-related configuration blocks
-    into strongly-typed dataclasses used by graph builders and pipelines.
-
-Dependencies:
-    logging
-    typing
-    dataclasses
-    pathlib
-    yaml
-
-Inputs:
-    YAML configuration file or configuration dictionary
-
-Outputs:
-    Graph configuration dataclass instances
-"""
-
 from __future__ import annotations
 
 import logging
@@ -30,138 +7,178 @@ from typing import Any, Dict
 
 import yaml
 
-
 logger = logging.getLogger(__name__)
 
 
+# =========================================================
+# YAML LOADER
+# =========================================================
+
 def load_yaml_as_dict(path: str | Path) -> Dict[str, Any]:
-    """
-    Load a YAML file and return its contents as a dictionary.
-    """
     with open(path, "r", encoding="utf-8") as fh:
         data = yaml.safe_load(fh)
+
     if not isinstance(data, dict):
-        raise ValueError(f"Expected a YAML mapping at {path}, got {type(data)}")
+        raise ValueError(f"Expected YAML dict at {path}")
+
     return data
 
 
+# =========================================================
+# PARSER
+# =========================================================
+
 def parse_graph_config(config_data: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Extract and validate the graph subsection from a configuration dictionary.
-    Falls back to sensible defaults for missing keys.
-    """
-    graph_section = config_data.get("graph", config_data)
 
-    parsed: Dict[str, Any] = {
-        "enable_entity_graph": bool(graph_section.get("enable_entity_graph", True)),
-        "enable_narrative_graph": bool(graph_section.get("enable_narrative_graph", True)),
-        "min_keyword_length": int(graph_section.get("min_keyword_length", 4)),
-        "max_keywords_per_sentence": int(graph_section.get("max_keywords_per_sentence", 4)),
+    graph = config_data.get("graph", config_data)
+
+    return {
+        # core toggles
+        "enable_entity_graph": bool(graph.get("enable_entity_graph", True)),
+        "enable_narrative_graph": bool(graph.get("enable_narrative_graph", True)),
+
+        #  NEW
+        "enable_temporal_graph": bool(graph.get("enable_temporal_graph", True)),
+        "enable_graph_explainer": bool(graph.get("enable_graph_explainer", True)),
+
+        # extraction
+        "min_keyword_length": int(graph.get("min_keyword_length", 4)),
+        "max_keywords_per_sentence": int(graph.get("max_keywords_per_sentence", 4)),
+
+        # graph behavior
+        "use_weighted_edges": bool(graph.get("use_weighted_edges", True)),
+        "normalize_graph": bool(graph.get("normalize_graph", True)),
+
+        # thresholds
+        "min_edge_weight": float(graph.get("min_edge_weight", 0.0)),
+        "max_edge_weight": float(graph.get("max_edge_weight", 10.0)),
+
+        # scaling
+        "feature_scale": float(graph.get("feature_scale", 1.0)),
+
+        # advanced
+        "enable_graph_embeddings": bool(graph.get("enable_graph_embeddings", False)),
     }
-    return parsed
 
+
+# =========================================================
+# DATACLASS
+# =========================================================
 
 @dataclass(slots=True)
 class GraphConfig:
-    """
-    Configuration for graph subsystem.
 
-    Attributes
-    ----------
-    enable_entity_graph : bool
-        Enable entity interaction graph.
-    enable_narrative_graph : bool
-        Enable narrative transition graph.
-    min_keyword_length : int
-        Minimum token length used in keyword extraction.
-    max_keywords_per_sentence : int
-        Maximum keywords extracted per sentence.
-    """
-
+    # toggles
     enable_entity_graph: bool = True
     enable_narrative_graph: bool = True
+
+    # 🔥 NEW
+    enable_temporal_graph: bool = True
+    enable_graph_explainer: bool = True
+
+    # extraction
     min_keyword_length: int = 4
     max_keywords_per_sentence: int = 4
 
+    # graph behavior
+    use_weighted_edges: bool = True
+    normalize_graph: bool = True
+
+    # thresholds
+    min_edge_weight: float = 0.0
+    max_edge_weight: float = 10.0
+
+    # scaling
+    feature_scale: float = 1.0
+
+    # advanced
+    enable_graph_embeddings: bool = False
+
+
+# =========================================================
+# LOADER
+# =========================================================
 
 class GraphConfigLoader:
-    """
-    Loader for graph configuration from YAML or dictionary sources.
-    """
 
-    def __init__(self) -> None:
+    def __init__(self):
         logger.info("GraphConfigLoader initialized")
 
-    def load_from_yaml(self, config_path: str | Path) -> GraphConfig:
-        """
-        Load graph configuration from YAML file.
-        """
+    def load_from_yaml(self, path: str | Path) -> GraphConfig:
 
-        path = Path(config_path)
+        p = Path(path)
 
-        if not path.exists():
-            raise FileNotFoundError(f"Config file not found: {path}")
+        if not p.exists():
+            raise FileNotFoundError(f"Config not found: {p}")
 
-        try:
-            config_data = load_yaml_as_dict(path)
-        except Exception as exc:
-            logger.exception("Failed to load YAML configuration")
-            raise RuntimeError("YAML configuration loading failed") from exc
+        data = load_yaml_as_dict(p)
+        return self._parse(data)
 
-        return self._parse_config(config_data)
+    def load_from_dict(self, config: Dict[str, Any]) -> GraphConfig:
 
-    def load_from_dict(self, config_dict: Dict[str, Any]) -> GraphConfig:
-        """
-        Load graph configuration from dictionary.
-        """
+        if not isinstance(config, dict):
+            raise TypeError("config must be dict")
 
-        if not isinstance(config_dict, dict):
-            raise ValueError("config_dict must be a dictionary")
+        return self._parse(config)
 
-        return self._parse_config(config_dict)
+    # =====================================================
+    # INTERNAL
+    # =====================================================
 
-    def _parse_config(self, config_data: Dict[str, Any]) -> GraphConfig:
-        """
-        Parse configuration dictionary into GraphConfig.
-        """
-        hardened = parse_graph_config(config_data)
-        if isinstance(hardened, dict):
-            enable_entity_graph = hardened.get("enable_entity_graph", True)
-            enable_narrative_graph = hardened.get("enable_narrative_graph", True)
-            min_keyword_length = hardened.get("min_keyword_length", 4)
-            max_keywords_per_sentence = hardened.get("max_keywords_per_sentence", 4)
-        else:
-            enable_entity_graph = hardened.enable_entity_graph
-            enable_narrative_graph = hardened.enable_narrative_graph
-            min_keyword_length = hardened.min_keyword_length
-            max_keywords_per_sentence = hardened.max_keywords_per_sentence
+    def _parse(self, config_data: Dict[str, Any]) -> GraphConfig:
 
-        config = GraphConfig(
-            enable_entity_graph=enable_entity_graph,
-            enable_narrative_graph=enable_narrative_graph,
-            min_keyword_length=min_keyword_length,
-            max_keywords_per_sentence=max_keywords_per_sentence,
-        )
+        parsed = parse_graph_config(config_data)
 
-        self._validate_config(config)
+        cfg = GraphConfig(**parsed)
 
-        logger.info("Graph configuration loaded successfully")
+        self._validate(cfg)
 
-        return config
+        logger.info("GraphConfig loaded")
 
-    def _validate_config(self, config: GraphConfig) -> None:
-        """
-        Validate graph configuration values.
-        """
+        return cfg
 
-        if config.min_keyword_length < 1:
+    # =====================================================
+    # VALIDATION
+    # =====================================================
+
+    def _validate(self, cfg: GraphConfig) -> None:
+
+        if cfg.min_keyword_length < 1:
             raise ValueError("min_keyword_length must be >= 1")
 
-        if config.max_keywords_per_sentence < 1:
+        if cfg.max_keywords_per_sentence < 1:
             raise ValueError("max_keywords_per_sentence must be >= 1")
 
-        if not isinstance(config.enable_entity_graph, bool):
-            raise ValueError("enable_entity_graph must be bool")
+        if cfg.min_edge_weight < 0:
+            raise ValueError("min_edge_weight must be >= 0")
 
-        if not isinstance(config.enable_narrative_graph, bool):
-            raise ValueError("enable_narrative_graph must be bool")
+        if cfg.max_edge_weight <= cfg.min_edge_weight:
+            raise ValueError("max_edge_weight must be > min_edge_weight")
+
+        if not (0.0 < cfg.feature_scale <= 10.0):
+            raise ValueError("feature_scale must be in (0, 10]")
+
+        if not isinstance(cfg.enable_entity_graph, bool):
+            raise TypeError("enable_entity_graph must be bool")
+
+        if not isinstance(cfg.enable_narrative_graph, bool):
+            raise TypeError("enable_narrative_graph must be bool")
+
+        #  NEW VALIDATION
+        if not isinstance(cfg.enable_temporal_graph, bool):
+            raise TypeError("enable_temporal_graph must be bool")
+
+        if not isinstance(cfg.enable_graph_explainer, bool):
+            raise TypeError("enable_graph_explainer must be bool")
+
+
+# =========================================================
+# UTILITIES
+# =========================================================
+
+def clip_edge_weight(value: float, cfg: GraphConfig) -> float:
+    return float(max(cfg.min_edge_weight, min(value, cfg.max_edge_weight)))
+
+
+def scale_feature(value: float, cfg: GraphConfig) -> float:
+    return float(value * cfg.feature_scale)

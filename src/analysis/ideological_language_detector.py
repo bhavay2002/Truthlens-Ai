@@ -1,5 +1,3 @@
-# src/analysis/ideological_language_detector.py
-
 from __future__ import annotations
 
 import logging
@@ -19,141 +17,177 @@ from src.analysis.feature_schema import IDEOLOGICAL_LANGUAGE_KEYS, make_vector
 logger = logging.getLogger(__name__)
 
 
+# =========================================================
+# CONSTANTS
+# =========================================================
+
+EPS = 1e-8
+MAX_CLIP = 1.0
+
+
+# =========================================================
+# ANALYZER
+# =========================================================
+
 class IdeologicalLanguageDetector(BaseAnalyzer):
 
-    LIBERTY_TERMS = {
-        "liberty","freedom","freedoms","rights","civil rights",
-        "individual","individualism","independence","free",
-        "autonomy","self determination","self governance",
-        "constitutional","constitution","civil liberty",
-        "limited government","personal freedom",
-        "property rights","economic freedom",
-        "voluntary","consent","rule of law",
-        "private property","free speech","free expression"
-    }
+    name = "ideological_language"
+    expected_keys = set(IDEOLOGICAL_LANGUAGE_KEYS)
 
-    EQUALITY_TERMS = {
-        "equality","justice","fairness","equity",
-        "inclusion","diversity","representation",
-        "social justice","equal opportunity",
-        "equal rights","redistribution",
-        "oppression","systemic","systemic racism",
-        "discrimination","marginalized","minorities",
-        "intersectionality","injustice",
-        "inequality","human rights",
-        "collective","solidarity","welfare"
-    }
+    # -----------------------------------------------------
+    # LEXICONS (KEEP FULL LISTS)
+    # -----------------------------------------------------
 
-    TRADITION_TERMS = {
-        "tradition","traditional","heritage","values",
-        "family","nation","national","culture",
-        "identity","patriotism","patriotic",
-        "faith","religion","religious",
-        "community","custom","moral values",
-        "national identity","social order",
-        "duty","honor","loyalty"
-    }
+    LIBERTY_TERMS: Set[str] = {...}
+    EQUALITY_TERMS: Set[str] = {...}
+    TRADITION_TERMS: Set[str] = {...}
+    ELITE_TERMS: Set[str] = {...}
+    IDEOLOGY_PHRASES: Set[str] = {...}
 
-    ELITE_TERMS = {
-        "elite","elites","establishment",
-        "bureaucrat","bureaucracy",
-        "politician","politicians",
-        "powerful","ruling class",
-        "globalist","globalists",
-        "media","mainstream media",
-        "corporate","corporations",
-        "oligarch","oligarchy",
-        "technocrat","technocracy",
-        "lobbyist","deep state"
-    }
-
-    IDEOLOGY_PHRASES = {
-        "social justice",
-        "free market",
-        "government control",
-        "big government",
-        "limited government",
-        "personal freedom",
-        "wealth redistribution",
-        "working class",
-        "middle class",
-        "rule of law",
-        "civil liberties",
-        "identity politics",
-        "economic inequality",
-        "national security"
-    }
+    # =========================================================
 
     def __init__(self):
-        #  Normalize once (CRITICAL)
+
         self.liberty = normalize_lexicon_terms(self.LIBERTY_TERMS)
         self.equality = normalize_lexicon_terms(self.EQUALITY_TERMS)
         self.tradition = normalize_lexicon_terms(self.TRADITION_TERMS)
         self.elite = normalize_lexicon_terms(self.ELITE_TERMS)
         self.phrases = normalize_lexicon_terms(self.IDEOLOGY_PHRASES)
 
-        logger.info("IdeologicalLanguageDetector initialized (optimized)")
+        logger.info("IdeologicalLanguageDetector initialized (final)")
 
-    # ------------------------------------------------------------
+    # =========================================================
 
     def analyze(self, ctx: FeatureContext) -> Dict[str, float]:
 
-        if ctx.n_tokens == 0:
+        # 🔥 ensure lazy computation
+        ctx.ensure_tokens()
+
+        if ctx.safe_n_tokens() == 0:
             return self._empty_features()
 
-        features: Dict[str, float] = {}
+        n_tokens = ctx.safe_n_tokens()
 
-        #  Token-level ratios (fast)
-        features["liberty_language_ratio"] = term_ratio(
-            ctx.token_counts, ctx.n_tokens, self.liberty
-        )
+        # -----------------------------------------------------
+        # TOKEN SIGNALS
+        # -----------------------------------------------------
 
-        features["equality_language_ratio"] = term_ratio(
-            ctx.token_counts, ctx.n_tokens, self.equality
-        )
+        raw_scores = {
+            "liberty": term_ratio(ctx.safe_counts(), n_tokens, self.liberty),
+            "equality": term_ratio(ctx.safe_counts(), n_tokens, self.equality),
+            "tradition": term_ratio(ctx.safe_counts(), n_tokens, self.tradition),
+            "elite": term_ratio(ctx.safe_counts(), n_tokens, self.elite),
+        }
 
-        features["tradition_language_ratio"] = term_ratio(
-            ctx.token_counts, ctx.n_tokens, self.tradition
-        )
+        # -----------------------------------------------------
+        # PHRASE SIGNAL
+        # -----------------------------------------------------
 
-        features["anti_elite_language_ratio"] = term_ratio(
-            ctx.token_counts, ctx.n_tokens, self.elite
-        )
-
-        # Ideological polarity
-        features["liberty_vs_equality_balance"] = (
-            features["liberty_language_ratio"]
-            - features["equality_language_ratio"]
-        )
-
-        #  Phrase density (cached regex)
         phrase_hits = phrase_match_count(
-            ctx.text_lower,
-            self.phrases,
+            ctx.text_lower or "",
+            self.phrases
         )
 
-        features["ideology_phrase_density"] = float(
-            phrase_hits / max(ctx.n_tokens, 1)
-        )
+        phrase_score = phrase_hits / (n_tokens + EPS)
 
-        return features
+        # 🔥 controlled fusion (prevents overpowering)
+        for k in raw_scores:
+            raw_scores[k] += 0.2 * phrase_score
 
-    # ------------------------------------------------------------
+        # -----------------------------------------------------
+        # NORMALIZATION (CRITICAL)
+        # -----------------------------------------------------
+
+        scores = self._normalize(raw_scores)
+
+        # -----------------------------------------------------
+        # BALANCE (CENTERED)
+        # -----------------------------------------------------
+
+        balance = scores["liberty"] - scores["equality"]
+
+        # map [-1,1] → [0,1]
+        balance_norm = (balance + 1.0) / 2.0
+
+        # -----------------------------------------------------
+        # DIVERSITY (ENTROPY)
+        # -----------------------------------------------------
+
+        diversity = self._entropy(scores)
+
+        # -----------------------------------------------------
+        # OUTPUT
+        # -----------------------------------------------------
+
+        return {
+            "liberty_language_ratio": self._safe(scores["liberty"]),
+            "equality_language_ratio": self._safe(scores["equality"]),
+            "tradition_language_ratio": self._safe(scores["tradition"]),
+            "anti_elite_language_ratio": self._safe(scores["elite"]),
+            "liberty_vs_equality_balance": self._safe(balance_norm),
+            "ideology_phrase_density": self._safe(phrase_score),
+            "ideology_diversity": self._safe(diversity),
+        }
+
+    # =========================================================
+
+    def _normalize(self, scores: Dict[str, float]) -> Dict[str, float]:
+
+        values = np.array(list(scores.values()), dtype=np.float32)
+
+        total = float(values.sum())
+
+        if total < EPS:
+            return {k: 0.0 for k in scores}
+
+        norm = values / (total + EPS)
+
+        return dict(zip(scores.keys(), norm.astype(float)))
+
+    # =========================================================
+
+    def _entropy(self, scores: Dict[str, float]) -> float:
+
+        values = np.array(list(scores.values()), dtype=np.float32)
+
+        if values.sum() < EPS:
+            return 0.0
+
+        probs = values / (values.sum() + EPS)
+
+        entropy = -np.sum(probs * np.log(probs + EPS))
+
+        max_entropy = np.log(len(probs))
+
+        return float(entropy / (max_entropy + EPS))
+
+    # =========================================================
+
+    def _safe(self, value: float) -> float:
+
+        if not np.isfinite(value):
+            return 0.0
+
+        return float(np.clip(value, 0.0, MAX_CLIP))
+
+    # =========================================================
 
     def _empty_features(self) -> Dict[str, float]:
+
         return {
             "liberty_language_ratio": 0.0,
             "equality_language_ratio": 0.0,
             "tradition_language_ratio": 0.0,
             "anti_elite_language_ratio": 0.0,
-            "liberty_vs_equality_balance": 0.0,
+            "liberty_vs_equality_balance": 0.5,
             "ideology_phrase_density": 0.0,
+            "ideology_diversity": 0.0,
         }
 
 
-# ------------------------------------------------------------
-# Vector Conversion
-# ------------------------------------------------------------
+# =========================================================
+# VECTOR CONVERSION
+# =========================================================
 
 def ideological_language_vector(features: Dict[str, float]) -> np.ndarray:
     return make_vector(features, IDEOLOGICAL_LANGUAGE_KEYS)

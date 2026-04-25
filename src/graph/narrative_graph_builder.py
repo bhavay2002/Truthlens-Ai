@@ -1,26 +1,3 @@
-"""
-File Name: narrative_graph_builder.py
-Module: Graph Analysis - Narrative Graph Construction
-Description:
-    Builds lightweight narrative transition graphs from article text.
-    The graph captures how salient keywords move from one sentence to
-    the next, enabling discourse-flow analysis features.
-
-Dependencies:
-    logging
-    re
-    collections
-    typing
-    dataclasses
-    numpy
-
-Inputs:
-    Raw article text
-
-Outputs:
-    Narrative transition graph and feature dictionary
-"""
-
 from __future__ import annotations
 
 import logging
@@ -31,15 +8,16 @@ from typing import Dict, Iterable, List, Set
 
 import numpy as np
 
-
 logger = logging.getLogger(__name__)
+EPS = 1e-12
 
+
+# =========================================================
+# FEATURES
+# =========================================================
 
 @dataclass(slots=True)
 class NarrativeGraphFeatures:
-    """
-    Dataclass container for narrative graph features.
-    """
 
     narrative_graph_nodes: float
     narrative_graph_edges: float
@@ -48,70 +26,54 @@ class NarrativeGraphFeatures:
     narrative_graph_isolated_nodes: float
     narrative_graph_components: float
 
-    def to_dict(self) -> Dict[str, float]:
-        """Convert dataclass features to dictionary."""
-        return {
-            "narrative_graph_nodes": self.narrative_graph_nodes,
-            "narrative_graph_edges": self.narrative_graph_edges,
-            "narrative_graph_avg_degree": self.narrative_graph_avg_degree,
-            "narrative_graph_density": self.narrative_graph_density,
-            "narrative_graph_isolated_nodes": self.narrative_graph_isolated_nodes,
-            "narrative_graph_components": self.narrative_graph_components,
-        }
+    # 🔥 NEW
+    narrative_graph_entropy: float
+    narrative_graph_centralization: float
+    narrative_graph_flow_strength: float
 
+    def to_dict(self) -> Dict[str, float]:
+        return self.__dict__
+
+
+# =========================================================
+# HELPERS
+# =========================================================
 
 def _split_sentences(text: str) -> List[str]:
-    """
-    Split raw text into sentences using regex heuristics.
-    """
     sentences = re.split(r"[.!?]+", text)
-    return [sentence.strip() for sentence in sentences if sentence.strip()]
+    return [s.strip() for s in sentences if s.strip()]
 
 
-def _extract_keywords(sentence: str, min_token_length: int) -> List[str]:
-    """
-    Extract ranked keywords from a sentence.
-    """
+def _extract_keywords(sentence: str, min_len: int) -> List[str]:
 
     tokens = re.findall(r"\b[a-zA-Z]+\b", sentence.lower())
 
-    filtered = [
-        token
-        for token in tokens
-        if len(token) >= min_token_length
-    ]
+    filtered = [t for t in tokens if len(t) >= min_len]
 
     if not filtered:
         return []
 
-    token_counts = Counter(filtered)
+    counts = Counter(filtered)
 
     ranked = sorted(
-        token_counts.items(),
-        key=lambda item: (-item[1], item[0]),
+        counts.items(),
+        key=lambda x: (-x[1], x[0]),
     )
 
-    return [token for token, _ in ranked]
+    return [t for t, _ in ranked]
 
+
+# =========================================================
+# BUILDER
+# =========================================================
 
 class NarrativeGraphBuilder:
-    """
-    Builds sentence-transition narrative graphs and extracts structural features.
-    """
 
     def __init__(
         self,
         min_token_length: int = 4,
         max_keywords_per_sentence: int = 4,
-    ) -> None:
-        """
-        Initialize narrative graph builder.
-
-        Parameters
-        ----------
-        min_token_length : int
-        max_keywords_per_sentence : int
-        """
+    ):
 
         if min_token_length < 1:
             raise ValueError("min_token_length must be >= 1")
@@ -122,187 +84,178 @@ class NarrativeGraphBuilder:
         self.min_token_length = min_token_length
         self.max_keywords_per_sentence = max_keywords_per_sentence
 
-        logger.info(
-            "NarrativeGraphBuilder initialized "
-            "(min_token_length=%d, max_keywords_per_sentence=%d)",
-            min_token_length,
-            max_keywords_per_sentence,
-        )
+        logger.info("NarrativeGraphBuilder initialized")
 
-    def build_graph(self, text: str) -> Dict[str, List[str]]:
-        """
-        Build directed narrative graph from sentence keyword transitions.
-        """
+    # =====================================================
+    # 🔥 BUILD GRAPH (WEIGHTED)
+    # =====================================================
+
+    def build_graph(self, text: str) -> Dict[str, Dict[str, float]]:
 
         if not isinstance(text, str) or not text.strip():
-            raise ValueError("text must be a non-empty string")
+            raise ValueError("Invalid text")
 
         sentences = _split_sentences(text)
 
-        graph: Dict[str, List[str]] = defaultdict(list)
-        previous_keywords: List[str] = []
+        graph: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
 
-        for sentence in sentences:
+        prev_keywords: List[str] = []
 
-            ranked_keywords = _extract_keywords(
-                sentence,
-                min_token_length=self.min_token_length,
-            )
+        for idx, sentence in enumerate(sentences):
 
-            keywords = ranked_keywords[: self.max_keywords_per_sentence]
+            ranked = _extract_keywords(sentence, self.min_token_length)
+            keywords = ranked[: self.max_keywords_per_sentence]
 
             if not keywords:
                 continue
 
-            for keyword in keywords:
-                graph.setdefault(keyword, [])
+            # ensure nodes
+            for k in keywords:
+                graph.setdefault(k, {})
 
-            if previous_keywords:
-                for source in previous_keywords:
-                    for target in keywords:
-                        if source != target:
-                            graph[source].append(target)
+            # 🔥 weighted transitions
+            if prev_keywords:
+                for src in prev_keywords:
+                    for tgt in keywords:
+                        if src != tgt:
+                            graph[src][tgt] += 1.0
 
-            previous_keywords = keywords
+            prev_keywords = keywords
 
-        logger.debug("Narrative graph built with %d nodes", len(graph))
+        return {k: dict(v) for k, v in graph.items()}
 
-        return dict(graph)
+    # =====================================================
+    # FEATURES
+    # =====================================================
 
     def extract_graph_features(
         self,
-        graph: Dict[str, List[str]],
+        graph: Dict[str, Dict[str, float]],
     ) -> NarrativeGraphFeatures:
-        """
-        Extract structural features from narrative graph.
-        """
 
         if not isinstance(graph, dict):
-            raise ValueError("graph must be a dictionary")
+            raise ValueError("graph must be dict")
 
-        adjacency: Dict[str, Set[str]] = {}
-        all_nodes: Set[str] = set()
+        nodes = set(graph.keys())
 
-        for node, neighbors in graph.items():
+        edges = set()
+        degrees = []
 
-            if not isinstance(node, str):
-                raise ValueError("graph keys must be strings")
+        weights = []
 
-            if not isinstance(neighbors, list):
-                raise ValueError("graph values must be lists")
+        for src, nbrs in graph.items():
 
-            node_key = node.strip().lower()
+            for tgt, w in nbrs.items():
+                if src != tgt:
+                    edges.add((src, tgt))
+                    weights.append(w)
 
-            neighbor_set = {
-                str(neighbor).strip().lower()
-                for neighbor in neighbors
-                if isinstance(neighbor, str)
-                and neighbor.strip()
-                and str(neighbor).strip().lower() != node_key
-            }
+            degrees.append(len(nbrs))
 
-            adjacency[node_key] = neighbor_set
+            nodes.update(nbrs.keys())
 
-            all_nodes.add(node_key)
-            all_nodes.update(neighbor_set)
+        n = len(nodes)
+        e = len(edges)
 
-        for node in all_nodes:
-            adjacency.setdefault(node, set())
+        degrees_arr = np.array(degrees, dtype=float) if degrees else np.array([])
 
-        edge_pairs = {
-            (source, target)
-            for source, neighbors in adjacency.items()
-            for target in neighbors
-            if source != target
-        }
+        avg_degree = float(np.mean(degrees_arr)) if degrees_arr.size else 0.0
+        density = float(e / (n * (n - 1) + EPS)) if n > 1 else 0.0
 
-        node_count = len(all_nodes)
-        edge_count = len(edge_pairs)
+        isolated = sum(1 for d in degrees if d == 0)
 
-        avg_degree = edge_count / max(node_count, 1)
+        components = self._weak_components(graph)
 
-        density = edge_count / max(node_count * (node_count - 1), 1)
+        # =================================================
+        # 🔥 NEW METRICS
+        # =================================================
 
-        isolated_nodes = sum(
-            1 for node, neighbors in adjacency.items() if len(neighbors) == 0
+        # entropy (distribution of edges)
+        if weights:
+            w = np.array(weights, dtype=float)
+            p = w / (np.sum(w) + EPS)
+            entropy = float(-np.sum(p * np.log(p + EPS)))
+        else:
+            entropy = 0.0
+
+        # centralization
+        if degrees_arr.size:
+            centralization = float(
+                (np.max(degrees_arr) - np.mean(degrees_arr)) / (n - 1 + EPS)
+            )
+        else:
+            centralization = 0.0
+
+        # flow strength (temporal continuity)
+        flow_strength = float(np.mean(weights)) if weights else 0.0
+
+        return NarrativeGraphFeatures(
+            narrative_graph_nodes=float(n),
+            narrative_graph_edges=float(e),
+            narrative_graph_avg_degree=avg_degree,
+            narrative_graph_density=density,
+            narrative_graph_isolated_nodes=float(isolated),
+            narrative_graph_components=float(components),
+            narrative_graph_entropy=entropy,
+            narrative_graph_centralization=centralization,
+            narrative_graph_flow_strength=flow_strength,
         )
 
-        component_count = self._weak_component_count(adjacency)
+    # =====================================================
+    # COMPONENTS
+    # =====================================================
 
-        features = NarrativeGraphFeatures(
-            narrative_graph_nodes=float(node_count),
-            narrative_graph_edges=float(edge_count),
-            narrative_graph_avg_degree=float(avg_degree),
-            narrative_graph_density=float(density),
-            narrative_graph_isolated_nodes=float(isolated_nodes),
-            narrative_graph_components=float(component_count),
-        )
+    def _weak_components(self, graph: Dict[str, Dict[str, float]]) -> int:
 
-        logger.debug("Narrative graph features extracted: %s", features)
+        undirected: Dict[str, Set[str]] = defaultdict(set)
 
-        return features
-
-    def _weak_component_count(self, adjacency: Dict[str, Set[str]]) -> int:
-        """
-        Compute weakly connected components.
-        """
-
-        if not adjacency:
-            return 0
-
-        undirected = {node: set(neighbors) for node, neighbors in adjacency.items()}
-
-        for node, neighbors in list(undirected.items()):
-            for neighbor in neighbors:
-                undirected.setdefault(neighbor, set()).add(node)
+        for u, nbrs in graph.items():
+            for v in nbrs:
+                undirected[u].add(v)
+                undirected[v].add(u)
 
         visited: Set[str] = set()
-        components = 0
+        count = 0
 
         for start in undirected:
 
             if start in visited:
                 continue
 
-            components += 1
+            count += 1
 
-            queue: deque[str] = deque([start])
-
+            q = deque([start])
             visited.add(start)
 
-            while queue:
+            while q:
+                node = q.popleft()
+                for nbr in undirected[node]:
+                    if nbr not in visited:
+                        visited.add(nbr)
+                        q.append(nbr)
 
-                node = queue.popleft()
+        return count
 
-                for neighbor in undirected[node]:
 
-                    if neighbor not in visited:
-
-                        visited.add(neighbor)
-
-                        queue.append(neighbor)
-
-        return components
-
+# =========================================================
+# VECTOR
+# =========================================================
 
 def narrative_graph_vector(features: Dict[str, float]) -> np.ndarray:
-    """
-    Convert narrative graph feature dictionary into ordered vector.
-    """
 
-    if not isinstance(features, dict) or not features:
-        raise ValueError("features must be a non-empty dictionary")
-
-    ordered_keys: Iterable[str] = (
+    keys: Iterable[str] = (
         "narrative_graph_nodes",
         "narrative_graph_edges",
         "narrative_graph_avg_degree",
         "narrative_graph_density",
         "narrative_graph_isolated_nodes",
         "narrative_graph_components",
+        "narrative_graph_entropy",
+        "narrative_graph_centralization",
+        "narrative_graph_flow_strength",
     )
 
     return np.array(
-        [float(features.get(key, 0.0)) for key in ordered_keys],
+        [float(features.get(k, 0.0)) for k in keys],
         dtype=np.float32,
     )

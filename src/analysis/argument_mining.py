@@ -1,5 +1,3 @@
-# src/analysis/argument_mining.py
-
 from __future__ import annotations
 
 import logging
@@ -15,112 +13,134 @@ from src.analysis._text_features import (
     normalize_lexicon_terms,
 )
 from src.analysis.feature_schema import ARGUMENT_MINING_KEYS, make_vector
+from src.analysis.spacy_loader import get_doc
 
 logger = logging.getLogger(__name__)
 
+
+# =========================================================
+# CONSTANTS
+# =========================================================
+
+EPS = 1e-8
+MAX_RATIO_CLIP = 1.0
+
+
+# =========================================================
+# ANALYZER
+# =========================================================
 
 class ArgumentMiningAnalyzer(BaseAnalyzer):
 
     CLAIM_MARKERS = {
         "therefore","thus","hence","consequently","so",
         "accordingly","as a result","for this reason",
-        "it follows","it follows that",
-        "this proves","this shows","this demonstrates",
-        "this indicates","this confirms",
-        "clearly","obviously","undoubtedly",
-        "without doubt","there is no doubt",
-        "in conclusion","to conclude","overall",
+        "it follows","this proves","this shows",
+        "this demonstrates","clearly","obviously",
+        "undoubtedly","in conclusion","overall",
         "ultimately","in summary"
     }
 
     PREMISE_MARKERS = {
         "because","since","given","as",
-        "considering","due to","owing to",
-        "based on","in light of",
-        "for the reason that",
-        "seeing that","inasmuch as",
-        "assuming that","insofar as"
+        "due to","based on","in light of",
+        "for the reason that","seeing that"
     }
 
     SUPPORT_MARKERS = {
-        "for example","for instance","as an example",
-        "to illustrate","as evidence",
-        "evidence","empirical evidence",
-        "data shows","data suggest",
-        "studies show","research indicates",
-        "research shows","statistics show",
-        "statistics indicate",
-        "according to","reports show",
-        "analysis shows","findings suggest"
+        "for example","for instance","to illustrate",
+        "as evidence","data shows","studies show",
+        "research indicates","statistics show",
+        "according to","analysis shows"
     }
 
     CONTRAST_MARKERS = {
         "however","but","although","though",
-        "yet","nevertheless","nonetheless",
-        "on the other hand","in contrast",
-        "by contrast","alternatively",
-        "despite","despite this",
-        "even though","whereas",
-        "while","still"
+        "nevertheless","on the other hand",
+        "in contrast","despite","whereas"
     }
 
     REBUTTAL_MARKERS = {
         "however","nonetheless","still",
-        "nevertheless","despite this",
-        "even so","regardless",
-        "that said","having said that",
-        "yet still","in spite of this",
-        "contrary to this",
-        "despite these claims"
+        "despite this","even so","that said",
+        "in spite of this","contrary to this"
     }
 
+    # -----------------------------------------------------
+
     def __init__(self):
-        # Normalize once (CRITICAL optimization)
         self.support_phrases = normalize_lexicon_terms(self.SUPPORT_MARKERS)
         self.rebuttal_phrases = normalize_lexicon_terms(self.REBUTTAL_MARKERS)
 
-    # ------------------------------------------------------------
+    # =========================================================
 
     def analyze(self, ctx: FeatureContext) -> Dict[str, float]:
 
-        if ctx.n_tokens == 0:
+        if not ctx.text:
             return self._empty_features()
+
+        #  Shared spaCy doc (CRITICAL optimization)
+        doc = get_doc(ctx, task="syntax")
+
+        tokens = ctx.tokens or []
+        n_tokens = len(tokens)
+
+        if n_tokens == 0:
+            return self._empty_features()
+
+        token_counts = ctx.token_counts or {}
+
+        text_lower = ctx.text.lower()
 
         features: Dict[str, float] = {}
 
-        # ✅ Token-based ratios (fast)
-        features["argument_claim_ratio"] = term_ratio(
-            ctx.token_counts, ctx.n_tokens, self.CLAIM_MARKERS
+        # -----------------------------------------------------
+        # TOKEN RATIOS
+        # -----------------------------------------------------
+
+        features["argument_claim_ratio"] = self._safe_ratio(
+            term_ratio(token_counts, n_tokens, self.CLAIM_MARKERS)
         )
 
-        features["argument_premise_ratio"] = term_ratio(
-            ctx.token_counts, ctx.n_tokens, self.PREMISE_MARKERS
+        features["argument_premise_ratio"] = self._safe_ratio(
+            term_ratio(token_counts, n_tokens, self.PREMISE_MARKERS)
         )
 
-        features["argument_contrast_ratio"] = term_ratio(
-            ctx.token_counts, ctx.n_tokens, self.CONTRAST_MARKERS
+        features["argument_contrast_ratio"] = self._safe_ratio(
+            term_ratio(token_counts, n_tokens, self.CONTRAST_MARKERS)
         )
 
-        # ✅ Phrase-based ratios (cached regex)
+        # -----------------------------------------------------
+        # PHRASE FEATURES
+        # -----------------------------------------------------
+
         features["argument_support_ratio"] = self._phrase_ratio(
-            ctx.text_lower, ctx.n_tokens, self.support_phrases
+            text_lower, n_tokens, self.support_phrases
         )
 
         features["argument_rebuttal_ratio"] = self._phrase_ratio(
-            ctx.text_lower, ctx.n_tokens, self.rebuttal_phrases
+            text_lower, n_tokens, self.rebuttal_phrases
         )
 
-        # ✅ Structural features (reuse doc)
-        features.update(self._argument_density(ctx))
+        # -----------------------------------------------------
+        # STRUCTURAL FEATURES (spaCy)
+        # -----------------------------------------------------
 
-        features["argument_complexity"] = (
-            features["argument_clause_density"]
-            + features["argument_verb_density"]
+        density = self._argument_density(doc)
+        features.update(density)
+
+        # -----------------------------------------------------
+        # COMPLEXITY
+        # -----------------------------------------------------
+
+        features["argument_complexity"] = self._safe_ratio(
+            density["argument_clause_density"]
+            + density["argument_verb_density"]
         )
 
         return features
 
-    # ------------------------------------------------------------
+    # =========================================================
 
     def _phrase_ratio(
         self,
@@ -128,30 +148,46 @@ class ArgumentMiningAnalyzer(BaseAnalyzer):
         n_tokens: int,
         phrases: set,
     ) -> float:
+
+        if n_tokens <= 0:
+            return 0.0
+
         hits = phrase_match_count(text_lower, phrases)
-        return float(hits / n_tokens)
 
-    # ------------------------------------------------------------
+        return self._safe_ratio(hits / (n_tokens + EPS))
 
-    def _argument_density(self, ctx: FeatureContext) -> Dict[str, float]:
+    # =========================================================
 
-        doc = ctx.doc
+    def _argument_density(self, doc) -> Dict[str, float]:
+
+        total = max(len(doc), 1)
 
         verbs = sum(1 for t in doc if t.pos_ == "VERB")
         clauses = sum(
             1 for t in doc if t.dep_ in {"ccomp", "xcomp", "advcl"}
         )
 
-        total_tokens = max(len(doc), 1)
+        verb_density = verbs / total
+        clause_density = clauses / total
 
         return {
-            "argument_verb_density": float(verbs / total_tokens),
-            "argument_clause_density": float(clauses / total_tokens),
+            "argument_verb_density": self._safe_ratio(verb_density),
+            "argument_clause_density": self._safe_ratio(clause_density),
         }
 
-    # ------------------------------------------------------------
+    # =========================================================
+
+    def _safe_ratio(self, value: float) -> float:
+
+        if not np.isfinite(value):
+            return 0.0
+
+        return float(np.clip(value, 0.0, MAX_RATIO_CLIP))
+
+    # =========================================================
 
     def _empty_features(self) -> Dict[str, float]:
+
         return {
             "argument_claim_ratio": 0.0,
             "argument_premise_ratio": 0.0,
@@ -164,9 +200,9 @@ class ArgumentMiningAnalyzer(BaseAnalyzer):
         }
 
 
-# ------------------------------------------------------------
-# Vector Conversion (UNCHANGED)
-# ------------------------------------------------------------
+# =========================================================
+# VECTOR CONVERSION (MODEL-READY)
+# =========================================================
 
 def argument_feature_vector(features: Dict[str, float]) -> np.ndarray:
     return make_vector(features, ARGUMENT_MINING_KEYS)

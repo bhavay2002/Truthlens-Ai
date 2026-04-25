@@ -1,10 +1,8 @@
-# src/analysis/schemas/output_models.py
-
 from __future__ import annotations
 
-from typing import Dict, Any
-from pydantic import BaseModel, Field
+from typing import Dict, Any, Tuple, List
 import numpy as np
+from pydantic import BaseModel, Field, field_validator
 
 from src.analysis.feature_schema import (
     RHETORICAL_DEVICE_KEYS,
@@ -26,21 +24,56 @@ from src.analysis.feature_schema import (
 
 
 # =========================================================
-# Base Model
+# BASE MODEL
 # =========================================================
 
 class FeatureModel(BaseModel):
-    """Base class for all feature models"""
+    """
+    Base class:
+    - numeric safety
+    - vector conversion
+    - completeness tracking
+    """
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _validate_numeric(cls, v):
+        if v is None:
+            return 0.0
+        if not isinstance(v, (int, float)):
+            return 0.0
+        if not np.isfinite(v):
+            return 0.0
+        return float(np.clip(v, 0.0, 1.0))
+
+    # -------------------------
 
     def to_dict(self) -> Dict[str, float]:
         return self.model_dump()
 
-    def to_vector(self, keys) -> np.ndarray:
-        return make_vector(self.model_dump(), keys)
+    # -------------------------
+
+    def to_vector(
+        self,
+        keys: Tuple[str, ...],
+        *,
+        strict: bool = False,
+    ) -> np.ndarray:
+        return make_vector(
+            self.model_dump(),
+            keys,
+            strict=strict,
+        )
+
+    # -------------------------
+
+    def completeness(self, keys: Tuple[str, ...]) -> float:
+        present = sum(1 for k in keys if k in self.model_dump())
+        return present / max(len(keys), 1)
 
 
 # =========================================================
-# Individual Feature Models
+# FEATURE MODELS
 # =========================================================
 
 class RhetoricalFeatures(FeatureModel):
@@ -128,7 +161,6 @@ class InformationFeatures(FeatureModel):
     modal_density: float = 0.0
     rhetorical_punctuation_density: float = 0.0
     information_emotion_ratio: float = 0.0
-    information_emotion_ratio_normalized: float = 0.0
 
     def vector(self):
         return self.to_vector(INFORMATION_DENSITY_KEYS)
@@ -160,7 +192,7 @@ class SourceAttributionFeatures(FeatureModel):
 
 
 # =========================================================
-# Aggregated Models
+# PROPAGANDA
 # =========================================================
 
 class PropagandaFeatures(FeatureModel):
@@ -174,6 +206,10 @@ class PropagandaFeatures(FeatureModel):
         return self.to_vector(PROPAGANDA_PATTERN_KEYS)
 
 
+# =========================================================
+# PROFILE
+# =========================================================
+
 class BiasProfile(BaseModel):
     bias: Dict[str, float]
     emotion: Dict[str, float]
@@ -185,7 +221,7 @@ class BiasProfile(BaseModel):
 
 
 # =========================================================
-# Pipeline Output
+# PIPELINE OUTPUT
 # =========================================================
 
 class PipelineOutput(BaseModel):
@@ -201,7 +237,7 @@ class PipelineOutput(BaseModel):
 
 
 # =========================================================
-# Final System Output
+# FINAL OUTPUT
 # =========================================================
 
 class FullAnalysisOutput(BaseModel):
@@ -209,3 +245,48 @@ class FullAnalysisOutput(BaseModel):
     profile: BiasProfile
     propaganda: PropagandaFeatures
     meta: Dict[str, Any] = Field(default_factory=dict)
+
+    # -----------------------------------------------------
+    # GLOBAL VECTOR (ORDERED + STABLE)
+    # -----------------------------------------------------
+
+    def to_vector(self) -> np.ndarray:
+        parts: List[float] = []
+
+        # 🔥 enforce deterministic ordering
+        ordered_sections = [
+            "rhetorical",
+            "argument",
+            "context",
+            "discourse",
+            "emotion",
+            "framing",
+            "information",
+            "ideology",
+            "source",
+        ]
+
+        feature_dict = self.features.model_dump()
+
+        for section_name in ordered_sections:
+            section = feature_dict.get(section_name, {})
+            if isinstance(section, dict):
+                for k in sorted(section.keys()):
+                    v = section[k]
+                    if isinstance(v, (int, float)):
+                        parts.append(float(v))
+                    else:
+                        parts.append(0.0)
+
+        return np.asarray(parts, dtype=np.float32)
+
+    # -----------------------------------------------------
+    # DEBUG / INSPECTION
+    # -----------------------------------------------------
+
+    def summary(self) -> Dict[str, Any]:
+        return {
+            "num_features": len(self.to_vector()),
+            "confidence": self.meta.get("confidence", 0.0),
+            "has_error": self.meta.get("error", False),
+        }

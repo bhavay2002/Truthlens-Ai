@@ -1,5 +1,3 @@
-# src/analysis/orchestrator.py
-
 from __future__ import annotations
 
 import logging
@@ -10,24 +8,11 @@ from src.analysis.analysis_pipeline import AnalysisPipeline
 from src.analysis.bias_profile_builder import BiasProfileBuilder
 from src.analysis.propaganda_pattern_detector import PropagandaPatternDetector
 
-#  FIXED IMPORT PATH
-try:
-    from src.analysis.output_models import (
-        PipelineOutput,
-        FullAnalysisOutput,
-        PropagandaFeatures,
-        BiasProfile,
-    )
-    USE_MODELS = True
-except Exception:
-    USE_MODELS = False
-
-
 logger = logging.getLogger(__name__)
 
 
 # =========================================================
-# Orchestrator
+# ORCHESTRATOR
 # =========================================================
 
 class AnalysisOrchestrator:
@@ -44,35 +29,46 @@ class AnalysisOrchestrator:
         self.propaganda = propaganda_detector or PropagandaPatternDetector()
         self.enable_timing = enable_timing
 
-        logger.info("AnalysisOrchestrator initialized")
+        logger.info("AnalysisOrchestrator initialized (final)")
 
     # =====================================================
-    # SINGLE TEXT
+    # SINGLE
     # =====================================================
 
     def run(self, text: str) -> Dict[str, Any]:
 
+        start_total = time.perf_counter()
+
         try:
-            if not isinstance(text, str):
-                raise ValueError("Input must be string")
+            text = self._validate_input(text)
 
-            text = text.strip()
-            if not text:
-                raise ValueError("Input text cannot be empty")
+            # -------------------------
+            # PIPELINE
+            # -------------------------
+            t0 = time.perf_counter()
+            raw = self.pipeline.run(text)
+            t_pipeline = time.perf_counter() - t0
 
-            start_time = time.time()
+            if hasattr(raw, "model_dump"):
+                raw = raw.model_dump()
 
-            raw_results = self.pipeline.run(text)
+            # -------------------------
+            # POST PROCESS
+            # -------------------------
+            t1 = time.perf_counter()
+            result = self._post_process(raw, text)
+            t_post = time.perf_counter() - t1
 
-            if hasattr(raw_results, "model_dump"):
-                raw_results = raw_results.model_dump()
-
-            result = self._post_process(raw_results)
-
+            # -------------------------
+            # META (TIMING)
+            # -------------------------
             if self.enable_timing:
-                result["meta"]["latency_ms"] = round(
-                    (time.time() - start_time) * 1000, 2
-                )
+                result.setdefault("meta", {})
+                result["meta"]["timing"] = {
+                    "pipeline_ms": round(t_pipeline * 1000, 2),
+                    "postprocess_ms": round(t_post * 1000, 2),
+                    "total_ms": round((time.perf_counter() - start_total) * 1000, 2),
+                }
 
             return result
 
@@ -81,103 +77,172 @@ class AnalysisOrchestrator:
             return self._error_response()
 
     # =====================================================
-    # 🔥 BATCH SUPPORT (IMPORTANT)
+    # BATCH
     # =====================================================
 
     def run_batch(self, texts: List[str]) -> List[Dict[str, Any]]:
 
-        try:
-            raw_batch = self.pipeline.run_batch(texts)
+        if not texts:
+            return []
 
-            results = []
-            for raw in raw_batch:
-                results.append(self._post_process(raw))
+        start_total = time.perf_counter()
+
+        try:
+            indexed = list(enumerate(texts))
+
+            t0 = time.perf_counter()
+            raw_batch = self.pipeline.run_batch([t for _, t in indexed])
+            t_pipeline = time.perf_counter() - t0
+
+            results: List[Dict[str, Any]] = []
+
+            for (idx, text), raw in zip(indexed, raw_batch):
+                try:
+                    if hasattr(raw, "model_dump"):
+                        raw = raw.model_dump()
+
+                    result = self._post_process(raw, text)
+
+                    result.setdefault("meta", {})
+                    result["meta"]["index"] = idx
+
+                    results.append(result)
+
+                except Exception:
+                    logger.exception("Post-process failed")
+                    results.append(self._error_response())
+
+            # -------------------------
+            # GLOBAL TIMING
+            # -------------------------
+            if self.enable_timing:
+                total_time = (time.perf_counter() - start_total) * 1000
+
+                for r in results:
+                    r.setdefault("meta", {})
+                    r["meta"]["batch_timing"] = {
+                        "pipeline_total_ms": round(t_pipeline * 1000, 2),
+                        "batch_total_ms": round(total_time, 2),
+                    }
 
             return results
 
         except Exception:
-            logger.exception("Batch processing failed")
-
-            # fallback to safe processing
+            logger.exception("Batch failed → fallback to sequential")
             return [self.run(t) for t in texts]
 
     # =====================================================
-    # CORE POST PROCESS
+    # POST PROCESS
     # =====================================================
 
-    def _post_process(self, raw_results: Dict[str, Any]) -> Dict[str, Any]:
+    def _post_process(self, raw: Dict[str, Any], text: str) -> Dict[str, Any]:
 
-        # Safe extraction
-        rhetorical = raw_results.get("rhetorical", {})
-        argument = raw_results.get("argument", {})
-        context = raw_results.get("context", {})
-        discourse = raw_results.get("discourse", {})
-        emotion = raw_results.get("emotion", {})
-        framing = raw_results.get("framing", {})
-        information = raw_results.get("information", {})
-        ideology = raw_results.get("ideology", {})
+        # -------------------------
+        # SAFE EXTRACTION
+        # -------------------------
+        sections = {
+            "rhetorical": raw.get("rhetorical", {}),
+            "argument": raw.get("argument", {}),
+            "context": raw.get("context", {}),
+            "discourse": raw.get("discourse", {}),
+            "emotion": raw.get("emotion", {}),
+            "framing": raw.get("framing", {}),
+            "information": raw.get("information", {}),
+            "ideology": raw.get("ideology", {}),
+        }
 
-        # -----------------------------
-        # Profile
-        # -----------------------------
+        # -------------------------
+        # PROFILE
+        # -------------------------
         profile = self.builder.build_profile(
-            bias=framing,
-            emotion=emotion,
-            narrative=framing,
-            discourse=discourse,
-            ideology=ideology,
+            bias=sections["framing"],
+            emotion=sections["emotion"],
+            narrative=sections["framing"],
+            discourse=sections["discourse"],
+            ideology=sections["ideology"],
         )
 
-        # -----------------------------
-        # Propaganda
-        # -----------------------------
+        # -------------------------
+        # PROPAGANDA
+        # -------------------------
         propaganda = self.propaganda.analyze(
-            emotion_features=emotion,
-            narrative_features=framing,
-            rhetorical_features=rhetorical,
-            argument_features=argument,
-            information_features=information,
+            emotion_features=sections["emotion"],
+            narrative_features=sections["framing"],
+            rhetorical_features=sections["rhetorical"],
+            argument_features=sections["argument"],
+            information_features=sections["information"],
         )
 
-        # Convert if needed
-        profile_dict = profile.model_dump() if hasattr(profile, "model_dump") else profile
-        propaganda_dict = (
-            propaganda.model_dump()
-            if hasattr(propaganda, "model_dump")
-            else propaganda
-        )
+        # -------------------------
+        # CONFIDENCE
+        # -------------------------
+        confidence = self._confidence(sections)
 
-        meta = {"text_length": len(str(raw_results))}
-
-        # -----------------------------
-        # Models (optional)
-        # -----------------------------
-        if USE_MODELS:
-            try:
-                return FullAnalysisOutput(
-                    features=PipelineOutput(**raw_results),
-                    profile=profile if isinstance(profile, BiasProfile) else profile_dict,
-                    propaganda=PropagandaFeatures(**propaganda_dict),
-                    meta=meta,
-                )
-            except Exception as e:
-                logger.warning("Model conversion failed: %s", e)
+        # -------------------------
+        # META
+        # -------------------------
+        meta = {
+            "input_length": len(text),
+            "num_features": sum(len(v) for v in sections.values()),
+            "confidence": confidence,
+        }
 
         return {
-            "features": raw_results,
-            "profile": profile_dict,
-            "propaganda": propaganda_dict,
+            "features": raw,
+            "profile": profile,
+            "propaganda": propaganda,
             "meta": meta,
         }
 
     # =====================================================
-    # ERROR RESPONSE
+    # CONFIDENCE
+    # =====================================================
+
+    def _confidence(self, sections: Dict[str, Dict[str, float]]) -> float:
+
+        values = []
+
+        for section in sections.values():
+            values.extend(
+                v for v in section.values() if isinstance(v, (int, float))
+            )
+
+        if not values:
+            return 0.0
+
+        # robust signal strength
+        mean_val = sum(values) / len(values)
+
+        return float(min(max(mean_val, 0.0), 1.0))
+
+    # =====================================================
+    # VALIDATION
+    # =====================================================
+
+    def _validate_input(self, text: Any) -> str:
+
+        if not isinstance(text, str):
+            raise ValueError("Input must be string")
+
+        text = text.strip()
+
+        if not text:
+            raise ValueError("Empty text")
+
+        return text
+
+    # =====================================================
+    # ERROR
     # =====================================================
 
     def _error_response(self) -> Dict[str, Any]:
+
         return {
             "features": {},
             "profile": {},
             "propaganda": {},
-            "meta": {"error": True},
+            "meta": {
+                "error": True,
+                "confidence": 0.0,
+            },
         }

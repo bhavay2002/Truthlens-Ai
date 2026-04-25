@@ -1,188 +1,279 @@
-"""
-File Name: graph_visualization.py
-Module: Graph Analysis - Graph Visualization
-Description:
-    Provides visualization utilities for graph structures used in the
-    TruthLens AI system. This module supports rendering entity graphs
-    and narrative graphs for debugging, research analysis, and
-    explainability dashboards. Graphs are converted into NetworkX
-    objects and exported as PNG images using Matplotlib.
-
-Dependencies:
-    logging
-    typing
-    pathlib
-    networkx
-    matplotlib
-
-Inputs:
-    Graph adjacency dictionary
-
-Outputs:
-    PNG visualization files (entity_graph.png, narrative_graph.png)
-"""
-
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
+
+import numpy as np
 
 def ensure_headless_matplotlib_backend() -> None:
-    """
-    Switch matplotlib to 'Agg' backend for headless environments.
-    """
     import matplotlib
     try:
         matplotlib.use("Agg")
     except Exception:
         pass
 
-
 ensure_headless_matplotlib_backend()
 
 import matplotlib.pyplot as plt
 import networkx as nx
 
-
 logger = logging.getLogger(__name__)
+EPS = 1e-12
+
+try:
+    import plotly.graph_objects as go
+except ImportError:
+    go = None
 
 
 class GraphVisualizer:
-    """
-    Utility class for visualizing graphs used in the TruthLens system.
-    """
 
     def __init__(self, output_dir: str | Path = "reports/graphs") -> None:
-        """
-        Initialize visualization output directory.
-
-        Parameters
-        ----------
-        output_dir : str | Path
-            Directory where graph images will be saved.
-        """
-
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        logger.info("GraphVisualizer initialized (output_dir=%s)", self.output_dir)
+        logger.info("GraphVisualizer initialized")
 
-    def _validate_graph(self, graph: Dict[str, List[str]]) -> None:
-        """Validate adjacency graph structure."""
+    # =====================================================
+    # VALIDATION
+    # =====================================================
 
+    def _validate_graph(self, graph: Dict[str, List[str]]):
         if not isinstance(graph, dict):
-            raise ValueError("graph must be a dictionary")
+            raise ValueError("graph must be dict")
+        for k, v in graph.items():
+            if not isinstance(k, str) or not isinstance(v, list):
+                raise ValueError("Invalid graph format")
 
-        for node, neighbors in graph.items():
-            if not isinstance(node, str):
-                raise ValueError("graph keys must be strings")
-            if not isinstance(neighbors, list):
-                raise ValueError("graph values must be lists")
+    # =====================================================
+    # GRAPH BUILD
+    # =====================================================
 
-    def _build_networkx_graph(self, graph: Dict[str, List[str]]) -> nx.DiGraph:
-        """
-        Convert adjacency dictionary into NetworkX graph.
-        """
-
-        G = nx.DiGraph()
-
-        for node, neighbors in graph.items():
-            node_key = node.strip().lower()
-            G.add_node(node_key)
-
-            for neighbor in neighbors:
-                if isinstance(neighbor, str) and neighbor.strip():
-                    neighbor_key = neighbor.strip().lower()
-                    if neighbor_key != node_key:
-                        G.add_edge(node_key, neighbor_key)
-
+    def _to_nx(self, graph: Dict[str, List[str]]) -> nx.Graph:
+        G = nx.Graph()
+        for node, nbrs in graph.items():
+            n = node.strip().lower()
+            G.add_node(n)
+            for nbr in nbrs:
+                if isinstance(nbr, str):
+                    m = nbr.strip().lower()
+                    if m and m != n:
+                        G.add_edge(n, m)
         return G
 
-    def visualize_entity_graph(
+    # =====================================================
+    # NODE IMPORTANCE
+    # =====================================================
+
+    def _node_importance(
         self,
-        graph: Dict[str, List[str]],
-        filename: str = "entity_graph.png",
+        G: nx.Graph,
+        importance: Optional[Dict[str, float]] = None,
+    ) -> np.ndarray:
+
+        if importance:
+            values = np.array(
+                [importance.get(n, 0.0) for n in G.nodes()],
+                dtype=float,
+            )
+        else:
+            centrality = nx.degree_centrality(G)
+            values = np.array(list(centrality.values()), dtype=float)
+
+        if values.size == 0:
+            return values
+
+        return values / (np.max(values) + EPS)
+
+    # =====================================================
+    # EDGE WEIGHTS
+    # =====================================================
+
+    def _edge_widths(
+        self,
+        G: nx.Graph,
+        edge_importance: Optional[Dict[str, float]] = None,
+    ):
+
+        widths = []
+
+        for u, v in G.edges():
+            key = f"{u}->{v}"
+            rev = f"{v}->{u}"
+
+            val = 1.0
+
+            if edge_importance:
+                val = max(
+                    edge_importance.get(key, 0.0),
+                    edge_importance.get(rev, 0.0),
+                    0.1,
+                )
+
+            widths.append(1.0 + 5.0 * val)
+
+        return widths
+
+    # =====================================================
+    # TEMPORAL COLORING
+    # =====================================================
+
+    def _temporal_colors(
+        self,
+        G: nx.Graph,
+        temporal_features: Optional[Dict[str, float]],
+    ):
+
+        if not temporal_features:
+            return None
+
+        drift = float(temporal_features.get("narrative_drift", 0.0))
+
+        return np.full(G.number_of_nodes(), drift)
+
+    # =====================================================
+    # STATIC DRAW
+    # =====================================================
+
+    def _draw_static(
+        self,
+        G: nx.Graph,
+        title: str,
+        path: Path,
+        *,
+        node_importance: Optional[Dict[str, float]] = None,
+        edge_importance: Optional[Dict[str, float]] = None,
+        temporal_features: Optional[Dict[str, float]] = None,
     ) -> Path:
-        """
-        Visualize entity interaction graph.
 
-        Parameters
-        ----------
-        graph : Dict[str, List[str]]
-        filename : str
+        plt.figure(figsize=(12, 10))
 
-        Returns
-        -------
-        Path
-            Path to saved image.
-        """
+        pos = nx.spring_layout(G, seed=42, k=0.5)
 
-        self._validate_graph(graph)
+        node_colors = self._node_importance(G, node_importance)
 
-        G = self._build_networkx_graph(graph)
+        # temporal override (if present)
+        temporal_colors = self._temporal_colors(G, temporal_features)
+        if temporal_colors is not None:
+            node_colors = temporal_colors
 
-        output_path = self.output_dir / filename
+        edge_widths = self._edge_widths(G, edge_importance)
 
-        plt.figure(figsize=(10, 8))
+        nx.draw_networkx_nodes(
+            G,
+            pos,
+            node_size=500,
+            node_color=node_colors if len(node_colors) else "blue",
+            cmap="Reds",
+        )
 
-        pos = nx.spring_layout(G, seed=42)
+        nx.draw_networkx_edges(
+            G,
+            pos,
+            width=edge_widths,
+            alpha=0.7,
+        )
 
-        nx.draw_networkx_nodes(G, pos)
-        nx.draw_networkx_edges(G, pos)
         nx.draw_networkx_labels(G, pos, font_size=8)
 
-        plt.title("Entity Interaction Graph")
+        plt.title(title)
         plt.axis("off")
 
         plt.tight_layout()
-        plt.savefig(output_path, dpi=300)
+        plt.savefig(path, dpi=300)
         plt.close()
 
-        logger.info("Entity graph saved: %s", output_path)
+        return path
 
-        return output_path
+    # =====================================================
+    # INTERACTIVE
+    # =====================================================
 
-    def visualize_narrative_graph(
+    def _draw_interactive(
         self,
-        graph: Dict[str, List[str]],
-        filename: str = "narrative_graph.png",
-    ) -> Path:
-        """
-        Visualize narrative transition graph.
+        G: nx.Graph,
+        node_importance: Optional[Dict[str, float]] = None,
+    ):
 
-        Parameters
-        ----------
-        graph : Dict[str, List[str]]
-        filename : str
-
-        Returns
-        -------
-        Path
-            Path to saved image.
-        """
-
-        self._validate_graph(graph)
-
-        G = self._build_networkx_graph(graph)
-
-        output_path = self.output_dir / filename
-
-        plt.figure(figsize=(10, 8))
+        if go is None:
+            raise ImportError("Plotly not installed")
 
         pos = nx.spring_layout(G, seed=42)
 
-        nx.draw_networkx_nodes(G, pos)
-        nx.draw_networkx_edges(G, pos)
-        nx.draw_networkx_labels(G, pos, font_size=8)
+        edge_x, edge_y = [], []
 
-        plt.title("Narrative Transition Graph")
-        plt.axis("off")
+        for edge in G.edges():
+            x0, y0 = pos[edge[0]]
+            x1, y1 = pos[edge[1]]
 
-        plt.tight_layout()
-        plt.savefig(output_path, dpi=300)
-        plt.close()
+            edge_x += [x0, x1, None]
+            edge_y += [y0, y1, None]
 
-        logger.info("Narrative graph saved: %s", output_path)
+        edge_trace = go.Scatter(
+            x=edge_x,
+            y=edge_y,
+            mode="lines",
+            line=dict(width=1),
+            hoverinfo="none",
+        )
 
-        return output_path
+        node_x, node_y, text, color = [], [], [], []
+
+        importance_vec = self._node_importance(G, node_importance)
+
+        for i, node in enumerate(G.nodes()):
+            x, y = pos[node]
+            node_x.append(x)
+            node_y.append(y)
+            text.append(node)
+            color.append(importance_vec[i] if len(importance_vec) else 0.5)
+
+        node_trace = go.Scatter(
+            x=node_x,
+            y=node_y,
+            mode="markers+text",
+            text=text,
+            textposition="top center",
+            marker=dict(
+                size=12,
+                color=color,
+                colorscale="Reds",
+            ),
+        )
+
+        fig = go.Figure(data=[edge_trace, node_trace])
+        fig.show()
+
+    # =====================================================
+    # PUBLIC API
+    # =====================================================
+
+    def visualize(
+        self,
+        graph: Dict[str, List[str]],
+        *,
+        name: str = "graph",
+        interactive: bool = False,
+        node_importance: Optional[Dict[str, float]] = None,
+        edge_importance: Optional[Dict[str, float]] = None,
+        temporal_features: Optional[Dict[str, float]] = None,
+    ) -> Path:
+
+        self._validate_graph(graph)
+
+        G = self._to_nx(graph)
+
+        if interactive:
+            self._draw_interactive(G, node_importance)
+
+        path = self.output_dir / f"{name}.png"
+
+        return self._draw_static(
+            G,
+            f"{name.title()} Graph",
+            path,
+            node_importance=node_importance,
+            edge_importance=edge_importance,
+            temporal_features=temporal_features,
+        )

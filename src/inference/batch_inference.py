@@ -1,43 +1,7 @@
-"""
-File Name: batch_inference.py
-Module: Batch Inference Engine
-Description:
-    Executes large-scale inference over datasets containing thousands or
-    millions of articles. The module orchestrates loading input datasets,
-    running the TruthLens prediction pipeline, generating reports, and
-    exporting structured outputs.
-
-    Typical usage scenarios include:
-        • research experiments
-        • evaluation pipelines
-        • dataset labeling
-        • large-scale monitoring systems
-        • offline analytics
-
-    The engine processes data in batches to ensure memory efficiency and
-    GPU utilization.
-
-Dependencies:
-    logging
-    typing
-    dataclasses
-    pathlib
-    argparse
-    pandas
-    tqdm
-    json
-
-Inputs:
-    CSV dataset containing article text and optional metadata.
-
-Outputs:
-    JSON / CSV files containing predictions and generated reports.
-"""
-
 from __future__ import annotations
 
 import argparse
-import json
+import json 
 import logging
 import multiprocessing as mp
 from dataclasses import dataclass
@@ -47,6 +11,7 @@ from typing import Dict, Any, List, Optional
 import pandas as pd
 from tqdm import tqdm
 import torch
+import numpy as np
 
 from src.inference.model_loader import ModelLoader
 from src.inference.feature_preparer import (
@@ -64,15 +29,23 @@ from src.graph.graph_pipeline import GraphPipeline
 
 logger = logging.getLogger(__name__)
 
-_worker_runner: Optional[AnalysisIntegrationRunner] = None
-_worker_graph: Optional[GraphPipeline] = None
 
+# =========================================================
+# HELPER
+# =========================================================
+
+def _to_numpy(x):
+    if torch.is_tensor(x):
+        return x.detach().cpu().numpy()
+    return np.asarray(x)
+
+
+# =========================================================
+# CONFIG
+# =========================================================
 
 @dataclass
 class BatchInferenceConfig:
-    """
-    Configuration for batch inference.
-    """
     dataset_path: str
     text_column: str = "text"
     output_path: str = "batch_predictions.json"
@@ -81,339 +54,170 @@ class BatchInferenceConfig:
     num_workers: int = 0
 
 
-def _init_worker() -> None:
-    global _worker_runner, _worker_graph
-    _worker_runner = AnalysisIntegrationRunner()
-    _worker_graph = GraphPipeline()
-
-
-def _analyze_text_worker(text: str) -> Dict[str, Any]:
-    if _worker_runner is None:
-        raise RuntimeError("Worker runner not initialized")
-    return _worker_runner.analyze_text(text)
-
-
-def _graph_run_worker(text: str) -> Dict[str, Any]:
-    if _worker_graph is None:
-        raise RuntimeError("Worker graph not initialized")
-    return _worker_graph.run(text)
-
+# =========================================================
+# ENGINE
+# =========================================================
 
 class BatchInferenceEngine:
-    """
-    Runs large-scale inference across datasets.
-    """
 
-    def __init__(
-        self,
-        config: BatchInferenceConfig,
-        feature_preparer: Optional[FeaturePreparer] = None,
-    ) -> None:
+    def __init__(self, config: BatchInferenceConfig):
 
         self.config = config
-
         self.model_loader = ModelLoader(config.models_dir)
         self.artifacts = self.model_loader.load_all()
 
-        if feature_preparer is not None:
-            self.feature_preparer = feature_preparer
-        else:
-            schema = self.artifacts.feature_schema
-            if isinstance(schema, dict):
-                feature_schema = [str(k) for k in schema.keys()]
-            elif isinstance(schema, list):
-                feature_schema = [str(k) for k in schema]
-            else:
-                feature_schema = ["text_length"]
+        # ---------------- FEATURE PREPARER ----------------
+        schema = self.artifacts.feature_schema
+        feature_schema = (
+            list(schema.keys()) if isinstance(schema, dict)
+            else schema if isinstance(schema, list)
+            else ["text_length"]
+        )
 
-            prep_config = FeaturePreparationConfig(
+        self.feature_preparer = FeaturePreparer(
+            FeaturePreparationConfig(
                 feature_schema=feature_schema,
                 return_tensor=True,
-            )
-            self.feature_preparer = FeaturePreparer(
-                prep_config,
-                scaler=self.artifacts.feature_scaler,
-                selector=self.artifacts.feature_selector,
-            )
+            ),
+            scaler=self.artifacts.feature_scaler,
+            selector=self.artifacts.feature_selector,
+        )
 
+        # ---------------- MODEL PIPELINE ----------------
         self.prediction_pipeline = PredictionPipeline(
             config=PredictionPipelineConfig(
                 device=str(self.model_loader.device),
-                return_probabilities=False,
+                return_probabilities=True,  # 🔥 IMPORTANT
+                return_logits=True,         # 🔥 NEW
             ),
             bias_model=self.artifacts.bias_model,
             ideology_model=self.artifacts.ideology_model,
-            propaganda_model=None,
             emotion_model=self.artifacts.emotion_model,
         )
-
-        if torch.cuda.is_available():
-            for model in [
-                self.artifacts.bias_model,
-                self.artifacts.ideology_model,
-                self.artifacts.emotion_model,
-            ]:
-                if model is not None:
-                    model.half()
-
-        compile_models = getattr(self.prediction_pipeline, "compile_models", None)
-        if callable(compile_models):
-            compile_models()
 
         self.report_generator = ReportGenerator()
         self.formatter = ResultFormatter()
         self.analysis_runner = AnalysisIntegrationRunner()
         self.graph_pipeline = GraphPipeline()
 
-        logger.info("BatchInferenceEngine initialized")
+    # =====================================================
+    # DATA
+    # =====================================================
 
-    def _load_dataset(self) -> pd.DataFrame:
-        """
-        Load dataset from disk.
-        """
-
-        path = Path(self.config.dataset_path)
-
-        if not path.exists():
-            raise FileNotFoundError(f"Dataset not found: {path}")
-
-        df = pd.read_csv(path)
-
+    def _load_dataset(self):
+        df = pd.read_csv(self.config.dataset_path)
         if self.config.text_column not in df.columns:
-            raise ValueError(
-                f"Text column '{self.config.text_column}' not found in dataset"
-            )
-
-        logger.info("Loaded dataset with %d rows", len(df))
-
+            raise ValueError("Text column missing")
         return df
 
-    def _process_batch(
-        self,
-        texts: List[str],
-        metadata_list: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        """
-        Run inference for a batch of articles.
-        """
+    # =====================================================
+    # BATCH PROCESSING (UPDATED 🔥)
+    # =====================================================
 
-        if self.feature_preparer is None:
-            raise RuntimeError("FeaturePreparer is required for batch inference")
+    def _process_batch(self, texts: List[str]):
 
-        clean_texts: List[str] = []
-        for t in texts:
-            if t is None:
-                clean_texts.append("")
-            else:
-                clean_texts.append(str(t))
-        features_list = [{"text": t, "text_length": len(t)} for t in clean_texts]
-        prepared = self.feature_preparer.prepare_batch(features_list)
-
-        prepared = torch.as_tensor(prepared, dtype=torch.float32)
-
-        # Pin only when CUDA transfer can benefit from it.
-        if prepared.device.type == "cpu" and torch.cuda.is_available():
-            prepared = prepared.pin_memory()
+        features = [{"text": t, "text_length": len(t)} for t in texts]
+        prepared = self.feature_preparer.prepare_batch(features)
+        prepared = torch.tensor(prepared, dtype=torch.float32)
 
         with torch.inference_mode(), torch.autocast(
             device_type="cuda",
-            dtype=torch.bfloat16,
             enabled=torch.cuda.is_available(),
         ):
-            predictions = self.prediction_pipeline.predict(prepared)
+            output = self.prediction_pipeline.predict(prepared)
 
-        results: List[Dict[str, Any]] = []
-
-        bias_values = predictions.get("bias")
-        emotion_values = predictions.get("emotion")
-        credibility_values = predictions.get("credibility_score")
-        ideology_values = predictions.get("ideology")
-        propaganda_values = predictions.get("propaganda_probability")
-
-        if self.config.num_workers > 0:
-            ctx = mp.get_context("spawn")
-            with ctx.Pool(self.config.num_workers, initializer=_init_worker) as pool:
-                analysis_results = pool.map(_analyze_text_worker, texts)
-                graph_results = pool.map(_graph_run_worker, texts)
-        else:
-            analysis_results = [self.analysis_runner.analyze_text(text) for text in texts]
-            graph_results = [self.graph_pipeline.run(text) for text in texts]
+        results = []
 
         for i, text in enumerate(texts):
-            metadata = metadata_list[i]
-            analysis_modules = analysis_results[i]
-            graph_outputs = graph_results[i]
 
-            def _value_at(value: Any) -> Any:
-                if isinstance(value, list):
-                    return value[i]
-                if torch.is_tensor(value):
-                    return value[i].item() if value.ndim > 0 else value.item()
-                return value
+            # ---------------- EXTRACT PER SAMPLE ----------------
+            logits = {
+                k: _to_numpy(v[i]) if v is not None else None
+                for k, v in output.get("logits", {}).items()
+            }
 
+            probs = {
+                k: _to_numpy(v[i]) if v is not None else None
+                for k, v in output.get("probabilities", {}).items()
+            }
+
+            preds = {
+                k: _to_numpy(v[i]) if v is not None else None
+                for k, v in output.get("predictions", {}).items()
+            }
+
+            # ---------------- REPORT ----------------
             report = self.report_generator.generate_report(
                 article_text=text,
-                title=metadata.get("title"),
-                source=metadata.get("source"),
-                bias_analysis={"bias": _value_at(bias_values)},
-                emotion_analysis={"emotion": _value_at(emotion_values)},
-                narrative_structure=analysis_modules.get("narrative_propagation", {}),
-                entity_graph=graph_outputs,
-                credibility_score=_value_at(credibility_values),
-            )
-
-            api_output = self.formatter.format_api_response(
-                {
-                    "bias": _value_at(bias_values),
-                    "ideology": _value_at(ideology_values),
-                    "propaganda_probability": _value_at(propaganda_values),
-                    "emotion": _value_at(emotion_values),
-                    "credibility_score": _value_at(credibility_values),
-                    "credibility_explanation": _value_at(
-                        predictions.get("credibility_explanation")
-                    ),
-                }
+                bias_analysis={"bias": preds.get("bias")},
+                emotion_analysis={"emotion": preds.get("emotion")},
+                credibility_score=preds.get("credibility_score"),
             )
 
             results.append(
                 {
-                    "prediction": api_output,
+                    "text": text,
+
+                    # 🔥 EVALUATION READY
+                    "predictions": preds,
+                    "probabilities": probs,
+                    "logits": logits,
+
+                    # 🔥 EXISTING OUTPUT
                     "report": report,
-                    "analysis_modules": analysis_modules,
                 }
             )
 
         return results
 
-    def run(self) -> List[Dict[str, Any]]:
-        """
-        Execute batch inference.
-        """
+    # =====================================================
+    # RUN
+    # =====================================================
+
+    def run(self):
 
         df = self._load_dataset()
+        results = []
 
-        results: List[Dict[str, Any]] = []
+        for i in tqdm(range(0, len(df), self.config.batch_size)):
 
-        batch_size = self.config.batch_size
+            batch = df.iloc[i:i + self.config.batch_size]
+            texts = batch[self.config.text_column].fillna("").tolist()
 
-        for start in tqdm(range(0, len(df), batch_size), desc="Batch inference"):
-            batch_df = df.iloc[start:start + batch_size]
-            texts = [str(t) if pd.notna(t) else "" for t in batch_df[self.config.text_column].tolist()]
-            texts = [t for t in texts if t.strip()]
-
-            # Metadata columns are optional by module contract.
-            has_title = "title" in batch_df.columns
-            has_source = "source" in batch_df.columns
-            metadata_list = []
-            for _, row in batch_df.iterrows():
-                metadata_list.append(
-                    {
-                        "title": row["title"] if has_title else None,
-                        "source": row["source"] if has_source else None,
-                    }
-                )
-
-            try:
-                batch_results = self._process_batch(texts, metadata_list)
-                results.extend(batch_results)
-            except Exception as exc:
-                logger.exception("Batch failed")
-                results.extend([{"error": str(exc)}] * len(texts))
-
-        logger.info("Batch inference completed")
+            batch_results = self._process_batch(texts)
+            results.extend(batch_results)
 
         return results
 
-    def export_onnx(self, path: str) -> None:
-        if self.artifacts.bias_model is None:
-            raise RuntimeError("Bias model unavailable for ONNX export")
+    # =====================================================
+    # SAVE
+    # =====================================================
 
-        dummy = torch.randn(1, 10, device=self.model_loader.device)
-
-        torch.onnx.export(
-            self.artifacts.bias_model,
-            dummy,
-            path,
-            input_names=["input"],
-            output_names=["logits"],
-            dynamic_axes={"input": {0: "batch"}},
-            opset_version=17,
-        )
-
-        logger.info("ONNX export completed: %s", path)
-
-    def save_results(self, results: List[Dict[str, Any]]) -> None:
-        """
-        Save results to disk.
-        """
-
-        output_path = Path(self.config.output_path)
-
-        with open(output_path, "w", encoding="utf-8") as f:
+    def save_results(self, results):
+        with open(self.config.output_path, "w") as f:
             json.dump(results, f, indent=4)
 
-        logger.info("Saved results to %s", output_path)
 
+# =========================================================
+# CLI
+# =========================================================
 
-def parse_args() -> argparse.Namespace:
-    """
-    Parse CLI arguments.
-    """
+def main():
 
-    parser = argparse.ArgumentParser(description="Run TruthLens batch inference")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", required=True)
+    parser.add_argument("--output", default="predictions.json")
 
-    parser.add_argument(
-        "--dataset",
-        required=True,
-        help="Path to dataset CSV",
+    args = parser.parse_args()
+
+    engine = BatchInferenceEngine(
+        BatchInferenceConfig(
+            dataset_path=args.dataset,
+            output_path=args.output,
+        )
     )
-
-    parser.add_argument(
-        "--text-column",
-        default="text",
-        help="Column containing article text",
-    )
-
-    parser.add_argument(
-        "--output",
-        default="batch_predictions.json",
-        help="Output predictions file",
-    )
-
-    parser.add_argument(
-        "--models-dir",
-        default="models",
-        help="Directory containing trained models",
-    )
-
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=32,
-    )
-
-    return parser.parse_args()
-
-
-def main() -> None:
-    """
-    CLI entrypoint.
-    """
-
-    args = parse_args()
-
-    config = BatchInferenceConfig(
-        dataset_path=args.dataset,
-        text_column=args.text_column,
-        output_path=args.output,
-        batch_size=args.batch_size,
-        models_dir=args.models_dir,
-    )
-
-    engine = BatchInferenceEngine(config)
 
     results = engine.run()
-
     engine.save_results(results)
 
 

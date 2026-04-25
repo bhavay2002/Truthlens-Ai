@@ -1,43 +1,8 @@
-"""
-File Name: calibration_metrics.py
-Module: evaluation.calibration
-Description:
-    Implements calibration evaluation metrics used to assess the reliability
-    of probabilistic predictions produced by classification models.
-
-    The module includes commonly used calibration metrics such as:
-
-    • Expected Calibration Error (ECE)
-    • Maximum Calibration Error (MCE)
-    • Brier Score
-    • Negative Log Likelihood (NLL)
-    • Reliability diagram statistics
-
-    These metrics are essential for evaluating whether predicted probabilities
-    accurately reflect true likelihoods. The implementation supports both
-    binary and multiclass classification settings and integrates with PyTorch
-    pipelines by accepting logits or probability tensors.
-
-    Designed for research-grade and production ML systems with robust input
-    validation, structured logging, and reproducibility.
-    
-Dependencies:
-    numpy
-    torch
-    logging
-    dataclasses
-    typing
-Inputs:
-    Model logits or probability predictions and ground truth labels.
-Outputs:
-    Calibration metric values and bin statistics.
-"""
-
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Any
 
 import numpy as np
 import torch
@@ -46,206 +11,174 @@ import torch.nn.functional as F
 logger = logging.getLogger(__name__)
 
 
+# =========================================================
+# CONFIG
+# =========================================================
+
 @dataclass
 class CalibrationMetricConfig:
-    """
-    Configuration for calibration metric computation.
-    """
-
     n_bins: int = 15
 
-    def __post_init__(self) -> None:
+    def __post_init__(self):
         if self.n_bins <= 1:
-            raise ValueError("n_bins must be greater than 1.")
+            raise ValueError("n_bins must be > 1")
 
+
+# =========================================================
+# METRICS
+# =========================================================
 
 class CalibrationMetrics:
-    """
-    Computes calibration metrics for classification models.
 
-    Supported metrics:
-        • Expected Calibration Error (ECE)
-        • Maximum Calibration Error (MCE)
-        • Brier Score
-        • Negative Log Likelihood (NLL)
-    """
-
-    def __init__(self, config: CalibrationMetricConfig | None = None) -> None:
+    def __init__(self, config: CalibrationMetricConfig | None = None):
         self.config = config or CalibrationMetricConfig()
 
+    # -----------------------------------------------------
+
     @staticmethod
-    def _validate_inputs(probs: torch.Tensor, labels: torch.Tensor) -> None:
-        """Validate shapes and types of inputs."""
+    def _validate(probs: torch.Tensor, labels: torch.Tensor):
         if probs.ndim != 2:
-            raise ValueError(
-                "Probabilities must have shape [num_samples, num_classes]."
-            )
-
+            raise ValueError("probs must be [N, C]")
         if labels.ndim != 1:
-            raise ValueError("Labels must be a 1D tensor.")
-
+            raise ValueError("labels must be [N]")
         if probs.shape[0] != labels.shape[0]:
-            raise ValueError(
-                "Number of predictions must match number of labels."
-            )
+            raise ValueError("size mismatch")
+
+    # -----------------------------------------------------
 
     @staticmethod
-    def _logits_to_probs(logits: torch.Tensor) -> torch.Tensor:
-        """Convert logits to probabilities using softmax."""
-        return torch.softmax(logits, dim=1)
+    def _to_probs(x: torch.Tensor) -> torch.Tensor:
+        if x.max() > 1 or x.min() < 0:
+            return torch.softmax(x, dim=1)
+        return x
 
-    def _prepare_probs(
-        self, logits_or_probs: torch.Tensor
-    ) -> torch.Tensor:
-        """Ensure predictions are probabilities."""
-        if logits_or_probs.max() > 1 or logits_or_probs.min() < 0:
-            return self._logits_to_probs(logits_or_probs)
-        return logits_or_probs
+    # =====================================================
+    # ECE
+    # =====================================================
 
     def expected_calibration_error(
         self,
         logits_or_probs: torch.Tensor,
         labels: torch.Tensor,
     ) -> float:
-        """
-        Compute Expected Calibration Error (ECE).
-        """
 
-        probs = self._prepare_probs(logits_or_probs)
-        self._validate_inputs(probs, labels)
+        probs = self._to_probs(logits_or_probs)
+        self._validate(probs, labels)
 
-        confidences, predictions = torch.max(probs, dim=1)
-        accuracies = predictions.eq(labels)
+        conf, preds = torch.max(probs, dim=1)
+        acc = preds.eq(labels)
 
-        n_bins = self.config.n_bins
-        bin_boundaries = torch.linspace(0, 1, n_bins + 1)
-
+        bins = torch.linspace(0, 1, self.config.n_bins + 1)
         ece = torch.zeros(1, device=probs.device)
 
-        for i in range(n_bins):
-            bin_lower = bin_boundaries[i]
-            bin_upper = bin_boundaries[i + 1]
-
-            mask = (confidences > bin_lower) * (confidences <= bin_upper)
+        for i in range(self.config.n_bins):
+            mask = (conf > bins[i]) & (conf <= bins[i + 1])
 
             if mask.sum() > 0:
-                accuracy = accuracies[mask].float().mean()
-                confidence = confidences[mask].mean()
-
-                bin_prob = mask.float().mean()
-
-                ece += torch.abs(confidence - accuracy) * bin_prob
+                bin_acc = acc[mask].float().mean()
+                bin_conf = conf[mask].mean()
+                weight = mask.float().mean()
+                ece += torch.abs(bin_conf - bin_acc) * weight
 
         return float(ece.item())
+
+    # =====================================================
+    # MCE
+    # =====================================================
 
     def maximum_calibration_error(
         self,
         logits_or_probs: torch.Tensor,
         labels: torch.Tensor,
     ) -> float:
-        """
-        Compute Maximum Calibration Error (MCE).
-        """
 
-        probs = self._prepare_probs(logits_or_probs)
-        self._validate_inputs(probs, labels)
+        probs = self._to_probs(logits_or_probs)
+        self._validate(probs, labels)
 
-        confidences, predictions = torch.max(probs, dim=1)
-        accuracies = predictions.eq(labels)
+        conf, preds = torch.max(probs, dim=1)
+        acc = preds.eq(labels)
 
-        n_bins = self.config.n_bins
-        bin_boundaries = torch.linspace(0, 1, n_bins + 1)
-
+        bins = torch.linspace(0, 1, self.config.n_bins + 1)
         mce = torch.zeros(1, device=probs.device)
 
-        for i in range(n_bins):
-            bin_lower = bin_boundaries[i]
-            bin_upper = bin_boundaries[i + 1]
-
-            mask = (confidences > bin_lower) * (confidences <= bin_upper)
+        for i in range(self.config.n_bins):
+            mask = (conf > bins[i]) & (conf <= bins[i + 1])
 
             if mask.sum() > 0:
-                accuracy = accuracies[mask].float().mean()
-                confidence = confidences[mask].mean()
-
-                error = torch.abs(confidence - accuracy)
-
+                error = torch.abs(
+                    conf[mask].mean() - acc[mask].float().mean()
+                )
                 mce = torch.maximum(mce, error)
 
         return float(mce.item())
+
+    # =====================================================
+    # BRIER
+    # =====================================================
 
     def brier_score(
         self,
         logits_or_probs: torch.Tensor,
         labels: torch.Tensor,
     ) -> float:
-        """
-        Compute Brier score.
-        """
 
-        probs = self._prepare_probs(logits_or_probs)
-        self._validate_inputs(probs, labels)
+        probs = self._to_probs(logits_or_probs)
+        self._validate(probs, labels)
 
-        num_classes = probs.shape[1]
-
-        one_hot = F.one_hot(labels, num_classes=num_classes).float()
-
+        one_hot = F.one_hot(labels, num_classes=probs.shape[1]).float()
         score = torch.mean(torch.sum((probs - one_hot) ** 2, dim=1))
 
         return float(score.item())
+
+    # =====================================================
+    # NLL
+    # =====================================================
 
     def negative_log_likelihood(
         self,
         logits_or_probs: torch.Tensor,
         labels: torch.Tensor,
     ) -> float:
-        """
-        Compute Negative Log Likelihood (NLL).
-        """
 
         if logits_or_probs.max() <= 1 and logits_or_probs.min() >= 0:
             probs = logits_or_probs
-            log_probs = torch.log(probs + 1e-12)
-            loss = F.nll_loss(log_probs, labels)
+            loss = F.nll_loss(torch.log(probs + 1e-12), labels)
         else:
             loss = F.cross_entropy(logits_or_probs, labels)
 
         return float(loss.item())
+
+    # =====================================================
+    # RELIABILITY
+    # =====================================================
 
     def reliability_statistics(
         self,
         logits_or_probs: torch.Tensor,
         labels: torch.Tensor,
     ) -> Dict[str, np.ndarray]:
-        """
-        Compute statistics required for reliability diagrams.
-        """
 
-        probs = self._prepare_probs(logits_or_probs)
-        self._validate_inputs(probs, labels)
+        probs = self._to_probs(logits_or_probs)
+        self._validate(probs, labels)
 
-        confidences, predictions = torch.max(probs, dim=1)
-        accuracies = predictions.eq(labels).float()
+        conf, preds = torch.max(probs, dim=1)
+        acc = preds.eq(labels).float()
 
-        confidences_np = confidences.detach().cpu().numpy()
-        accuracies_np = accuracies.detach().cpu().numpy()
+        conf_np = conf.cpu().numpy()
+        acc_np = acc.cpu().numpy()
 
-        n_bins = self.config.n_bins
-        bins = np.linspace(0.0, 1.0, n_bins + 1)
+        bins = np.linspace(0.0, 1.0, self.config.n_bins + 1)
 
-        bin_acc = np.zeros(n_bins)
-        bin_conf = np.zeros(n_bins)
-        bin_counts = np.zeros(n_bins)
+        bin_acc = np.zeros(self.config.n_bins)
+        bin_conf = np.zeros(self.config.n_bins)
+        bin_counts = np.zeros(self.config.n_bins)
 
-        for i in range(n_bins):
-            lower = bins[i]
-            upper = bins[i + 1]
-
-            mask = (confidences_np > lower) & (confidences_np <= upper)
+        for i in range(self.config.n_bins):
+            mask = (conf_np > bins[i]) & (conf_np <= bins[i + 1])
 
             if mask.sum() > 0:
-                bin_acc[i] = accuracies_np[mask].mean()
-                bin_conf[i] = confidences_np[mask].mean()
+                bin_acc[i] = acc_np[mask].mean()
+                bin_conf[i] = conf_np[mask].mean()
                 bin_counts[i] = mask.sum()
 
         return {
@@ -255,14 +188,15 @@ class CalibrationMetrics:
             "bin_boundaries": bins,
         }
 
+    # =====================================================
+    # ALL
+    # =====================================================
+
     def compute_all_metrics(
         self,
         logits_or_probs: torch.Tensor,
         labels: torch.Tensor,
     ) -> Dict[str, float]:
-        """
-        Compute all calibration metrics.
-        """
 
         metrics = {
             "ece": self.expected_calibration_error(logits_or_probs, labels),
@@ -271,6 +205,6 @@ class CalibrationMetrics:
             "nll": self.negative_log_likelihood(logits_or_probs, labels),
         }
 
-        logger.info("Calibration metrics computed: %s", metrics)
+        logger.info("Calibration metrics: %s", metrics)
 
         return metrics

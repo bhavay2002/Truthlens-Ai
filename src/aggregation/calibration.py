@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional, Dict, Any, Union
+from typing import Dict, Any, Union
 
 import numpy as np
 
@@ -25,11 +25,38 @@ ArrayLike = Union[np.ndarray, "torch.Tensor"]
 
 
 # =========================================================
-# BASE CALIBRATOR
+# UTILS
+# =========================================================
+
+def _safe_numpy(x):
+    if TORCH_AVAILABLE and isinstance(x, torch.Tensor):
+        x = x.detach().cpu().numpy()
+    return np.nan_to_num(np.asarray(x), nan=0.0, posinf=1.0, neginf=0.0)
+
+
+def _softmax(x):
+    x = x - np.max(x, axis=-1, keepdims=True)
+    e = np.exp(x)
+    return e / (np.sum(e, axis=-1, keepdims=True) + EPS)
+
+
+def _sigmoid(x):
+    return 1 / (1 + np.exp(-x))
+
+
+def _to_output(arr, like):
+    if TORCH_AVAILABLE and isinstance(like, torch.Tensor):
+        return torch.from_numpy(arr).to(like.device)
+    return arr
+
+
+# =========================================================
+# BASE
 # =========================================================
 
 class BaseCalibrator:
-    def __init__(self) -> None:
+
+    def __init__(self):
         self.fitted = False
 
     def fit(self, logits: np.ndarray, labels: np.ndarray):
@@ -38,43 +65,40 @@ class BaseCalibrator:
     def transform(self, logits: ArrayLike) -> ArrayLike:
         raise NotImplementedError
 
-    def state_dict(self) -> Dict[str, Any]:
-        raise NotImplementedError
-
-    def load_state_dict(self, state: Dict[str, Any]) -> None:
-        raise NotImplementedError
+    def fit_transform(self, logits, labels):
+        self.fit(logits, labels)
+        return self.transform(logits)
 
 
 # =========================================================
-# TEMPERATURE SCALING (MULTICLASS)
+# 🔥 TEMPERATURE SCALING (ROBUST)
 # =========================================================
 
 class TemperatureScaler(BaseCalibrator):
-    def __init__(self, init_temp: float = 1.0) -> None:
+
+    def __init__(self, init_temp: float = 1.0):
         super().__init__()
         self.temperature = float(init_temp)
 
     def fit(self, logits: np.ndarray, labels: np.ndarray):
-        logits = np.asarray(logits, dtype=np.float64)
-        labels = np.asarray(labels)
+
+        logits = _safe_numpy(logits)
+        labels = labels.astype(int)
 
         if logits.ndim != 2:
             raise ValueError("Temperature scaling requires 2D logits")
 
         T = self.temperature
 
-        # simple optimization (gradient-free)
-        for _ in range(50):
-            probs = self._softmax(logits / T)
+        for _ in range(100):
+
+            probs = _softmax(logits / T)
+
             loss = -np.mean(np.log(probs[np.arange(len(labels)), labels] + EPS))
 
-            # finite difference gradient
-            T_eps = T + 1e-3
-            probs_eps = self._softmax(logits / T_eps)
-            loss_eps = -np.mean(np.log(probs_eps[np.arange(len(labels)), labels] + EPS))
+            grad = self._grad(logits, labels, T)
 
-            grad = (loss_eps - loss) / 1e-3
-            T -= 0.01 * grad
+            T -= 0.05 * grad
             T = max(T, 1e-3)
 
         self.temperature = float(T)
@@ -82,122 +106,130 @@ class TemperatureScaler(BaseCalibrator):
 
         logger.info("[Calibration] Temperature fitted: %.4f", self.temperature)
 
+    def _grad(self, logits, labels, T):
+
+        eps = 1e-4
+
+        loss1 = self._loss(logits, labels, T)
+        loss2 = self._loss(logits, labels, T + eps)
+
+        return (loss2 - loss1) / eps
+
+    def _loss(self, logits, labels, T):
+        probs = _softmax(logits / T)
+        return -np.mean(np.log(probs[np.arange(len(labels)), labels] + EPS))
+
     def transform(self, logits: ArrayLike) -> ArrayLike:
-        arr = self._to_numpy(logits)
-        scaled = arr / self.temperature
-        probs = self._softmax(scaled)
-        return self._to_output(probs, logits)
 
-    def _softmax(self, x):
-        x = x - np.max(x, axis=-1, keepdims=True)
-        e = np.exp(x)
-        return e / (np.sum(e, axis=-1, keepdims=True) + EPS)
+        arr = _safe_numpy(logits)
+        probs = _softmax(arr / self.temperature)
 
-    def _to_numpy(self, x):
-        if TORCH_AVAILABLE and isinstance(x, torch.Tensor):
-            return x.detach().cpu().numpy()
-        return np.asarray(x)
-
-    def _to_output(self, arr, like):
-        if TORCH_AVAILABLE and isinstance(like, torch.Tensor):
-            return torch.from_numpy(arr).to(like.device)
-        return arr
-
-    def state_dict(self):
-        return {"temperature": self.temperature}
-
-    def load_state_dict(self, state):
-        self.temperature = state["temperature"]
-        self.fitted = True
+        return _to_output(probs, logits)
 
 
 # =========================================================
-# SIGMOID CALIBRATION (PLATT SCALING)
+# 🔥 SIGMOID (MULTILABEL SAFE)
 # =========================================================
 
 class SigmoidCalibrator(BaseCalibrator):
+
     def __init__(self):
         super().__init__()
-        self.a = 1.0
-        self.b = 0.0
+        self.a = None
+        self.b = None
 
     def fit(self, logits: np.ndarray, labels: np.ndarray):
-        logits = logits.reshape(-1)
-        labels = labels.reshape(-1)
 
-        a, b = self.a, self.b
+        logits = _safe_numpy(logits)
+        labels = _safe_numpy(labels)
+
+        if logits.ndim == 2:
+            # per-class calibration
+            self.a = np.zeros(logits.shape[1])
+            self.b = np.zeros(logits.shape[1])
+
+            for c in range(logits.shape[1]):
+                self.a[c], self.b[c] = self._fit_binary(
+                    logits[:, c], labels[:, c]
+                )
+        else:
+            self.a, self.b = self._fit_binary(logits, labels)
+
+        self.fitted = True
+
+    def _fit_binary(self, logits, labels):
+
+        a, b = 1.0, 0.0
 
         for _ in range(100):
-            probs = 1 / (1 + np.exp(-(a * logits + b)))
-
+            probs = _sigmoid(a * logits + b)
             error = probs - labels
-            grad_a = np.mean(error * logits)
-            grad_b = np.mean(error)
 
-            a -= 0.1 * grad_a
-            b -= 0.1 * grad_b
+            a -= 0.1 * np.mean(error * logits)
+            b -= 0.1 * np.mean(error)
 
-        self.a = float(a)
-        self.b = float(b)
-        self.fitted = True
-
-        logger.info("[Calibration] Sigmoid fitted: a=%.4f b=%.4f", self.a, self.b)
+        return float(a), float(b)
 
     def transform(self, logits: ArrayLike) -> ArrayLike:
-        arr = self._to_numpy(logits)
-        probs = 1 / (1 + np.exp(-(self.a * arr + self.b)))
-        return self._to_output(probs, logits)
 
-    def _to_numpy(self, x):
-        if TORCH_AVAILABLE and isinstance(x, torch.Tensor):
-            return x.detach().cpu().numpy()
-        return np.asarray(x)
+        arr = _safe_numpy(logits)
 
-    def _to_output(self, arr, like):
-        if TORCH_AVAILABLE and isinstance(like, torch.Tensor):
-            return torch.from_numpy(arr).to(like.device)
-        return arr
+        if arr.ndim == 2:
+            probs = _sigmoid(arr * self.a + self.b)
+        else:
+            probs = _sigmoid(self.a * arr + self.b)
 
-    def state_dict(self):
-        return {"a": self.a, "b": self.b}
-
-    def load_state_dict(self, state):
-        self.a = state["a"]
-        self.b = state["b"]
-        self.fitted = True
+        return _to_output(probs, logits)
 
 
 # =========================================================
-# ISOTONIC CALIBRATION (NON-PARAMETRIC)
+# 🔥 ISOTONIC (MULTICLASS EXTENSION)
 # =========================================================
 
 class IsotonicCalibrator(BaseCalibrator):
+
     def __init__(self):
         super().__init__()
+
         if not SKLEARN_AVAILABLE:
-            raise ImportError("scikit-learn required for isotonic calibration")
-        self.model = IsotonicRegression(out_of_bounds="clip")
+            raise ImportError("scikit-learn required")
+
+        self.models = []
 
     def fit(self, logits: np.ndarray, labels: np.ndarray):
-        logits = logits.reshape(-1)
-        labels = labels.reshape(-1)
 
-        self.model.fit(logits, labels)
+        logits = _safe_numpy(logits)
+
+        if logits.ndim == 2:
+            self.models = []
+
+            for c in range(logits.shape[1]):
+                model = IsotonicRegression(out_of_bounds="clip")
+                binary = (labels == c).astype(int)
+                model.fit(logits[:, c], binary)
+                self.models.append(model)
+        else:
+            model = IsotonicRegression(out_of_bounds="clip")
+            model.fit(logits, labels)
+            self.models = [model]
+
         self.fitted = True
-
-        logger.info("[Calibration] Isotonic regression fitted")
 
     def transform(self, logits: ArrayLike) -> ArrayLike:
-        arr = logits.reshape(-1)
-        calibrated = self.model.transform(arr)
-        return calibrated.reshape(logits.shape)
 
-    def state_dict(self):
-        return {"model": self.model}
+        arr = _safe_numpy(logits)
 
-    def load_state_dict(self, state):
-        self.model = state["model"]
-        self.fitted = True
+        if arr.ndim == 2:
+            calibrated = np.zeros_like(arr)
+
+            for c, model in enumerate(self.models):
+                calibrated[:, c] = model.transform(arr[:, c])
+
+            calibrated = calibrated / (np.sum(calibrated, axis=1, keepdims=True) + EPS)
+        else:
+            calibrated = self.models[0].transform(arr)
+
+        return _to_output(calibrated, logits)
 
 
 # =========================================================
@@ -205,6 +237,7 @@ class IsotonicCalibrator(BaseCalibrator):
 # =========================================================
 
 def get_calibrator(method: str) -> BaseCalibrator:
+
     method = method.lower()
 
     if method == "temperature":

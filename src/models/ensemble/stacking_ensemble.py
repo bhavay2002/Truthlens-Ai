@@ -1,46 +1,33 @@
-"""
-stacking_ensemble.py
-Module: models.ensemble
-Description:
-    Stacking ensemble that uses a meta-learner on top of concatenated base-model
-    outputs.
-"""
-
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from src.models.ensemble._utils import extract_logits
 
 logger = logging.getLogger(__name__)
 
 
+# =========================================================
+# CONFIG
+# =========================================================
+
 @dataclass
 class StackingEnsembleConfig:
-    """
-    Configuration for StackingEnsembleModel.
-
-    Attributes
-    ----------
-    device : str
-        Target device.
-    """
-
     device: str = "cpu"
+    return_probabilities: bool = True
 
+
+# =========================================================
+# MODEL
+# =========================================================
 
 class StackingEnsembleModel(nn.Module):
-    """
-    Combines base-model logits via a meta-learner (stacking).
-
-    The concatenated logit outputs from all base models are fed into a
-    meta-model that produces the final prediction.
-    """
 
     def __init__(
         self,
@@ -51,36 +38,65 @@ class StackingEnsembleModel(nn.Module):
         super().__init__()
 
         if not base_models:
-            raise ValueError("At least one base model must be provided.")
+            raise ValueError("At least one base model must be provided")
+
         if meta_model is None:
-            raise ValueError("A meta_model must be provided for stacking.")
+            raise ValueError("meta_model is required")
 
-        if config is None:
-            config = StackingEnsembleConfig()
+        self.config = config or StackingEnsembleConfig()
 
-        self.config = config
         self.base_models = nn.ModuleList(base_models)
         self.meta_model = meta_model
 
+        self.device = torch.device(self.config.device)
+        self.to(self.device)
+
         logger.info(
-            "StackingEnsembleModel initialised | base_models=%d",
+            "StackingEnsembleModel | base_models=%d",
             len(base_models),
         )
 
-    def forward(self, *args, **kwargs) -> torch.Tensor:
-        """
-        Run base models, concatenate their logits, pass through meta-model.
+    # =====================================================
+    # FORWARD
+    # =====================================================
 
-        Returns
-        -------
-        torch.Tensor
-            Meta-model output logits.
-        """
-        all_logits: List[torch.Tensor] = [
-            extract_logits(model(*args, **kwargs)) for model in self.base_models
-        ]
+    def forward(self, *args, **kwargs) -> Dict[str, Any]:
 
-        concatenated = torch.cat(all_logits, dim=-1)
+        logits_list: List[torch.Tensor] = []
+
+        for model in self.base_models:
+            model = model.to(self.device)
+            output = model(*args, **kwargs)
+            logits = extract_logits(output)
+            logits_list.append(logits)
+
+        concatenated = torch.cat(logits_list, dim=-1)
 
         meta_output = self.meta_model(concatenated)
-        return extract_logits(meta_output)
+        logits = extract_logits(meta_output)
+
+        probs = F.softmax(logits, dim=-1)
+        preds = probs.argmax(dim=-1)
+        confidence = probs.max(dim=-1).values
+        entropy = -torch.sum(probs * torch.log(probs + 1e-12), dim=-1)
+
+        return {
+            "logits": logits,
+            "probabilities": probs if self.config.return_probabilities else None,
+            "predictions": preds,
+            "confidence": confidence,
+            "entropy": entropy,
+        }
+
+    # =====================================================
+    # UTILS
+    # =====================================================
+
+    def add_base_model(self, model: nn.Module) -> None:
+        self.base_models.append(model)
+
+    def set_meta_model(self, model: nn.Module) -> None:
+        self.meta_model = model
+
+    def get_num_models(self) -> int:
+        return len(self.base_models)

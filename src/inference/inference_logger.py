@@ -1,37 +1,3 @@
-"""
-File Name: inference_logger.py
-Module: Inference Structured Logging
-Description:
-    Provides structured logging utilities for the TruthLens inference system.
-    This module enables production-grade logging for monitoring, debugging,
-    and auditing model predictions at scale.
-
-    Logged attributes include:
-        • article_id
-        • processing_time
-        • model_versions
-        • feature_count
-        • prediction_confidence
-
-    Logs are emitted in structured JSON format to facilitate ingestion by
-    monitoring systems such as ELK, Datadog, Prometheus pipelines, or
-    cloud logging infrastructure.
-    
-Dependencies:
-    logging
-    typing
-    dataclasses
-    json
-    time
-    uuid
-
-Inputs:
-    Inference metadata and prediction outputs.
-
-Outputs:
-    Structured JSON log entries.
-"""
-
 from __future__ import annotations
 
 import json
@@ -39,102 +5,152 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, asdict
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
+
+import numpy as np
 
 from src.utils import current_datetime
-
 
 logger = logging.getLogger(__name__)
 
 
+# =========================================================
+# CONFIG
+# =========================================================
+
+MAX_VECTOR_LOG = 10  # truncate arrays
+
+
+# =========================================================
+# SAFE SERIALIZATION
+# =========================================================
+
+def _truncate_vector(x):
+    if x is None:
+        return None
+    x = np.asarray(x)
+    return x[:MAX_VECTOR_LOG].tolist()
+
+
+# =========================================================
+# DATA CLASS
+# =========================================================
+
 @dataclass
 class InferenceLogEntry:
-    """
-    Dataclass representing a single inference log record.
-    """
 
     article_id: str
+    trace_id: str
     processing_time_ms: float
+
     model_versions: Dict[str, str]
     feature_count: int
+
+    # 🔥 prediction
+    predicted_label: Optional[Any]
     prediction_confidence: Optional[float]
+
+    # 🔥 probabilities / logits
+    probabilities: Optional[Any]
+    logits: Optional[Any]
+
+    # 🔥 uncertainty
+    entropy: Optional[float]
+    p95_entropy: Optional[float]
+
     timestamp: float
 
 
+# =========================================================
+# LOGGER
+# =========================================================
+
 class InferenceLogger:
-    """
-    Production-grade structured logger for inference events.
-    """
 
     def __init__(
         self,
         service_name: str = "truthlens-inference",
         enable_json_logs: bool = True,
-    ) -> None:
+        log_vectors: bool = False,
+    ):
         self.service_name = service_name
         self.enable_json_logs = enable_json_logs
+        self.log_vectors = log_vectors
 
-        logger.info("InferenceLogger initialized for service: %s", service_name)
+        logger.info("InferenceLogger initialized")
+
+    # =====================================================
+    # UTILS
+    # =====================================================
 
     def generate_article_id(self) -> str:
-        """
-        Generate a unique article identifier when not provided.
-        """
+        return str(uuid.uuid4())
+
+    def generate_trace_id(self) -> str:
         return str(uuid.uuid4())
 
     def start_timer(self) -> float:
-        """
-        Start processing timer.
-        """
         return time.perf_counter()
 
     def stop_timer(self, start_time: float) -> float:
-        """
-        Stop timer and compute elapsed time in milliseconds.
-        """
-        elapsed = (time.perf_counter() - start_time) * 1000
-        return elapsed
+        return (time.perf_counter() - start_time) * 1000
+
+    # =====================================================
+    # ENTRY CREATION (UPGRADED 🔥)
+    # =====================================================
 
     def create_log_entry(
         self,
-        article_id: str,
-        processing_time_ms: float,
+        *,
+        article_id: Optional[str],
+        start_time: float,
         model_versions: Dict[str, str],
         feature_count: int,
-        prediction_confidence: Optional[float],
+
+        predicted_label: Optional[Any] = None,
+        prediction_confidence: Optional[float] = None,
+
+        probabilities: Optional[Any] = None,
+        logits: Optional[Any] = None,
+
+        entropy: Optional[float] = None,
+        p95_entropy: Optional[float] = None,
     ) -> InferenceLogEntry:
-        """
-        Create structured log entry.
-        """
 
-        if not isinstance(article_id, str):
-            raise TypeError("article_id must be a string")
+        if article_id is None:
+            article_id = self.generate_article_id()
 
-        if not isinstance(model_versions, dict):
-            raise TypeError("model_versions must be a dictionary")
+        trace_id = self.generate_trace_id()
+        processing_time_ms = self.stop_timer(start_time)
 
-        if feature_count < 0:
-            raise ValueError("feature_count cannot be negative")
+        # 🔥 SAFE VECTOR LOGGING
+        if not self.log_vectors:
+            probabilities = None
+            logits = None
+        else:
+            probabilities = _truncate_vector(probabilities)
+            logits = _truncate_vector(logits)
 
-        entry = InferenceLogEntry(
+        return InferenceLogEntry(
             article_id=article_id,
+            trace_id=trace_id,
             processing_time_ms=processing_time_ms,
             model_versions=model_versions,
             feature_count=feature_count,
+            predicted_label=predicted_label,
             prediction_confidence=prediction_confidence,
+            probabilities=probabilities,
+            logits=logits,
+            entropy=entropy,
+            p95_entropy=p95_entropy,
             timestamp=float(current_datetime().timestamp()),
         )
 
-        return entry
+    # =====================================================
+    # EMIT
+    # =====================================================
 
-    def log(
-        self,
-        entry: InferenceLogEntry,
-        level: int = logging.INFO,
-    ) -> None:
-        """
-        Emit structured log entry.
-        """
+    def log(self, entry: InferenceLogEntry, level=logging.INFO):
 
         record = {
             "service": self.service_name,
@@ -143,39 +159,50 @@ class InferenceLogger:
         }
 
         try:
-            if self.enable_json_logs:
-                message = json.dumps(record)
-            else:
-                message = str(record)
+            msg = json.dumps(record) if self.enable_json_logs else str(record)
+            logger.log(level, msg)
 
-            logger.log(level, message)
+        except Exception as e:
+            logger.exception("Logging failed: %s", e)
 
-        except Exception as exc:
-            logger.exception("Failed to emit inference log: %s", exc)
+    # =====================================================
+    # HIGH-LEVEL API
+    # =====================================================
 
     def log_prediction(
         self,
-        article_id: Optional[str],
+        *,
         start_time: float,
         model_versions: Dict[str, str],
         feature_count: int,
-        prediction_confidence: Optional[float],
-    ) -> None:
-        """
-        Convenience method to log a completed inference event.
-        """
 
-        if article_id is None:
-            article_id = self.generate_article_id()
+        article_id: Optional[str] = None,
+        predicted_label: Optional[Any] = None,
+        prediction_confidence: Optional[float] = None,
 
-        processing_time_ms = self.stop_timer(start_time)
+        probabilities: Optional[Any] = None,
+        logits: Optional[Any] = None,
+
+        entropy: Optional[float] = None,
+        p95_entropy: Optional[float] = None,
+    ):
 
         entry = self.create_log_entry(
             article_id=article_id,
-            processing_time_ms=processing_time_ms,
+            start_time=start_time,
             model_versions=model_versions,
             feature_count=feature_count,
+            predicted_label=predicted_label,
             prediction_confidence=prediction_confidence,
+            probabilities=probabilities,
+            logits=logits,
+            entropy=entropy,
+            p95_entropy=p95_entropy,
         )
+
+        # 🔥 AUTO ALERTING (OPTIONAL)
+        if entropy is not None and p95_entropy is not None:
+            if entropy > p95_entropy:
+                logger.warning("High uncertainty detected")
 
         self.log(entry)

@@ -1,136 +1,144 @@
-"""
-File Name: model_utils.py
-Module: models.utils
-Description:
-    Utility functions for model persistence and basic text preprocessing
-    used in the TruthLens AI system. This module provides standardized
-    helpers for saving and loading serialized models as well as minimal
-    text normalization utilities for inference pipelines.
-
-    These helpers are intentionally lightweight and framework-agnostic
-    so they can be used across training, evaluation, and inference code.
-
-Dependencies:
-    logging
-    pathlib
-    typing
-    re
-    joblib
-Inputs:
-    model objects
-    file paths
-    raw text
-Outputs:
-    saved model files
-    loaded model objects
-    normalized text
-"""
-
 from __future__ import annotations
 
 import logging
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, Optional
 
 import joblib
+import torch
 
 logger = logging.getLogger(__name__)
 
 
-def save_model(model: Any, path: str | Path) -> Path:
-    """
-    Save a trained model to disk using joblib serialization.
+# =========================================================
+# SAVE
+# =========================================================
 
-    Parameters
-    ----------
-    model : Any
-        Trained model object.
-    path : str | Path
-        Destination file path.
+def save_model(
+    model: Any,
+    path: str | Path,
+    *,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Path:
 
-    Returns
-    -------
-    Path
-        Path where the model was saved.
-    """
-
-    path_obj = Path(path)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        path_obj.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(model, torch.nn.Module):
+            torch.save(
+                {
+                    "state_dict": model.state_dict(),
+                    "metadata": metadata or {},
+                },
+                path,
+            )
+        else:
+            joblib.dump(
+                {
+                    "model": model,
+                    "metadata": metadata or {},
+                },
+                path,
+            )
 
-        joblib.dump(model, path_obj)
+        logger.info("Model saved: %s", path)
 
-        logger.info("Model saved successfully: %s", path_obj)
+        return path
 
-        return path_obj
-
-    except Exception as exc:
-        logger.exception("Failed to save model")
-        raise RuntimeError("Model saving failed") from exc
+    except Exception as e:
+        logger.exception("Save failed")
+        raise RuntimeError from e
 
 
-def load_model(path: str | Path) -> Any:
-    """
-    Load a serialized model from disk.
+# =========================================================
+# LOAD
+# =========================================================
 
-    Parameters
-    ----------
-    path : str | Path
-        Path to saved model file.
+def load_model(
+    path: str | Path,
+    *,
+    model_class: Optional[type] = None,
+    device: Optional[str] = None,
+) -> Any:
 
-    Returns
-    -------
-    Any
-        Loaded model object.
-    """
+    path = Path(path)
 
-    path_obj = Path(path)
-
-    if not path_obj.exists():
-        raise FileNotFoundError(f"Model file not found: {path_obj}")
+    if not path.exists():
+        raise FileNotFoundError(path)
 
     try:
-        model = joblib.load(path_obj)
+        if path.suffix in {".pt", ".pth"}:
 
-        logger.info("Model loaded successfully: %s", path_obj)
+            device_obj = torch.device(
+                device or ("cuda" if torch.cuda.is_available() else "cpu")
+            )
 
-        return model
+            checkpoint = torch.load(path, map_location=device_obj)
 
-    except Exception as exc:
-        logger.exception("Failed to load model")
-        raise RuntimeError("Model loading failed") from exc
+            if model_class is None:
+                return checkpoint
+
+            model = model_class()
+            model.load_state_dict(checkpoint["state_dict"])
+            model.to(device_obj)
+            model.eval()
+
+            return model
+
+        else:
+
+            obj = joblib.load(path)
+
+            if isinstance(obj, dict) and "model" in obj:
+                return obj["model"]
+
+            return obj
+
+    except Exception as e:
+        logger.exception("Load failed")
+        raise RuntimeError from e
 
 
-def preprocess_text(text: str) -> str:
-    """
-    Perform lightweight text normalization for inference.
+# =========================================================
+# TEXT PREPROCESS
+# =========================================================
 
-    Operations:
-        • Remove newline and tab characters
-        • Normalize whitespace
-        • Strip leading/trailing spaces
-
-    Parameters
-    ----------
-    text : str
-        Input text.
-
-    Returns
-    -------
-    str
-        Normalized text.
-    """
+def preprocess_text(
+    text: str,
+    *,
+    lowercase: bool = True,
+    remove_urls: bool = True,
+    remove_html: bool = True,
+) -> str:
 
     if text is None:
-        raise ValueError("Input text cannot be None")
+        raise ValueError("text cannot be None")
+
     if not isinstance(text, str):
-        raise TypeError("Input text must be a string")
-    if not text.strip():
-        raise ValueError("Input text cannot be empty")
+        raise TypeError("text must be string")
 
-    normalized = str(text).replace("\n", " ").replace("\t", " ")
-    normalized = re.sub(r"\s+", " ", normalized).strip()
+    text = text.strip()
 
-    return normalized
+    if not text:
+        raise ValueError("text empty")
+
+    # -------------------------
+    # BASIC CLEANING
+    # -------------------------
+
+    text = text.replace("\n", " ").replace("\t", " ")
+
+    if remove_html:
+        text = re.sub(r"<.*?>", " ", text)
+
+    if remove_urls:
+        text = re.sub(r"http\S+|www\S+", " ", text)
+
+    text = re.sub(r"\s+", " ", text)
+
+    if lowercase:
+        text = text.lower()
+
+    return text.strip()

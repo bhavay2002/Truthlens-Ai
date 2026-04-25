@@ -1,33 +1,32 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 import numpy as np
 
-
 logger = logging.getLogger(__name__)
+
+EPS = 1e-12
 
 
 # =========================================================
-# DEFAULT FEATURE MAP (CAN BE OVERRIDDEN VIA CONFIG)
+# DEFAULT FEATURE MAP
 # =========================================================
 
 DEFAULT_FEATURE_MAP: Dict[str, Dict[str, str]] = {
     "bias": {
-        "logit": "bias_logit",
         "probability": "bias_probability",
-        "prediction": "bias_prediction",
+        "confidence": "bias_confidence",
+        "entropy": "bias_entropy",
     },
     "emotion": {
         "intensity": "emotion_intensity",
         "confidence": "emotion_confidence",
+        "entropy": "emotion_entropy",
     },
     "narrative": {
         "score": "narrative_score",
-    },
-    "discourse": {
-        "coherence": "coherence_score",
     },
     "graph": {
         "consistency": "graph_consistency",
@@ -35,28 +34,38 @@ DEFAULT_FEATURE_MAP: Dict[str, Dict[str, str]] = {
     "ideology": {
         "score": "ideology_score",
     },
-    "analysis": {
-        "confidence": "analysis_confidence",
-    },
 }
 
 
 # =========================================================
-# VALIDATION UTIL
+# UTILS
 # =========================================================
 
-def _validate_numeric(value: Any, *, strict: bool) -> Optional[float]:
+def _safe_numeric(value: Any, strict: bool) -> Optional[float]:
+
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         if strict:
-            raise TypeError(f"Invalid numeric value: {value}")
+            raise TypeError(f"Invalid numeric: {value}")
         return None
 
     if not np.isfinite(value):
         if strict:
-            raise ValueError(f"Non-finite value: {value}")
+            raise ValueError(f"Non-finite: {value}")
         return None
 
     return float(value)
+
+
+def _compute_entropy(probs: np.ndarray) -> float:
+    probs = np.asarray(probs)
+    return float(-np.sum(probs * np.log(probs + EPS)))
+
+
+def _normalize_array(arr: np.ndarray) -> np.ndarray:
+    if arr.size == 0:
+        return arr
+    max_val = np.max(arr) + EPS
+    return arr / max_val
 
 
 # =========================================================
@@ -64,154 +73,169 @@ def _validate_numeric(value: Any, *, strict: bool) -> Optional[float]:
 # =========================================================
 
 class FeatureMapper:
-    """
-    Maps raw model outputs → standardized aggregation profile.
-
-    Converts heterogeneous outputs into:
-    {
-        "bias": {...},
-        "emotion": {...},
-        ...
-    }
-    """
 
     def __init__(
         self,
         feature_map: Optional[Dict[str, Dict[str, str]]] = None,
         *,
         strict: bool = False,
-    ) -> None:
+        normalize: bool = True,
+    ):
         self.feature_map = feature_map or DEFAULT_FEATURE_MAP
         self.strict = strict
+        self.normalize = normalize
 
         logger.info(
-            "[FeatureMapper] Initialized | strict=%s | sections=%d",
-            self.strict,
-            len(self.feature_map),
+            "[FeatureMapper] init | strict=%s normalize=%s",
+            strict,
+            normalize,
         )
 
-    # =========================================================
-    # MAIN API
-    # =========================================================
-    def map_features(
-        self,
-        raw_outputs: Dict[str, Any],
-    ) -> Dict[str, Dict[str, float]]:
-        """
-        Convert raw outputs into aggregation-ready profile.
-        """
+    # =====================================================
+    # MAIN
+    # =====================================================
+
+    def map_features(self, raw_outputs: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
 
         if not isinstance(raw_outputs, dict):
-            raise ValueError("raw_outputs must be a dictionary")
+            raise ValueError("raw_outputs must be dict")
 
-        profile: Dict[str, Dict[str, float]] = {}
+        profile = {}
 
         for section, mapping in self.feature_map.items():
 
-            section_data: Dict[str, float] = {}
+            section_data = {}
 
             for feature_name, raw_key in mapping.items():
 
                 if raw_key not in raw_outputs:
                     continue
 
-                val = _validate_numeric(raw_outputs[raw_key], strict=self.strict)
+                val = _safe_numeric(raw_outputs[raw_key], self.strict)
+
                 if val is None:
                     continue
+
+                # 🔥 FIX 1: CLIP BEFORE USE
+                val = float(np.clip(val, 0.0, 1.0))
 
                 section_data[feature_name] = val
 
             if section_data:
                 profile[section] = section_data
-            else:
-                logger.debug(
-                    "[FeatureMapper] No valid features for section: %s",
-                    section,
-                )
+
+        if self.normalize:
+            profile = self._normalize(profile)
 
         return profile
 
-    # =========================================================
-    # MULTI-TASK HEAD SUPPORT
-    # =========================================================
+    # =====================================================
+    # MULTI-TASK SUPPORT (FIXED)
+    # =====================================================
+
     def map_from_model_outputs(
         self,
         model_outputs: Dict[str, Dict[str, Any]],
     ) -> Dict[str, Dict[str, float]]:
-        """
-        Handles outputs from multi-head model.
 
-        Expected format:
-        {
-            "bias": {"logits": ..., "probabilities": ..., "confidence": ...},
-            "emotion": {...},
-            ...
-        }
-        """
-
-        if not isinstance(model_outputs, dict):
-            raise ValueError("model_outputs must be a dictionary")
-
-        flat: Dict[str, Any] = {}
+        flat = {}
 
         for task, outputs in model_outputs.items():
+
             if not isinstance(outputs, dict):
                 continue
 
-            for k, v in outputs.items():
-                flat_key = f"{task}_{k}"
-                flat[flat_key] = v
+            probs = outputs.get("probabilities")
+            logits = outputs.get("logits")
+
+            # -------------------------
+            # PROBABILITIES
+            # -------------------------
+            if probs is not None:
+
+                probs = np.asarray(probs)
+
+                # 🔥 FIX 2: PER-TASK NORMALIZATION
+                if probs.ndim > 1:
+                    probs = _normalize_array(probs[0])
+                else:
+                    probs = _normalize_array(probs)
+
+                conf = float(np.max(probs))
+
+                flat[f"{task}_probability"] = float(np.clip(conf, 0.0, 1.0))
+                flat[f"{task}_confidence"] = float(np.clip(conf, 0.0, 1.0))
+
+                entropy = _compute_entropy(probs)
+                flat[f"{task}_entropy"] = float(np.clip(entropy, 0.0, 1.0))
+
+            # -------------------------
+            # LOGITS
+            # -------------------------
+            if logits is not None:
+                val = float(np.mean(logits))
+                flat[f"{task}_logit"] = float(np.clip(val, 0.0, 1.0))
 
         return self.map_features(flat)
 
-    # =========================================================
+    # =====================================================
     # CONFIDENCE EXTRACTION
-    # =========================================================
+    # =====================================================
+
     def extract_confidence(
         self,
         model_outputs: Dict[str, Dict[str, Any]],
     ) -> Dict[str, float]:
-        """
-        Extract confidence per section (for weighting).
-        """
 
-        confidence: Dict[str, float] = {}
+        confidence = {}
 
-        for section, outputs in model_outputs.items():
-            if not isinstance(outputs, dict):
+        for task, outputs in model_outputs.items():
+
+            probs = outputs.get("probabilities")
+
+            if probs is None:
                 continue
 
-            conf = outputs.get("confidence")
+            probs = np.asarray(probs)
 
-            if conf is None:
-                continue
+            if probs.ndim > 1:
+                probs = probs[0]
 
-            val = _validate_numeric(conf, strict=self.strict)
-            if val is None:
-                continue
+            conf = float(np.max(probs))
 
-            confidence[section] = float(np.clip(val, 0.0, 1.0))
+            confidence[task] = float(np.clip(conf, 0.0, 1.0))
 
         return confidence
 
-    # =========================================================
-    # BATCH SUPPORT
-    # =========================================================
+    # =====================================================
+    # NORMALIZATION
+    # =====================================================
+
+    def _normalize(self, profile):
+
+        for section in profile:
+
+            values = list(profile[section].values())
+
+            if not values:
+                continue
+
+            max_val = max(values) + EPS
+
+            for k in profile[section]:
+                profile[section][k] = float(
+                    np.clip(profile[section][k] / max_val, 0.0, 1.0)
+                )
+
+        return profile
+
+    # =====================================================
+    # BATCH
+    # =====================================================
+
     def map_batch(
         self,
-        batch_outputs: list[Dict[str, Any]],
-    ) -> list[Dict[str, Dict[str, float]]]:
-        """
-        Batch mapping for inference pipelines.
-        """
+        batch_outputs: List[Dict[str, Any]],
+    ) -> List[Dict[str, Dict[str, float]]]:
 
-        if not isinstance(batch_outputs, list):
-            raise ValueError("batch_outputs must be a list")
-
-        results = []
-
-        for item in batch_outputs:
-            mapped = self.map_features(item)
-            results.append(mapped)
-
-        return results
+        return [self.map_features(x) for x in batch_outputs]

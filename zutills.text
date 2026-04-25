@@ -1,0 +1,2608 @@
+"""
+File: config_loader.py
+Location: src/utils/
+
+Production-grade multi-task configuration loader for TruthLens.
+
+Supports:
+- N-task architecture
+- Per-task datasets
+- Task-aware model config
+- Sampling strategies
+- Encoder control
+- Strong validation
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, Any, Optional
+from functools import lru_cache
+from copy import deepcopy
+
+import yaml
+
+logger = logging.getLogger(__name__)
+
+
+# =========================================================
+# PROJECT ROOT
+# =========================================================
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "config.yaml"
+
+
+# =========================================================
+# CONSTANTS
+# =========================================================
+
+VALID_TASK_TYPES = {"binary", "multiclass", "multilabel"}
+
+
+# =========================================================
+# DATACLASSES
+# =========================================================
+
+@dataclass(slots=True)
+class TaskDatasetConfig:
+    train_path: Path
+    validation_path: Optional[Path]
+    test_path: Optional[Path]
+    text_column: str = "text"
+    label_column: str = "label"
+
+
+@dataclass(slots=True)
+class TaskConfig:
+    name: str
+    task_type: str
+    num_labels: int
+    dataset: TaskDatasetConfig
+
+
+@dataclass(slots=True)
+class EncoderConfig:
+    name: str
+    pretrained_model: Optional[str]
+    hidden_size: int
+    freeze_epochs: int = 0
+    layerwise_lr_decay: Optional[float] = None
+
+
+@dataclass(slots=True)
+class ModelConfig:
+    encoder: EncoderConfig
+
+
+@dataclass(slots=True)
+class TrainingConfig:
+    batch_size: int
+    epochs: int
+    learning_rate: float
+    gradient_accumulation_steps: int = 1
+    device: str = "auto"
+    max_grad_norm: float = 1.0
+    fp16: bool = False
+
+
+@dataclass(slots=True)
+class SamplingConfig:
+    strategy: str = "uniform"
+    temperature: float = 1.0
+
+
+@dataclass(slots=True)
+class ExperimentConfig:
+    seed: int
+    output_dir: Path
+    experiment_name: str
+
+
+@dataclass(slots=True)
+class AppConfig:
+    model: ModelConfig
+    tasks: Dict[str, TaskConfig]
+    training: TrainingConfig
+    sampling: SamplingConfig
+    experiment: ExperimentConfig
+
+
+# =========================================================
+# PATH RESOLUTION
+# =========================================================
+
+def _resolve_path(path_value: str | Path) -> Path:
+    path = Path(path_value)
+    return path if path.is_absolute() else (PROJECT_ROOT / path).resolve()
+
+
+# =========================================================
+# YAML LOADER
+# =========================================================
+
+@lru_cache(maxsize=4)
+def load_config(config_path: str | Path | None = None) -> Dict[str, Any]:
+    path = _resolve_path(config_path or DEFAULT_CONFIG_PATH)
+
+    if not path.exists():
+        raise FileNotFoundError(f"Config not found: {path}")
+
+    logger.info("Loading config from %s", path)
+
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
+    except yaml.YAMLError as e:
+        raise RuntimeError("Invalid YAML") from e
+
+    return deepcopy(config)
+
+
+# =========================================================
+# VALIDATION
+# =========================================================
+
+def _validate_required(config: Dict[str, Any], keys: list[str]):
+    missing = [k for k in keys if k not in config]
+    if missing:
+        raise ValueError(f"Missing required keys: {missing}")
+
+
+def _validate_task(name: str, cfg: Dict[str, Any]):
+    if "type" not in cfg:
+        raise ValueError(f"{name}: missing type")
+
+    if cfg["type"] not in VALID_TASK_TYPES:
+        raise ValueError(f"{name}: invalid task type")
+
+    if "num_labels" not in cfg:
+        raise ValueError(f"{name}: missing num_labels")
+
+    if cfg["num_labels"] <= 0:
+        raise ValueError(f"{name}: num_labels must be > 0")
+
+    if "dataset" not in cfg:
+        raise ValueError(f"{name}: missing dataset config")
+
+
+# =========================================================
+# MAIN LOADER
+# =========================================================
+
+def load_app_config(config_path: str | Path | None = None) -> AppConfig:
+    config = load_config(config_path)
+
+    _validate_required(config, ["model", "tasks", "training"])
+
+    # ---------------- MODEL ----------------
+    encoder_cfg = config["model"].get("encoder", {})
+
+    model = ModelConfig(
+        encoder=EncoderConfig(
+            name=encoder_cfg.get("name", "roberta-base"),
+            pretrained_model=encoder_cfg.get("pretrained_model"),
+            hidden_size=encoder_cfg.get("hidden_size", 768),
+            freeze_epochs=encoder_cfg.get("freeze_epochs", 0),
+            layerwise_lr_decay=encoder_cfg.get("layerwise_lr_decay"),
+        )
+    )
+
+    # ---------------- TASKS ----------------
+    tasks: Dict[str, TaskConfig] = {}
+
+    for name, cfg in config["tasks"].items():
+        _validate_task(name, cfg)
+
+        ds = cfg["dataset"]
+
+        dataset = TaskDatasetConfig(
+            train_path=_resolve_path(ds["train_path"]),
+            validation_path=_resolve_path(ds["validation_path"]) if ds.get("validation_path") else None,
+            test_path=_resolve_path(ds["test_path"]) if ds.get("test_path") else None,
+            text_column=ds.get("text_column", "text"),
+            label_column=ds.get("label_column", "label"),
+        )
+
+        tasks[name] = TaskConfig(
+            name=name,
+            task_type=cfg["type"],
+            num_labels=cfg["num_labels"],
+            dataset=dataset,
+        )
+
+    # ---------------- TRAINING ----------------
+    t = config["training"]
+
+    training = TrainingConfig(
+        batch_size=t["batch_size"],
+        epochs=t["epochs"],
+        learning_rate=t["learning_rate"],
+        gradient_accumulation_steps=t.get("gradient_accumulation_steps", 1),
+        device=t.get("device", "auto"),
+        max_grad_norm=t.get("max_grad_norm", 1.0),
+        fp16=t.get("fp16", False),
+    )
+
+    # ---------------- SAMPLING ----------------
+    s = config.get("task_sampling", {})
+
+    sampling = SamplingConfig(
+        strategy=s.get("strategy", "uniform"),
+        temperature=s.get("temperature", 1.0),
+    )
+
+    # ---------------- EXPERIMENT ----------------
+    e = config.get("experiment", {})
+
+    experiment = ExperimentConfig(
+        seed=e.get("seed", 42),
+        output_dir=_resolve_path(e.get("output_dir", "outputs")),
+        experiment_name=e.get("experiment_name", "truthlens"),
+    )
+
+    logger.info("Loaded config | tasks=%d", len(tasks))
+
+    return AppConfig(
+        model=model,
+        tasks=tasks,
+        training=training,
+        sampling=sampling,
+        experiment=experiment,
+    )  
+
+
+    from __future__ import annotations
+
+import logging
+import platform
+from typing import Any, Dict
+from contextlib import nullcontext
+
+import torch
+
+from src.utils.distributed_utils import is_primary  # ✅ centralized
+
+logger = logging.getLogger(__name__)
+
+
+# =========================================================
+# DEVICE SETUP (DDP SAFE)
+# =========================================================
+
+def get_device(
+    prefer_gpu: bool = True,
+    local_rank: int | None = None,
+) -> torch.device:
+    """
+    Resolve device and bind process (DDP-safe).
+    """
+
+    # -----------------------------
+    # DDP MODE (CRITICAL)
+    # -----------------------------
+    if local_rank is not None and torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)  # 🔥 REQUIRED
+
+        device = torch.device(f"cuda:{local_rank}")
+
+        logger.info(
+            "Using DDP device | local_rank=%d | device=%s",
+            local_rank,
+            device,
+        )
+
+        return device
+
+    # -----------------------------
+    # SINGLE GPU
+    # -----------------------------
+    if prefer_gpu and torch.cuda.is_available():
+        device = torch.device("cuda")
+        logger.info("Using CUDA device")
+        return device
+
+    # -----------------------------
+    # MPS (Apple Silicon)
+    # -----------------------------
+    if prefer_gpu and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        device = torch.device("mps")
+        logger.info("Using MPS device")
+        return device
+
+    # -----------------------------
+    # CPU
+    # -----------------------------
+    logger.info("Using CPU device")
+    return torch.device("cpu")
+
+
+def setup_device(local_rank: int | None = None) -> torch.device:
+    """
+    Unified device setup entrypoint.
+    """
+    device = get_device(local_rank=local_rank)
+
+    if torch.cuda.is_available():
+        logger.info(
+            "GPU count=%d | current_device=%d",
+            torch.cuda.device_count(),
+            torch.cuda.current_device(),
+        )
+
+    return device
+
+
+# =========================================================
+# PERFORMANCE FLAGS
+# =========================================================
+
+def enable_performance_optimizations():
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+
+
+# =========================================================
+# AMP + SCALER
+# =========================================================
+
+def get_autocast_dtype() -> torch.dtype:
+    if torch.cuda.is_available():
+        return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    return torch.float32
+
+
+def autocast_context():
+    if torch.cuda.is_available():
+        return torch.autocast("cuda", dtype=get_autocast_dtype())
+    return nullcontext()
+
+
+def get_grad_scaler(enabled: bool = True) -> torch.cuda.amp.GradScaler:
+    return torch.cuda.amp.GradScaler(enabled=enabled and torch.cuda.is_available())
+
+
+# =========================================================
+# INFERENCE CONTEXT
+# =========================================================
+
+def inference_context():
+    return torch.no_grad()
+
+
+# =========================================================
+# CPU BF16 SUPPORT
+# =========================================================
+
+def _cpu_supports_bf16() -> bool:
+    try:
+        if platform.system() == "Linux":
+            with open("/proc/cpuinfo", "r") as f:
+                return "bf16" in f.read().lower()
+    except Exception:
+        pass
+    return False
+
+
+# =========================================================
+# TENSOR MOVE
+# =========================================================
+
+def move_tensor(
+    tensor: torch.Tensor,
+    device: torch.device,
+    *,
+    non_blocking: bool = True,
+    pin_memory: bool = False,
+    dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+
+    if not isinstance(tensor, torch.Tensor):
+        return tensor
+
+    if tensor.device == device and dtype is None:
+        return tensor
+
+    if pin_memory and tensor.device.type == "cpu" and device.type == "cuda":
+        tensor = tensor.pin_memory()
+
+    use_non_blocking = (
+        non_blocking
+        and tensor.device.type == "cpu"
+        and device.type == "cuda"
+        and tensor.is_pinned()
+    )
+
+    return tensor.to(device, non_blocking=use_non_blocking, dtype=dtype)
+
+
+# =========================================================
+# RECURSIVE MOVE (TASK SAFE)
+# =========================================================
+
+def move_to_device(
+    obj: Any,
+    device: torch.device,
+    *,
+    non_blocking: bool = True,
+    pin_memory: bool = False,
+    dtype: torch.dtype | None = None,
+) -> Any:
+
+    if obj is None:
+        return None
+
+    if isinstance(obj, torch.Tensor):
+        return move_tensor(
+            obj,
+            device,
+            non_blocking=non_blocking,
+            pin_memory=pin_memory,
+            dtype=dtype,
+        )
+
+    if isinstance(obj, dict):
+        return {
+            k: move_to_device(v, device, non_blocking=non_blocking, pin_memory=pin_memory, dtype=dtype)
+            if isinstance(v, (torch.Tensor, dict, list, tuple))
+            else v  # do not move strings like "task"
+            for k, v in obj.items()
+        }
+
+    if isinstance(obj, list):
+        return [
+            move_to_device(v, device, non_blocking=non_blocking, pin_memory=pin_memory, dtype=dtype)
+            for v in obj
+        ]
+
+    if isinstance(obj, tuple):
+        return tuple(
+            move_to_device(v, device, non_blocking=non_blocking, pin_memory=pin_memory, dtype=dtype)
+            for v in obj
+        )
+
+    if isinstance(obj, torch.nn.Module):
+        return obj.to(device=device)
+
+    return obj
+
+
+# =========================================================
+# BATCH MOVE
+# =========================================================
+
+def move_batch(
+    batch: Dict[str, Any],
+    device: torch.device,
+    *,
+    pin_memory: bool = False,
+    non_blocking: bool = True,
+) -> Dict[str, Any]:
+
+    if not isinstance(batch, dict):
+        raise TypeError("Batch must be dict")
+
+    return move_to_device(
+        batch,
+        device,
+        non_blocking=non_blocking,
+        pin_memory=pin_memory,
+    )
+
+
+# =========================================================
+# GPU UTILITIES
+# =========================================================
+
+def gpu_memory_summary(device_index: int = 0) -> str:
+
+    if not torch.cuda.is_available():
+        return "GPU not available"
+
+    allocated = torch.cuda.memory_allocated(device_index) / 1024**3
+    total = torch.cuda.get_device_properties(device_index).total_memory / 1024**3
+
+    return f"GPU {device_index} | {allocated:.2f}/{total:.2f} GB"
+
+
+def get_gpu_count() -> int:
+    return torch.cuda.device_count() if torch.cuda.is_available() else 0
+
+
+# =========================================================
+# PROCESS ROLE (DELEGATED)
+# =========================================================
+
+def is_primary_process() -> bool:
+    """
+    Backward-compatible alias.
+    Prefer: src.utils.distributed_utils.is_primary
+    """
+    return is_primary()
+
+
+# =========================================================
+# DEVICE SUMMARY HELPERS
+# =========================================================
+
+def device_name(device: torch.device | str | None = None) -> str:
+    """Return a human-readable name for ``device`` (defaults to current)."""
+    if device is None:
+        device = get_device(prefer_gpu=True)
+    if isinstance(device, str):
+        device = torch.device(device)
+    if device.type == "cuda" and torch.cuda.is_available():
+        idx = device.index if device.index is not None else torch.cuda.current_device()
+        try:
+            return torch.cuda.get_device_name(idx)
+        except Exception:
+            return f"cuda:{idx}"
+    if device.type == "mps":
+        return "Apple MPS"
+    return "CPU"
+
+
+def device_summary(device: torch.device | str | None = None) -> Dict[str, Any]:
+    """Return a structured summary of the active compute device."""
+    if device is None:
+        device = get_device(prefer_gpu=True)
+    elif isinstance(device, str):
+        device = torch.device(device)
+
+    summary: Dict[str, Any] = {
+        "type": device.type,
+        "name": device_name(device),
+        "torch_version": torch.__version__,
+        "platform": platform.platform(),
+        "cuda_available": torch.cuda.is_available(),
+        "gpu_count": get_gpu_count(),
+    }
+
+    if device.type == "cuda" and torch.cuda.is_available():
+        idx = device.index if device.index is not None else torch.cuda.current_device()
+        try:
+            props = torch.cuda.get_device_properties(idx)
+            summary.update(
+                {
+                    "device_index": idx,
+                    "total_memory_gb": round(props.total_memory / 1024**3, 2),
+                    "compute_capability": f"{props.major}.{props.minor}",
+                    "memory_summary": gpu_memory_summary(idx),
+                }
+            )
+        except Exception:
+            pass
+
+    return summary
+
+
+def set_cuda_device(index: int) -> None:
+    """Bind the current process to ``cuda:index`` when CUDA is available."""
+    if torch.cuda.is_available():
+        torch.cuda.set_device(int(index))
+
+
+        """
+File: distributed_utils.py
+Location: src/utils/
+
+Distributed training utilities for TruthLens.
+
+Supports:
+- PyTorch DDP initialization (torchrun compatible)
+- Rank/world size management
+- Safe logging control (primary process only)
+- Synchronization barriers
+- Device assignment (per-rank GPU)
+
+Designed for:
+- Multi-GPU training
+- Research reproducibility
+- Production stability
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from typing import Optional
+
+import torch
+import torch.distributed as dist
+
+logger = logging.getLogger(__name__)
+
+
+# =========================================================
+# STATE CHECKS
+# =========================================================
+
+def is_distributed() -> bool:
+    return dist.is_available() and dist.is_initialized()
+
+
+def get_world_size() -> int:
+    return dist.get_world_size() if is_distributed() else 1
+
+
+def get_rank() -> int:
+    return dist.get_rank() if is_distributed() else 0
+
+
+def is_primary() -> bool:
+    return get_rank() == 0
+
+
+# =========================================================
+# INITIALIZATION
+# =========================================================
+
+def init_distributed(
+    backend: Optional[str] = None,
+    timeout_seconds: int = 1800,
+) -> None:
+    """
+    Initialize distributed training.
+
+    Automatically detects torchrun environment.
+
+    Environment variables used:
+    - RANK
+    - WORLD_SIZE
+    - LOCAL_RANK
+    """
+
+    if is_distributed():
+        logger.warning("Distributed already initialized")
+        return
+
+    if "RANK" not in os.environ:
+        logger.info("Running in single-process mode")
+        return
+
+    rank = int(os.environ["RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+
+    if backend is None:
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+
+    logger.info(
+        "Initializing distributed | rank=%d | world_size=%d | backend=%s",
+        rank,
+        world_size,
+        backend,
+    )
+
+    dist.init_process_group(
+        backend=backend,
+        init_method="env://",
+        rank=rank,
+        world_size=world_size,
+        timeout=torch.distributed.timedelta(seconds=timeout_seconds),
+    )
+
+    # Set device per process
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+
+    logger.info("Distributed initialized successfully")
+
+
+# =========================================================
+# CLEANUP
+# =========================================================
+
+def cleanup_distributed() -> None:
+    if is_distributed():
+        dist.destroy_process_group()
+        logger.info("Distributed process group destroyed")
+
+
+# =========================================================
+# SYNCHRONIZATION
+# =========================================================
+
+def barrier() -> None:
+    if is_distributed():
+        dist.barrier()
+
+
+# =========================================================
+# SAFE EXECUTION (PRIMARY ONLY)
+# =========================================================
+
+def run_on_primary(fn, *args, **kwargs):
+    """
+    Execute function only on primary process.
+    """
+    if is_primary():
+        return fn(*args, **kwargs)
+    return None
+
+
+# =========================================================
+# REDUCTION UTILITIES
+# =========================================================
+
+def all_reduce_mean(tensor: torch.Tensor) -> torch.Tensor:
+    """
+    Compute mean across all processes.
+    """
+    if not is_distributed():
+        return tensor
+
+    tensor = tensor.clone()
+    dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+    tensor /= get_world_size()
+    return tensor
+
+
+def all_reduce_sum(tensor: torch.Tensor) -> torch.Tensor:
+    if not is_distributed():
+        return tensor
+
+    tensor = tensor.clone()
+    dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+    return tensor
+
+
+# =========================================================
+# GATHER UTILITIES
+# =========================================================
+
+def gather_tensor(tensor: torch.Tensor) -> list[torch.Tensor]:
+    """
+    Gather tensors from all processes.
+    """
+    if not is_distributed():
+        return [tensor]
+
+    world_size = get_world_size()
+    gathered = [torch.zeros_like(tensor) for _ in range(world_size)]
+
+    dist.all_gather(gathered, tensor)
+
+    return gathered
+
+
+# =========================================================
+# BROADCAST
+# =========================================================
+
+def broadcast_object(obj, src: int = 0):
+    """
+    Broadcast Python object from source process.
+    """
+    if not is_distributed():
+        return obj
+
+    obj_list = [obj]
+    dist.broadcast_object_list(obj_list, src=src)
+    return obj_list[0]
+
+
+# =========================================================
+# DEBUG INFO
+# =========================================================
+
+def get_distributed_info() -> dict:
+    return {
+        "distributed": is_distributed(),
+        "rank": get_rank(),
+        "world_size": get_world_size(),
+        "device": torch.cuda.current_device() if torch.cuda.is_available() else "cpu",
+    }
+
+
+    
+#src\utils\experiment_utils.py
+
+from __future__ import annotations
+
+import logging
+import json
+import socket
+import subprocess
+from pathlib import Path
+from typing import Any, Dict, Optional
+from dataclasses import dataclass, asdict
+
+import torch
+
+from src.utils.json_utils import append_json
+from src.utils.time_utils import timestamp
+
+logger = logging.getLogger(__name__)
+
+
+# =========================================================
+# SYSTEM METADATA
+# =========================================================
+
+def _get_git_commit() -> str:
+    try:
+        return subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
+    except Exception:
+        return "unknown"
+
+
+def _get_device_info() -> Dict[str, Any]:
+    if torch.cuda.is_available():
+        return {
+            "device": "cuda",
+            "gpu_name": torch.cuda.get_device_name(0),
+            "gpu_count": torch.cuda.device_count(),
+        }
+    return {"device": "cpu"}
+
+
+# =========================================================
+# CONFIG SANITIZATION (CRITICAL)
+# =========================================================
+
+def _sanitize_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Convert config into JSON-serializable format.
+    """
+
+    def convert(obj):
+        if isinstance(obj, Path):
+            return str(obj)
+        if isinstance(obj, dict):
+            return {k: convert(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [convert(v) for v in obj]
+        if hasattr(obj, "__dict__"):
+            return convert(vars(obj))
+        return obj
+
+    return convert(config)
+
+
+# =========================================================
+# EXPERIMENT RECORD
+# =========================================================
+
+@dataclass(slots=True)
+class ExperimentRecord:
+    experiment_id: str
+    timestamp: str
+
+    model: str
+    tasks: Dict[str, Any]
+
+    parameters: Dict[str, Any]
+    metrics: Dict[str, Any]
+
+    runtime_seconds: Optional[float]
+
+    #  CRITICAL
+    config_snapshot: Dict[str, Any]
+
+    git_commit: str
+    hostname: str
+    device_info: Dict[str, Any]
+
+
+# =========================================================
+# ID GENERATION
+# =========================================================
+
+def generate_experiment_id(prefix: str = "exp") -> str:
+    return f"{prefix}_{timestamp()}"
+
+
+# =========================================================
+# EXPERIMENT DIRECTORY
+# =========================================================
+
+def create_experiment_dir(base_dir: str | Path, exp_id: str) -> Path:
+    path = Path(base_dir) / exp_id
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+# =========================================================
+# RECORD BUILDER (FINAL VERSION)
+# =========================================================
+
+def create_experiment_record(
+    model_name: str,
+    tasks: Dict[str, Any],
+    parameters: Dict[str, Any],
+    metrics: Dict[str, Any],
+    dataset: Optional[str] = None,
+    runtime: Optional[float] = None,
+    config_snapshot: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+
+    #  ENFORCE REPRODUCIBILITY
+    if config_snapshot is None:
+        raise ValueError(
+            "config_snapshot is required for reproducibility"
+        )
+
+    ts = timestamp()
+    exp_id = f"exp_{ts}"
+
+    sanitized_config = _sanitize_config(config_snapshot)
+
+    record = ExperimentRecord(
+        experiment_id=exp_id,
+        timestamp=ts,
+        model=model_name,
+        tasks=tasks,
+        parameters=parameters,
+        metrics=metrics,
+        runtime_seconds=runtime,
+        config_snapshot=sanitized_config,
+        git_commit=_get_git_commit(),
+        hostname=socket.gethostname(),
+        device_info=_get_device_info(),
+    )
+
+    return asdict(record)
+
+
+# =========================================================
+# LOGGING (PERSISTENT)
+# =========================================================
+
+_REQUIRED_KEYS = {
+    "experiment_id",
+    "timestamp",
+    "model",
+    "tasks",
+    "parameters",
+    "metrics",
+    "runtime_seconds",
+    "config_snapshot",
+    "git_commit",
+}
+
+
+def log_experiment(
+    record: Dict[str, Any],
+    base_dir: str | Path = "reports/experiments",
+) -> Path:
+
+    missing = _REQUIRED_KEYS - set(record.keys())
+    if missing:
+        raise ValueError(f"Missing required keys: {missing}")
+
+    exp_id = record["experiment_id"]
+
+    exp_dir = create_experiment_dir(base_dir, exp_id)
+
+    # ---------------- SAVE FULL RECORD ----------------
+    full_path = exp_dir / "experiment.json"
+
+    with full_path.open("w", encoding="utf-8") as f:
+        json.dump(record, f, indent=2)
+
+    # ---------------- APPEND SUMMARY ----------------
+    summary_path = Path(base_dir) / "experiments_summary.json"
+
+    append_json(
+        {
+            "experiment_id": exp_id,
+            "model": record["model"],
+            "timestamp": record["timestamp"],
+        },
+        summary_path,
+    )
+
+    logger.info("Experiment saved: %s", exp_id)
+
+    return full_path
+
+
+# =========================================================
+# STEP LOGGING
+# =========================================================
+
+def log_training_step(
+    exp_dir: Path,
+    step: int,
+    task: str,
+    loss: float,
+):
+
+    step_file = exp_dir / "training_steps.json"
+
+    append_json(
+        {
+            "step": step,
+            "task": task,
+            "loss": loss,
+        },
+        step_file,
+    )
+
+
+# =========================================================
+# METRIC LOGGING
+# =========================================================
+
+def log_metrics(
+    exp_dir: Path,
+    metrics: Dict[str, Any],
+    split: str = "validation",
+):
+
+    file_path = exp_dir / f"{split}_metrics.json"
+
+    with file_path.open("w", encoding="utf-8") as f:
+        json.dump(metrics, f, indent=2)
+
+
+#src\utils\helper_functions.py
+
+from __future__ import annotations
+
+import logging
+import os
+import shutil
+import tempfile
+from pathlib import Path
+from typing import Iterable, Union
+
+logger = logging.getLogger(__name__)
+
+PathLike = Union[str, Path]
+
+
+# =========================================================
+# PATH UTILITIES
+# =========================================================
+
+def to_path(path: PathLike) -> Path:
+    if isinstance(path, Path):
+        return path.resolve()
+
+    if not isinstance(path, str):
+        raise TypeError(f"Expected str or Path, got {type(path).__name__}")
+
+    return Path(path).resolve()
+
+
+# =========================================================
+# DIRECTORY CREATION (DDP SAFE)
+# =========================================================
+
+def create_folder(path: PathLike, retries: int = 3) -> Path:
+    path_obj = to_path(path)
+
+    for attempt in range(retries):
+        try:
+            path_obj.mkdir(parents=True, exist_ok=True)
+            return path_obj
+        except OSError as e:
+            logger.warning("Retry mkdir (%d/%d): %s", attempt + 1, retries, path_obj)
+            if attempt == retries - 1:
+                raise RuntimeError(f"Failed to create directory: {path_obj}") from e
+
+    return path_obj
+
+
+def ensure_directories(paths: Iterable[PathLike]) -> list[Path]:
+    return [create_folder(p) for p in paths]
+
+
+# =========================================================
+# FILE VALIDATION
+# =========================================================
+
+def ensure_file_exists(path: PathLike) -> Path:
+    path_obj = to_path(path)
+
+    if not path_obj.exists() or not path_obj.is_file():
+        raise FileNotFoundError(f"File not found: {path_obj}")
+
+    return path_obj
+
+
+def ensure_files_exist(paths: Iterable[PathLike]) -> list[Path]:
+    return [ensure_file_exists(p) for p in paths]
+
+
+# =========================================================
+# ATOMIC WRITE (CRITICAL FOR ML SYSTEMS)
+# =========================================================
+
+def atomic_write(file_path: PathLike, data: bytes) -> Path:
+    path = to_path(file_path)
+    tmp_dir = path.parent
+
+    create_folder(tmp_dir)
+
+    with tempfile.NamedTemporaryFile(delete=False, dir=tmp_dir) as tmp:
+        tmp.write(data)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp_path = Path(tmp.name)
+
+    tmp_path.replace(path)  # atomic rename
+
+    return path
+
+
+# =========================================================
+# FILE SIZE + DISK UTILITIES
+# =========================================================
+
+def get_file_size(path: PathLike) -> int:
+    file_path = ensure_file_exists(path)
+    return file_path.stat().st_size
+
+
+def get_directory_size(path: PathLike) -> int:
+    path_obj = to_path(path)
+
+    if not path_obj.exists():
+        return 0
+
+    total = 0
+    for p in path_obj.rglob("*"):
+        if p.is_file():
+            total += p.stat().st_size
+
+    return total
+
+
+# =========================================================
+# SAFE DELETE
+# =========================================================
+
+def safe_delete(path: PathLike) -> None:
+    path_obj = to_path(path)
+
+    if not path_obj.exists():
+        return
+
+    if path_obj.is_file():
+        path_obj.unlink()
+        logger.debug("Deleted file: %s", path_obj)
+        return
+
+    shutil.rmtree(path_obj)
+    logger.debug("Deleted directory: %s", path_obj)
+
+
+# =========================================================
+# TEMP DIRECTORY (FOR PIPELINES)
+# =========================================================
+
+def create_temp_dir(prefix: str = "tmp_") -> Path:
+    path = Path(tempfile.mkdtemp(prefix=prefix))
+    return path.resolve()
+
+
+# =========================================================
+# PATH VALIDATION (STRICT)
+# =========================================================
+
+def assert_is_directory(path: PathLike) -> Path:
+    p = to_path(path)
+    if not p.exists() or not p.is_dir():
+        raise NotADirectoryError(f"Not a directory: {p}")
+    return p
+
+
+def assert_is_file(path: PathLike) -> Path:
+    p = to_path(path)
+    if not p.exists() or not p.is_file():
+        raise FileNotFoundError(f"Not a file: {p}")
+    return p
+
+
+    #src\utils\input_validation.py
+
+from __future__ import annotations
+
+import logging
+from typing import Iterable, Sequence, Any, Dict, Optional
+
+import pandas as pd
+import numpy as np
+import torch
+
+logger = logging.getLogger(__name__)
+
+
+# =========================================================
+# GLOBAL VALIDATION SWITCH
+# =========================================================
+
+VALIDATION_ENABLED = True
+
+
+def _skip_validation():
+    return not VALIDATION_ENABLED
+
+
+# =========================================================
+# DATAFRAME SCHEMA VALIDATION
+# =========================================================
+
+def ensure_dataframe(
+    df: pd.DataFrame,
+    *,
+    name: str = "df",
+    required_columns: Iterable[str] = (),
+    min_rows: int = 1,
+    dtypes: Optional[Dict[str, str]] = None,
+) -> None:
+
+    if _skip_validation():
+        return
+
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError(f"{name} must be DataFrame")
+
+    if len(df) < min_rows:
+        raise ValueError(f"{name} must have >= {min_rows} rows")
+
+    # -----------------------------
+    # Required columns
+    # -----------------------------
+    missing = set(required_columns) - set(df.columns)
+    if missing:
+        raise ValueError(f"{name} missing columns: {missing}")
+
+    # -----------------------------
+    # DTYPE VALIDATION (NEW)
+    # -----------------------------
+    if dtypes:
+        for col, expected_dtype in dtypes.items():
+            if col not in df.columns:
+                continue
+
+            actual = str(df[col].dtype)
+
+            if expected_dtype not in actual:
+                raise TypeError(
+                    f"{name}.{col} expected dtype {expected_dtype}, got {actual}"
+                )
+
+
+# =========================================================
+# LABEL VALIDATION (UPGRADED)
+# =========================================================
+
+def validate_labels(
+    labels: Any,
+    task_type: str,
+    num_labels: int,
+) -> None:
+
+    if _skip_validation():
+        return
+
+    if isinstance(labels, torch.Tensor):
+        labels = labels.detach().cpu().numpy()
+
+    labels = np.asarray(labels)
+
+    # -----------------------------
+    # BINARY
+    # -----------------------------
+    if task_type == "binary":
+        unique = np.unique(labels)
+        if not set(unique).issubset({0, 1}):
+            raise ValueError(f"Binary labels must be 0/1, got {unique}")
+
+    # -----------------------------
+    # MULTICLASS
+    # -----------------------------
+    elif task_type == "multiclass":
+        if labels.ndim != 1:
+            raise ValueError("Multiclass labels must be 1D")
+
+        if labels.min() < 0 or labels.max() >= num_labels:
+            raise ValueError(
+                f"Labels must be in [0, {num_labels-1}]"
+            )
+
+    # -----------------------------
+    # MULTILABEL
+    # -----------------------------
+    elif task_type == "multilabel":
+        if labels.ndim != 2:
+            raise ValueError("Multilabel must be [B, num_labels]")
+
+        if labels.shape[1] != num_labels:
+            raise ValueError("Incorrect label dimension")
+
+        unique = np.unique(labels)
+        if not set(unique).issubset({0, 1}):
+            raise ValueError("Multilabel must be binary (0/1)")
+
+    else:
+        raise ValueError(f"Unknown task_type: {task_type}")
+
+
+# =========================================================
+# TENSOR VALIDATION (ENHANCED)
+# =========================================================
+
+def validate_tensor(
+    tensor: torch.Tensor,
+    *,
+    name: str,
+    expected_dim: int | None = None,
+    dtype: torch.dtype | None = None,
+) -> None:
+
+    if _skip_validation():
+        return
+
+    if not isinstance(tensor, torch.Tensor):
+        raise TypeError(f"{name} must be tensor")
+
+    if expected_dim and tensor.dim() != expected_dim:
+        raise ValueError(f"{name} must have dim={expected_dim}")
+
+    if dtype and tensor.dtype != dtype:
+        raise TypeError(f"{name} expected dtype {dtype}, got {tensor.dtype}")
+
+    if torch.isnan(tensor).any():
+        raise ValueError(f"{name} contains NaN")
+
+    if torch.isinf(tensor).any():
+        raise ValueError(f"{name} contains Inf")
+
+
+# =========================================================
+# BATCH VALIDATION (ENHANCED)
+# =========================================================
+
+def validate_batch(batch: Dict[str, Any]) -> None:
+
+    if _skip_validation():
+        return
+
+    required = {"input_ids", "attention_mask", "labels", "task"}
+
+    missing = required - set(batch.keys())
+    if missing:
+        raise ValueError(f"Batch missing keys: {missing}")
+
+    validate_tensor(batch["input_ids"], name="input_ids", expected_dim=2)
+    validate_tensor(batch["attention_mask"], name="attention_mask", expected_dim=2)
+
+    if not isinstance(batch["task"], str):
+        raise TypeError("task must be string")
+
+
+# =========================================================
+# TEXT VALIDATION
+# =========================================================
+
+def ensure_non_empty_text(text: str, *, name: str = "text") -> str:
+
+    if _skip_validation():
+        return text
+
+    if not isinstance(text, str):
+        raise TypeError(f"{name} must be string")
+
+    if not text.strip():
+        raise ValueError(f"{name} cannot be empty")
+
+    return text
+
+
+def ensure_non_empty_text_list(
+    texts: Sequence[str] | Iterable[str],
+    *,
+    name: str = "texts",
+) -> list[str]:
+
+    if _skip_validation():
+        return list(texts)
+
+    if texts is None:
+        raise ValueError(f"{name} cannot be None")
+
+    if isinstance(texts, (str, bytes)):
+        texts = [texts]
+
+    normalized = []
+
+    for t in texts:
+        if t is None:
+            normalized.append("")
+            continue
+
+        if isinstance(t, (bytes, bytearray)):
+            normalized.append(t.decode("utf-8", errors="ignore"))
+            continue
+
+        normalized.append(str(t))
+
+    if not normalized or all(not t.strip() for t in normalized):
+        raise ValueError(f"{name} cannot be empty")
+
+    return normalized
+
+
+def ensure_non_empty_text_column(
+    df: pd.DataFrame,
+    column: str,
+    *,
+    name: str = "df",
+) -> pd.DataFrame:
+    """Validate that ``column`` exists in ``df`` and contains non-empty text."""
+    if _skip_validation():
+        return df
+
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError(f"{name} must be DataFrame")
+
+    if column not in df.columns:
+        raise ValueError(f"{name} missing column: {column!r}")
+
+    series = df[column].astype(str).str.strip()
+    if series.eq("").all():
+        raise ValueError(f"{name}.{column} cannot be entirely empty")
+
+    return df
+
+
+def ensure_positive_int(value: Any, *, name: str = "value") -> int:
+    """Coerce ``value`` to a positive ``int`` or raise ``ValueError``."""
+    if _skip_validation() and isinstance(value, int):
+        return value
+
+    try:
+        ivalue = int(value)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{name} must be an integer, got {type(value).__name__}") from exc
+
+    if ivalue <= 0:
+        raise ValueError(f"{name} must be > 0, got {ivalue}")
+
+    return ivalue
+
+    #src\utils\json_utils.py
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import tempfile
+import gzip
+from pathlib import Path
+from typing import Iterable, Any
+from contextlib import contextmanager
+
+import portalocker  
+
+logger = logging.getLogger(__name__)
+
+
+# =========================================================
+# FILE LOCK (CROSS-PLATFORM SAFE)
+# =========================================================
+
+@contextmanager
+def file_lock(path: Path):
+    """
+    Cross-platform file lock using portalocker.
+    Works on Windows, Linux, Mac.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_suffix(path.suffix + ".lock")
+
+    with open(lock_path, "w") as lock_file:
+        try:
+            portalocker.lock(lock_file, portalocker.LOCK_EX)
+            yield
+        finally:
+            portalocker.unlock(lock_file)
+
+
+# =========================================================
+# ATOMIC WRITE
+# =========================================================
+
+def _atomic_write(path: Path, data: bytes):
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, dir=path.parent) as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+            tmp = Path(f.name)
+
+        # Atomic replace
+        os.replace(tmp, path)
+
+    finally:
+        if tmp and tmp.exists():
+            tmp.unlink(missing_ok=True)
+
+
+# =========================================================
+# SAVE JSON
+# =========================================================
+
+def save_json(data: dict, path: str | Path, indent: int = 2) -> Path:
+    path = Path(path)
+
+    payload = json.dumps(data, indent=indent, ensure_ascii=False).encode("utf-8")
+
+    with file_lock(path):
+        _atomic_write(path, payload)
+
+    return path
+
+
+# =========================================================
+# LOAD JSON (LOCK SAFE)
+# =========================================================
+
+def load_json(path: str | Path) -> dict:
+    path = Path(path)
+
+    if not path.exists():
+        raise FileNotFoundError(path)
+
+    with file_lock(path):
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+
+
+# =========================================================
+# APPEND JSONL
+# =========================================================
+
+def append_json(entry: dict, path: str | Path) -> Path:
+    path = Path(path)
+
+    line = json.dumps(entry, ensure_ascii=False) + "\n"
+
+    with file_lock(path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        with path.open("a", encoding="utf-8") as f:
+            f.write(line)
+            f.flush()
+            os.fsync(f.fileno())
+
+    return path
+
+
+# =========================================================
+# BATCH APPEND (HIGH PERFORMANCE)
+# =========================================================
+
+def append_json_batch(entries: Iterable[dict], path: str | Path) -> Path:
+    path = Path(path)
+
+    lines = "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in entries)
+
+    with file_lock(path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        with path.open("a", encoding="utf-8") as f:
+            f.write(lines)
+            f.flush()
+            os.fsync(f.fileno())
+
+    return path
+
+
+# =========================================================
+# COMPRESSED JSONL (GZIP)
+# =========================================================
+
+def append_json_gz(entry: dict, path: str | Path) -> Path:
+    path = Path(path)
+
+    with file_lock(path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        with gzip.open(path, "at", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    return path
+
+
+    #src\utils\logging_utils.py
+
+from __future__ import annotations
+
+import json
+import logging
+import sys
+from pathlib import Path
+from typing import Optional, Dict, Any
+from logging.handlers import RotatingFileHandler
+from threading import Lock
+
+from src.utils.distributed_utils import is_primary
+
+
+# =========================================================
+# GLOBAL CONTEXT (THREAD-SAFE)
+# =========================================================
+
+_GLOBAL_CONTEXT: Dict[str, Any] = {}
+_CONTEXT_LOCK = Lock()
+
+
+def set_global_context(**kwargs) -> None:
+    """
+    Set global logging context.
+
+    Example:
+        set_global_context(experiment_id="exp_123", epoch=1)
+    """
+    with _CONTEXT_LOCK:
+        _GLOBAL_CONTEXT.update(kwargs)
+
+
+def clear_global_context() -> None:
+    """Clear all global context."""
+    with _CONTEXT_LOCK:
+        _GLOBAL_CONTEXT.clear()
+
+
+def get_global_context() -> Dict[str, Any]:
+    with _CONTEXT_LOCK:
+        return dict(_GLOBAL_CONTEXT)
+
+
+# =========================================================
+# FORMATTERS
+# =========================================================
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        log_record = {
+            "time": self.formatTime(record, "%Y-%m-%d %H:%M:%S"),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+
+        # Inject global context
+        log_record.update(get_global_context())
+
+        # Inject per-call extra
+        if hasattr(record, "extra"):
+            log_record.update(record.extra)
+
+        return json.dumps(log_record, ensure_ascii=False)
+
+
+def _create_text_formatter():
+    return logging.Formatter(
+        "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        "%Y-%m-%d %H:%M:%S",
+    )
+
+
+# =========================================================
+# CONFIGURATION
+# =========================================================
+
+def configure_logging(
+    level: int = logging.INFO,
+    log_file: Optional[str | Path] = None,
+    *,
+    json_logging: bool = False,
+) -> None:
+
+    root = logging.getLogger()
+    root.setLevel(level)
+
+    formatter = JsonFormatter() if json_logging else _create_text_formatter()
+
+    _setup_stream(root, formatter)
+
+    if log_file:
+        _setup_file(root, formatter, log_file)
+
+
+def _setup_stream(logger, formatter):
+    if any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
+        return
+
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+
+def _setup_file(logger, formatter, log_file):
+    path = Path(log_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    handler = RotatingFileHandler(
+        path,
+        maxBytes=50 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+        delay=True,
+    )
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+
+# =========================================================
+# STRUCTURED LOGGING API
+# =========================================================
+
+def log_event(
+    logger: logging.Logger,
+    message: str,
+    *,
+    level: int = logging.INFO,
+    **extra: Any,
+) -> None:
+
+    if not is_primary():
+        return
+
+    logger.log(level, message, extra={"extra": extra})
+
+
+# =========================================================
+# TRAINING LOGGING
+# =========================================================
+
+def log_training_step(
+    logger: logging.Logger,
+    step: int,
+    task: str,
+    loss: float,
+    lr: float,
+):
+
+    log_event(
+        logger,
+        "training_step",
+        step=step,
+        task=task,
+        loss=round(loss, 6),
+        lr=lr,
+    )
+
+
+def log_epoch_summary(
+    logger: logging.Logger,
+    epoch: int,
+    metrics: Dict[str, Any],
+):
+
+    log_event(
+        logger,
+        "epoch_summary",
+        epoch=epoch,
+        metrics=metrics,
+    )
+
+
+# =========================================================
+# INFERENCE LOGGING
+# =========================================================
+
+def log_prediction(
+    logger: logging.Logger,
+    task: str,
+    confidence: float,
+):
+
+    log_event(
+        logger,
+        "prediction",
+        task=task,
+        confidence=confidence,
+    )
+
+"""
+File: metrics_utils.py
+Location: src/utils/
+
+Centralized metric utilities for TruthLens multi-task system.
+
+Supports:
+- Binary, multiclass, multilabel tasks
+- Tensor + numpy compatibility
+- Safe metric computation
+- Aggregation for multi-task evaluation
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Dict, Any, List
+
+import numpy as np
+import torch
+
+logger = logging.getLogger(__name__)
+
+
+# =========================================================
+# HELPERS
+# =========================================================
+
+def _to_numpy(x):
+    if isinstance(x, torch.Tensor):
+        return x.detach().cpu().numpy()
+    return np.asarray(x)
+
+
+def safe_div(numerator: float, denominator: float) -> float:
+    return numerator / denominator if denominator != 0 else 0.0
+
+
+# =========================================================
+# BASIC METRICS
+# =========================================================
+
+def accuracy(y_true, y_pred) -> float:
+    y_true = _to_numpy(y_true)
+    y_pred = _to_numpy(y_pred)
+
+    return float((y_true == y_pred).mean())
+
+
+def precision_recall_f1(y_true, y_pred) -> Dict[str, float]:
+    y_true = _to_numpy(y_true)
+    y_pred = _to_numpy(y_pred)
+
+    tp = np.sum((y_true == 1) & (y_pred == 1))
+    fp = np.sum((y_true == 0) & (y_pred == 1))
+    fn = np.sum((y_true == 1) & (y_pred == 0))
+
+    precision = safe_div(tp, tp + fp)
+    recall = safe_div(tp, tp + fn)
+    f1 = safe_div(2 * precision * recall, precision + recall)
+
+    return {
+        "precision": float(precision),
+        "recall": float(recall),
+        "f1": float(f1),
+    }
+
+
+# =========================================================
+# MULTICLASS METRICS
+# =========================================================
+
+def multiclass_f1(y_true, y_pred, num_classes: int) -> float:
+    y_true = _to_numpy(y_true)
+    y_pred = _to_numpy(y_pred)
+
+    f1_scores = []
+
+    for cls in range(num_classes):
+        yt = (y_true == cls).astype(int)
+        yp = (y_pred == cls).astype(int)
+
+        metrics = precision_recall_f1(yt, yp)
+        f1_scores.append(metrics["f1"])
+
+    return float(np.mean(f1_scores))
+
+
+# =========================================================
+# MULTILABEL METRICS
+# =========================================================
+
+def multilabel_f1(y_true, y_pred) -> Dict[str, float]:
+    y_true = _to_numpy(y_true)
+    y_pred = _to_numpy(y_pred)
+
+    # micro
+    tp = np.sum((y_true == 1) & (y_pred == 1))
+    fp = np.sum((y_true == 0) & (y_pred == 1))
+    fn = np.sum((y_true == 1) & (y_pred == 0))
+
+    micro_precision = safe_div(tp, tp + fp)
+    micro_recall = safe_div(tp, tp + fn)
+    micro_f1 = safe_div(2 * micro_precision * micro_recall,
+                        micro_precision + micro_recall)
+
+    # macro
+    per_label_f1 = []
+    for i in range(y_true.shape[1]):
+        metrics = precision_recall_f1(y_true[:, i], y_pred[:, i])
+        per_label_f1.append(metrics["f1"])
+
+    macro_f1 = float(np.mean(per_label_f1))
+
+    return {
+        "micro_f1": float(micro_f1),
+        "macro_f1": macro_f1,
+    }
+
+
+# =========================================================
+# PREDICTION CONVERSION
+# =========================================================
+
+def logits_to_predictions(
+    logits: torch.Tensor,
+    task_type: str,
+    threshold: float = 0.5,
+) -> torch.Tensor:
+
+    if task_type == "multiclass":
+        return torch.argmax(logits, dim=-1)
+
+    elif task_type == "binary":
+        probs = torch.sigmoid(logits)
+        return (probs > threshold).long()
+
+    elif task_type == "multilabel":
+        probs = torch.sigmoid(logits)
+        return (probs > threshold).long()
+
+    else:
+        raise ValueError(f"Unknown task_type: {task_type}")
+
+
+# =========================================================
+# TASK METRIC WRAPPER
+# =========================================================
+
+def compute_task_metrics(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    task_type: str,
+    num_labels: int,
+    threshold: float = 0.5,
+) -> Dict[str, float]:
+
+    preds = logits_to_predictions(logits, task_type, threshold)
+
+    if task_type == "binary":
+        metrics = precision_recall_f1(labels, preds)
+        metrics["accuracy"] = accuracy(labels, preds)
+        return metrics
+
+    elif task_type == "multiclass":
+        return {
+            "accuracy": accuracy(labels, preds),
+            "macro_f1": multiclass_f1(labels, preds, num_labels),
+        }
+
+    elif task_type == "multilabel":
+        return multilabel_f1(labels, preds)
+
+    else:
+        raise ValueError(f"Unsupported task_type: {task_type}")
+
+
+# =========================================================
+# MULTI-TASK AGGREGATION
+# =========================================================
+
+def aggregate_metrics(
+    task_metrics: Dict[str, Dict[str, float]],
+    weights: Dict[str, float] | None = None,
+) -> Dict[str, float]:
+
+    if not task_metrics:
+        return {}
+
+    total_score = 0.0
+    total_weight = 0.0
+
+    for task, metrics in task_metrics.items():
+        weight = weights.get(task, 1.0) if weights else 1.0
+
+        # choose representative metric
+        score = (
+            metrics.get("f1")
+            or metrics.get("micro_f1")
+            or metrics.get("macro_f1")
+            or metrics.get("accuracy")
+        )
+
+        if score is None:
+            logger.warning("No usable metric for task: %s", task)
+            continue
+
+        total_score += score * weight
+        total_weight += weight
+
+    overall = safe_div(total_score, total_weight)
+
+    return {
+        "overall_score": float(overall)
+    }
+
+
+# =========================================================
+# METRIC REDUCTION (DDP SAFE)
+# =========================================================
+
+def reduce_metrics_across_processes(
+    metrics: Dict[str, float],
+) -> Dict[str, float]:
+    """
+    Placeholder for DDP reduction.
+    (Integrate with distributed_utils if needed)
+    """
+    return metrics
+
+
+# =========================================================
+# GENERIC HELPERS (re-exported from src.utils)
+# =========================================================
+
+def safe_mean(values, default: float = 0.0) -> float:
+    """Mean of a sequence, returning ``default`` for empty / non-finite input."""
+    if values is None:
+        return float(default)
+
+    arr = _to_numpy(values).astype(float, copy=False).ravel()
+    arr = arr[np.isfinite(arr)]
+
+    if arr.size == 0:
+        return float(default)
+
+    return float(arr.mean())
+
+
+def normalize_score(value, *, lo: float = 0.0, hi: float = 1.0) -> float:
+    """Clamp ``value`` into the closed interval ``[lo, hi]``."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return float(lo)
+
+    if not np.isfinite(v):
+        return float(lo)
+
+    if v < lo:
+        return float(lo)
+    if v > hi:
+        return float(hi)
+    return v
+
+#src\utils\seed_utils.py
+
+from __future__ import annotations
+
+import logging
+import os
+import random
+from typing import Optional
+
+import numpy as np
+import torch
+
+logger = logging.getLogger(__name__)
+
+
+# =========================================================
+# MAIN ENTRY
+# =========================================================
+
+def set_seed(
+    seed: int = 42,
+    *,
+    deterministic: Optional[bool] = None,
+    enable_tf32: bool = True,
+    matmul_precision: str = "high",
+    rank: int = 0,
+) -> int:
+    """
+    Set global seed with DDP support.
+
+    Returns
+    -------
+    int
+        Final seed used (seed + rank)
+    """
+
+    if not isinstance(seed, int):
+        raise TypeError("seed must be int")
+
+    final_seed = seed + rank
+
+    # -----------------------------
+    # Core Seeding
+    # -----------------------------
+    random.seed(final_seed)
+    np.random.seed(final_seed)
+    torch.manual_seed(final_seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(final_seed)
+        torch.cuda.manual_seed_all(final_seed)
+
+    # -----------------------------
+    # Determinism
+    # -----------------------------
+    if deterministic is None:
+        deterministic = os.environ.get("TRUTHLENS_DETERMINISTIC", "0") == "1"
+
+    if deterministic:
+        _set_deterministic()
+    else:
+        _set_fast_mode(enable_tf32, matmul_precision)
+
+    logger.info(
+        "Seed initialized | base=%d | rank=%d | final=%d | deterministic=%s",
+        seed,
+        rank,
+        final_seed,
+        deterministic,
+    )
+
+    return final_seed
+
+
+# =========================================================
+# DETERMINISTIC MODE
+# =========================================================
+
+def _set_deterministic():
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
+    try:
+        torch.use_deterministic_algorithms(True)
+    except Exception:
+        logger.warning("Deterministic algorithms not fully supported")
+
+    logger.debug("Deterministic mode enabled")
+
+
+# =========================================================
+# FAST MODE
+# =========================================================
+
+def _set_fast_mode(enable_tf32: bool, matmul_precision: str):
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = False
+
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = enable_tf32
+        torch.backends.cudnn.allow_tf32 = enable_tf32
+
+    try:
+        torch.set_float32_matmul_precision(matmul_precision)
+    except Exception:
+        logger.warning("Matmul precision setting not supported")
+
+    logger.debug(
+        "Fast mode | TF32=%s | precision=%s",
+        enable_tf32,
+        matmul_precision,
+    )
+
+
+# =========================================================
+# FULL REPRO MODE (RESEARCH)
+# =========================================================
+
+def enable_full_reproducibility(seed: int = 42, rank: int = 0):
+    """
+    Strict reproducibility mode for research.
+    """
+    return set_seed(
+        seed,
+        deterministic=True,
+        enable_tf32=False,
+        matmul_precision="highest",
+        rank=rank,
+    )
+
+
+# =========================================================
+# DATALOADER SUPPORT
+# =========================================================
+
+def seed_worker(worker_id: int):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+    torch.manual_seed(worker_seed)
+
+
+def create_generator(seed: int) -> torch.Generator:
+    g = torch.Generator()
+    g.manual_seed(seed)
+    return g
+
+
+# =========================================================
+# DEBUG / TRACKING
+# =========================================================
+
+def get_seed_state() -> dict:
+    return {
+        "python_seed": os.environ.get("PYTHONHASHSEED"),
+        "torch_seed": torch.initial_seed(),
+        "cuda": torch.cuda.is_available(),
+        "deterministic": torch.backends.cudnn.deterministic,
+    }
+
+"""
+File: settings.py
+Location: src/utils/
+
+Runtime settings loader.
+
+Exposes a single :func:`load_settings` entry point that returns an
+attribute-accessible view over ``config/config.yaml``. Several callers
+(``api/app.py``, ``src.inference.predict_api``, training scripts) depend on
+nested attribute access — e.g. ``SETTINGS.model.path`` or
+``SETTINGS.paths.tfidf_vectorizer_path`` — so this loader builds a recursive
+namespace from the YAML and applies a small set of project-specific
+conveniences (path resolution, attribute defaults).
+"""
+
+from __future__ import annotations
+
+import logging
+from functools import lru_cache
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Dict, Iterable
+
+import yaml
+
+logger = logging.getLogger(__name__)
+
+# =========================================================
+# PROJECT ROOT
+# =========================================================
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "config.yaml"
+
+
+# =========================================================
+# ATTRIBUTE NAMESPACE
+# =========================================================
+
+class AttrDict(SimpleNamespace):
+    """SimpleNamespace that also supports ``dict``-style access and ``.get``."""
+
+    def __getitem__(self, key: str) -> Any:
+        try:
+            return getattr(self, key)
+        except AttributeError as exc:
+            raise KeyError(key) from exc
+
+    def __contains__(self, key: object) -> bool:  # type: ignore[override]
+        return isinstance(key, str) and hasattr(self, key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+    def to_dict(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        for k, v in self.__dict__.items():
+            if isinstance(v, AttrDict):
+                out[k] = v.to_dict()
+            elif isinstance(v, list):
+                out[k] = [x.to_dict() if isinstance(x, AttrDict) else x for x in v]
+            else:
+                out[k] = v
+        return out
+
+
+def _to_namespace(value: Any) -> Any:
+    if isinstance(value, dict):
+        return AttrDict(**{k: _to_namespace(v) for k, v in value.items()})
+    if isinstance(value, list):
+        return [_to_namespace(v) for v in value]
+    return value
+
+
+# =========================================================
+# YAML LOADER
+# =========================================================
+
+def _resolve_path(value: str | Path) -> Path:
+    p = Path(value)
+    return p if p.is_absolute() else (PROJECT_ROOT / p).resolve()
+
+
+def _load_yaml(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        raise FileNotFoundError(f"Config not found: {path}")
+    with path.open("r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+# =========================================================
+# DEFAULTS
+# =========================================================
+
+_DEFAULT_API: Dict[str, Any] = {
+    "title": "TruthLens AI API",
+    "description": "Multi-task NLP system",
+    "version": "2.0.0",
+    "text_preview_chars": 100,
+}
+
+_DEFAULT_INFERENCE: Dict[str, Any] = {
+    "batch_size": 32,
+    "device": "auto",
+    "use_half_precision": False,
+    "allow_raw_text_fallback": True,
+}
+
+
+def _ensure_defaults(target: AttrDict, defaults: Dict[str, Any]) -> None:
+    for key, val in defaults.items():
+        if not hasattr(target, key):
+            setattr(target, key, _to_namespace(val))
+
+
+def _resolve_paths(ns: AttrDict, keys: Iterable[str]) -> None:
+    """Resolve any keys that look like paths into absolute :class:`Path` objects."""
+    for key in keys:
+        if hasattr(ns, key):
+            value = getattr(ns, key)
+            if isinstance(value, (str, Path)):
+                setattr(ns, key, _resolve_path(value))
+
+
+# =========================================================
+# PUBLIC API
+# =========================================================
+
+@lru_cache(maxsize=1)
+def load_settings(config_path: str | Path | None = None) -> AttrDict:
+    """Load the runtime settings as an attribute-accessible namespace."""
+    path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
+    raw = _load_yaml(path)
+
+    settings = _to_namespace(raw)
+    if not isinstance(settings, AttrDict):  # pragma: no cover - defensive
+        raise TypeError("config root must be a mapping")
+
+    # ---- model ----
+    model = getattr(settings, "model", AttrDict())
+    if hasattr(model, "path"):
+        model.path = _resolve_path(model.path)
+    encoder = getattr(model, "encoder", AttrDict())
+    if not hasattr(model, "name"):
+        model.name = getattr(encoder, "name", "roberta-base")
+    if not hasattr(model, "max_length"):
+        model.max_length = int(getattr(encoder, "max_length", 512))
+    settings.model = model
+
+    # ---- paths ----
+    paths = getattr(settings, "paths", AttrDict())
+    _resolve_paths(
+        paths,
+        (
+            "tfidf_vectorizer_path",
+            "evaluation_results_path",
+            "confusion_matrix_path",
+            "cleaning_report_path",
+            "models_dir",
+            "logs_dir",
+            "reports_dir",
+        ),
+    )
+    settings.paths = paths
+
+    # ---- training ----
+    training = getattr(settings, "training", AttrDict())
+    if not hasattr(training, "text_column"):
+        training.text_column = "text"
+    settings.training = training
+
+    # ---- api / inference defaults ----
+    api_ns = getattr(settings, "api", AttrDict())
+    _ensure_defaults(api_ns, _DEFAULT_API)
+    settings.api = api_ns
+
+    inference_ns = getattr(settings, "inference", AttrDict())
+    _ensure_defaults(inference_ns, _DEFAULT_INFERENCE)
+    settings.inference = inference_ns
+
+    logger.info("Loaded settings from %s", path)
+    return settings
+
+#src\utils\time_utils.py#
+
+from __future__ import annotations
+
+import logging
+import time
+from datetime import datetime, timezone
+from typing import Callable, Any, Tuple, TypeVar, Optional, Dict
+
+import torch
+
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+
+# =========================================================
+# GLOBAL PROFILING SWITCH
+# =========================================================
+
+_PROFILING_ENABLED: bool = False
+
+
+def enable_profiling(enabled: bool = True) -> None:
+    """
+    Enable / disable profiling globally.
+    """
+    global _PROFILING_ENABLED
+    _PROFILING_ENABLED = enabled
+
+
+def is_profiling_enabled() -> bool:
+    return _PROFILING_ENABLED
+
+
+# =========================================================
+# TIMESTAMP
+# =========================================================
+
+def timestamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+
+
+def current_datetime() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+# =========================================================
+# GPU SYNC (CRITICAL)
+# =========================================================
+
+def _sync_if_needed():
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
+# =========================================================
+# FUNCTION TIMER
+# =========================================================
+
+def measure_runtime(
+    func: Callable[..., T],
+    *args: Any,
+    sync_cuda: bool = True,
+    log: bool = False,
+    **kwargs: Any,
+) -> Tuple[T, float]:
+
+    if not _PROFILING_ENABLED:
+        return func(*args, **kwargs), 0.0
+
+    if sync_cuda:
+        _sync_if_needed()
+
+    start = time.perf_counter()
+
+    try:
+        result = func(*args, **kwargs)
+    except Exception:
+        logger.exception("Error in %s", getattr(func, "__name__", "unknown"))
+        raise
+
+    if sync_cuda:
+        _sync_if_needed()
+
+    runtime = time.perf_counter() - start
+
+    if log:
+        logger.debug(
+            "Runtime | function=%s | time=%.6f",
+            getattr(func, "__name__", "unknown"),
+            runtime,
+        )
+
+    return result, runtime
+
+
+# =========================================================
+# DECORATOR
+# =========================================================
+
+def timeit(sync_cuda: bool = True):
+    def decorator(func: Callable[..., T]):
+        def wrapper(*args, **kwargs):
+            if not _PROFILING_ENABLED:
+                return func(*args, **kwargs)
+
+            _, runtime = measure_runtime(
+                func, *args, sync_cuda=sync_cuda, log=True, **kwargs
+            )
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+# =========================================================
+# CONTEXT TIMER
+# =========================================================
+
+class Timer:
+    def __init__(
+        self,
+        name: Optional[str] = None,
+        *,
+        sync_cuda: bool = True,
+        logger_enabled: bool = True,
+    ):
+        self.name = name or "timer"
+        self.sync_cuda = sync_cuda
+        self.logger_enabled = logger_enabled
+        self._start: Optional[float] = None
+        self.elapsed: Optional[float] = None
+
+    def __enter__(self):
+        if not _PROFILING_ENABLED:
+            return self
+
+        if self.sync_cuda:
+            _sync_if_needed()
+
+        self._start = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if not _PROFILING_ENABLED or self._start is None:
+            return
+
+        if self.sync_cuda:
+            _sync_if_needed()
+
+        self.elapsed = time.perf_counter() - self._start
+
+        if self.logger_enabled:
+            logger.debug(
+                "Timer | name=%s | elapsed=%.6f",
+                self.name,
+                self.elapsed,
+            )
+
+
+# =========================================================
+# MULTI-TIMER (AGGREGATION)
+# =========================================================
+
+class MultiTimer:
+    def __init__(self):
+        self.times: Dict[str, list[float]] = {}
+
+    def add(self, name: str, value: float):
+        if not _PROFILING_ENABLED:
+            return
+
+        self.times.setdefault(name, []).append(value)
+
+    def summary(self) -> Dict[str, float]:
+        return {
+            k: sum(v) / len(v)
+            for k, v in self.times.items()
+            if v
+        }
+
+    def total(self) -> Dict[str, float]:
+        return {
+            k: sum(v)
+            for k, v in self.times.items()
+        }
+
+    def reset(self):
+        self.times.clear()

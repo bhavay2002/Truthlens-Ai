@@ -1,95 +1,274 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional
+import threading
+import hashlib
+from collections import OrderedDict
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Sequence, TYPE_CHECKING
 
 import numpy as np
-import torch
 
-from src.explainability.token_alignment import align_tokens
-from src.explainability.utils_validation import validate_tokens_scores
+from src.explainability.explanation_calibrator import calibrate_explanation
+from src.explainability.common_schema import ExplanationOutput, TokenImportance
+
+if TYPE_CHECKING:
+    from lime.lime_text import LimeTextExplainer
+else:
+    LimeTextExplainer = Any
 
 logger = logging.getLogger(__name__)
 
+# =========================================================
+# GLOBALS
+# =========================================================
 
-class PropagandaExplainer:
-    def __init__(self, model: torch.nn.Module) -> None:
-        if model is None:
-            raise ValueError("model cannot be None")
-        if not isinstance(model, torch.nn.Module):
-            raise TypeError("model must be torch.nn.Module")
-        self.model = model
-        logger.info("PropagandaExplainer initialized")
+_LOCK = threading.RLock()
 
-    def _resolve_device(self) -> Optional[torch.device]:
+_MAX_CACHE_SIZE = 4
+_EXPLAINER_CACHE: Dict[str, LimeTextExplainer] = OrderedDict()
+
+_EXPLANATION_CACHE: Dict[str, ExplanationOutput] = {}
+
+EPS = 1e-12
+
+
+# =========================================================
+# UTILS
+# =========================================================
+
+def _make_cache_key(text: str, num_features: int, num_samples: int) -> str:
+    raw = f"{text}|{num_features}|{num_samples}"
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _extract_fake_probability(result: Any) -> float:
+    if not isinstance(result, dict) or "fake_probability" not in result:
+        raise KeyError("predict_fn must return {'fake_probability': float}")
+
+    prob = float(result["fake_probability"])
+
+    if not (0.0 <= prob <= 1.0):
+        raise ValueError("fake_probability must be in [0,1]")
+
+    return prob
+
+
+# =========================================================
+# EXPLAINER CACHE
+# =========================================================
+
+def get_explainer(model_id: str = "default") -> LimeTextExplainer:
+
+    if LimeTextExplainer is None:
+        raise ImportError("Install 'lime' to use LIME explainer")
+
+    with _LOCK:
+        if model_id in _EXPLAINER_CACHE:
+            _EXPLAINER_CACHE.move_to_end(model_id)
+            return _EXPLAINER_CACHE[model_id]
+
+        logger.info("Initializing LIME explainer (%s)", model_id)
+
+        explainer = LimeTextExplainer(class_names=["Real", "Fake"])
+
+        _EXPLAINER_CACHE[model_id] = explainer
+        _EXPLAINER_CACHE.move_to_end(model_id)
+
+        if len(_EXPLAINER_CACHE) > _MAX_CACHE_SIZE:
+            _EXPLAINER_CACHE.popitem(last=False)
+
+        return explainer
+
+
+# =========================================================
+# PREDICTION WRAPPER
+# =========================================================
+
+def lime_predict_wrapper(
+    texts: Sequence[str],
+    predict_fn: Callable[[Any], Any],
+) -> np.ndarray:
+
+    text_list = [str(t) for t in texts]
+
+    batch_fn = getattr(predict_fn, "batch_predict", None)
+
+    if callable(batch_fn):
         try:
-            return next(self.model.parameters()).device
-        except Exception:
-            return None
-
-    def explain(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, tokens: List[str]) -> Dict[str, float]:
-        if not isinstance(input_ids, torch.Tensor) or not isinstance(attention_mask, torch.Tensor):
-            raise TypeError("input_ids and attention_mask must be torch.Tensor")
-        if input_ids.ndim != 2 or attention_mask.ndim != 2:
-            raise ValueError("input_ids and attention_mask must be 2D")
-        if input_ids.shape != attention_mask.shape:
-            raise ValueError("input_ids and attention_mask must have same shape")
-        if not isinstance(tokens, list) or not tokens:
-            raise ValueError("tokens must be a non-empty list")
-        if len(tokens) > input_ids.shape[1]:
-            raise ValueError("tokens length exceeds sequence length")
-
-        gradients = self._gradient_importance(input_ids, attention_mask)
-        normalized = self._normalize_scores(gradients, tokens)
-        validate_tokens_scores(tokens, normalized)
-        merged_tokens, merged_scores = align_tokens(tokens, normalized)
-
-        # Accumulate scores for duplicate merged tokens rather than
-        # appending suffixes like "the_1" which pollute the output space.
-        explanation: Dict[str, float] = {}
-        for token, score in zip(merged_tokens, merged_scores):
-            explanation[token] = explanation.get(token, 0.0) + float(score)
-        return explanation
-
-    def _gradient_importance(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> np.ndarray:
-        device = self._resolve_device()
-        if device is not None:
-            input_ids = input_ids.to(device)
-            attention_mask = attention_mask.to(device)
-
-        was_training = self.model.training
-        self.model.eval()
-        try:
-            emb = self.model.get_input_embeddings()(input_ids).detach().requires_grad_(True)
-            outputs = self.model(inputs_embeds=emb, attention_mask=attention_mask)
-            logits = outputs.logits if hasattr(outputs, "logits") else outputs["logits"]
-
-            # Per-sample softmax sum → stable, shared-model-safe target.
-            probs = torch.softmax(logits, dim=-1)
-            target = probs.max(dim=-1).values.sum()
-
-            (grads,) = torch.autograd.grad(
-                outputs=target,
-                inputs=emb,
-                retain_graph=False,
-                create_graph=False,
-                allow_unused=False,
+            results = batch_fn(text_list)
+            return np.array(
+                [[1 - _extract_fake_probability(r), _extract_fake_probability(r)]
+                 for r in results],
+                dtype=float,
             )
-        finally:
-            if was_training:
-                self.model.train()
+        except Exception:
+            pass
 
-        return torch.abs(grads).sum(dim=-1).detach().cpu().numpy()[0]
+    try:
+        results = predict_fn(text_list)
+        if isinstance(results, list) and len(results) == len(text_list):
+            return np.array(
+                [[1 - _extract_fake_probability(r), _extract_fake_probability(r)]
+                 for r in results],
+                dtype=float,
+            )
+    except Exception:
+        pass
 
-    def _normalize_scores(self, scores: np.ndarray, tokens: List[str]) -> np.ndarray:
-        vals = np.asarray(scores[: len(tokens)], dtype=float)
-        vals = np.abs(vals)
-        total = float(np.sum(vals))
-        if total <= 0:
-            return np.zeros(len(tokens), dtype=float)
-        return vals / total
+    outputs = []
+    for t in text_list:
+        r = predict_fn(t)
+        p = _extract_fake_probability(r)
+        outputs.append([1 - p, p])
 
-    def propaganda_intensity(self, explanation: Dict[str, float]) -> float:
-        if not explanation:
-            return 0.0
-        return float(np.mean(list(explanation.values())))
+    return np.array(outputs, dtype=float)
+
+
+def _batched_predict(
+    texts: Sequence[str],
+    predict_fn: Callable[[Any], Any],
+    batch_size: int = 32,
+) -> np.ndarray:
+
+    results = []
+
+    for i in range(0, len(texts), batch_size):
+        chunk = texts[i:i + batch_size]
+        results.append(lime_predict_wrapper(chunk, predict_fn))
+
+    return np.vstack(results) if results else np.zeros((0, 2))
+
+
+def _get_lime_predict_fn(predict_fn):
+    return lambda x: _batched_predict(x, predict_fn)
+
+
+# =========================================================
+# MAIN EXPLAIN (FINAL)
+# =========================================================
+
+def explain_prediction(
+    predict_fn: Callable[[Any], Any],
+    text: str,
+    num_features: int = 10,
+    num_samples: int = 256,
+) -> ExplanationOutput:
+
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("text cannot be empty")
+
+    key = _make_cache_key(text, num_features, num_samples)
+
+    with _LOCK:
+        if key in _EXPLANATION_CACHE:
+            return _EXPLANATION_CACHE[key]
+
+    explainer = get_explainer()
+    predictor = _get_lime_predict_fn(predict_fn)
+
+    exp = explainer.explain_instance(
+        text,
+        predictor,
+        num_features=num_features,
+        num_samples=num_samples,
+    )
+
+    raw_features = exp.as_list()
+
+    if not raw_features:
+        return ExplanationOutput(
+            method="lime",
+            tokens=[],
+            importance=[],
+            structured=[],
+        )
+
+    tokens = [t for t, _ in raw_features]
+    values = [s for _, s in raw_features]
+
+    # =====================================================
+    # 🔥 CALIBRATION
+    # =====================================================
+    cal = calibrate_explanation(values, method="lime")
+
+    scores = cal["scores"]
+    confidence = cal["confidence"]
+    entropy = cal["entropy"]
+
+    structured = [
+        TokenImportance(token=t, importance=float(s))
+        for t, s in zip(tokens, scores)
+    ]
+
+    result = ExplanationOutput(
+        method="lime",
+        tokens=tokens,
+        importance=scores.tolist(),
+        structured=structured,
+        confidence=confidence,
+        entropy=entropy,
+        raw=raw_features,
+    )
+
+    with _LOCK:
+        _EXPLANATION_CACHE[key] = result
+
+    logger.info("LIME explanation generated")
+
+    return result
+
+
+# =========================================================
+# HTML EXPORT
+# =========================================================
+
+def save_explanation_html(
+    predict_fn: Callable[[Any], Any],
+    text: str,
+    output_path: str | Path = "reports/lime_explanation.html",
+    num_features: int = 10,
+    num_samples: int = 256,
+) -> Path:
+
+    explainer = get_explainer()
+    predictor = _get_lime_predict_fn(predict_fn)
+
+    exp = explainer.explain_instance(
+        text,
+        predictor,
+        num_features=num_features,
+        num_samples=num_samples,
+    )
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    exp.save_to_file(str(output_path))
+
+    logger.info("Saved LIME HTML to %s", output_path)
+
+    return output_path
+
+
+# =========================================================
+# CACHE CONTROL
+# =========================================================
+
+def clear_explainer_cache():
+    with _LOCK:
+        _EXPLAINER_CACHE.clear()
+
+
+def clear_explanation_cache():
+    with _LOCK:
+        _EXPLANATION_CACHE.clear()
+
+
+def cache_info():
+    with _LOCK:
+        return {
+            "explainer_cache_size": len(_EXPLAINER_CACHE),
+            "explanation_cache_size": len(_EXPLANATION_CACHE),
+            "capacity": _MAX_CACHE_SIZE,
+        }

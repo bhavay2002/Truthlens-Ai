@@ -42,7 +42,7 @@ SAMPLE_TEXT = (
 @pytest.fixture(scope="module")
 def nlp():
     """Full spaCy pipeline used across tests."""
-    from src.analysis._nlp import get_nlp
+    from src.analysis.spacy_loader import get_nlp
     return get_nlp("en_core_web_sm")
 
 
@@ -59,25 +59,25 @@ def sample_doc(nlp):
 class TestNlpCache:
 
     def test_same_instance_same_key(self):
-        from src.analysis._nlp import get_nlp
+        from src.analysis.spacy_loader import get_nlp
         nlp1 = get_nlp("en_core_web_sm", disable=("ner",))
         nlp2 = get_nlp("en_core_web_sm", disable=("ner",))
         assert nlp1 is nlp2
 
     def test_different_disable_gives_different_instance(self):
-        from src.analysis._nlp import get_nlp
+        from src.analysis.spacy_loader import get_nlp
         nlp_a = get_nlp("en_core_web_sm", disable=("ner",))
         nlp_b = get_nlp("en_core_web_sm", disable=("parser",))
         assert nlp_a is not nlp_b
 
     def test_none_disable_and_empty_tuple_are_same_key(self):
-        from src.analysis._nlp import get_nlp
+        from src.analysis.spacy_loader import get_nlp
         nlp_none = get_nlp("en_core_web_sm", disable=None)
         nlp_full = get_nlp("en_core_web_sm")
         assert nlp_none is nlp_full
 
     def test_cache_clear(self):
-        from src.analysis._nlp import get_nlp, clear_cache, _CACHE
+        from src.analysis.spacy_loader import get_nlp, clear_cache, _CACHE
         get_nlp("en_core_web_sm")
         assert len(_CACHE) > 0
         clear_cache()

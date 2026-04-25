@@ -1,39 +1,3 @@
-"""
-File Name: multitask_head.py
-Module: models.heads
-Description:
-    Implements a flexible multi-task prediction head used in the TruthLens AI
-    system. This module manages multiple task-specific heads (classification,
-    regression, multilabel, etc.) and orchestrates forward execution, prediction
-    aggregation, and optional loss computation.
-
-    The multitask head allows a shared encoder representation to feed multiple
-    prediction objectives simultaneously, which is essential for architectures
-    like the TruthLens multi-task model predicting bias, ideology, propaganda,
-    narrative structure, and emotion.
-
-    Each task head is registered with its own configuration, output dimension,
-    and optional loss function.
-
-Dependencies:
-    logging
-    typing
-    torch
-    torch.nn
-
-Inputs:
-    Shared encoder embeddings (batch_size, hidden_dim)
-    Optional task label dictionary
-
-Outputs:
-    Dictionary containing:
-        - task logits
-        - probabilities
-        - predictions
-        - optional task losses
-        - total_loss
-"""
-
 from __future__ import annotations
 
 import logging
@@ -47,36 +11,25 @@ logger = logging.getLogger(__name__)
 
 
 class MultiTaskHead(nn.Module):
-    """
-    Multi-task prediction head.
-
-    This module routes shared encoder representations into multiple
-    task-specific heads and aggregates outputs.
-    """
 
     def __init__(self) -> None:
         super().__init__()
 
         self.task_heads: nn.ModuleDict = nn.ModuleDict()
         self.loss_fns: Dict[str, nn.Module] = {}
+        self.task_weights: Dict[str, float] = {}
+
+    # =====================================================
+    # REGISTER
+    # =====================================================
 
     def register_task(
         self,
         task_name: str,
         head: nn.Module,
         loss_fn: Optional[nn.Module] = None,
+        weight: float = 1.0,
     ) -> None:
-        """
-        Register a task head.
-
-        Args:
-            task_name:
-                Unique name of the task.
-            head:
-                Neural module implementing prediction head.
-            loss_fn:
-                Optional loss function for the task.
-        """
 
         if not isinstance(task_name, str) or not task_name.strip():
             raise ValueError("task_name must be a valid string")
@@ -85,46 +38,40 @@ class MultiTaskHead(nn.Module):
             raise ValueError(f"Task '{task_name}' already registered")
 
         if not isinstance(head, nn.Module):
-            raise TypeError("head must be a torch.nn.Module")
+            raise TypeError("head must be nn.Module")
 
         self.task_heads[task_name] = head
 
         if loss_fn is not None:
             self.loss_fns[task_name] = loss_fn
 
-        logger.info("Registered multitask head for task: %s", task_name)
+        self.task_weights[task_name] = float(weight)
+
+        logger.info("Registered multitask head: %s", task_name)
+
+    # =====================================================
+    # FORWARD
+    # =====================================================
 
     def forward(
         self,
         features: torch.Tensor,
         labels: Optional[Dict[str, torch.Tensor]] = None,
     ) -> Dict[str, Any]:
-        """
-        Forward pass through all task heads.
-
-        Args:
-            features:
-                Shared encoder embeddings (batch_size, hidden_dim)
-            labels:
-                Optional dictionary mapping task names to label tensors.
-
-        Returns:
-            Aggregated task outputs.
-        """
 
         if features is None:
             raise ValueError("features cannot be None")
 
         if features.dim() != 2:
-            raise ValueError(
-                f"Expected features shape (batch_size, hidden_dim), got {features.shape}"
-            )
+            raise ValueError(f"Expected 2D tensor, got {features.shape}")
 
         if not features.is_contiguous():
             features = features.contiguous()
 
-        outputs: Dict[str, Any] = {"tasks": {}}
-        tasks_out = outputs["tasks"]
+        outputs: Dict[str, Any] = {
+            "tasks": {},
+        }
+
         total_loss: Optional[torch.Tensor] = None
 
         for task_name, head in self.task_heads.items():
@@ -132,24 +79,28 @@ class MultiTaskHead(nn.Module):
             head_output = head(features)
 
             if not isinstance(head_output, dict):
-                # assume logits-only output
                 logits = head_output
                 task_output = {"logits": logits}
             else:
                 task_output = head_output
+
                 if "logits" not in task_output:
                     raise RuntimeError(
-                        f"Task head '{task_name}' must produce logits or logits field"
+                        f"Task '{task_name}' must return logits"
                     )
+
                 logits = task_output["logits"]
 
-            tasks_out[task_name] = task_output
+            outputs["tasks"][task_name] = task_output
 
+            # -------------------------
+            # LOSS
+            # -------------------------
             if labels is not None and task_name in labels:
 
                 if task_name not in self.loss_fns:
                     raise RuntimeError(
-                        f"No loss function registered for task '{task_name}'"
+                        f"No loss function for task '{task_name}'"
                     )
 
                 loss_fn = self.loss_fns[task_name]
@@ -157,33 +108,33 @@ class MultiTaskHead(nn.Module):
 
                 loss = loss_fn(logits, task_labels)
 
+                weight = self.task_weights.get(task_name, 1.0)
+
+                weighted_loss = weight * loss
+
                 task_output["loss"] = loss
+                task_output["weighted_loss"] = weighted_loss
 
                 if total_loss is None:
-                    total_loss = loss
+                    total_loss = weighted_loss
                 else:
-                    total_loss += loss
+                    total_loss = total_loss + weighted_loss
 
         if total_loss is not None:
             outputs["total_loss"] = total_loss
 
         return outputs
 
+    # =====================================================
+    # PREDICT
+    # =====================================================
+
     @torch.no_grad()
     def predict(self, features: torch.Tensor) -> Dict[str, Any]:
-        """
-        Run inference for all tasks.
-
-        Args:
-            features:
-                Shared encoder embeddings.
-
-        Returns:
-            Task prediction dictionary.
-        """
 
         was_training = self.training
         self.eval()
+
         try:
             outputs = self.forward(features)
         finally:
@@ -194,19 +145,25 @@ class MultiTaskHead(nn.Module):
 
         for task_name, task_output in outputs["tasks"].items():
 
-            preds = task_output.get("predictions")
-            probs = task_output.get("probabilities")
-
             predictions[task_name] = {
-                "predictions": preds,
-                "probabilities": probs,
+                "predictions": task_output.get("predictions"),
+                "probabilities": task_output.get("probabilities"),
+                "confidence": task_output.get("confidence"),
             }
 
         return predictions
 
-    def get_tasks(self) -> Dict[str, nn.Module]:
-        """
-        Return registered task heads.
-        """
+    # =====================================================
+    # UTILS
+    # =====================================================
 
+    def get_tasks(self) -> Dict[str, nn.Module]:
         return dict(self.task_heads)
+
+    def set_task_weight(self, task_name: str, weight: float) -> None:
+        if task_name not in self.task_heads:
+            raise ValueError(f"Task '{task_name}' not found")
+        self.task_weights[task_name] = float(weight)
+
+    def get_task_weights(self) -> Dict[str, float]:
+        return dict(self.task_weights)

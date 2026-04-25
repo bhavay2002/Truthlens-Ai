@@ -1,20 +1,15 @@
 from __future__ import annotations
 
-from typing import Dict, Any, Optional, Literal
+from typing import Dict, Any, Optional, Literal, List
 import math
-
 from pydantic import BaseModel, field_validator, ConfigDict
 
-
-# =========================================================
-# GLOBAL CONSTANTS
-# =========================================================
 
 _ALLOWED_LEVELS = {"LOW", "MEDIUM", "HIGH"}
 
 
 # =========================================================
-# BASE SCORE UNIT (PER TASK)
+# BASE TASK SCORE (UPGRADED)
 # =========================================================
 
 class TaskScore(BaseModel):
@@ -23,28 +18,38 @@ class TaskScore(BaseModel):
     score: float
     confidence: Optional[float] = None
 
-    @field_validator("score", "confidence")
+    # 🔥 NEW
+    probabilities: Optional[List[float]] = None
+    entropy: Optional[float] = None
+
+    @field_validator("score", "confidence", "entropy")
     @classmethod
     def validate_numeric(cls, v):
         if v is None:
             return v
 
         if isinstance(v, bool):
-            raise TypeError("Must be numeric (not boolean)")
+            raise TypeError("Must be numeric")
 
         fv = float(v)
 
         if not math.isfinite(fv):
             raise ValueError("Must be finite")
 
-        if not (0.0 <= fv <= 1.0):
-            raise ValueError(f"Out of range [0,1]: {fv}")
-
         return fv
+
+    @field_validator("score", "confidence")
+    @classmethod
+    def validate_range(cls, v):
+        if v is None:
+            return v
+        if not (0.0 <= v <= 1.0):
+            raise ValueError("Must be in [0,1]")
+        return v
 
 
 # =========================================================
-# SCORE STRUCTURE (EXTENSIBLE)
+# SCORES (UPGRADED)
 # =========================================================
 
 class TruthLensScoreModel(BaseModel):
@@ -56,6 +61,9 @@ class TruthLensScoreModel(BaseModel):
     credibility_score: float
     final_score: float
 
+    # 🔥 NEW
+    uncertainty_summary: Optional[Dict[str, float]] = None
+
     @field_validator("tasks")
     @classmethod
     def validate_tasks(cls, v):
@@ -65,34 +73,24 @@ class TruthLensScoreModel(BaseModel):
 
 
 # =========================================================
-# RISK MODEL
+# RISK MODEL (UPGRADED)
 # =========================================================
+
+class RiskValue(BaseModel):
+    level: Literal["LOW", "MEDIUM", "HIGH"]
+    score: Optional[float] = None  # 🔥 continuous score
+
 
 class TruthLensRiskModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    manipulation_risk: Optional[Literal["LOW", "MEDIUM", "HIGH"]] = None
-    credibility_level: Optional[Literal["LOW", "MEDIUM", "HIGH"]] = None
-    overall_truthlens_rating: Optional[Literal["LOW", "MEDIUM", "HIGH"]] = None
-
-    @field_validator("*", mode="before")
-    @classmethod
-    def normalize_levels(cls, v):
-        if v is None:
-            return v
-
-        if not isinstance(v, str):
-            raise TypeError("Risk level must be string")
-
-        v = v.upper()
-        if v not in _ALLOWED_LEVELS:
-            raise ValueError(f"Invalid risk level: {v}")
-
-        return v
+    manipulation_risk: Optional[RiskValue] = None
+    credibility_level: Optional[RiskValue] = None
+    overall_truthlens_rating: Optional[RiskValue] = None
 
 
 # =========================================================
-# ATTRIBUTION STRUCTURE
+# EXPLAINABILITY (UPGRADED)
 # =========================================================
 
 class TokenAttribution(BaseModel):
@@ -103,13 +101,13 @@ class TokenAttribution(BaseModel):
 
 
 class ExplanationSection(BaseModel):
-    method: Literal[
-        "integrated_gradients",
-        "shap",
-        "attention"
-    ]
-    top_features: list[str]
-    attributions: list[TokenAttribution]
+    method: Literal["integrated_gradients", "shap", "attention"]
+
+    top_features: List[str]
+    attributions: List[TokenAttribution]
+
+    # 🔥 NEW
+    section_score: Optional[float] = None
 
 
 class ExplanationModel(BaseModel):
@@ -119,26 +117,53 @@ class ExplanationModel(BaseModel):
 
 
 # =========================================================
-# FINAL OUTPUT
+# METADATA (NEW 🔥)
+# =========================================================
+
+class SystemMetadata(BaseModel):
+    device: Optional[str] = None
+    latency_ms: Optional[float] = None
+    request_id: Optional[str] = None
+
+    calibration_method: Optional[str] = None
+    normalization_method: Optional[str] = None
+
+
+# =========================================================
+# FINAL OUTPUT (UPGRADED)
 # =========================================================
 
 class TruthLensAggregationOutputModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     schema_version: str
-    model_version: str
 
+    # 🔥 VERSIONING
+    model_version: str
+    aggregation_version: Optional[str] = None
+
+    # -------------------------
+    # CORE OUTPUTS
+    # -------------------------
     scores: TruthLensScoreModel
     raw_scores: Dict[str, float]
 
     risks: TruthLensRiskModel
     explanations: ExplanationModel
 
+    # -------------------------
+    # SYSTEM INFO
+    # -------------------------
+    metadata: Optional[SystemMetadata] = None
+
+    # -------------------------
+    # EXTENSIONS
+    # -------------------------
     analysis_modules: Dict[str, Any]
 
     @field_validator("analysis_modules")
     @classmethod
     def validate_modules(cls, v):
         if not isinstance(v, dict):
-            raise TypeError("Must be a dictionary")
+            raise TypeError("Must be dict")
         return v

@@ -1,64 +1,51 @@
-"""
-File Name: feature_schema_validator.py
-Module: Feature Engineering - Schema Validation
-Description:
-    Validates feature dictionaries produced by the TruthLens feature
-    pipeline against an expected schema. The validator ensures that:
-
-        • required features are present
-        • feature values are numeric
-        • feature keys match the defined schema
-        • missing or unexpected features are detected
-        • feature order consistency is maintained for ML pipelines
-
-    The validator supports both strict and permissive validation modes
-    and is intended to safeguard training and inference pipelines against
-    schema drift or corrupted feature outputs.
-
-Dependencies:
-    dataclasses
-    typing
-    logging
-    numbers
-
-Inputs:
-    Feature dictionaries (Dict[str, float])
-    Expected feature schema (List[str])
-
-Outputs:
-    Validated feature dictionaries
-"""
-
 from __future__ import annotations
 
 import logging
 import numbers
+import hashlib
 from dataclasses import dataclass, field
-from typing import Dict, List, Set
+from typing import Dict, List, Set, Tuple
+
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
 FeatureVector = Dict[str, float]
+EPS = 1e-8
 
 
 @dataclass
 class FeatureSchemaValidator:
     """
-    Validates feature vectors against a defined schema.
+    Production-grade schema validator for feature vectors.
     """
 
     expected_features: List[str]
+
     strict: bool = True
     allow_missing: bool = False
     allow_extra: bool = False
 
+    #  NEW
+    fill_value: float = 0.0
+    return_numpy: bool = False
+
     _expected_set: Set[str] = field(init=False)
+    _feature_index: Dict[str, int] = field(init=False)
+
+    # -----------------------------------------------------
 
     def __post_init__(self) -> None:
+
         if not self.expected_features:
             raise ValueError("Expected feature schema cannot be empty")
 
         self._expected_set = set(self.expected_features)
+
+        #  FAST INDEX
+        self._feature_index = {
+            f: i for i, f in enumerate(self.expected_features)
+        }
 
         logger.info(
             "FeatureSchemaValidator initialized | features=%d strict=%s",
@@ -66,18 +53,19 @@ class FeatureSchemaValidator:
             self.strict,
         )
 
+    # =====================================================
+    # SINGLE VALIDATION
+    # =====================================================
+
     def validate(self, features: FeatureVector) -> FeatureVector:
-        """
-        Validate a single feature dictionary.
-        """
 
         if not isinstance(features, dict):
             raise TypeError("Features must be a dictionary")
 
-        feature_keys = set(features.keys())
+        keys = set(features.keys())
 
-        missing = self._expected_set - feature_keys
-        extra = feature_keys - self._expected_set
+        missing = self._expected_set - keys
+        extra = keys - self._expected_set
 
         if missing and not self.allow_missing:
             raise ValueError(f"Missing required features: {sorted(missing)}")
@@ -89,22 +77,50 @@ class FeatureSchemaValidator:
 
         for key in self.expected_features:
 
-            value = features.get(key, 0.0)
+            value = features.get(key, self.fill_value)
 
             if not isinstance(value, numbers.Number):
                 raise TypeError(f"Feature '{key}' must be numeric")
 
-            validated[key] = float(value)
+            value = float(value)
+
+            #  FIX: NaN / Inf handling
+            if not np.isfinite(value):
+                value = self.fill_value
+
+            validated[key] = value
 
         return validated
+
+    # =====================================================
+    # FAST VECTOR CONVERSION
+    # =====================================================
+
+    def enforce_order(self, features: FeatureVector):
+
+        vec = np.full(len(self.expected_features), self.fill_value, dtype=np.float32)
+
+        for key, value in features.items():
+
+            idx = self._feature_index.get(key)
+            if idx is None:
+                continue
+
+            if isinstance(value, numbers.Number):
+                v = float(value)
+                if np.isfinite(v):
+                    vec[idx] = v
+
+        return vec if self.return_numpy else vec.tolist()
+
+    # =====================================================
+    # BATCH VALIDATION
+    # =====================================================
 
     def validate_batch(
         self,
         feature_list: List[FeatureVector],
     ) -> List[FeatureVector]:
-        """
-        Validate multiple feature vectors.
-        """
 
         if not feature_list:
             raise ValueError("Feature list cannot be empty")
@@ -116,45 +132,75 @@ class FeatureSchemaValidator:
             try:
                 validated.append(self.validate(fv))
 
-            except Exception:  # noqa: BLE001
-                logger.error("Feature validation failed at index %d", idx)
+            except Exception as e:
+                logger.error("Validation failed at index %d: %s", idx, e)
 
                 if self.strict:
                     raise
 
                 validated.append({})
 
-        logger.info(
-            "Batch feature validation completed | samples=%d",
-            len(validated),
-        )
-
         return validated
 
-    def enforce_order(self, features: FeatureVector) -> List[float]:
-        """
-        Convert validated feature dictionary into ordered feature vector.
-        """
-
-        validated = self.validate(features)
-
-        return [validated[key] for key in self.expected_features]
+    # =====================================================
+    # BATCH VECTOR (FAST)
+    # =====================================================
 
     def enforce_order_batch(
         self,
         feature_list: List[FeatureVector],
-    ) -> List[List[float]]:
+    ):
+
+        n = len(feature_list)
+        d = len(self.expected_features)
+
+        matrix = np.full((n, d), self.fill_value, dtype=np.float32)
+
+        for i, features in enumerate(feature_list):
+
+            for key, value in features.items():
+
+                idx = self._feature_index.get(key)
+                if idx is None:
+                    continue
+
+                if isinstance(value, numbers.Number):
+                    v = float(value)
+                    if np.isfinite(v):
+                        matrix[i, idx] = v
+
+        return matrix if self.return_numpy else matrix.tolist()
+
+    # =====================================================
+    # DIAGNOSTICS
+    # =====================================================
+
+    def diff(self, features: FeatureVector) -> Tuple[List[str], List[str]]:
         """
-        Convert batch of feature dictionaries into ordered vectors.
+        Return (missing, extra)
         """
 
-        return [self.enforce_order(f) for f in feature_list]
+        keys = set(features.keys())
+
+        missing = list(self._expected_set - keys)
+        extra = list(keys - self._expected_set)
+
+        return missing, extra
+
+    # =====================================================
+    # SCHEMA METADATA
+    # =====================================================
 
     def schema_summary(self) -> Dict[str, int]:
-        """
-        Return metadata about the feature schema.
-        """
-
         return {
             "num_features": len(self.expected_features),
         }
+
+    #  NEW: schema hash (CRITICAL)
+    def schema_hash(self) -> str:
+        """
+        Stable hash for schema consistency (train vs inference)
+        """
+
+        joined = "|".join(self.expected_features)
+        return hashlib.md5(joined.encode()).hexdigest()

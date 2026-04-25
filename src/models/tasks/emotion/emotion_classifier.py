@@ -1,36 +1,3 @@
-"""
-File Name: emotion_classifier.py
-Module: models.tasks.emotion
-Description:
-    Implements a multi-label emotion classification model for the TruthLens AI
-    system. The classifier predicts multiple emotions simultaneously from
-    text inputs using a transformer encoder backbone (e.g., RoBERTa, BERT)
-    followed by a multi-label classification head.
-
-    The dataset is assumed to contain 20 emotion labels:
-        emotion_0 ... emotion_19
-
-    The model outputs independent probabilities for each emotion using
-    sigmoid activation and supports BCEWithLogitsLoss for training.
-
-Author: TruthLens Engineering
-Date: 2026-04-02
-Dependencies:
-    logging
-    typing
-    dataclasses
-    torch
-    torch.nn
-    models.encoder.transformer_encoder
-    models.heads.multilabel_head
-Inputs:
-    input_ids: Tensor (batch_size, sequence_length)
-    attention_mask: Tensor (batch_size, sequence_length)
-    labels (optional): Tensor (batch_size, 20)
-Outputs:
-    Dictionary containing logits, probabilities, predictions, and optional loss
-"""
-
 from __future__ import annotations
 
 import logging
@@ -51,16 +18,8 @@ from src.features.emotion.emotion_schema import EMOTION_LABELS
 logger = logging.getLogger(__name__)
 
 
-# ------------------------------------------------------------
-# Configuration
-# ------------------------------------------------------------
-
 @dataclass
 class EmotionClassifierConfig:
-    """
-    Configuration for EmotionClassifier.
-    """
-
     model_name: str = "roberta-base"
     pooling: str = "cls"
     dropout: float = 0.1
@@ -68,19 +27,7 @@ class EmotionClassifierConfig:
     threshold: float = 0.5
 
 
-# ------------------------------------------------------------
-# Emotion Classifier
-# ------------------------------------------------------------
-
 class EmotionClassifier(BaseModel):
-    """
-    Multi-label emotion classifier.
-
-    Dataset labels:
-        emotion0 ... emotion19
-
-    Emotion names are mapped from EMOTION_LABELS.
-    """
 
     NUM_EMOTIONS = 20
 
@@ -108,17 +55,18 @@ class EmotionClassifier(BaseModel):
             self.encoder.gradient_checkpointing_enable()
 
         # ------------------------------------------------
-        # Classification head
+        # Head
         # ------------------------------------------------
 
-        head_config = MultiLabelHeadConfig(
-            input_dim=self.encoder.hidden_size,
-            num_labels=self.NUM_EMOTIONS,
-            dropout=config.dropout,
-            threshold=config.threshold,
+        self.classifier_head = MultiLabelHead(
+            MultiLabelHeadConfig(
+                input_dim=self.encoder.hidden_size,
+                num_labels=self.NUM_EMOTIONS,
+                dropout=config.dropout,
+                threshold=config.threshold,
+                return_features=False,
+            )
         )
-
-        self.classifier_head = MultiLabelHead(head_config)
 
         logger.info(
             "EmotionClassifier initialized | model=%s | num_emotions=%d",
@@ -127,7 +75,7 @@ class EmotionClassifier(BaseModel):
         )
 
     # ------------------------------------------------------------
-    # Forward pass
+    # FORWARD
     # ------------------------------------------------------------
 
     def forward(
@@ -135,7 +83,7 @@ class EmotionClassifier(BaseModel):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         labels: Optional[torch.Tensor] = None,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> Dict[str, Any]:
 
         if input_ids is None or attention_mask is None:
             raise ValueError("input_ids and attention_mask must be provided")
@@ -155,15 +103,23 @@ class EmotionClassifier(BaseModel):
         if not pooled_output.is_contiguous():
             pooled_output = pooled_output.contiguous()
 
-        outputs = self.classifier_head(
+        head_outputs = self.classifier_head(
             pooled_output,
             labels=labels,
         )
 
-        return outputs
+        return {
+            "logits": head_outputs["logits"],
+            "probabilities": head_outputs["probabilities"],
+            "predictions": head_outputs["predictions"],
+            "confidence": head_outputs["confidence"],
+            "entropy": head_outputs["entropy"],
+            "loss": head_outputs.get("loss"),
+            "embeddings": pooled_output,
+        }
 
     # ------------------------------------------------------------
-    # Inference
+    # PREDICT
     # ------------------------------------------------------------
 
     @torch.inference_mode()
@@ -176,36 +132,34 @@ class EmotionClassifier(BaseModel):
         was_training = self.training
         self.eval()
 
-        outputs = self.forward(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-        )
-
-        if was_training:
-            self.train()
+        try:
+            outputs = self.forward(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            )
+        finally:
+            if was_training:
+                self.train()
 
         return {
             "predictions": outputs["predictions"],
             "probabilities": outputs["probabilities"],
+            "confidence": outputs["confidence"],
         }
 
     # ------------------------------------------------------------
-    # Label Mapping
+    # LABELS
     # ------------------------------------------------------------
 
     def get_output_labels(self) -> Dict[int, str]:
-        """
-        Map numeric output indices to emotion names.
-        """
-
         return {i: EMOTION_LABELS[i] for i in range(self.NUM_EMOTIONS)}
 
     def get_training_labels(self) -> Dict[int, str]:
-        """
-        Return dataset label names (emotion0…emotion19).
-        """
-
         return {i: f"emotion{i}" for i in range(self.NUM_EMOTIONS)}
+
+    # ------------------------------------------------------------
+    # FACTORIES
+    # ------------------------------------------------------------
 
     @classmethod
     def from_task_config(
@@ -217,29 +171,7 @@ class EmotionClassifier(BaseModel):
         device: Optional[str] = None,
         threshold: float = 0.5,
     ) -> "EmotionClassifier":
-        """
-        Instantiate an ``EmotionClassifier`` from central config dataclasses.
 
-        Parameters
-        ----------
-        task_config:
-            Task-level descriptor from
-            ``MultiTaskModelConfig.tasks["emotion"]``.
-        head_config:
-            Head-level dimensions/dropout from ``model_config.HeadConfig``.
-        model_name:
-            HuggingFace model identifier.
-        pooling:
-            Encoder pooling strategy (``"cls"`` or ``"mean"``).
-        device:
-            Target device string or ``None`` for auto-detection.
-        threshold:
-            Sigmoid threshold for multi-label prediction (default ``0.5``).
-
-        Returns
-        -------
-        EmotionClassifier
-        """
         cfg = EmotionClassifierConfig(
             model_name=model_name,
             pooling=pooling,
@@ -247,11 +179,7 @@ class EmotionClassifier(BaseModel):
             device=device,
             threshold=threshold,
         )
-        logger.info(
-            "EmotionClassifier.from_task_config | task=%s num_labels=%d",
-            task_config.name,
-            task_config.num_labels,
-        )
+
         return cls(cfg)
 
     @classmethod
@@ -259,9 +187,11 @@ class EmotionClassifier(BaseModel):
         cls,
         model_config: MultiTaskModelConfig,
     ) -> "EmotionClassifier":
+
         task_cfg = model_config.tasks.get("emotion")
+
         if task_cfg is None:
-            raise KeyError("Task 'emotion' not found in MultiTaskModelConfig")
+            raise KeyError("Task 'emotion' not found")
 
         return cls.from_task_config(
             task_config=task_cfg,
@@ -273,8 +203,14 @@ class EmotionClassifier(BaseModel):
             model_name=model_config.encoder.model_name,
             pooling=model_config.encoder.pooling,
             device=model_config.encoder.device,
-            threshold=float(model_config.metadata.get("emotion_threshold", 0.5)),
+            threshold=float(
+                model_config.metadata.get("emotion_threshold", 0.5)
+            ),
         )
+
+    # ------------------------------------------------------------
+    # TRAINER
+    # ------------------------------------------------------------
 
     def create_trainer(
         self,
@@ -282,17 +218,17 @@ class EmotionClassifier(BaseModel):
         scheduler: Optional[Any] = None,
         config: Optional[TrainerConfig] = None,
     ) -> Trainer:
-        """
-        Build a TruthLensTrainer for this model.
-        """
+
         from dataclasses import replace as _replace
 
         effective_config = config if config is not None else TrainerConfig()
+
         effective_config = _replace(
             effective_config,
             architecture=type(self).__name__,
             model_name=self.config.model_name,
         )
+
         return Trainer(
             model=self,
             optimizer=optimizer,

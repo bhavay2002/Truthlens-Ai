@@ -1,27 +1,63 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Tuple
+from typing import Dict, Tuple, List, Iterable, Any
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Schema Registry (IMMUTABLE + SAFE)
-# ---------------------------------------------------------------------------
+# =========================================================
+# REGISTRY (LOCKABLE + SAFE)
+# =========================================================
 
 SCHEMA_REGISTRY: Dict[str, Tuple[str, ...]] = {}
+_SCHEMA_LOCKED: bool = False
 
+
+# =========================================================
+# REGISTRATION
+# =========================================================
 
 def register_schema(name: str, keys: List[str]) -> None:
+    global _SCHEMA_LOCKED
+
+    if _SCHEMA_LOCKED:
+        raise RuntimeError("Schema registry is locked")
+
+    if not name or not isinstance(name, str):
+        raise ValueError("Invalid schema name")
+
+    if not keys:
+        raise ValueError(f"Schema '{name}' cannot be empty")
+
+    if len(keys) != len(set(keys)):
+        raise ValueError(f"Duplicate keys in schema '{name}'")
+
+    # enforce deterministic ordering
+    ordered = tuple(keys)
+
     if name in SCHEMA_REGISTRY:
         logger.warning("Overwriting schema: %s", name)
 
-    # 🔥 enforce immutability
-    SCHEMA_REGISTRY[name] = tuple(keys)
+    SCHEMA_REGISTRY[name] = ordered
 
+
+def register_many(schemas: Dict[str, List[str]]) -> None:
+    for name, keys in schemas.items():
+        register_schema(name, keys)
+
+
+def lock_schema_registry() -> None:
+    global _SCHEMA_LOCKED
+    _SCHEMA_LOCKED = True
+    logger.info("Schema registry locked")
+
+
+# =========================================================
+# ACCESS
+# =========================================================
 
 def get_schema(name: str) -> Tuple[str, ...]:
     if name not in SCHEMA_REGISTRY:
@@ -29,169 +65,13 @@ def get_schema(name: str) -> Tuple[str, ...]:
     return SCHEMA_REGISTRY[name]
 
 
-# ---------------------------------------------------------------------------
-# FULL SCHEMA DEFINITIONS (🔥 COMPLETE)
-# ---------------------------------------------------------------------------
-
-ARGUMENT_MINING_KEYS = [
-    "argument_claim_ratio",
-    "argument_premise_ratio",
-    "argument_support_ratio",
-    "argument_contrast_ratio",
-    "argument_rebuttal_ratio",
-    "argument_verb_density",
-    "argument_clause_density",
-    "argument_complexity",
-]
-
-CONTEXT_OMISSION_KEYS = [
-    "context_vague_reference_ratio",
-    "context_attribution_ratio",
-    "context_evidence_ratio",
-    "context_uncertainty_ratio",
-    "context_quote_ratio",
-    "context_entity_ratio",
-    "context_entity_type_diversity",
-    "context_grounding_score",
-]
-
-DISCOURSE_COHERENCE_KEYS = [
-    "sentence_coherence",
-    "topic_drift",
-    "narrative_continuity",
-    "discourse_transition_ratio",
-]
-
-EMOTION_TARGET_KEYS = [
-    "emotion_target_diversity",
-    "emotion_target_focus",
-    "emotion_expression_ratio",
-    "emotion_type_diversity",
-    "dominant_emotion_strength",
-]
-
-RHETORICAL_DEVICE_KEYS = [
-    "rhetoric_exaggeration_score",
-    "rhetoric_loaded_language_score",
-    "rhetoric_emotional_appeal_score",
-    "rhetoric_fear_appeal_score",
-    "rhetoric_intensifier_ratio",
-    "rhetoric_scapegoating_score",
-    "rhetoric_false_dilemma_score",
-    "rhetoric_punctuation_score",
-]
-
-FRAMING_KEYS = [
-    "frame_conflict_score",
-    "frame_economic_score",
-    "frame_moral_score",
-    "frame_human_interest_score",
-    "frame_security_score",
-    "frame_dominance_score",
-    "frame_diversity_score",
-]
-
-INFORMATION_DENSITY_KEYS = [
-    "factual_density",
-    "opinion_density",
-    "claim_density",
-    "rhetorical_density",
-    "emotion_density",
-    "modal_density",
-    "rhetorical_punctuation_density",
-    "information_emotion_ratio",
-    "information_emotion_ratio_normalized",
-]
-
-IDEOLOGICAL_LANGUAGE_KEYS = [
-    "liberty_language_ratio",
-    "equality_language_ratio",
-    "tradition_language_ratio",
-    "anti_elite_language_ratio",
-    "liberty_vs_equality_balance",
-    "ideology_phrase_density",
-]
-
-SOURCE_ATTRIBUTION_KEYS = [
-    "expert_attribution_ratio",
-    "anonymous_source_ratio",
-    "credibility_indicator_ratio",
-    "attribution_verb_ratio",
-    "quotation_ratio",
-    "named_source_ratio",
-    "source_credibility_balance",
-]
-
-PROPAGANDA_PATTERN_KEYS = [
-    "fear_propaganda_score",
-    "scapegoating_score",
-    "polarization_score",
-    "emotional_amplification_score",
-    "narrative_imbalance_score",
-]
-
-INFORMATION_OMISSION_KEYS = [
-    "missing_counterargument_score",
-    "one_sided_framing_score",
-    "incomplete_evidence_score",
-    "claim_evidence_imbalance",
-]
-
-NARRATIVE_CONFLICT_KEYS = [
-    "conflict_verb_ratio",
-    "opposition_marker_ratio",
-    "polarization_ratio",
-    "conflict_exclamation_ratio",
-    "conflict_question_ratio",
-]
-
-NARRATIVE_PROPAGATION_KEYS = [
-    "violent_conflict_ratio",
-    "political_conflict_ratio",
-    "discursive_conflict_ratio",
-    "institutional_conflict_ratio",
-    "coercion_conflict_ratio",
-    "opposition_marker_ratio",
-    "polarization_ratio",
-    "conflict_phrase_ratio",
-    "hero_villain_conflict_score",
-    "villain_victim_harm_score",
-    "hero_victim_protection_score",
-    "conflict_exclamation_ratio",
-    "conflict_question_ratio",
-]
-
-NARRATIVE_TEMPORAL_KEYS = [
-    "past_framing_ratio",
-    "crisis_escalation_ratio",
-    "urgency_language_ratio",
-    "past_tense_ratio",
-    "present_tense_ratio",
-    "future_tense_ratio",
-    "temporal_contrast_score",
-]
+def list_schemas() -> List[str]:
+    return list(SCHEMA_REGISTRY.keys())
 
 
-# 🔥 REGISTER ALL
-register_schema("argument_mining", ARGUMENT_MINING_KEYS)
-register_schema("context_omission", CONTEXT_OMISSION_KEYS)
-register_schema("discourse_coherence", DISCOURSE_COHERENCE_KEYS)
-register_schema("emotion_target", EMOTION_TARGET_KEYS)
-register_schema("rhetorical", RHETORICAL_DEVICE_KEYS)
-register_schema("framing", FRAMING_KEYS)
-register_schema("information_density", INFORMATION_DENSITY_KEYS)
-register_schema("ideology", IDEOLOGICAL_LANGUAGE_KEYS)
-register_schema("source", SOURCE_ATTRIBUTION_KEYS)
-register_schema("propaganda", PROPAGANDA_PATTERN_KEYS)
-register_schema("information_omission", INFORMATION_OMISSION_KEYS)
-register_schema("narrative_conflict", NARRATIVE_CONFLICT_KEYS)
-register_schema("narrative_propagation", NARRATIVE_PROPAGATION_KEYS)
-register_schema("narrative_temporal", NARRATIVE_TEMPORAL_KEYS)
-
-
-# ---------------------------------------------------------------------------
-# Vectorization (STRONGER)
-# ---------------------------------------------------------------------------
+# =========================================================
+# VECTOR CREATION (OPTIMIZED)
+# =========================================================
 
 def make_vector(
     features: Dict[str, float],
@@ -200,51 +80,107 @@ def make_vector(
     strict: bool = False,
     safe: bool = True,
     clip: Tuple[float, float] | None = (0.0, 1.0),
-) -> np.ndarray:
+    return_metadata: bool = False,
+) -> Any:
 
     if features is None:
         raise ValueError("features cannot be None")
 
-    values = []
+    # -----------------------------------------------------
+    # FAST PATH (NUMPY ARRAY BUILD)
+    # -----------------------------------------------------
 
-    for k in keys:
-        v = features.get(k, 0.0)
+    values = np.empty(len(keys), dtype=np.float32)
+    missing_keys: List[str] = []
 
+    for i, k in enumerate(keys):
+
+        if k not in features:
+            if strict:
+                raise ValueError(f"Missing required key: {k}")
+            missing_keys.append(k)
+            v = 0.0
+        else:
+            v = features[k]
+
+        # -------------------------
+        # SAFE MODE
+        # -------------------------
         if safe:
             if not isinstance(v, (int, float)):
+                logger.debug("Non-numeric value for %s → 0.0", k)
                 v = 0.0
-            elif np.isnan(v) or np.isinf(v):
+            elif not np.isfinite(v):
+                logger.debug("Invalid value for %s → 0.0", k)
                 v = 0.0
 
         v = float(v)
 
-        # 🔥 optional clipping
+        # -------------------------
+        # CLIPPING
+        # -------------------------
         if clip is not None:
             v = float(np.clip(v, clip[0], clip[1]))
 
-        values.append(v)
+        values[i] = v
 
-    return np.asarray(values, dtype=np.float32)
+    if return_metadata:
+        return {
+            "vector": values,
+            "missing_keys": missing_keys,
+            "dim": int(values.shape[0]),
+        }
+
+    return values
 
 
-# ---------------------------------------------------------------------------
-# Schema-based vectorization
-# ---------------------------------------------------------------------------
+# =========================================================
+# SCHEMA-BASED VECTOR
+# =========================================================
 
 def make_vector_from_schema(
     features: Dict[str, float],
     schema_name: str,
     *,
     strict: bool = False,
-) -> np.ndarray:
-
+    **kwargs,
+):
     keys = get_schema(schema_name)
-    return make_vector(features, keys, strict=strict)
+    return make_vector(features, keys, strict=strict, **kwargs)
 
 
-# ---------------------------------------------------------------------------
-# Validation (STRICT MODE ADDED)
-# ---------------------------------------------------------------------------
+# =========================================================
+# MULTI-SCHEMA MERGE (NEW 🔥)
+# =========================================================
+
+def build_combined_schema(
+    names: Iterable[str],
+    *,
+    deduplicate: bool = True,
+) -> Tuple[str, ...]:
+
+    combined: List[str] = []
+
+    for name in names:
+        keys = get_schema(name)
+        combined.extend(keys)
+
+    if deduplicate:
+        # preserve order while removing duplicates
+        seen = set()
+        ordered = []
+        for k in combined:
+            if k not in seen:
+                seen.add(k)
+                ordered.append(k)
+        return tuple(ordered)
+
+    return tuple(combined)
+
+
+# =========================================================
+# VALIDATION
+# =========================================================
 
 def validate_features(
     features: Dict[str, float],
@@ -253,13 +189,18 @@ def validate_features(
     strict: bool = False,
 ) -> bool:
 
+    if not isinstance(features, dict):
+        raise TypeError("features must be dict")
+
     ok = True
 
     for k in schema_keys:
+
         if k not in features:
             if strict:
                 logger.error("Missing key: %s", k)
                 return False
+            ok = False
             continue
 
         v = features[k]
@@ -268,22 +209,49 @@ def validate_features(
             logger.warning("Non-numeric value for %s", k)
             ok = False
 
-        if isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
+        if isinstance(v, float) and not np.isfinite(v):
             logger.warning("Invalid value for %s", k)
             ok = False
 
     return ok
 
 
-# ---------------------------------------------------------------------------
-# Metadata
-# ---------------------------------------------------------------------------
+# =========================================================
+# SCHEMA INTEGRITY CHECK (NEW 🔥)
+# =========================================================
 
-SCHEMA_VERSION = "2.0.0"
+def validate_schema_integrity() -> None:
+    """
+    Ensures no key collisions across schemas.
+    Critical for multi-task models.
+    """
+
+    all_keys = {}
+    duplicates = {}
+
+    for name, keys in SCHEMA_REGISTRY.items():
+        for k in keys:
+            if k in all_keys:
+                duplicates.setdefault(k, []).append(name)
+            else:
+                all_keys[k] = name
+
+    if duplicates:
+        logger.warning("Schema key collisions detected: %s", duplicates)
+    else:
+        logger.info("Schema integrity check passed")
+
+
+# =========================================================
+# METADATA
+# =========================================================
+
+SCHEMA_VERSION = "4.0.0"
 
 
 def get_schema_metadata() -> Dict[str, str]:
     return {
         "version": SCHEMA_VERSION,
         "num_schemas": str(len(SCHEMA_REGISTRY)),
+        "locked": str(_SCHEMA_LOCKED),
     }

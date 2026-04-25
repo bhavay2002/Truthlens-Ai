@@ -1,3 +1,5 @@
+# src/features/emotion/emotion_target_features.py
+
 from __future__ import annotations
 
 import logging
@@ -5,36 +7,51 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Any
 
+import numpy as np
+
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
-from src.features.emotion.emotion_schema import EMOTION_TERMS
+from src.features.emotion.emotion_schema import WORD_TO_EMOTION
 
 logger = logging.getLogger(__name__)
 
-WORD_TO_EMOTION: Dict[str, str] = {}
-for emotion, words in EMOTION_TERMS.items():
-    for word in words:
-        WORD_TO_EMOTION[word.replace("_", " ").lower()] = emotion
+EPS = 1e-8
+MAX_CLIP = 1.0
 
-EMOTION_VOCAB = set(WORD_TO_EMOTION.keys())
+
+# -----------------------------------------------------
+# Target categories
+# -----------------------------------------------------
 
 FIRST_PERSON = {"i", "me", "my", "mine", "we", "our", "us"}
 SECOND_PERSON = {"you", "your", "yours"}
 THIRD_PERSON = {"he", "she", "they", "them", "their", "his", "her", "its"}
 
 
+# -----------------------------------------------------
+# Tokenizer
+# -----------------------------------------------------
+
 def _simple_tokenize(text: str) -> List[str]:
     return re.findall(r"\b\w+\b", text.lower())
 
 
+# -----------------------------------------------------
+# Feature extractor
+# -----------------------------------------------------
+
 @dataclass
 @register_feature
 class EmotionTargetFeatures(BaseFeature):
+
     name: str = "emotion_target_features"
-    description: str = "Emotion direction and target detection"
+    group: str = "emotion"
+    description: str = "Emotion target attribution (self/other/entity/group)"
 
     _nlp: Any = field(default=None, init=False, repr=False)
     _spacy_available: bool = field(default=False, init=False, repr=False)
+
+    # -------------------------------------------------
 
     def initialize(self) -> None:
         if self._nlp is not None or self._spacy_available:
@@ -43,114 +60,170 @@ class EmotionTargetFeatures(BaseFeature):
             import spacy
             self._nlp = spacy.load("en_core_web_sm")
             self._spacy_available = True
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("spaCy unavailable; using fallback heuristics: %s", exc)
+        except Exception as exc:
+            logger.warning("spaCy unavailable; fallback mode: %s", exc)
             self._nlp = None
             self._spacy_available = False
 
-    def _extract_spacy(self, text: str) -> Dict[str, float]:
-        doc = self._nlp(text)
-        doc_len = max(len(doc), 1)
+    # -------------------------------------------------
+    # spaCy-based (IMPROVED)
+    # -------------------------------------------------
 
-        self_targets = 0
-        other_targets = 0
-        entity_targets = 0
-        group_targets = 0
-        emotion_count = 0
-        active_targets = set()
+    def _extract_spacy(self, text: str) -> Dict[str, float]:
+
+        doc = self._nlp(text)
+
+        counts = {
+            "self": 0.0,
+            "other": 0.0,
+            "entity": 0.0,
+            "group": 0.0,
+        }
+
+        total_emotions = 0
 
         for token in doc:
             tok = token.text.lower()
-            if tok not in EMOTION_VOCAB:
+
+            if tok not in WORD_TO_EMOTION:
                 continue
 
-            emotion_count += 1
+            total_emotions += 1
 
-            neighborhood = {token}
-            neighborhood.update(token.children)
+            # 🔥 dependency-aware neighbors
+            related = list(token.children)
             if token.head is not None:
-                neighborhood.add(token.head)
+                related.append(token.head)
 
-            for neighbor in neighborhood:
-                t = neighbor.text.lower()
+            for r in related:
+                t = r.text.lower()
+
                 if t in FIRST_PERSON:
-                    self_targets += 1
-                    active_targets.add("self")
+                    counts["self"] += 1.0
+
                 elif t in SECOND_PERSON or t in THIRD_PERSON:
-                    other_targets += 1
-                    active_targets.add("other")
+                    counts["other"] += 1.0
 
-                if getattr(neighbor, "ent_type_", ""):
-                    entity_targets += 1
-                    active_targets.add("entity")
+                # entity (PERSON/ORG)
+                if r.ent_type_ in {"PERSON", "ORG"}:
+                    counts["entity"] += 1.0
 
-                if getattr(neighbor, "tag_", "") == "NNS":
-                    group_targets += 1
-                    active_targets.add("group")
+                # group (plural + noun chunk)
+                if r.pos_ == "NOUN" and r.tag_ == "NNS":
+                    counts["group"] += 0.5  # softer weight
 
-        denom = max(emotion_count, 1)
-        return {
-            "emotion_target_self_ratio": self_targets / denom,
-            "emotion_target_other_ratio": other_targets / denom,
-            "emotion_target_entity_ratio": entity_targets / denom,
-            "emotion_target_group_ratio": group_targets / denom,
-            "emotion_target_density": emotion_count / doc_len,
-            "emotion_target_diversity": len(active_targets) / 4.0,
+        total_emotions = max(total_emotions, 1)
+
+        # -------------------------
+        # Normalize
+        # -------------------------
+
+        ratios = {
+            k: v / total_emotions for k, v in counts.items()
         }
+
+        values = np.array(list(ratios.values()), dtype=np.float32)
+
+        # -------------------------
+        # Density (aligned)
+        # -------------------------
+
+        density = total_emotions / max(len(doc), 1)
+
+        # -------------------------
+        # Entropy (NEW)
+        # -------------------------
+
+        if values.sum() > 0:
+            probs = values / (values.sum() + EPS)
+            entropy_raw = -np.sum(probs * np.log(probs + EPS))
+            entropy = entropy_raw / (np.log(len(values)) + EPS)
+        else:
+            entropy = 0.0
+
+        return {
+            "emotion_target_self_ratio": self._safe(ratios["self"]),
+            "emotion_target_other_ratio": self._safe(ratios["other"]),
+            "emotion_target_entity_ratio": self._safe(ratios["entity"]),
+            "emotion_target_group_ratio": self._safe(ratios["group"]),
+
+            "emotion_target_density": self._safe(density),
+            "emotion_target_entropy": self._safe(entropy),
+        }
+
+    # -------------------------------------------------
+    # Fallback (IMPROVED)
+    # -------------------------------------------------
 
     def _extract_fallback(self, text: str) -> Dict[str, float]:
-        tokens = _simple_tokenize(text)
-        if not tokens:
-            return {
-                "emotion_target_self_ratio": 0.0,
-                "emotion_target_other_ratio": 0.0,
-                "emotion_target_entity_ratio": 0.0,
-                "emotion_target_group_ratio": 0.0,
-                "emotion_target_density": 0.0,
-                "emotion_target_diversity": 0.0,
-            }
 
-        emotion_positions = [i for i, token in enumerate(tokens) if token in EMOTION_VOCAB]
-        self_targets = 0
-        other_targets = 0
+        tokens = _simple_tokenize(text)
+
+        if not tokens:
+            return self._empty()
+
+        counts = {"self": 0, "other": 0}
+        emotion_positions = [
+            i for i, t in enumerate(tokens) if t in WORD_TO_EMOTION
+        ]
 
         for pos in emotion_positions:
-            window = tokens[max(0, pos - 3) : pos + 4]
+            window = tokens[max(0, pos - 3): pos + 4]
+
             for w in window:
                 if w in FIRST_PERSON:
-                    self_targets += 1
+                    counts["self"] += 1
                 elif w in SECOND_PERSON or w in THIRD_PERSON:
-                    other_targets += 1
+                    counts["other"] += 1
 
         total_emotions = max(len(emotion_positions), 1)
-        density = len(emotion_positions) / max(len(tokens), 1)
-        diversity = 0.0
-        if self_targets > 0:
-            diversity += 1
-        if other_targets > 0:
-            diversity += 1
 
-        return {
-            "emotion_target_self_ratio": self_targets / total_emotions,
-            "emotion_target_other_ratio": other_targets / total_emotions,
-            "emotion_target_entity_ratio": 0.0,
-            "emotion_target_group_ratio": 0.0,
-            "emotion_target_density": density,
-            "emotion_target_diversity": diversity / 4.0,
+        ratios = {
+            "self": counts["self"] / total_emotions,
+            "other": counts["other"] / total_emotions,
         }
 
+        density = len(emotion_positions) / max(len(tokens), 1)
+
+        return {
+            "emotion_target_self_ratio": self._safe(ratios["self"]),
+            "emotion_target_other_ratio": self._safe(ratios["other"]),
+            "emotion_target_entity_ratio": 0.0,
+            "emotion_target_group_ratio": 0.0,
+            "emotion_target_density": self._safe(density),
+            "emotion_target_entropy": 0.0,
+        }
+
+    # -------------------------------------------------
+
     def extract(self, context: FeatureContext) -> Dict[str, float]:
+
         if not isinstance(context.text, str):
             raise TypeError("FeatureContext.text must be a string")
+
         if not context.text.strip():
-            return {}
+            return self._empty()
 
         self.initialize()
-        features = self._extract_spacy(context.text) if self._spacy_available else self._extract_fallback(context.text)
 
-        logger.debug(
-            "Emotion target features extracted | self=%.3f other=%.3f",
-            features["emotion_target_self_ratio"],
-            features["emotion_target_other_ratio"],
-        )
-        return features
+        if self._spacy_available:
+            return self._extract_spacy(context.text)
+
+        return self._extract_fallback(context.text)
+
+    # -------------------------------------------------
+
+    def _empty(self) -> Dict[str, float]:
+        return {
+            "emotion_target_self_ratio": 0.0,
+            "emotion_target_other_ratio": 0.0,
+            "emotion_target_entity_ratio": 0.0,
+            "emotion_target_group_ratio": 0.0,
+            "emotion_target_density": 0.0,
+            "emotion_target_entropy": 0.0,
+        }
+
+    def _safe(self, v: float) -> float:
+        if not np.isfinite(v):
+            return 0.0
+        return float(np.clip(v, 0.0, MAX_CLIP))

@@ -1,423 +1,224 @@
-"""
-File Name: model_wrapper.py
-Module: models.inference
-Description:
-    Provides a standardized wrapper around TruthLens models to simplify
-    inference, evaluation, and deployment. The wrapper abstracts device
-    placement, model loading, checkpoint restoration, and unified forward
-    execution.
-
-    The wrapper is designed to work with both single-task models and the
-    MultiTaskTruthLensModel. It exposes consistent methods for prediction,
-    probability computation, and model checkpoint loading.
-
-Dependencies:
-    logging
-    typing
-    torch
-    torch.nn
-Inputs:
-    Tokenized model inputs (input_ids, attention_mask)
-Outputs:
-    Model predictions and probabilities
-"""
-
 from __future__ import annotations
 
 import logging
-from typing import Dict, Optional, Any
+from dataclasses import dataclass
+from typing import Dict, Optional
 
-import numpy as np
 import torch
 import torch.nn as nn
-from src.models.calibration import IsotonicCalibrator, TemperatureScaler
-from src.models.inference.prediction_output import PredictionOutput
+from transformers import AutoConfig, AutoModel
+
+from ..base.base_model import BaseModel
 
 logger = logging.getLogger(__name__)
 
-_MULTICLASS_TASKS: frozenset = frozenset({"bias", "ideology", "propaganda"})
-_MULTILABEL_TASKS: frozenset = frozenset({"narrative", "narrative_frame", "emotion"})
-_VALID_TASKS: frozenset = _MULTICLASS_TASKS | _MULTILABEL_TASKS
+
+# =========================================================
+# OUTPUT
+# =========================================================
+
+@dataclass
+class EncoderOutput:
+    sequence_output: torch.Tensor
+    pooled_output: torch.Tensor
 
 
-class ModelWrapper:
-    """
-    Wrapper for managing model lifecycle and inference execution.
-    """
+# =========================================================
+# ENCODER
+# =========================================================
+
+class TransformerEncoder(BaseModel):
+
+    VALID_POOLING = {"cls", "mean", "attention"}
 
     def __init__(
         self,
-        model: nn.Module,
+        model_name: str,
+        pooling: str = "cls",
         device: Optional[str] = None,
-        temperature_scaler: Optional[TemperatureScaler] = None,
-        isotonic_calibrator: Optional[IsotonicCalibrator] = None,
-        ensemble_model: Optional[nn.Module] = None,
-        *,
-        use_half_precision: bool = False,
-        compile_mode: Optional[str] = None,
+        freeze_encoder: bool = False,
+        gradient_checkpointing: bool = False,
+        output_hidden_states: bool = False,
+        use_amp: bool = True,
+        amp_dtype: str = "bf16",
+        use_compile: bool = False,
+        compile_mode: str = "default",
+        max_length: int = 512,
+        init_from_config_only: bool = False,
+        **kwargs,
     ) -> None:
-        """
-        Initialize model wrapper.
 
-        Args:
-            model:
-                PyTorch model instance.
-            device:
-                Target device for inference ("cpu", "cuda", etc.)
-        """
+        super().__init__()
 
-        if not isinstance(model, nn.Module):
-            raise TypeError("model must be an instance of torch.nn.Module")
+        if pooling not in self.VALID_POOLING:
+            raise ValueError(f"Invalid pooling: {pooling}")
 
-        self.model = model
+        self.model_name = model_name
+        self.pooling = pooling
+        self.use_amp = use_amp
+        self.amp_dtype = amp_dtype
+        self.max_length = max_length
+        self.output_hidden_states = output_hidden_states
 
-        self.device = torch.device(
+        self._encoder_frozen = False
+
+        device_obj = torch.device(
             device if device else ("cuda" if torch.cuda.is_available() else "cpu")
         )
 
-        self.model.to(self.device)
-        self.model.eval()
-        self.ensemble_model = ensemble_model
-        if self.ensemble_model is not None:
-            self.ensemble_model.to(self.device)
-            self.ensemble_model.eval()
-        self.temperature_scaler = temperature_scaler
-        self.isotonic_calibrator = isotonic_calibrator
-        self.compute_probabilities = False
-        self.return_logits_only = False
+        try:
+            self.config = AutoConfig.from_pretrained(model_name)
 
-        if use_half_precision and self.device.type == "cuda":
-            self.model.half()
-            if self.ensemble_model is not None:
-                self.ensemble_model.half()
+            if hasattr(self.config, "add_pooling_layer"):
+                self.config.add_pooling_layer = False
 
-        if compile_mode and hasattr(torch, "compile"):
+            if init_from_config_only:
+                self.encoder = AutoModel.from_config(self.config)
+            else:
+                self.encoder = AutoModel.from_pretrained(
+                    model_name,
+                    config=self.config,
+                )
+
+        except Exception as e:
+            logger.exception("Encoder init failed")
+            raise RuntimeError from e
+
+        self.hidden_size = self.config.hidden_size
+
+        if gradient_checkpointing:
+            self.gradient_checkpointing_enable()
+
+        if freeze_encoder:
+            self.freeze()
+
+        if use_compile and hasattr(torch, "compile"):
             try:
-                self.model = torch.compile(self.model, mode=compile_mode)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Model compilation skipped: %s", exc)
+                self.encoder = torch.compile(
+                    self.encoder,
+                    mode=compile_mode,
+                )
+                logger.info("Encoder compiled")
+            except Exception:
+                logger.warning("Compile failed")
 
-            if self.ensemble_model is not None:
-                try:
-                    self.ensemble_model = torch.compile(
-                        self.ensemble_model,
-                        mode=compile_mode,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("Ensemble model compilation skipped: %s", exc)
+        self.set_device(device_obj)
 
-    def set_temperature_scaler(self, scaler: TemperatureScaler) -> None:
-        self.temperature_scaler = scaler
+        logger.info(
+            "Encoder ready | model=%s | hidden=%d",
+            model_name,
+            self.hidden_size,
+        )
 
-    def set_isotonic_calibrator(self, calibrator: IsotonicCalibrator) -> None:
-        self.isotonic_calibrator = calibrator
-
-    def set_ensemble_model(self, ensemble_model: nn.Module) -> None:
-        self.ensemble_model = ensemble_model
-        self.ensemble_model.to(self.device)
-        self.ensemble_model.eval()
-
-    def _validate_task(self, task: str) -> None:
-        if not isinstance(task, str):
-            raise TypeError(f"task must be a string, got {type(task).__name__}")
-        if task not in _VALID_TASKS:
-            raise ValueError(
-                f"Unknown task {task!r}. Valid tasks: {sorted(_VALID_TASKS)}"
-            )
+    # =====================================================
+    # FORWARD
+    # =====================================================
 
     def forward(
         self,
-        batch: Dict[str, torch.Tensor],
-        *,
-        task: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """
-        Execute forward pass.
-
-        Args:
-            batch: Dictionary containing model inputs.
-            task:  When provided, only that task's head is executed (inference
-                   for a single task).  ``None`` runs all heads.
-        """
-
-        if not isinstance(batch, dict):
-            raise TypeError("batch must be a dictionary")
-
-        if task is not None:
-            self._validate_task(task)
-
-        batch = dict(batch)
-        batch.pop("labels", None)
-
-        if task is not None:
-            batch["task"] = task
-
-        batch = self._move_to_device(batch)
-
-        if self.device.type == "cuda":
-            autocast_dtype = (
-                torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-            )
-        else:
-            autocast_dtype = torch.float32
-
-        with torch.inference_mode():
-            with torch.autocast(
-                device_type=self.device.type,
-                dtype=autocast_dtype,
-                enabled=self.device.type == "cuda",
-            ):
-                if self.ensemble_model is not None:
-                    outputs = self._run_ensemble(batch)
-                else:
-                    outputs = self.model(**batch)
-
-        return outputs
-
-    def predict(
-        self,
-        batch: Dict[str, torch.Tensor],
-        *,
-        task: Optional[str] = None,
-        return_structured: bool = False,
-    ) -> Dict[str, Any]:
-        """
-        Run inference and return predictions.
-
-        Args:
-            batch:  Input tensors.
-            task:   Task name for single-task inference.  When provided, only
-                    that head runs and predictions/probabilities are computed
-                    with the correct strategy (argmax vs sigmoid threshold).
-        """
-
-        if task is not None:
-            self._validate_task(task)
-
-        outputs = self.forward(batch, task=task)
-        extracted = self._extract_predictions(outputs, task=task)
-
-        if return_structured and task is not None:
-            return PredictionOutput.from_single_task(task, extracted).to_dict()
-
-        if return_structured:
-            return PredictionOutput.from_raw_outputs(extracted).to_dict()
-
-        return extracted
-
-    def predict_structured(
-        self,
-        batch: Dict[str, torch.Tensor],
-        *,
-        task: Optional[str] = None,
-    ) -> PredictionOutput:
-        if task is not None:
-            self._validate_task(task)
-        outputs = self.forward(batch, task=task)
-        extracted = self._extract_predictions(outputs, task=task)
-        if task is not None:
-            return PredictionOutput.from_single_task(task, extracted)
-        return PredictionOutput.from_raw_outputs(extracted)
-
-    def predict_multi_task(
-        self,
-        batch: Dict[str, torch.Tensor],
-        tasks: Optional[list] = None,
-    ) -> Dict[str, Any]:
-        """Run inference for each specified task (or all tasks if None)."""
-        target_tasks = tasks or sorted(_VALID_TASKS)
-        results = {}
-        for t in target_tasks:
-            batch_copy = dict(batch)
-            results[t] = self.predict(batch_copy, task=t)
-        return results
-
-    def load_checkpoint(
-        self,
-        checkpoint_path: str,
-        strict: bool = True,
-    ) -> None:
-        """
-        Load model weights from checkpoint.
-
-        Args:
-            checkpoint_path:
-                Path to checkpoint file.
-            strict:
-                Whether to strictly enforce state dict keys.
-        """
-
-        try:
-            checkpoint = torch.load(
-                checkpoint_path,
-                map_location=self.device,
-                weights_only=False,
-            )
-
-            if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-                state_dict = checkpoint["model_state_dict"]
-            else:
-                state_dict = checkpoint
-
-            self.model.load_state_dict(state_dict, strict=strict)
-
-        except Exception as exc:
-            raise RuntimeError("Checkpoint loading failed") from exc
-
-    def _move_to_device(
-        self,
-        batch: Dict[str, torch.Tensor],
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
-        """
-        Move batch tensors to device.
 
-        Pinned memory + non_blocking=True is only meaningful for CPU->CUDA
-        transfers; it's pure overhead (and wasted pinned-pool pages) for
-        CPU->CPU. Gate it on the actual target device type.
-        """
+        if input_ids.device != self.device:
+            input_ids = input_ids.to(self.device)
 
-        target_is_cuda = self.device.type == "cuda"
-        moved_batch: Dict[str, torch.Tensor] = {}
+        if attention_mask.device != self.device:
+            attention_mask = attention_mask.to(self.device)
 
-        for key, value in batch.items():
-            if isinstance(value, torch.Tensor):
-                if target_is_cuda and value.device.type == "cpu" and not value.is_pinned():
-                    try:
-                        value = value.pin_memory()
-                    except RuntimeError:
-                        # pin_memory can fail under pressure; fall back silently.
-                        pass
-                moved_batch[key] = value.to(
-                    self.device,
-                    non_blocking=target_is_cuda,
-                )
-            else:
-                moved_batch[key] = value
+        autocast_dtype = (
+            torch.bfloat16 if self.amp_dtype == "bf16" else torch.float16
+        )
 
-        return moved_batch
-
-    def _extract_predictions(
-        self,
-        outputs: Any,
-        *,
-        task: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Convert model outputs to a flat prediction dict.
-
-        When ``task`` is supplied, probabilities and predictions are derived
-        using the task-correct strategy: softmax+argmax for multiclass tasks,
-        sigmoid+threshold for multilabel tasks.  Temperature calibration is
-        only applied to multiclass tasks (it is not valid for multilabel).
-        """
-
-        if not isinstance(outputs, dict):
-            raise RuntimeError("Unsupported model output format")
-
-        if self.return_logits_only:
-            return outputs
-
-        results: Dict[str, Any] = {}
-
-        for key, value in outputs.items():
-            if not isinstance(value, torch.Tensor):
-                results[key] = value
-                continue
-
-            is_logits = key == "logits" or key.endswith("_logits")
-            if not is_logits:
-                results[key] = value
-                continue
-
-            logits = value
-
-            if key == "logits":
-                base = ""
-                inferred_task = task
-            else:
-                base = key[: -len("_logits")] + "_"
-                inferred_task = key[: -len("_logits")]
-
-            is_multilabel = inferred_task in _MULTILABEL_TASKS if inferred_task else False
-            is_multiclass = inferred_task in _MULTICLASS_TASKS if inferred_task else True
-
-            if self.compute_probabilities:
-                if is_multilabel:
-                    probs = torch.sigmoid(logits)
-                    calibrated_probs = probs
-                else:
-                    probs = torch.softmax(logits, dim=-1)
-                    calibrated_probs = self._calibrate_probabilities(
-                        logits=logits,
-                        probabilities=probs,
+        with torch.autocast(
+            device_type=self.device.type,
+            enabled=self.use_amp and self.device.type == "cuda",
+            dtype=autocast_dtype,
+        ):
+            if self._encoder_frozen:
+                with torch.no_grad():
+                    outputs = self.encoder(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        return_dict=True,
+                        output_hidden_states=self.output_hidden_states,
                     )
             else:
-                probs = None
-                calibrated_probs = None
-
-            if is_multilabel:
-                preds = (torch.sigmoid(logits) > 0.5).int()
-            else:
-                preds = torch.argmax(logits, dim=-1)
-
-            results[f"{base}predictions"] = preds
-            results[f"{base}logits"] = logits
-
-            if probs is not None:
-                results[f"{base}probabilities"] = probs
-            if calibrated_probs is not None and calibrated_probs is not probs:
-                results[f"{base}calibrated_probabilities"] = calibrated_probs
-
-        return results
-
-    def _calibrate_probabilities(
-        self,
-        *,
-        logits: torch.Tensor,
-        probabilities: torch.Tensor,
-    ) -> torch.Tensor:
-        if self.temperature_scaler is not None:
-            try:
-                logits_device = logits
-                calibrated = self.temperature_scaler.predict_proba(logits_device)
-                return calibrated.to(probabilities.device)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Temperature scaling skipped: %s", exc)
-
-        if self.isotonic_calibrator is not None:
-            try:
-                probs_np = probabilities.detach().cpu().numpy().astype(np.float64)
-                calibrated_np = self.isotonic_calibrator.predict_proba(probs_np)
-                return torch.tensor(
-                    calibrated_np,
-                    dtype=probabilities.dtype,
-                    device=probabilities.device,
+                outputs = self.encoder(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    return_dict=True,
+                    output_hidden_states=self.output_hidden_states,
                 )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Isotonic calibration skipped: %s", exc)
 
-        return probabilities
+        sequence_output = outputs.last_hidden_state
+        pooled_output = self._pool(sequence_output, attention_mask)
 
-    def _run_ensemble(self, batch: Dict[str, torch.Tensor]) -> Dict[str, Any]:
-        if self.ensemble_model is None:
-            raise RuntimeError("Ensemble model is not configured.")
+        return {
+            "sequence_output": sequence_output,
+            "pooled_output": pooled_output,
+        }
 
-        logits: Optional[torch.Tensor] = None
-        outputs = self.ensemble_model(**batch)
+    # =====================================================
+    # POOLING
+    # =====================================================
 
-        if isinstance(outputs, torch.Tensor):
-            logits = outputs
-        elif isinstance(outputs, dict):
-            for key, value in outputs.items():
-                if isinstance(value, torch.Tensor) and "logits" in key:
-                    logits = value
-                    break
-            if logits is None:
-                for value in outputs.values():
-                    if isinstance(value, torch.Tensor):
-                        logits = value
-                        break
+    def _pool(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
 
-        if not isinstance(logits, torch.Tensor):
-            raise RuntimeError("Ensemble model must return logits tensor.")
+        if self.pooling == "cls":
+            return hidden_states[:, 0]
 
-        return {"ensemble_logits": logits}
+        if self.pooling == "mean":
+            mask = attention_mask.unsqueeze(-1).to(hidden_states.dtype)
+            summed = torch.sum(hidden_states * mask, dim=1)
+            counts = torch.clamp(mask.sum(dim=1), min=1e-9)
+            return summed / counts
+
+        if self.pooling == "attention":
+            weights = torch.softmax(hidden_states.mean(dim=-1), dim=1)
+            return torch.sum(hidden_states * weights.unsqueeze(-1), dim=1)
+
+        raise RuntimeError("Invalid pooling")
+
+    # =====================================================
+    # GRAD CKPT
+    # =====================================================
+
+    def gradient_checkpointing_enable(self):
+
+        if hasattr(self.encoder, "gradient_checkpointing_enable"):
+            self.encoder.gradient_checkpointing_enable()
+
+    def gradient_checkpointing_disable(self):
+
+        if hasattr(self.encoder, "gradient_checkpointing_disable"):
+            self.encoder.gradient_checkpointing_disable()
+
+    # =====================================================
+    # FREEZE
+    # =====================================================
+
+    def freeze(self):
+
+        for p in self.encoder.parameters():
+            p.requires_grad = False
+
+        self._encoder_frozen = True
+
+    def unfreeze(self):
+
+        for p in self.encoder.parameters():
+            p.requires_grad = True
+
+        self._encoder_frozen = False
+
+    # =====================================================
+    # UTILS
+    # =====================================================
+
+    def get_hidden_size(self) -> int:
+        return self.hidden_size

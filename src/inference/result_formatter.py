@@ -1,41 +1,3 @@
-"""
-File Name: result_formatter.py
-Module: Result Formatting
-Description:
-    Converts internal prediction and analysis outputs from the TruthLens
-    inference pipeline into multiple standardized external formats suitable
-    for different consumers.
-
-    Supported formats:
-        • API JSON responses
-        • Dashboard JSON structures
-        • Research export JSON
-
-    This module ensures that internal representations remain decoupled from
-    presentation layers while providing deterministic and validated output
-    schemas.
-
-    Example output targets:
-        - TruthLensAPIResponse
-        - TruthLensDashboardReport
-        - TruthLensResearchExport
-
-Dependencies:
-    logging
-    typing
-    dataclasses
-    json
-    datetime
-
-Inputs:
-    Internal prediction and analysis dictionaries produced by the
-    inference and report generation pipelines.
-
-Outputs:
-    Structured dictionaries compatible with APIs, dashboards,
-    and research exports.
-"""
-
 from __future__ import annotations
 
 import json
@@ -43,165 +5,218 @@ import logging
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, Optional
 
+import numpy as np
+
 from src.utils import timestamp
 
 logger = logging.getLogger(__name__)
 
 
+# =========================================================
+# DATA CLASSES (UPDATED)
+# =========================================================
+
 @dataclass
 class TruthLensAPIResponse:
-    """
-    API response structure used by production endpoints.
-    """
-    bias: Optional[str]
-    ideology: Optional[str]
-    propaganda_probability: Optional[float]
+    predictions: Dict[str, Any]
+    confidence: Dict[str, float]
+    uncertainty: Optional[Dict[str, float]]
     credibility_score: Optional[float]
+
+    # 🔥 NEW
+    graph: Optional[Dict[str, Any]]
+    graph_explanation: Optional[Dict[str, Any]]
+    drift: Optional[Dict[str, Any]]
+    monitoring: Optional[Dict[str, Any]]
+
     timestamp: str
 
 
 @dataclass
 class TruthLensDashboardReport:
-    """
-    Dashboard-oriented report structure including expanded analysis
-    for visualization and monitoring interfaces.
-    """
     article_summary: Dict[str, Any]
-    bias_analysis: Dict[str, Any]
-    emotion_analysis: Dict[str, Any]
-    narrative_structure: Dict[str, Any]
-    entity_graph: Dict[str, Any]
-    credibility_score: Optional[float]
+    predictions: Dict[str, Any]
+    evaluation: Dict[str, Any]
+    calibration: Dict[str, Any]
+    uncertainty: Dict[str, Any]
+    aggregation: Dict[str, Any]
+
+    # 🔥 NEW
+    graph: Optional[Dict[str, Any]]
+    graph_explanation: Optional[Dict[str, Any]]
+    drift: Optional[Dict[str, Any]]
+    monitoring: Optional[Dict[str, Any]]
+
     generated_at: str
 
 
 @dataclass
 class TruthLensResearchExport:
-    """
-    Research export format containing detailed signals and metadata
-    used for experimentation and analysis.
-    """
     article_summary: Dict[str, Any]
     predictions: Dict[str, Any]
+    logits: Dict[str, Any]
+    probabilities: Dict[str, Any]
+    calibration: Dict[str, Any]
+    uncertainty: Dict[str, Any]
+    evaluation: Dict[str, Any]
+    correlation: Dict[str, Any]
+
+    # 🔥 NEW
+    graph: Optional[Dict[str, Any]]
+    graph_explanation: Optional[Dict[str, Any]]
+    drift: Optional[Dict[str, Any]]
+    monitoring: Optional[Dict[str, Any]]
+
     intermediate_features: Optional[Dict[str, Any]]
     model_metadata: Optional[Dict[str, Any]]
     generated_at: str
 
 
-class ResultFormatter:
-    """
-    Responsible for converting internal system outputs into standardized
-    formats for APIs, dashboards, and research workflows.
-    """
+# =========================================================
+# FORMATTER
+# =========================================================
 
-    def __init__(self) -> None:
+class ResultFormatter:
+
+    def __init__(self):
         logger.info("ResultFormatter initialized")
 
-    def _timestamp(self) -> str:
-        """
-        Generate ISO timestamp.
-        """
+    def _timestamp(self):
         return timestamp().replace("_", "T") + "Z"
 
-    def format_api_response(
-        self,
-        prediction: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """
-        Convert internal prediction output to API response format.
-        """
+    # =====================================================
+    # 🔥 API FORMAT (UPDATED)
+    # =====================================================
 
-        if not isinstance(prediction, dict):
-            raise TypeError("prediction must be a dictionary")
+    def format_api_response(self, report: Dict[str, Any]):
 
-        credibility = prediction.get("credibility_score")
-        if isinstance(credibility, list):
-            credibility = credibility[0] if credibility else None
+        preds = report.get("predictions", {})
+        uncertainty = report.get("uncertainty", {})
 
-        propaganda_probability = prediction.get("propaganda_probability")
-        if isinstance(propaganda_probability, list):
-            propaganda_probability = propaganda_probability[0] if propaganda_probability else None
+        formatted_preds = {}
+        confidence = {}
+
+        for task, out in preds.items():
+
+            if not isinstance(out, dict):
+                continue
+
+            probs = out.get("probabilities")
+            pred = out.get("predictions")
+
+            if probs is not None:
+                probs = np.asarray(probs)
+                conf = float(np.max(probs[0]))
+            else:
+                conf = None
+
+            formatted_preds[task] = int(pred[0]) if pred is not None else None
+            confidence[task] = conf
+
+        # 🔥 NEW EXTRACTION
+        graph = report.get("graph") or report.get("analysis_modules", {}).get("graph")
+        graph_expl = report.get("graph_explanation") or report.get("analysis_modules", {}).get("graph_explanation")
+        drift = report.get("drift")
+        monitoring = report.get("monitoring")
 
         response = TruthLensAPIResponse(
-            bias=prediction.get("bias"),
-            ideology=prediction.get("ideology"),
-            propaganda_probability=propaganda_probability,
-            credibility_score=credibility,
+            predictions=formatted_preds,
+            confidence=confidence,
+            uncertainty=uncertainty,
+            credibility_score=report.get("aggregation", {}).get("scores", {}).get("truthlens_credibility_score"),
+
+            # 🔥 NEW
+            graph=graph,
+            graph_explanation=graph_expl,
+            drift=drift,
+            monitoring=monitoring,
+
             timestamp=self._timestamp(),
         )
 
-        logger.debug("Formatted API response")
-
         return asdict(response)
 
-    def format_dashboard_report(
-        self,
-        report: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """
-        Convert full report into dashboard-ready structure.
-        """
+    # =====================================================
+    # 🔥 DASHBOARD FORMAT (UPDATED)
+    # =====================================================
 
-        if not isinstance(report, dict):
-            raise TypeError("report must be a dictionary")
+    def format_dashboard_report(self, report: Dict[str, Any]):
 
-        dashboard_report = TruthLensDashboardReport(
+        dashboard = TruthLensDashboardReport(
             article_summary=report.get("article_summary", {}),
-            bias_analysis=report.get("bias_analysis", {}),
-            emotion_analysis=report.get("emotion_analysis", {}),
-            narrative_structure=report.get("narrative_structure", {}),
-            entity_graph=report.get("entity_graph", {}),
-            credibility_score=report.get("credibility_score"),
+            predictions=report.get("predictions", {}),
+            evaluation=report.get("evaluation", {}),
+            calibration=report.get("calibration", {}),
+            uncertainty=report.get("uncertainty", {}),
+            aggregation=report.get("aggregation", {}),
+
+            # 🔥 NEW
+            graph=report.get("graph") or report.get("analysis_modules", {}).get("graph"),
+            graph_explanation=report.get("graph_explanation") or report.get("analysis_modules", {}).get("graph_explanation"),
+            drift=report.get("drift"),
+            monitoring=report.get("monitoring"),
+
             generated_at=self._timestamp(),
         )
 
-        logger.debug("Formatted dashboard report")
+        return asdict(dashboard)
 
-        return asdict(dashboard_report)
+    # =====================================================
+    # 🔥 RESEARCH EXPORT (UPDATED)
+    # =====================================================
 
     def format_research_export(
         self,
         report: Dict[str, Any],
-        prediction: Dict[str, Any],
-        features: Optional[Dict[str, Any]] = None,
         model_metadata: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """
-        Convert system outputs into research-friendly export structure.
-        """
+        features: Optional[Dict[str, Any]] = None,
+    ):
 
-        if not isinstance(report, dict):
-            raise TypeError("report must be a dictionary")
+        preds = report.get("predictions", {})
 
-        if not isinstance(prediction, dict):
-            raise TypeError("prediction must be a dictionary")
+        logits = {}
+        probs = {}
+
+        for task, out in preds.items():
+            if isinstance(out, dict):
+                logits[task] = out.get("logits")
+                probs[task] = out.get("probabilities")
 
         export = TruthLensResearchExport(
             article_summary=report.get("article_summary", {}),
-            predictions=prediction,
+            predictions=preds,
+            logits=logits,
+            probabilities=probs,
+            calibration=report.get("calibration", {}),
+            uncertainty=report.get("uncertainty", {}),
+            evaluation=report.get("evaluation", {}),
+            correlation=report.get("task_correlation", {}),
+
+            # 🔥 NEW
+            graph=report.get("graph") or report.get("analysis_modules", {}).get("graph"),
+            graph_explanation=report.get("graph_explanation") or report.get("analysis_modules", {}).get("graph_explanation"),
+            drift=report.get("drift"),
+            monitoring=report.get("monitoring"),
+
             intermediate_features=features,
             model_metadata=model_metadata,
             generated_at=self._timestamp(),
         )
 
-        logger.debug("Formatted research export")
-
         return asdict(export)
 
-    def to_json(
-        self,
-        data: Dict[str, Any],
-        pretty: bool = True,
-    ) -> str:
-        """
-        Serialize formatted output to JSON.
-        """
+    # =====================================================
+    # JSON
+    # =====================================================
+
+    def to_json(self, data: Dict[str, Any], pretty=True):
 
         try:
-            if pretty:
-                return json.dumps(data, indent=4, ensure_ascii=False)
-            return json.dumps(data)
-
-        except Exception as exc:
-            logger.exception("JSON serialization failed")
-            raise RuntimeError("Failed to serialize output") from exc
+            return json.dumps(
+                data,
+                indent=4 if pretty else None,
+                ensure_ascii=False,
+            )
+        except Exception as e:
+            logger.exception("Serialization failed")
+            raise RuntimeError("JSON serialization failed") from e

@@ -1,31 +1,4 @@
-"""
-File Name: discourse_features.py
-Module: Feature Engineering - Discourse Features
-Description:
-    Extracts discourse-level linguistic signals from text such as discourse
-    markers, argumentation structure cues, rhetorical connectors, and
-    logical transition indicators. These features help characterize how
-    ideas are connected and structured within the text.
-
-    Discourse features are useful for identifying persuasive language,
-    argumentative structures, narrative flow, and coherence patterns.
-
-    The implementation relies on curated discourse marker lexicons and
-    lightweight heuristics to compute normalized feature ratios.
-
-Dependencies:
-    dataclasses
-    typing
-    logging
-    re
-    collections
-
-Inputs:
-    FeatureContext containing input text and optional tokens
-
-Outputs:
-    Dict[str, float] representing discourse structure indicators
-"""
+# src/features/discourse_features.py
 
 from __future__ import annotations
 
@@ -35,141 +8,131 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, List, Set
 
+import numpy as np
+
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
 
 logger = logging.getLogger(__name__)
 
+EPS = 1e-8
+MAX_CLIP = 1.0
+
+
+# ---------------------------------------------------------
+# Tokenization
+# ---------------------------------------------------------
 
 def _tokenize(text: str) -> List[str]:
-    """Basic tokenizer fallback."""
     return re.findall(r"\b\w+\b", text.lower())
 
 
-# ---------------------------------------------------------------------
-# Discourse Marker Lexicons
-# ---------------------------------------------------------------------
+# ---------------------------------------------------------
+# Lexicons
+# ---------------------------------------------------------
 
-CAUSAL_MARKERS: Set[str] = {
-    "because",
-    "since",
-    "therefore",
-    "thus",
-    "hence",
-    "consequently",
-}
+CAUSAL = {"because","since","therefore","thus","hence","consequently"}
+CONTRAST = {"however","but","although","though","nevertheless","yet"}
+ADDITIVE = {"also","furthermore","moreover","additionally","besides"}
+SEQUENTIAL = {"first","second","then","next","finally"}
+EVIDENTIAL = {"according","reported","evidence","study","data","research"}
 
-CONTRAST_MARKERS: Set[str] = {
-    "however",
-    "but",
-    "although",
-    "though",
-    "nevertheless",
-    "yet",
-}
 
-ADDITIVE_MARKERS: Set[str] = {
-    "also",
-    "furthermore",
-    "moreover",
-    "additionally",
-    "besides",
-}
-
-SEQUENTIAL_MARKERS: Set[str] = {
-    "first",
-    "second",
-    "then",
-    "next",
-    "finally",
-}
-
-EVIDENTIAL_MARKERS: Set[str] = {
-    "according",
-    "reported",
-    "evidence",
-    "study",
-    "data",
-    "research",
-}
-
+# ---------------------------------------------------------
+# Feature
+# ---------------------------------------------------------
 
 @dataclass
 @register_feature
 class DiscourseFeatures(BaseFeature):
-    """
-    Extracts discourse structure indicators.
-
-    Output Features
-    ---------------
-    discourse_causal_ratio
-    discourse_contrast_ratio
-    discourse_additive_ratio
-    discourse_sequential_ratio
-    discourse_evidential_ratio
-    discourse_marker_density
-    discourse_diversity
-    """
 
     name: str = "discourse_features"
-    description: str = "Discourse structure and rhetorical connector features"
+    group: str = "discourse"
+    description: str = "Normalized discourse structure features"
+
+    # -----------------------------------------------------
 
     def extract(self, context: FeatureContext) -> Dict[str, float]:
-        """Extract discourse-related features."""
-        if not isinstance(context.text, str):
-            raise TypeError("FeatureContext.text must be a string")
-        if not context.text.strip():
+
+        text = context.text.strip()
+        if not text:
             return {}
 
-        text = context.text
-        text_lower = text.lower()
+        tokens = context.tokens or _tokenize(text)
+        n = len(tokens)
 
-        tokens = context.tokens or _tokenize(text_lower)
-
-        if not tokens:
-            logger.warning("No tokens available for discourse feature extraction")
+        if n == 0:
             return {}
 
         counter = Counter(tokens)
-        total_tokens = len(tokens)
 
         def ratio(lexicon: Set[str]) -> float:
-            count = sum(counter.get(w, 0) for w in lexicon)
-            return count / total_tokens
+            return sum(counter.get(w, 0) for w in lexicon) / (n + EPS)
 
-        causal_ratio = ratio(CAUSAL_MARKERS)
-        contrast_ratio = ratio(CONTRAST_MARKERS)
-        additive_ratio = ratio(ADDITIVE_MARKERS)
-        sequential_ratio = ratio(SEQUENTIAL_MARKERS)
-        evidential_ratio = ratio(EVIDENTIAL_MARKERS)
-
-        marker_counts = [
-            sum(counter.get(w, 0) for w in CAUSAL_MARKERS),
-            sum(counter.get(w, 0) for w in CONTRAST_MARKERS),
-            sum(counter.get(w, 0) for w in ADDITIVE_MARKERS),
-            sum(counter.get(w, 0) for w in SEQUENTIAL_MARKERS),
-            sum(counter.get(w, 0) for w in EVIDENTIAL_MARKERS),
-        ]
-
-        total_markers = sum(marker_counts)
-        marker_density = total_markers / total_tokens
-
-        diversity = sum(1 for c in marker_counts if c > 0) / len(marker_counts)
-
-        features: Dict[str, float] = {
-            "discourse_causal_ratio": float(causal_ratio),
-            "discourse_contrast_ratio": float(contrast_ratio),
-            "discourse_additive_ratio": float(additive_ratio),
-            "discourse_sequential_ratio": float(sequential_ratio),
-            "discourse_evidential_ratio": float(evidential_ratio),
-            "discourse_marker_density": float(marker_density),
-            "discourse_diversity": float(diversity),
+        raw = {
+            "causal": ratio(CAUSAL),
+            "contrast": ratio(CONTRAST),
+            "additive": ratio(ADDITIVE),
+            "sequential": ratio(SEQUENTIAL),
+            "evidential": ratio(EVIDENTIAL),
         }
 
-        logger.debug(
-            "Discourse features extracted | density=%.4f diversity=%.4f",
-            marker_density,
-            diversity,
-        )
+        # -------------------------
+        # NORMALIZED DISTRIBUTION
+        # -------------------------
 
-        return features
+        values = np.array(list(raw.values()), dtype=np.float32)
+        total = values.sum()
+
+        if total < EPS:
+            dist = {k: 0.0 for k in raw}
+        else:
+            norm = values / (total + EPS)
+            dist = dict(zip(raw.keys(), norm.astype(float)))
+
+        probs = np.array(list(dist.values()), dtype=np.float32)
+
+        # -------------------------
+        # INTENSITY
+        # -------------------------
+
+        intensity = float(np.linalg.norm(values))
+
+        # -------------------------
+        # ENTROPY (CRITICAL)
+        # -------------------------
+
+        if probs.sum() > 0:
+            entropy_raw = -np.sum(probs * np.log(probs + EPS))
+            entropy = entropy_raw / (np.log(len(probs)) + EPS)
+        else:
+            entropy = 0.0
+
+        # -------------------------
+        # BALANCE
+        # -------------------------
+
+        balance = 1.0 - float(np.std(probs))
+
+        # -------------------------
+        # OUTPUT
+        # -------------------------
+
+        return {
+            "disc_causal": self._safe(dist["causal"]),
+            "disc_contrast": self._safe(dist["contrast"]),
+            "disc_additive": self._safe(dist["additive"]),
+            "disc_sequential": self._safe(dist["sequential"]),
+            "disc_evidential": self._safe(dist["evidential"]),
+
+            "disc_intensity": self._safe(intensity),
+            "disc_entropy": self._safe(entropy),
+            "disc_balance": self._safe(balance),
+        }
+
+    # -----------------------------------------------------
+
+    def _safe(self, v: float) -> float:
+        if not np.isfinite(v):
+            return 0.0
+        return float(np.clip(v, 0.0, MAX_CLIP))

@@ -12,31 +12,45 @@ from src.analysis.feature_schema import get_schema
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------
+# =========================================================
+# CONSTANTS
+# =========================================================
+
+EPS = 1e-9
+
+
+# =========================================================
+# CONFIG
+# =========================================================
 
 @dataclass(slots=True)
 class BiasProfileConfig:
 
+    # Section weights
     bias_weight: float = 1.0
     emotion_weight: float = 1.0
     narrative_weight: float = 1.0
     discourse_weight: float = 1.0
     ideology_weight: float = 0.6
 
+    # Normalization
     normalize_values: bool = True
-    normalization_method: str = "minmax"  # minmax | zscore
+    normalization_method: str = "minmax"  # minmax | zscore | robust
 
     clip_values: bool = True
     clip_range: tuple[float, float] = (0.0, 1.0)
 
+    # Advanced
     global_normalization: bool = True
+    apply_softmax_to_ideology: bool = True
+
+    # Score aggregation
+    aggregation_method: str = "mean"  # mean | weighted_mean
 
 
-# ---------------------------------------------------------
-# Builder
-# ---------------------------------------------------------
+# =========================================================
+# BUILDER
+# =========================================================
 
 class BiasProfileBuilder:
 
@@ -48,11 +62,13 @@ class BiasProfileBuilder:
         "ideology",
     )
 
-    def __init__(self, config: BiasProfileConfig | None = None) -> None:
+    def __init__(self, config: BiasProfileConfig | None = None):
         self.config = config or BiasProfileConfig()
         logger.info("BiasProfileBuilder initialized")
 
-    # -----------------------------------------------------
+    # =====================================================
+    # MAIN ENTRY
+    # =====================================================
 
     def build_profile(
         self,
@@ -68,76 +84,76 @@ class BiasProfileBuilder:
             "metadata": {
                 "created_at": int(time.time()),
                 "sections": list(self.PROFILE_SECTIONS),
-                "weights": {
-                    "bias": self.config.bias_weight,
-                    "emotion": self.config.emotion_weight,
-                    "narrative": self.config.narrative_weight,
-                    "discourse": self.config.discourse_weight,
-                    "ideology": self.config.ideology_weight,
-                },
-            },
-            "bias": self._process_section(bias),
-            "emotion": self._process_section(emotion),
-            "narrative": self._process_section(narrative),
-            "discourse": self._process_section(discourse),
-            "ideology": self._process_section(ideology),
+            }
         }
 
-        # 🔥 GLOBAL NORMALIZATION (CRITICAL)
+        # ---- Process each section ----
+        for section_name, data in {
+            "bias": bias,
+            "emotion": emotion,
+            "narrative": narrative,
+            "discourse": discourse,
+            "ideology": ideology,
+        }.items():
+            profile[section_name] = self._process_section(data)
+
+        # ---- Ideology calibration ----
+        if self.config.apply_softmax_to_ideology:
+            profile["ideology"] = self._softmax(profile["ideology"])
+
+        # ---- Global normalization ----
         if self.config.global_normalization:
             profile = self._global_normalize(profile)
 
-        profile["metrics"] = self._compute_profile_metrics(profile)
+        # ---- Metrics ----
+        profile["metrics"] = self._compute_metrics(profile)
+
+        # ---- Final score ----
         profile["bias_score"] = self._compute_bias_score(profile)
 
         return profile
 
-    # -----------------------------------------------------
-    # Processing Pipeline
-    # -----------------------------------------------------
+    # =====================================================
+    # SECTION PROCESSING
+    # =====================================================
 
     def _process_section(self, data: Dict[str, Any]) -> Dict[str, float]:
 
-        data = self._sanitize_numeric_dict(data)
+        data = self._sanitize(data)
 
         if self.config.normalize_values:
-            data = self._normalize_values(data)
+            data = self._normalize(data)
 
         if self.config.clip_values:
-            data = self._clip_values(data)
+            data = self._clip(data)
 
         return data
 
-    # -----------------------------------------------------
-    # Sanitization (STRONG)
-    # -----------------------------------------------------
+    # =====================================================
+    # SANITIZATION
+    # =====================================================
 
-    def _sanitize_numeric_dict(self, data: Dict[str, Any]) -> Dict[str, float]:
-
-        if not isinstance(data, dict):
-            raise ValueError("Input must be dictionary")
+    def _sanitize(self, data: Dict[str, Any]) -> Dict[str, float]:
 
         cleaned = {}
 
         for k, v in data.items():
-
-            if isinstance(v, (int, float, np.number)):
+            try:
                 v = float(v)
-
-                if np.isnan(v) or np.isinf(v):
+                if not np.isfinite(v):
                     v = 0.0
-            else:
+            except Exception:
                 v = 0.0
 
             cleaned[k] = v
 
         return cleaned
 
-    # -----------------------------------------------------
-    # Normalization
-    # -----------------------------------------------------
+    # =====================================================
+    # NORMALIZATION
+    # =====================================================
 
-    def _normalize_values(self, data: Dict[str, float]) -> Dict[str, float]:
+    def _normalize(self, data: Dict[str, float]) -> Dict[str, float]:
 
         if not data:
             return data
@@ -145,65 +161,79 @@ class BiasProfileBuilder:
         values = np.array(list(data.values()), dtype=np.float32)
 
         if self.config.normalization_method == "zscore":
-
-            mean = values.mean()
-            std = values.std()
-
-            if std < 1e-9:
+            mean, std = values.mean(), values.std()
+            if std < EPS:
                 return data
+            norm = (values - mean) / (std + EPS)
 
-            norm = (values - mean) / std
+        elif self.config.normalization_method == "robust":
+            median = np.median(values)
+            iqr = np.percentile(values, 75) - np.percentile(values, 25)
+            if iqr < EPS:
+                return data
+            norm = (values - median) / (iqr + EPS)
 
         else:  # minmax
-
-            min_v = values.min()
-            max_v = values.max()
-
-            if max_v - min_v < 1e-9:
+            min_v, max_v = values.min(), values.max()
+            if max_v - min_v < EPS:
                 return data
+            norm = (values - min_v) / (max_v - min_v + EPS)
 
-            norm = (values - min_v) / (max_v - min_v)
+        return dict(zip(data.keys(), norm.astype(float)))
 
-        return {k: float(v) for k, v in zip(data.keys(), norm)}
-
-    # -----------------------------------------------------
-    # Global Normalization (NEW)
-    # -----------------------------------------------------
+    # =====================================================
+    # GLOBAL NORMALIZATION (FIXED)
+    # =====================================================
 
     def _global_normalize(self, profile: Dict[str, Any]) -> Dict[str, Any]:
 
-        all_values = []
+        values = []
 
         for section in self.PROFILE_SECTIONS:
-            all_values.extend(profile[section].values())
+            values.extend(profile.get(section, {}).values())
 
-        if not all_values:
+        if not values:
             return profile
 
-        arr = np.array(all_values, dtype=np.float32)
+        arr = np.array(values, dtype=np.float32)
+        min_v, max_v = arr.min(), arr.max()
 
-        min_v = arr.min()
-        max_v = arr.max()
-
-        if max_v - min_v < 1e-9:
+        if max_v - min_v < EPS:
             return profile
 
-        def normalize_section(section_data):
-            return {
-                k: float((v - min_v) / (max_v - min_v))
-                for k, v in section_data.items()
+        scale = max_v - min_v + EPS
+
+        for section in self.PROFILE_SECTIONS:
+            profile[section] = {
+                k: float((v - min_v) / scale)
+                for k, v in profile[section].items()
             }
-
-        for section in self.PROFILE_SECTIONS:
-            profile[section] = normalize_section(profile[section])
 
         return profile
 
-    # -----------------------------------------------------
-    # Clipping
-    # -----------------------------------------------------
+    # =====================================================
+    # SOFTMAX (STABLE)
+    # =====================================================
 
-    def _clip_values(self, data: Dict[str, float]) -> Dict[str, float]:
+    def _softmax(self, data: Dict[str, float]) -> Dict[str, float]:
+
+        if not data:
+            return data
+
+        values = np.array(list(data.values()), dtype=np.float32)
+
+        values = values - np.max(values)  # stability
+        exp = np.exp(values)
+
+        probs = exp / (exp.sum() + EPS)
+
+        return dict(zip(data.keys(), probs.astype(float)))
+
+    # =====================================================
+    # CLIPPING
+    # =====================================================
+
+    def _clip(self, data: Dict[str, float]) -> Dict[str, float]:
 
         low, high = self.config.clip_range
 
@@ -212,41 +242,28 @@ class BiasProfileBuilder:
             for k, v in data.items()
         }
 
-    # -----------------------------------------------------
-    # Metrics
-    # -----------------------------------------------------
+    # =====================================================
+    # METRICS (IMPROVED)
+    # =====================================================
 
-    def _compute_profile_metrics(self, profile: Dict[str, Any]) -> Dict[str, float]:
+    def _compute_metrics(self, profile: Dict[str, Any]) -> Dict[str, float]:
 
         ideology_vals = np.array(
-            list(profile["ideology"].values()),
-            dtype=np.float32,
+            list(profile.get("ideology", {}).values()), dtype=np.float32
         )
 
         if ideology_vals.size > 0:
-
-            ideology_vals = np.clip(ideology_vals, 0.0, None)
-            total = float(ideology_vals.sum())
-
-            if total > 0:
-                p = ideology_vals / total
-
-                entropy = float(-np.sum(p * np.log(p + 1e-9)))
-                dominance = float(np.max(p))
-            else:
-                entropy = 0.0
-                dominance = 0.0
-
+            p = ideology_vals / (ideology_vals.sum() + EPS)
+            entropy = float(-np.sum(p * np.log(p + EPS)))
+            dominance = float(np.max(p))
         else:
-            entropy = 0.0
-            dominance = 0.0
+            entropy = dominance = 0.0
 
         bias_vals = np.array(
-            list(profile["bias"].values()),
-            dtype=np.float32,
+            list(profile.get("bias", {}).values()), dtype=np.float32
         )
 
-        variance = float(np.var(bias_vals)) if bias_vals.size > 0 else 0.0
+        variance = float(np.var(bias_vals)) if bias_vals.size else 0.0
 
         return {
             "bias_variance": variance,
@@ -254,38 +271,47 @@ class BiasProfileBuilder:
             "ideology_dominance": dominance,
         }
 
-    # -----------------------------------------------------
-    # Bias Score (CALIBRATED)
-    # -----------------------------------------------------
+    # =====================================================
+    # FINAL SCORE (FIXED WEIGHTING)
+    # =====================================================
 
     def _compute_bias_score(self, profile: Dict[str, Any]) -> float:
 
-        weighted_values: List[float] = []
+        weights = {
+            "bias": self.config.bias_weight,
+            "emotion": self.config.emotion_weight,
+            "narrative": self.config.narrative_weight,
+            "discourse": self.config.discourse_weight,
+            "ideology": self.config.ideology_weight,
+        }
 
-        def add(section, weight):
-            weighted_values.extend(v * weight for v in section.values())
+        weighted_sum = 0.0
+        total_weight = 0.0
 
-        add(profile["bias"], self.config.bias_weight)
-        add(profile["emotion"], self.config.emotion_weight)
-        add(profile["narrative"], self.config.narrative_weight)
-        add(profile["discourse"], self.config.discourse_weight)
-        add(profile["ideology"], self.config.ideology_weight)
+        for section, weight in weights.items():
+            values = list(profile.get(section, {}).values())
 
-        if not weighted_values:
+            if not values:
+                continue
+
+            section_mean = float(np.mean(values))
+
+            weighted_sum += section_mean * weight
+            total_weight += weight
+
+        if total_weight <= EPS:
             return 0.0
 
-        score = float(np.mean(weighted_values))
+        score = weighted_sum / (total_weight + EPS)
 
         return float(np.clip(score, 0.0, 1.0))
 
-# ---------------------------------------------------------
-# Vector Conversion (SCHEMA-STABLE)
-# ---------------------------------------------------------
+
+# =========================================================
+# VECTORIZATION (STABLE)
+# =========================================================
 
 def bias_profile_vector(profile: Dict[str, Any]) -> np.ndarray:
-
-    if not isinstance(profile, dict):
-        raise ValueError("profile must be dictionary")
 
     sections = {
         "bias": "framing",
@@ -298,7 +324,6 @@ def bias_profile_vector(profile: Dict[str, Any]) -> np.ndarray:
     values: List[float] = []
 
     for section, schema_name in sections.items():
-
         keys = get_schema(schema_name)
         data = profile.get(section, {})
 
@@ -306,6 +331,6 @@ def bias_profile_vector(profile: Dict[str, Any]) -> np.ndarray:
             values.append(float(data.get(k, 0.0)))
 
     if not values:
-        raise ValueError("profile contains no numeric values")
+        raise ValueError("profile contains no values")
 
     return np.array(values, dtype=np.float32)

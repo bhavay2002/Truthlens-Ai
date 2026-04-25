@@ -1,88 +1,121 @@
-# src/analysis/discourse_coherence_analyzer.py
-
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Set
+from typing import Dict, Set, List
 
 import numpy as np
 
 from src.analysis.base_analyzer import BaseAnalyzer
 from src.analysis.feature_context import FeatureContext
-from src.analysis._text_features import phrase_match_count, normalize_lexicon_terms
+from src.analysis._text_features import (
+    phrase_match_count,
+    normalize_lexicon_terms,
+)
 from src.analysis.feature_schema import DISCOURSE_COHERENCE_KEYS, make_vector
+from src.analysis.spacy_loader import get_doc
 
 logger = logging.getLogger(__name__)
 
 
+# =========================================================
+# CONSTANTS
+# =========================================================
+
+EPS = 1e-8
+MAX_CLIP = 1.0
+
+
+# =========================================================
+# ANALYZER
+# =========================================================
+
 class DiscourseCoherenceAnalyzer(BaseAnalyzer):
+
+    name = "discourse_coherence"
+    expected_keys = set(DISCOURSE_COHERENCE_KEYS)
 
     TRANSITION_MARKERS = {
         "however","nevertheless","nonetheless",
         "yet","still","though","although",
-        "in contrast","by contrast",
-        "on the other hand","despite this",
-        "even so","alternatively",
-
+        "in contrast","on the other hand",
         "therefore","thus","hence",
-        "consequently","accordingly",
-        "as a result","for this reason",
+        "consequently","as a result",
         "because","since","due to",
-
         "furthermore","moreover","additionally",
-        "in addition","also","besides",
-        "similarly","likewise",
-
-        "first","second","third",
-        "next","then","afterward",
-        "subsequently","finally",
-        "meanwhile","at the same time",
-
-        "in conclusion","to conclude",
-        "in summary","overall",
-        "ultimately","in short",
-
-        "in other words","that is",
-        "to clarify","namely",
-        "specifically","for example",
-        "for instance"
+        "also","besides","similarly",
+        "first","second","next","then",
+        "finally","meanwhile",
+        "in conclusion","overall",
+        "in summary","ultimately",
+        "for example","for instance"
     }
 
     def __init__(self):
         self.transition_phrases = normalize_lexicon_terms(self.TRANSITION_MARKERS)
 
-    # ------------------------------------------------------------
+    # =========================================================
 
     def analyze(self, ctx: FeatureContext) -> Dict[str, float]:
 
-        doc = ctx.doc
+        if ctx.n_tokens == 0:
+            return self._empty_features()
+
+        # 🔥 shared spaCy doc
+        doc = get_doc(ctx, task="syntax")
         sentences = list(doc.sents)
 
         if len(sentences) < 2:
             return self._empty_features()
 
-        #  Precompute sentence token sets ONCE
-        sentence_tokens = [
-            self._sentence_token_set(sent)
-            for sent in sentences
+        # -----------------------------------------------------
+        # SENTENCE TOKEN SETS
+        # -----------------------------------------------------
+
+        sent_tokens = [self._sentence_token_set(sent) for sent in sentences]
+
+        # -----------------------------------------------------
+        # LOCAL COHERENCE (adjacent similarity)
+        # -----------------------------------------------------
+
+        local_sim = [
+            self._safe_jaccard(sent_tokens[i], sent_tokens[i + 1])
+            for i in range(len(sent_tokens) - 1)
         ]
 
-        similarities = [
-            self._jaccard(sentence_tokens[i], sentence_tokens[i + 1])
-            for i in range(len(sentence_tokens) - 1)
-        ]
+        mean_local = float(np.mean(local_sim)) if local_sim else 0.0
 
-        mean_sim = float(np.mean(similarities)) if similarities else 0.0
+        # -----------------------------------------------------
+        # GLOBAL COHERENCE (start vs end)
+        # -----------------------------------------------------
+
+        global_score = self._safe_jaccard(
+            sent_tokens[0], sent_tokens[-1]
+        )
+
+        # -----------------------------------------------------
+        # SMOOTHED COHERENCE
+        # -----------------------------------------------------
+
+        coherence = 0.7 * mean_local + 0.3 * global_score
+
+        # nonlinear smoothing (important)
+        coherence = float(np.sqrt(max(coherence, 0.0)))
 
         features = {
-            "sentence_coherence": mean_sim,
-            "topic_drift": float(1.0 - mean_sim),
+            "sentence_coherence": self._safe(coherence),
+            "topic_drift": self._safe(1.0 - coherence),
         }
 
-        # Narrative continuity
+        # -----------------------------------------------------
+        # NARRATIVE CONTINUITY (IMPROVED)
+        # -----------------------------------------------------
+
         features.update(self._narrative_continuity(doc))
 
-        # Transition markers (cached regex)
+        # -----------------------------------------------------
+        # TRANSITION SIGNAL
+        # -----------------------------------------------------
+
         features["discourse_transition_ratio"] = self._transition_ratio(
             ctx.text_lower,
             ctx.n_tokens
@@ -90,7 +123,7 @@ class DiscourseCoherenceAnalyzer(BaseAnalyzer):
 
         return features
 
-    # ------------------------------------------------------------
+    # =========================================================
 
     def _sentence_token_set(self, sent) -> Set[str]:
         return {
@@ -99,14 +132,20 @@ class DiscourseCoherenceAnalyzer(BaseAnalyzer):
             if token.is_alpha and not token.is_stop
         }
 
-    # ------------------------------------------------------------
+    # =========================================================
 
-    def _jaccard(self, a: Set[str], b: Set[str]) -> float:
+    def _safe_jaccard(self, a: Set[str], b: Set[str]) -> float:
+
         if not a and not b:
             return 0.0
-        return float(len(a & b) / max(len(a | b), 1))
 
-    # ------------------------------------------------------------
+        denom = len(a | b)
+        if denom == 0:
+            return 0.0
+
+        return self._safe(len(a & b) / denom)
+
+    # =========================================================
 
     def _narrative_continuity(self, doc) -> Dict[str, float]:
 
@@ -115,34 +154,47 @@ class DiscourseCoherenceAnalyzer(BaseAnalyzer):
         if not entities:
             return {"narrative_continuity": 0.0}
 
-        unique_entities = set(entities)
+        total = len(entities)
+        unique = len(set(entities))
 
-        continuity = 1.0 - (len(unique_entities) / max(len(entities), 1))
+        # repetition ratio (better signal)
+        repetition = 1.0 - (unique / (total + EPS))
 
-        return {"narrative_continuity": float(continuity)}
+        # smooth scaling
+        continuity = float(np.sqrt(max(repetition, 0.0)))
 
-    # ------------------------------------------------------------
+        return {"narrative_continuity": self._safe(continuity)}
+
+    # =========================================================
 
     def _transition_ratio(self, text_lower: str, n_tokens: int) -> float:
 
+        if n_tokens <= 0:
+            return 0.0
+
         hits = phrase_match_count(text_lower, self.transition_phrases)
 
-        return float(hits / max(n_tokens, 1))
+        return self._safe(hits / (n_tokens + EPS))
 
-    # ------------------------------------------------------------
+    # =========================================================
+
+    def _safe(self, value: float) -> float:
+
+        if not np.isfinite(value):
+            return 0.0
+
+        return float(np.clip(value, 0.0, MAX_CLIP))
+
+    # =========================================================
 
     def _empty_features(self) -> Dict[str, float]:
-        return {
-            "sentence_coherence": 0.0,
-            "topic_drift": 0.0,
-            "narrative_continuity": 0.0,
-            "discourse_transition_ratio": 0.0,
-        }
+
+        return {k: 0.0 for k in DISCOURSE_COHERENCE_KEYS}
 
 
-# ------------------------------------------------------------
-# Vector Conversion
-# ------------------------------------------------------------
+# =========================================================
+# VECTOR CONVERSION
+# =========================================================
 
 def discourse_coherence_vector(features: Dict[str, float]) -> np.ndarray:
     return make_vector(features, DISCOURSE_COHERENCE_KEYS)

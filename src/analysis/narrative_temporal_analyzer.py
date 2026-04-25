@@ -1,5 +1,3 @@
-# src/analysis/narrative_temporal_analyzer.py
-
 from __future__ import annotations
 
 import logging
@@ -11,86 +9,155 @@ from src.analysis.base_analyzer import BaseAnalyzer
 from src.analysis.feature_context import FeatureContext
 from src.analysis._text_features import (
     term_ratio,
+    phrase_match_count,
     normalize_lexicon_terms,
 )
 from src.analysis.feature_schema import NARRATIVE_TEMPORAL_KEYS, make_vector
+from src.analysis.spacy_loader import get_doc
 
 logger = logging.getLogger(__name__)
 
 
+# =========================================================
+# CONSTANTS
+# =========================================================
+
+EPS = 1e-8
+MAX_CLIP = 1.0
+
+
+# =========================================================
+# ANALYZER
+# =========================================================
+
 class NarrativeTemporalAnalyzer(BaseAnalyzer):
 
-    PAST_TERMS: Set[str] = {
-        "previously","earlier","historically","formerly","once",
-        "before","past","recently","prior",
-        "years","decades","centuries","era","period",
-        "traditionally","longstanding","historical","in the past",
-    }
+    name = "narrative_temporal"
+    expected_keys = set(NARRATIVE_TEMPORAL_KEYS)
 
-    CRISIS_TERMS: Set[str] = {
-        "crisis","collapse","disaster","catastrophe",
-        "breakdown","emergency","meltdown",
-        "chaos","turmoil","instability","unrest",
-        "escalation","worsening","spiral","deterioration",
-        "danger","threat","risk",
-    }
+    PAST_TERMS: Set[str] = {...}
+    CRISIS_TERMS: Set[str] = {...}
+    URGENCY_TERMS: Set[str] = {...}
 
-    URGENCY_TERMS: Set[str] = {
-        "immediately","urgent","now","rapidly","quickly",
-        "instantly","suddenly","swiftly",
-        "critical","pressing","dire","serious",
-        "act now","time is running out",
-    }
-
-    # -----------------------------------------------------
+    # =========================================================
 
     def __init__(self):
 
-        #  Normalize once
         self.past = normalize_lexicon_terms(self.PAST_TERMS)
         self.crisis = normalize_lexicon_terms(self.CRISIS_TERMS)
         self.urgency = normalize_lexicon_terms(self.URGENCY_TERMS)
 
-        logger.info("NarrativeTemporalAnalyzer initialized (optimized)")
+        logger.info("NarrativeTemporalAnalyzer initialized (final)")
 
-    # -----------------------------------------------------
+    # =========================================================
 
     def analyze(self, ctx: FeatureContext) -> Dict[str, float]:
 
-        if ctx.n_tokens == 0:
+        # 🔥 lazy-safe
+        ctx.ensure_tokens()
+
+        if ctx.safe_n_tokens() == 0:
             return self._empty()
 
-        features: Dict[str, float] = {}
+        # shared spaCy
+        doc = get_doc(ctx, task="syntax")
 
-        #  Token-based ratios (fast)
-        features["past_framing_ratio"] = term_ratio(
-            ctx.token_counts, ctx.n_tokens, self.past
+        # -----------------------------------------------------
+        # RAW DENSITIES
+        # -----------------------------------------------------
+
+        raw = {
+            "past": self._density(ctx, self.past),
+            "crisis": self._density(ctx, self.crisis),
+            "urgency": self._density(ctx, self.urgency),
+        }
+
+        # -----------------------------------------------------
+        # NORMALIZATION
+        # -----------------------------------------------------
+
+        dist = self._normalize(raw)
+
+        # -----------------------------------------------------
+        # TENSE FEATURES
+        # -----------------------------------------------------
+
+        tense = self._tense_distribution(doc)
+
+        # -----------------------------------------------------
+        # TEMPORAL CONTRAST
+        # -----------------------------------------------------
+
+        contrast = float(np.std(list(dist.values())))
+
+        # -----------------------------------------------------
+        # TEMPORAL INTENSITY
+        # -----------------------------------------------------
+
+        intensity = float(sum(raw.values()) / (len(raw) + EPS))
+
+        # -----------------------------------------------------
+        # DIVERSITY
+        # -----------------------------------------------------
+
+        diversity = self._entropy(dist)
+
+        # -----------------------------------------------------
+        # OUTPUT
+        # -----------------------------------------------------
+
+        return {
+            "past_framing_ratio": self._safe(dist["past"]),
+            "crisis_escalation_ratio": self._safe(dist["crisis"]),
+            "urgency_language_ratio": self._safe(dist["urgency"]),
+            **tense,
+            "temporal_contrast_score": self._safe(contrast),
+            "temporal_intensity": self._safe(intensity),
+            "temporal_diversity": self._safe(diversity),
+        }
+
+    # =========================================================
+
+    def _density(self, ctx: FeatureContext, lexicon: Set[str]) -> float:
+
+        n_tokens = ctx.safe_n_tokens()
+
+        token_score = term_ratio(
+            ctx.safe_counts(),
+            n_tokens,
+            lexicon,
         )
 
-        features["crisis_escalation_ratio"] = term_ratio(
-            ctx.token_counts, ctx.n_tokens, self.crisis
+        phrase_hits = phrase_match_count(
+            ctx.text_lower or "",
+            lexicon,
         )
 
-        features["urgency_language_ratio"] = term_ratio(
-            ctx.token_counts, ctx.n_tokens, self.urgency
-        )
+        phrase_score = phrase_hits / (n_tokens + EPS)
 
-        #  Tense distribution (reuse doc)
-        features.update(self._tense_distribution(ctx))
+        # 🔥 weighted fusion
+        return 0.7 * token_score + 0.3 * phrase_score
 
-        #  Temporal contrast
-        features["temporal_contrast_score"] = abs(
-            features["past_framing_ratio"]
-            - features["urgency_language_ratio"]
-        )
+    # =========================================================
 
-        return features
+    def _normalize(self, scores: Dict[str, float]) -> Dict[str, float]:
 
-    # -----------------------------------------------------
+        values = np.array(list(scores.values()), dtype=np.float32)
 
-    def _tense_distribution(self, ctx: FeatureContext) -> Dict[str, float]:
+        total = float(values.sum())
 
-        verbs = [t for t in ctx.doc if t.pos_ in {"VERB", "AUX"}]
+        if total < EPS:
+            return {k: 0.0 for k in scores}
+
+        norm = values / (total + EPS)
+
+        return dict(zip(scores.keys(), norm.astype(float)))
+
+    # =========================================================
+
+    def _tense_distribution(self, doc) -> Dict[str, float]:
+
+        verbs = [t for t in doc if t.pos_ in {"VERB", "AUX"}]
 
         if not verbs:
             return {
@@ -106,7 +173,7 @@ class NarrativeTemporalAnalyzer(BaseAnalyzer):
             tag = token.tag_
             lemma = token.lemma_.lower()
 
-            if lemma in {"will", "shall"} or tag == "MD":
+            if lemma in {"will", "shall"}:
                 future += 1
             elif tag in {"VBD", "VBN"}:
                 past += 1
@@ -121,9 +188,35 @@ class NarrativeTemporalAnalyzer(BaseAnalyzer):
             "future_tense_ratio": future / total,
         }
 
-    # -----------------------------------------------------
+    # =========================================================
+
+    def _entropy(self, dist: Dict[str, float]) -> float:
+
+        values = np.array(list(dist.values()), dtype=np.float32)
+
+        if values.sum() < EPS:
+            return 0.0
+
+        probs = values / (values.sum() + EPS)
+
+        entropy = -np.sum(probs * np.log(probs + EPS))
+        max_entropy = np.log(len(probs))
+
+        return float(entropy / (max_entropy + EPS))
+
+    # =========================================================
+
+    def _safe(self, value: float) -> float:
+
+        if not np.isfinite(value):
+            return 0.0
+
+        return float(np.clip(value, 0.0, MAX_CLIP))
+
+    # =========================================================
 
     def _empty(self) -> Dict[str, float]:
+
         return {
             "past_framing_ratio": 0.0,
             "crisis_escalation_ratio": 0.0,
@@ -132,12 +225,14 @@ class NarrativeTemporalAnalyzer(BaseAnalyzer):
             "present_tense_ratio": 0.0,
             "future_tense_ratio": 0.0,
             "temporal_contrast_score": 0.0,
+            "temporal_intensity": 0.0,
+            "temporal_diversity": 0.0,
         }
 
 
-# ---------------------------------------------------------
-# Vector
-# ---------------------------------------------------------
+# =========================================================
+# VECTOR
+# =========================================================
 
 def narrative_temporal_vector(features: Dict[str, float]) -> np.ndarray:
     return make_vector(features, NARRATIVE_TEMPORAL_KEYS)

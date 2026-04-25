@@ -18,13 +18,15 @@ logger = logging.getLogger(__name__)
 
 class EmotionTrainer:
     """
-    Lightweight trainer wrapper for EmotionClassifier.
+    Production-grade trainer for EmotionClassifier.
 
     Supports:
     - device placement
     - gradient clipping
     - mixed precision (AMP)
+    - gradient accumulation
     - scheduler updates
+    - early stopping hooks (external)
     """
 
     def __init__(
@@ -35,22 +37,28 @@ class EmotionTrainer:
         scheduler: Optional[Any] = None,
         grad_clip: Optional[float] = None,
         use_amp: bool = False,
+        grad_accum_steps: int = 1,
     ) -> None:
 
-        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        self.device = torch.device(
+            device or ("cuda" if torch.cuda.is_available() else "cpu")
+        )
 
         self.model = model.to(self.device)
         self.optimizer = optimizer
         self.scheduler = scheduler
         self.grad_clip = grad_clip
         self.use_amp = use_amp
+        self.grad_accum_steps = max(1, grad_accum_steps)
 
         self.scaler = GradScaler(enabled=use_amp)
+
         self.amp_dtype = (
             torch.bfloat16
             if self.device.type == "cuda" and torch.cuda.is_bf16_supported()
             else torch.float16
         )
+
         if (
             self.device.type == "cuda"
             and self.use_amp
@@ -59,12 +67,13 @@ class EmotionTrainer:
         ):
             self.model = self.model.to(dtype=torch.bfloat16)
 
+        self._step_count = 0
+
         logger.info("EmotionTrainer initialized on device: %s", self.device)
 
     # -----------------------------------------------------
 
     def _move_batch(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """Move tensors to correct device."""
         return {k: v.to(self.device) for k, v in batch.items()}
 
     # -----------------------------------------------------
@@ -75,8 +84,6 @@ class EmotionTrainer:
 
         batch = self._move_batch(batch)
 
-        self.optimizer.zero_grad()
-
         with autocast(enabled=self.use_amp, dtype=self.amp_dtype):
 
             outputs: Dict[str, Any] = self.model(**batch)
@@ -86,30 +93,45 @@ class EmotionTrainer:
             if loss is None:
                 raise RuntimeError("Model output did not include 'loss'")
 
+            loss = loss / self.grad_accum_steps
+
         if self.use_amp:
-
             self.scaler.scale(loss).backward()
-
-            if self.grad_clip is not None:
-                self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
-
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-
         else:
-
             loss.backward()
 
-            if self.grad_clip is not None:
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+        self._step_count += 1
 
-            self.optimizer.step()
+        if self._step_count % self.grad_accum_steps == 0:
 
-        if self.scheduler is not None:
-            self.scheduler.step()
+            if self.use_amp:
 
-        return float(loss.item())
+                if self.grad_clip is not None:
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(),
+                        self.grad_clip,
+                    )
+
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+
+            else:
+
+                if self.grad_clip is not None:
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(),
+                        self.grad_clip,
+                    )
+
+                self.optimizer.step()
+
+            self.optimizer.zero_grad(set_to_none=True)
+
+            if self.scheduler is not None:
+                self.scheduler.step()
+
+        return float(loss.item() * self.grad_accum_steps)
 
     # -----------------------------------------------------
 
@@ -117,12 +139,11 @@ class EmotionTrainer:
         self,
         dataloader: Iterable[Dict[str, torch.Tensor]],
     ) -> float:
-        """
-        Train model for one epoch.
-        """
 
         total_loss = 0.0
         steps = 0
+
+        self.optimizer.zero_grad(set_to_none=True)
 
         for batch in dataloader:
 

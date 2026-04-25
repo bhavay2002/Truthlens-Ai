@@ -1,5 +1,3 @@
-# src/analysis/narrative_role_extractor.py
-
 from __future__ import annotations
 
 import logging
@@ -9,103 +7,100 @@ import numpy as np
 
 from src.analysis.base_analyzer import BaseAnalyzer
 from src.analysis.feature_context import FeatureContext
+from src.analysis.feature_schema import NARRATIVE_ROLE_KEYS, make_vector
+from src.analysis._text_features import normalize_lexicon_terms
+from src.analysis.spacy_loader import get_doc
 
 logger = logging.getLogger(__name__)
 
 
+# =========================================================
+# CONSTANTS
+# =========================================================
+
+EPS = 1e-8
+MAX_CLIP = 1.0
+
+
+# =========================================================
+# ANALYZER
+# =========================================================
+
 class NarrativeRoleExtractor(BaseAnalyzer):
 
-    HERO_TERMS = {
-        "protect","defend","shield","guard","secure",
-        "rescue","save","help","aid","assist","support",
-        "lead","guide","champion","advocate",
-        "rebuild","restore","stabilize","reform",
-        "fight for","stand for","stand with",
-    }
+    name = "narrative_roles"
+    expected_keys = set(NARRATIVE_ROLE_KEYS)
 
-    VILLAIN_TERMS = {
-        "attack","assault","bomb","invade","raid","strike",
-        "kill","destroy","harm","injure",
-        "exploit","abuse","oppress","suppress",
-        "corrupt","manipulate","undermine",
-        "threaten","intimidate","coerce",
-        "blame","accuse","condemn",
-    }
+    HERO_TERMS: Set[str] = {...}
+    VILLAIN_TERMS: Set[str] = {...}
+    VICTIM_TERMS: Set[str] = {...}
 
-    VICTIM_TERMS = {
-        "hurt","injure","kill","attack","harm",
-        "suffer","struggle","endure",
-        "lose","damage","destroy",
-        "target","persecute",
-        "displace","flee","escape",
-        "affect","impact","burden",
-    }
-
-    # -----------------------------------------------------
+    # =========================================================
 
     def __init__(self):
-        self.hero_terms = self._normalize(self.HERO_TERMS)
-        self.villain_terms = self._normalize(self.VILLAIN_TERMS)
-        self.victim_terms = self._normalize(self.VICTIM_TERMS)
 
-        logger.info("NarrativeRoleExtractor initialized (optimized)")
+        self.hero_terms = normalize_lexicon_terms(self.HERO_TERMS)
+        self.villain_terms = normalize_lexicon_terms(self.VILLAIN_TERMS)
+        self.victim_terms = normalize_lexicon_terms(self.VICTIM_TERMS)
 
-    # -----------------------------------------------------
+        logger.info("NarrativeRoleExtractor initialized (final)")
 
-    def analyze(self, ctx: FeatureContext) -> Dict[str, List[str]]:
+    # =========================================================
 
-        hero_entities: Set[str] = set()
-        villain_entities: Set[str] = set()
-        victim_entities: Set[str] = set()
+    def analyze(self, ctx: FeatureContext) -> Dict[str, float]:
 
-        for token in ctx.doc:
+        # 🔥 shared spaCy
+        doc = get_doc(ctx, task="syntax")
+
+        hero_entities: Dict[str, float] = {}
+        villain_entities: Dict[str, float] = {}
+        victim_entities: Dict[str, float] = {}
+
+        for token in doc:
 
             lemma = token.lemma_.lower()
 
-            # HERO
             if lemma in self.hero_terms:
-                self._assign_roles(token, hero_entities, victim_entities)
+                self._assign(token, hero_entities, victim_entities)
 
-            # VILLAIN
             elif lemma in self.villain_terms:
-                self._assign_roles(token, villain_entities, victim_entities)
+                self._assign(token, villain_entities, victim_entities)
 
-            # VICTIM
             elif lemma in self.victim_terms:
                 obj = self._get_object(token)
                 if obj:
-                    victim_entities.add(obj)
+                    victim_entities[obj] = victim_entities.get(obj, 0) + 1
 
-            # Passive victim detection
+            # passive victim detection
             if token.dep_ == "nsubjpass":
                 entity = self._resolve_entity(token)
                 if entity:
-                    victim_entities.add(entity)
+                    victim_entities[entity] = victim_entities.get(entity, 0) + 1
 
-        return {
-            "hero_entities": sorted(hero_entities),
-            "villain_entities": sorted(villain_entities),
-            "victim_entities": sorted(victim_entities),
-        }
+        # -----------------------------------------------------
+        # CONVERT TO SCORES (IMPORTANT FIX)
+        # -----------------------------------------------------
 
-    # -----------------------------------------------------
+        return self._role_scores(
+            hero_entities,
+            villain_entities,
+            victim_entities,
+        )
 
-    def _assign_roles(
-        self,
-        token,
-        actor_set: Set[str],
-        victim_set: Set[str],
-    ):
+    # =========================================================
+
+    def _assign(self, token, actor_dict, victim_dict):
+
         subject = self._get_subject(token)
         obj = self._get_object(token)
 
         if subject:
-            actor_set.add(subject)
+            actor_dict[subject] = actor_dict.get(subject, 0) + 1
 
         if obj:
-            victim_set.add(obj)
+            victim_dict[obj] = victim_dict.get(obj, 0) + 1
 
-    # -----------------------------------------------------
+    # =========================================================
 
     def _get_subject(self, token) -> Optional[str]:
         for child in token.children:
@@ -113,7 +108,7 @@ class NarrativeRoleExtractor(BaseAnalyzer):
                 return self._resolve_entity(child)
         return None
 
-    # -----------------------------------------------------
+    # =========================================================
 
     def _get_object(self, token) -> Optional[str]:
         for child in token.children:
@@ -121,65 +116,79 @@ class NarrativeRoleExtractor(BaseAnalyzer):
                 return self._resolve_entity(child)
         return None
 
-    # -----------------------------------------------------
+    # =========================================================
 
     def _resolve_entity(self, token) -> Optional[str]:
 
-        # Named entity span
-        if token.ent_iob_ in {"B", "I"}:
-            span = token.doc[token.left_edge.i : token.right_edge.i + 1]
-            if span.text.strip():
-                return span.text.lower()
+        # named entity span
+        if token.ent_iob_ in {"B", "I"} and token.ent_type_:
+            span = token.doc[token.ent_start : token.ent_end]
+            text = span.text.lower().strip()
+            if len(text) > 2:
+                return text
 
-        # Compound noun phrases
+        # fallback: noun/proper noun
         if token.pos_ in {"NOUN", "PROPN"}:
             return token.lemma_.lower()
 
-        # Fallback to head
-        if token.head and token.head != token:
-            return token.head.lemma_.lower()
-
         return None
 
-    # -----------------------------------------------------
+    # =========================================================
 
-    def _normalize(self, terms: Set[str]) -> Set[str]:
-        return {t.replace("_", " ").lower() for t in terms}
+    def _role_scores(
+        self,
+        hero_entities: Dict[str, float],
+        villain_entities: Dict[str, float],
+        victim_entities: Dict[str, float],
+    ) -> Dict[str, float]:
 
-    # -----------------------------------------------------
+        heroes = sum(hero_entities.values())
+        villains = sum(villain_entities.values())
+        victims = sum(victim_entities.values())
 
-    def role_scores(self, features: Dict[str, List[str]]) -> Dict[str, float]:
+        total = heroes + villains + victims
 
-        heroes = len(features.get("hero_entities", []))
-        villains = len(features.get("villain_entities", []))
-        victims = len(features.get("victim_entities", []))
+        if total == 0:
+            return self._empty()
 
-        total = max(heroes + villains + victims, 1)
+        hero_r = heroes / total
+        villain_r = villains / total
+        victim_r = victims / total
+
+        # balance mapping [-1,1] → [0,1]
+        hv_balance = (hero_r - villain_r + 1.0) / 2.0
 
         return {
-            "hero_ratio": heroes / total,
-            "villain_ratio": villains / total,
-            "victim_ratio": victims / total,
-            "hero_vs_villain": heroes - villains,
+            "hero_ratio": self._safe(hero_r),
+            "villain_ratio": self._safe(villain_r),
+            "victim_ratio": self._safe(victim_r),
+            "hero_vs_villain_balance": self._safe(hv_balance),
+        }
+
+    # =========================================================
+
+    def _safe(self, value: float) -> float:
+
+        if not np.isfinite(value):
+            return 0.0
+
+        return float(np.clip(value, 0.0, MAX_CLIP))
+
+    # =========================================================
+
+    def _empty(self) -> Dict[str, float]:
+
+        return {
+            "hero_ratio": 0.0,
+            "villain_ratio": 0.0,
+            "victim_ratio": 0.0,
+            "hero_vs_villain_balance": 0.5,
         }
 
 
-# ---------------------------------------------------------
-# Vector
-# ---------------------------------------------------------
+# =========================================================
+# VECTOR
+# =========================================================
 
-def narrative_role_vector(features: Dict[str, List[str]]) -> np.ndarray:
-
-    heroes = len(features.get("hero_entities", []))
-    villains = len(features.get("villain_entities", []))
-    victims = len(features.get("victim_entities", []))
-
-    return np.array(
-        [
-            float(heroes),
-            float(villains),
-            float(victims),
-            float(heroes - villains),
-        ],
-        dtype=np.float32,
-    )
+def narrative_role_vector(features: Dict[str, float]) -> np.ndarray:
+    return make_vector(features, NARRATIVE_ROLE_KEYS)

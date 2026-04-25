@@ -1,32 +1,3 @@
-"""
-File Name: model_versioning.py
-Module: model_management
-Description:
-    Provides a production-grade model versioning system used to manage
-    machine learning model artifacts in large-scale ML systems.
-
-    The module implements structured version control for trained models,
-    including version registration, artifact tracking, metadata storage,
-    and version history management.
-
-    This system enables reproducibility, auditability, and controlled
-    deployment workflows by maintaining a registry of model versions
-    and their associated artifacts.
-
-Dependencies:
-    dataclasses
-    datetime
-    json
-    logging
-    pathlib
-    typing
-    uuid
-Inputs:
-    Model artifacts, metadata dictionaries, and version identifiers.
-Outputs:
-    Versioned model directories, version registry files, and metadata records.
-"""
-
 from __future__ import annotations
 
 import json
@@ -38,239 +9,195 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
-
 logger = logging.getLogger(__name__)
 
 
-def _ensure_directory(path: Path) -> None:
-    """Ensure that the specified directory exists."""
-    try:
-        path.mkdir(parents=True, exist_ok=True)
-    except Exception as exc:
-        logger.exception("Failed to create directory: %s", path)
-        raise OSError(f"Unable to create directory: {path}") from exc
+# =========================================================
+# UTILS
+# =========================================================
+
+def _ensure_dir(path: Path):
+    path.mkdir(parents=True, exist_ok=True)
 
 
-def _validate_non_empty(value: str, field_name: str) -> None:
-    """Validate that a string value is not empty."""
+def _validate_non_empty(value: str, name: str):
     if not value or not value.strip():
-        raise ValueError(f"{field_name} cannot be empty.")
+        raise ValueError(f"{name} cannot be empty")
 
+
+# =========================================================
+# DATA CLASS
+# =========================================================
 
 @dataclass
 class ModelVersionInfo:
-    """
-    Metadata describing a specific model version.
-    """
-
     model_name: str
     version: str
     version_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    created_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
     description: Optional[str] = None
     metrics: Optional[Dict[str, float]] = None
     artifact_path: Optional[str] = None
     tags: Optional[List[str]] = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self):
         _validate_non_empty(self.model_name, "model_name")
         _validate_non_empty(self.version, "version")
 
-        if self.metrics is not None:
-            for key, value in self.metrics.items():
-                if not isinstance(value, (int, float)):
-                    raise ValueError(
-                        f"Metric '{key}' must be numeric but received {type(value)}"
-                    )
+        if self.metrics:
+            for k, v in self.metrics.items():
+                if not isinstance(v, (int, float)):
+                    raise ValueError(f"Invalid metric type for {k}")
 
+
+# =========================================================
+# REGISTRY
+# =========================================================
 
 class ModelVersionRegistry:
-    """
-    Manages model version registration and retrieval.
 
-    The registry stores metadata for each model version in a structured
-    JSON index file. Each version is stored within its own directory
-    containing artifacts and metadata.
-    """
+    REGISTRY_FILE = "model_registry.json"
 
-    REGISTRY_FILENAME = "model_registry.json"
-
-    def __init__(self, registry_dir: str | Path) -> None:
-        """
-        Initialize the model version registry.
-
-        Parameters
-        ----------
-        registry_dir : str | Path
-            Directory where model versions and registry metadata are stored.
-        """
+    def __init__(self, registry_dir: str | Path):
 
         self.registry_dir = Path(registry_dir)
-        _ensure_directory(self.registry_dir)
+        _ensure_dir(self.registry_dir)
 
-        self.registry_file = self.registry_dir / self.REGISTRY_FILENAME
+        self.registry_path = self.registry_dir / self.REGISTRY_FILE
         self._lock = threading.Lock()
 
-        if not self.registry_file.exists():
-            self._initialize_registry()
+        if not self.registry_path.exists():
+            self._init_registry()
 
-    def _initialize_registry(self) -> None:
-        """Create an empty registry file."""
-        try:
-            with self.registry_file.open("w", encoding="utf-8") as f:
-                json.dump({"models": {}}, f, indent=4)
-        except Exception as exc:
-            logger.exception("Failed to initialize registry.")
-            raise IOError("Could not initialize model registry.") from exc
+    # =====================================================
+    # INTERNAL
+    # =====================================================
 
-    def _load_registry(self) -> Dict:
-        """Load registry contents."""
-        try:
-            with self.registry_file.open("r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as exc:
-            logger.exception("Failed to load registry.")
-            raise IOError("Unable to read registry file.") from exc
+    def _init_registry(self):
+        with open(self.registry_path, "w", encoding="utf-8") as f:
+            json.dump({"models": {}}, f, indent=4)
 
-    def _save_registry(self, registry_data: Dict) -> None:
-        """Save registry data."""
-        try:
-            with self.registry_file.open("w", encoding="utf-8") as f:
-                json.dump(registry_data, f, indent=4)
-        except Exception as exc:
-            logger.exception("Failed to save registry.")
-            raise IOError("Unable to write registry file.") from exc
+    def _load(self) -> Dict:
+        with open(self.registry_path, "r", encoding="utf-8") as f:
+            return json.load(f)
 
-    def register_version(self, version_info: ModelVersionInfo) -> Path:
-        """
-        Register a new model version.
+    def _save(self, data: Dict):
+        with open(self.registry_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
 
-        Parameters
-        ----------
-        version_info : ModelVersionInfo
-            Metadata describing the model version.
+    # =====================================================
+    # REGISTER
+    # =====================================================
 
-        Returns
-        -------
-        Path
-            Path to the created model version directory.
-        """
+    def register_version(self, info: ModelVersionInfo) -> Path:
 
-        model_name = version_info.model_name
-
-        version_directory = (
-            self.registry_dir
-            / model_name
-            / f"version_{version_info.version}"
+        version_dir = (
+            self.registry_dir / info.model_name / f"version_{info.version}"
         )
 
-        _ensure_directory(version_directory)
+        _ensure_dir(version_dir)
 
-        version_info.artifact_path = str(version_directory)
+        info.artifact_path = str(version_dir)
 
         with self._lock:
-            registry = self._load_registry()
 
-            model_name = version_info.model_name
+            registry = self._load()
 
-            if model_name not in registry["models"]:
-                registry["models"][model_name] = []
+            registry["models"].setdefault(info.model_name, [])
+            registry["models"][info.model_name].append(asdict(info))
 
-            registry["models"][model_name].append(asdict(version_info))
+            self._save(registry)
 
-            self._save_registry(registry)
+        metadata_file = version_dir / "version.json"
 
-        metadata_file = version_directory / "version_metadata.json"
+        with open(metadata_file, "w", encoding="utf-8") as f:
+            json.dump(asdict(info), f, indent=4)
 
-        try:
-            with metadata_file.open("w", encoding="utf-8") as f:
-                json.dump(asdict(version_info), f, indent=4)
-        except Exception as exc:
-            logger.exception("Failed to write version metadata.")
-            raise IOError("Unable to store version metadata.") from exc
+        logger.info("Registered model version: %s %s", info.model_name, info.version)
 
-        logger.info(
-            "Registered model version: %s (version=%s)",
-            version_info.model_name,
-            version_info.version,
-        )
+        return version_dir
 
-        return version_directory
+    # =====================================================
+    # QUERY
+    # =====================================================
 
     def list_versions(self, model_name: str) -> List[ModelVersionInfo]:
-        """
-        List all versions of a given model.
-
-        Parameters
-        ----------
-        model_name : str
-
-        Returns
-        -------
-        List[ModelVersionInfo]
-        """
 
         _validate_non_empty(model_name, "model_name")
 
         with self._lock:
-            registry = self._load_registry()
+            registry = self._load()
 
-        if model_name not in registry["models"]:
-            return []
+        entries = registry["models"].get(model_name, [])
 
-        versions: List[ModelVersionInfo] = []
-
-        for entry in registry["models"][model_name]:
-            versions.append(ModelVersionInfo(**entry))
-
-        return versions
+        return [ModelVersionInfo(**e) for e in entries]
 
     def get_latest_version(self, model_name: str) -> Optional[ModelVersionInfo]:
-        """
-        Retrieve the latest registered version of a model.
-
-        Parameters
-        ----------
-        model_name : str
-
-        Returns
-        -------
-        Optional[ModelVersionInfo]
-        """
 
         versions = self.list_versions(model_name)
 
         if not versions:
             return None
 
-        versions_sorted = sorted(
+        return sorted(
             versions,
             key=lambda v: v.created_at,
             reverse=True,
-        )
-
-        return versions_sorted[0]
+        )[0]
 
     def get_version(
-        self, model_name: str, version: str
+        self,
+        model_name: str,
+        version: str,
     ) -> Optional[ModelVersionInfo]:
-        """
-        Retrieve a specific model version.
 
-        Parameters
-        ----------
-        model_name : str
-        version : str
-
-        Returns
-        -------
-        Optional[ModelVersionInfo]
-        """
-
-        versions = self.list_versions(model_name)
-
-        for v in versions:
+        for v in self.list_versions(model_name):
             if v.version == version:
                 return v
 
         return None
+
+    # =====================================================
+    # DELETE / CLEANUP
+    # =====================================================
+
+    def delete_version(self, model_name: str, version: str) -> bool:
+
+        with self._lock:
+            registry = self._load()
+
+            versions = registry["models"].get(model_name, [])
+
+            new_versions = [v for v in versions if v["version"] != version]
+
+            if len(new_versions) == len(versions):
+                return False
+
+            registry["models"][model_name] = new_versions
+            self._save(registry)
+
+        version_dir = self.registry_dir / model_name / f"version_{version}"
+
+        if version_dir.exists():
+            import shutil
+            shutil.rmtree(version_dir)
+
+        logger.info("Deleted version: %s %s", model_name, version)
+
+        return True
+
+    # =====================================================
+    # SUMMARY
+    # =====================================================
+
+    def summary(self) -> Dict[str, Any]:
+
+        with self._lock:
+            registry = self._load()
+
+        return {
+            model: len(versions)
+            for model, versions in registry["models"].items()
+        }

@@ -1,117 +1,53 @@
-"""
-File Name: parameter_count.py
-Module: models.utils
-Description:
-    Provides utilities for inspecting the number of parameters in PyTorch
-    models used within the TruthLens AI system. These utilities help
-    developers understand model size, memory footprint, and trainable
-    parameter distribution.
-
-    Functions include:
-        • total parameter count
-        • trainable parameter count
-        • frozen parameter count
-        • per-layer parameter summaries
-
-Dependencies:
-    logging
-    typing
-    torch
-    torch.nn
-Inputs:
-    PyTorch model
-Outputs:
-    Parameter statistics and summaries
-"""
-
 from __future__ import annotations
 
 import logging
-from typing import Dict
+from typing import Dict, Any
 
+import torch
 import torch.nn as nn
 
 logger = logging.getLogger(__name__)
 
 
+# =========================================================
+# BASIC COUNTS
+# =========================================================
+
 def count_parameters(model: nn.Module) -> int:
-    """
-    Count total parameters in a model.
-
-    Parameters
-    ----------
-    model : nn.Module
-        PyTorch model.
-
-    Returns
-    -------
-    int
-        Total number of parameters.
-    """
-
     if not isinstance(model, nn.Module):
-        raise TypeError("model must be an instance of torch.nn.Module")
+        raise TypeError("model must be nn.Module")
 
-    total = sum(p.numel() for p in model.parameters())
-
-    logger.debug("Total parameters: %d", total)
-
-    return total
+    return sum(p.numel() for p in model.parameters())
 
 
 def count_trainable_parameters(model: nn.Module) -> int:
-    """
-    Count trainable parameters.
-
-    Parameters
-    ----------
-    model : nn.Module
-
-    Returns
-    -------
-    int
-    """
-
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-    logger.debug("Trainable parameters: %d", trainable)
-
-    return trainable
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
 def count_frozen_parameters(model: nn.Module) -> int:
+    return sum(p.numel() for p in model.parameters() if not p.requires_grad)
+
+
+# =========================================================
+# MEMORY ESTIMATION
+# =========================================================
+
+def estimate_model_size_mb(model: nn.Module) -> float:
     """
-    Count non-trainable parameters.
-
-    Parameters
-    ----------
-    model : nn.Module
-
-    Returns
-    -------
-    int
+    Approximate model size in MB (assuming float32 unless specified).
     """
 
-    frozen = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+    total_params = count_parameters(model)
+    bytes_per_param = 4  # float32
 
-    logger.debug("Frozen parameters: %d", frozen)
-
-    return frozen
+    return (total_params * bytes_per_param) / (1024 ** 2)
 
 
-def parameter_summary(model: nn.Module) -> Dict[str, int]:
-    """
-    Generate a summary of model parameters.
+# =========================================================
+# SUMMARY
+# =========================================================
 
-    Parameters
-    ----------
-    model : nn.Module
-
-    Returns
-    -------
-    Dict[str, int]
-        Dictionary with parameter statistics.
-    """
+def parameter_summary(model: nn.Module) -> Dict[str, Any]:
 
     total = count_parameters(model)
     trainable = count_trainable_parameters(model)
@@ -121,38 +57,64 @@ def parameter_summary(model: nn.Module) -> Dict[str, int]:
         "total_parameters": total,
         "trainable_parameters": trainable,
         "frozen_parameters": frozen,
+        "trainable_ratio": trainable / total if total > 0 else 0.0,
+        "model_size_mb": estimate_model_size_mb(model),
     }
 
     logger.info(
-        "Model parameters | total=%d | trainable=%d | frozen=%d",
+        "Params | total=%d | trainable=%d | frozen=%d | size=%.2fMB",
         total,
         trainable,
         frozen,
+        summary["model_size_mb"],
     )
 
     return summary
 
 
-def layer_parameter_breakdown(model: nn.Module) -> Dict[str, int]:
-    """
-    Return parameter count per layer/module.
+# =========================================================
+# LAYER BREAKDOWN
+# =========================================================
 
-    Parameters
-    ----------
-    model : nn.Module
+def layer_parameter_breakdown(model: nn.Module) -> Dict[str, Dict[str, int]]:
 
-    Returns
-    -------
-    Dict[str, int]
-        Mapping of module names to parameter counts.
-    """
-
-    breakdown: Dict[str, int] = {}
+    breakdown: Dict[str, Dict[str, int]] = {}
 
     for name, module in model.named_modules():
+
         params = sum(p.numel() for p in module.parameters(recurse=False))
+        trainable = sum(
+            p.numel() for p in module.parameters(recurse=False) if p.requires_grad
+        )
 
         if params > 0:
-            breakdown[name] = params
+            breakdown[name] = {
+                "total": params,
+                "trainable": trainable,
+                "frozen": params - trainable,
+            }
 
     return breakdown
+
+
+# =========================================================
+# TOP-K HEAVIEST LAYERS
+# =========================================================
+
+def top_k_layers_by_parameters(
+    model: nn.Module,
+    k: int = 10,
+) -> Dict[str, int]:
+
+    layer_counts = {
+        name: sum(p.numel() for p in module.parameters(recurse=False))
+        for name, module in model.named_modules()
+    }
+
+    sorted_layers = sorted(
+        layer_counts.items(),
+        key=lambda x: x[1],
+        reverse=True,
+    )
+
+    return dict(sorted_layers[:k])

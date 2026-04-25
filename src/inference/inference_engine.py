@@ -1,13 +1,5 @@
 from __future__ import annotations
 
-import torch
-
-# cudnn.benchmark speeds up convolutions with fixed input shapes on CUDA.
-# Only enable it when CUDA is actually available — setting it unconditionally
-# at import time mutates global PyTorch state on CPU-only environments.
-if torch.cuda.is_available():
-    torch.backends.cudnn.benchmark = True
-
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,10 +8,14 @@ from typing import Dict, List, Optional, Union, Any
 import numpy as np
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
-from src.inference.feature_preparer import FeaturePreparer
-from src.inference.prediction_pipeline import PredictionPipeline
-from src.inference.report_generator import ReportGenerator
+
 from src.models.calibration import IsotonicCalibrator, TemperatureScaler
+from src.inference.postprocessing import Postprocessor
+
+# 🔥 NEW IMPORTS
+from src.inference.prediction_service import PredictionService
+from src.inference.schema import PredictionOutput
+
 from src.utils import (
     ensure_file_exists,
     ensure_non_empty_text_list,
@@ -30,509 +26,264 @@ from src.utils import (
 logger = logging.getLogger(__name__)
 
 
+# =========================================================
+# CONFIG
+# =========================================================
+
 @dataclass
 class InferenceConfig:
-    """
-    Configuration for inference engine.
-    """
     model_path: str
-    tokenizer_path: Optional[str]
+    tokenizer_path: Optional[str] = None
     device: str = "auto"
     max_length: int = 512
-    batch_size: int = 8
+    batch_size: int = 16
     return_probabilities: bool = True
+    return_logits: bool = True
     use_amp: bool = True
 
+    # 🔥 NEW
+    enable_full_pipeline: bool = True
 
-@dataclass
-class PredictionResult:
-    """
-    Structured prediction result.
-    """
-    text: str
-    predicted_label: Union[int, str]
-    probabilities: Optional[List[float]] = None
-    calibrated_probabilities: Optional[List[float]] = None
-    ensemble_probabilities: Optional[List[float]] = None
-    logits: Optional[List[float]] = None
 
+# =========================================================
+# ENGINE
+# =========================================================
 
 class InferenceEngine:
-    """
-    High-level inference engine used for model loading and prediction.
-
-    Responsibilities:
-    - Model loading
-    - Tokenization
-    - Device management
-    - Batch inference
-    - Output formatting
-    """
 
     def __init__(
         self,
         config: InferenceConfig,
         *,
-        feature_preparer: Optional[FeaturePreparer] = None,
-        prediction_pipeline: Optional[PredictionPipeline] = None,
-        report_generator: Optional[ReportGenerator] = None,
-        article_analyzer: Optional[Any] = None,
         temperature_scaler: Optional[TemperatureScaler] = None,
         isotonic_calibrator: Optional[IsotonicCalibrator] = None,
-        ensemble_model: Optional[torch.nn.Module] = None,
-    ) -> None:
+        postprocessor: Optional[Postprocessor] = None,
+    ):
         self.config = config
         self.device = self._resolve_device(config.device)
-        self.use_amp = (self.device.type == "cuda") and getattr(config, "use_amp", True)
-        if self.device.type == "cuda":
-            self.amp_dtype = (
-                torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-            )
-        else:
-            self.amp_dtype = torch.float32
-        self.use_compile = self.device.type == "cuda"
+
+        self.temperature_scaler = temperature_scaler
+        self.isotonic_calibrator = isotonic_calibrator
+
         self.model = None
         self.tokenizer = None
         self.label_map: Optional[Dict[int, str]] = None
-        self.feature_preparer = feature_preparer
-        self.prediction_pipeline = prediction_pipeline
-        self.report_generator = report_generator or ReportGenerator()
-        self.article_analyzer = article_analyzer
-        self.temperature_scaler = temperature_scaler
-        self.isotonic_calibrator = isotonic_calibrator
-        self.ensemble_model = ensemble_model
-        if self.ensemble_model is not None:
-            self.ensemble_model.to(self.device)
-            self.ensemble_model.eval()
+
+        self.postprocessor = postprocessor or Postprocessor()
+
+        self.use_amp = self.device.type == "cuda" and config.use_amp
+        self.amp_dtype = torch.float16 if self.device.type == "cuda" else torch.float32
 
         self._load_model()
 
-    def _resolve_device(self, device: str) -> torch.device:
-        """
-        Resolve device configuration.
-        """
-        if device == "auto":
-            resolved = get_device(prefer_gpu=True)
-        else:
-            resolved = torch.device(device)
+        # 🔥 NEW: Prediction Service (FULL SYSTEM)
+        self.prediction_service: Optional[PredictionService] = None
 
-        logger.info("Using device: %s", resolved)
-        return resolved
-
-    def _load_model(self) -> None:
-        """
-        Load model and tokenizer from disk.
-        """
-        model_path = Path(self.config.model_path)
-
-        ensure_file_exists(model_path)
-
-        tokenizer_path = (
-            self.config.tokenizer_path
-            if self.config.tokenizer_path
-            else self.config.model_path
-        )
-
-        try:
-            logger.info("Loading tokenizer from %s", tokenizer_path)
-            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast=True)
-            if self.tokenizer is None:
-                raise RuntimeError("Tokenizer failed to load")
-
-            logger.info("Loading model from %s", model_path)
-            self.model = AutoModelForSequenceClassification.from_pretrained(
-                model_path,
-                torch_dtype=self.amp_dtype if self.device.type == "cuda" else None,
-                low_cpu_mem_usage=True,
+        if config.enable_full_pipeline:
+            self.prediction_service = PredictionService(
+                model=self,
             )
 
-            self.model.to(self.device, non_blocking=True)
+    # =====================================================
+    # DEVICE
+    # =====================================================
 
-            if self.use_compile:
-                try:
-                    self.model = torch.compile(self.model, mode="reduce-overhead")
-                except Exception:
-                    logger.debug("torch.compile skipped")
-            self.model.eval()
+    def _resolve_device(self, device: str) -> torch.device:
+        if device == "auto":
+            return get_device(prefer_gpu=True)
+        return torch.device(device)
 
-            self._load_label_map(model_path)
+    # =====================================================
+    # MODEL LOAD
+    # =====================================================
 
-        except Exception as exc:
-            logger.exception("Failed to load model")
-            raise RuntimeError("Model loading failed") from exc
+    def _load_model(self):
 
-    def _load_label_map(self, model_path: Path) -> None:
-        """
-        Load label mapping if available.
-        """
-        label_map_path = model_path / "label_map.json"
+        model_path = Path(self.config.model_path)
+        ensure_file_exists(model_path)
 
-        if label_map_path.exists():
-            try:
-                raw_map = load_json(label_map_path)
+        tokenizer_path = self.config.tokenizer_path or self.config.model_path
 
-                self.label_map = {int(k): v for k, v in raw_map.items()}
-                logger.info("Loaded label map")
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast=True)
 
-            except Exception as exc:
-                logger.warning("Failed to load label map: %s", exc)
+        self.model = AutoModelForSequenceClassification.from_pretrained(
+            model_path,
+            torch_dtype=self.amp_dtype if self.device.type == "cuda" else None,
+        )
 
-    def _validate_input(self, texts: Union[str, List[str]]) -> List[str]:
-        """
-        Validate input texts.
-        """
+        self.model.to(self.device)
+        self.model.eval()
+
+        self._load_label_map(model_path)
+
+    def _load_label_map(self, path: Path):
+        file = path / "label_map.json"
+        if file.exists():
+            raw = load_json(file)
+            self.label_map = {int(k): v for k, v in raw.items()}
+
+    # =====================================================
+    # HELPERS
+    # =====================================================
+
+    def _validate_input(self, texts):
         if isinstance(texts, str):
-            return ensure_non_empty_text_list([texts], name="texts")
-        return ensure_non_empty_text_list(texts, name="texts")
+            texts = [texts]
+        return ensure_non_empty_text_list(texts, "texts")
 
-    def _batchify(self, items: List[Any], batch_size: int) -> List[List[Any]]:
-        """
-        Split items into batches.
-        """
-        return [
-            items[i : i + batch_size]
-            for i in range(0, len(items), batch_size)
-        ]
+    def _batchify(self, items, size):
+        return [items[i:i + size] for i in range(0, len(items), size)]
 
-    def predict(
+    # =====================================================
+    # CORE FORWARD
+    # =====================================================
+
+    def _forward(self, batch):
+
+        encoded = self.tokenizer(
+            batch,
+            padding=True,
+            truncation=True,
+            max_length=self.config.max_length,
+            return_tensors="pt",
+        ).to(self.device)
+
+        if self.use_amp:
+            with torch.autocast(device_type=self.device.type):
+                logits = self.model(**encoded).logits
+        else:
+            logits = self.model(**encoded).logits
+
+        return logits
+
+    # =====================================================
+    # CALIBRATION
+    # =====================================================
+
+    def _apply_calibration(self, logits, probs):
+
+        if self.temperature_scaler:
+            try:
+                return self.temperature_scaler.predict_proba(logits)
+            except Exception:
+                pass
+
+        if self.isotonic_calibrator:
+            try:
+                return torch.tensor(
+                    self.isotonic_calibrator.predict_proba(
+                        probs.detach().cpu().numpy()
+                    ),
+                    device=probs.device,
+                    dtype=probs.dtype,
+                )
+            except Exception:
+                pass
+
+        return probs
+
+    # =====================================================
+    # 🔥 BASE INFERENCE (UNCHANGED)
+    # =====================================================
+
+    def predict_for_evaluation(
         self,
-        texts: Union[str, List[str]]
-    ) -> List[PredictionResult]:
+        texts: Union[str, List[str]],
+    ) -> Dict[str, Any]:
+
+        texts = self._validate_input(texts)
+
+        all_logits = []
+        all_probs = []
+        all_cal = []
+
+        for batch in self._batchify(texts, self.config.batch_size):
+
+            logits = self._forward(batch)
+            probs = torch.softmax(logits, dim=-1)
+            cal = self._apply_calibration(logits, probs)
+
+            all_logits.append(logits.detach().cpu())
+            all_probs.append(probs.detach().cpu())
+            all_cal.append(cal.detach().cpu())
+
+        logits = torch.cat(all_logits)
+        probs = torch.cat(all_probs)
+        cal = torch.cat(all_cal)
+
+        preds = np.argmax(cal.numpy(), axis=1)
+
+        return {
+            "texts": texts,
+            "predictions": preds,
+            "probabilities": probs.numpy(),
+            "calibrated_probabilities": cal.numpy(),
+            "logits": logits.numpy(),
+        }
+
+    # =====================================================
+    # 🔥 NEW FULL PIPELINE
+    # =====================================================
+
+    def predict_full(self, text: str) -> Dict[str, Any]:
         """
-        Perform batch prediction.
+        🔥 FULL SYSTEM:
+        model + graph + explainability + aggregation +
+        postprocessing + drift + monitoring + schema
         """
-        validated_texts = self._validate_input(texts)
-        batches = self._batchify(validated_texts, self.config.batch_size)
 
-        results: List[PredictionResult] = []
+        if not self.prediction_service:
+            raise RuntimeError("Full pipeline not enabled")
 
-        with torch.inference_mode():
-            for batch in batches:
-                encoded = self.tokenizer(
-                    batch,
-                    padding="longest",
-                    truncation=True,
-                    max_length=self.config.max_length,
-                    return_tensors="pt",
-                )
+        result = self.prediction_service.predict(text)
 
-                for key in encoded:
-                    if self.device.type == "cuda" and encoded[key].device.type == "cpu":
-                        encoded[key] = encoded[key].pin_memory().to(
-                            self.device,
-                            non_blocking=True,
-                        )
-                    else:
-                        encoded[key] = encoded[key].to(self.device)
+        # optional schema validation
+        try:
+            result = PredictionOutput(**result).model_dump()
+        except Exception as e:
+            logger.warning("Schema validation failed: %s", e)
 
-                if self.use_amp:
-                    with torch.autocast(
-                        device_type=self.device.type,
-                        dtype=self.amp_dtype,
-                    ):
-                        logits = self._compute_logits(encoded)
-                else:
-                    logits = self._compute_logits(encoded)
+        return result
 
-                needs_probs = (
-                    self.config.return_probabilities
-                    or self.temperature_scaler is not None
-                    or self.isotonic_calibrator is not None
-                    or self.ensemble_model is not None
-                )
+    # =====================================================
+    # 🔥 LEGACY USER API
+    # =====================================================
 
-                if needs_probs:
-                    probabilities = torch.softmax(logits, dim=-1)
-                    calibrated_probabilities = self._apply_calibration(logits, probabilities)
-                else:
-                    probabilities = None
-                    calibrated_probabilities = None
+    def predict(self, texts):
 
-                ensemble_probabilities = self._apply_ensemble(encoded)
-                if ensemble_probabilities is not None:
-                    predicted_indices = torch.argmax(ensemble_probabilities, dim=-1)
-                elif needs_probs:
-                    predicted_indices = torch.argmax(calibrated_probabilities, dim=-1)
-                else:
-                    predicted_indices = torch.argmax(logits, dim=-1)
+        # 🔥 route to full pipeline if enabled
+        if self.prediction_service:
+            return [self.predict_full(t) for t in self._validate_input(texts)]
 
-                batch_logits_cpu = logits.detach().cpu()
-                batch_preds_cpu = predicted_indices.detach().cpu()
+        # fallback (old behavior)
+        processed = self.predict_with_postprocessing(texts)
 
-                batch_probs_cpu = (
-                    probabilities.detach().cpu() if probabilities is not None else None
-                )
-                batch_calibrated_cpu = (
-                    calibrated_probabilities.detach().cpu()
-                    if calibrated_probabilities is not None
-                    else None
-                )
-                batch_ensemble_cpu = (
-                    ensemble_probabilities.detach().cpu()
-                    if ensemble_probabilities is not None
-                    else None
-                )
+        texts = self._validate_input(texts)
+        results = []
 
-                for i, text in enumerate(batch):
-                    label_idx = int(batch_preds_cpu[i].item())
+        for i, text in enumerate(texts):
+            item = {"text": text}
 
-                    label = (
-                        self.label_map[label_idx]
-                        if self.label_map
-                        else label_idx
-                    )
+            for task, out in processed.items():
+                item[task] = {
+                    "label": out["labels"][i],
+                    "confidence": float(out["confidence"][i]),
+                }
 
-                    probs = (
-                        batch_probs_cpu[i].tolist()
-                        if batch_probs_cpu is not None and self.config.return_probabilities
-                        else None
-                    )
-                    calibrated_probs = (
-                        batch_calibrated_cpu[i].tolist()
-                        if batch_calibrated_cpu is not None and self.config.return_probabilities
-                        else None
-                    )
-                    ensemble_probs = (
-                        batch_ensemble_cpu[i].tolist()
-                        if batch_ensemble_cpu is not None and self.config.return_probabilities
-                        else None
-                    )
-                    logit_values = batch_logits_cpu[i].tolist()
-
-                    result = PredictionResult(
-                        text=text,
-                        predicted_label=label,
-                        probabilities=probs if self.config.return_probabilities else None,
-                        calibrated_probabilities=(
-                            calibrated_probs if self.config.return_probabilities else None
-                        ),
-                        ensemble_probabilities=(
-                            ensemble_probs if self.config.return_probabilities else None
-                        ),
-                        logits=logit_values,
-                    )
-
-                    results.append(result)
+            results.append(item)
 
         return results
 
-    def export_onnx(self, output_path: str) -> None:
-        if self.model is None:
-            raise RuntimeError("Model not loaded")
-        if self.tokenizer is None:
-            raise RuntimeError("Tokenizer not loaded")
-        if not output_path:
-            raise ValueError("output_path must be non-empty")
+    def predict_single(self, text: str):
+        return self.predict([text])[0]
 
-        dummy = self.tokenizer(
-            ["ONNX export"],
-            return_tensors="pt",
-            padding="longest",
-            truncation=True,
-            max_length=self.config.max_length,
-        )
+    # =====================================================
+    # INFO
+    # =====================================================
 
-        input_ids = dummy["input_ids"].to(self.device)
-        attention_mask = dummy.get("attention_mask")
-        if attention_mask is not None:
-            attention_mask = attention_mask.to(self.device)
-
-        args = (input_ids,) if attention_mask is None else (input_ids, attention_mask)
-
-        torch.onnx.export(
-            self.model,
-            args=args,
-            f=output_path,
-            input_names=["input_ids", "attention_mask"],
-            output_names=["logits"],
-            dynamic_axes={
-                "input_ids": {0: "batch", 1: "sequence"},
-                "attention_mask": {0: "batch", 1: "sequence"},
-            },
-            opset_version=17,
-        )
-
-        logger.info("ONNX model exported to %s", output_path)
-
-    def predict_single(self, text: str) -> PredictionResult:
-        """
-        Convenience method for single prediction.
-        """
-        results = self.predict([text])
-        return results[0]
-
-    def warmup(self) -> None:
-        """
-        Perform a dummy inference for warm-up.
-        """
-        logger.info("Running inference warm-up")
-
-        dummy_text = "Warmup inference example."
-
-        try:
-            _ = self.predict_single(dummy_text)
-        except Exception as exc:
-            logger.warning("Warm-up failed: %s", exc)
-
-    def get_model_info(self) -> Dict[str, Any]:
-        """
-        Return metadata about loaded model.
-        """
-        if self.model is None:
-            raise RuntimeError("Model not loaded")
-
+    def get_model_info(self):
         return {
-            "model_path": self.config.model_path,
             "device": str(self.device),
-            "num_parameters": sum(p.numel() for p in self.model.parameters()),
-            "num_trainable_parameters": sum(
-                p.numel() for p in self.model.parameters() if p.requires_grad
-            ),
+            "params": sum(p.numel() for p in self.model.parameters()),
+            "full_pipeline_enabled": self.prediction_service is not None,
         }
-
-    def predict_from_feature_dict(
-        self,
-        features: Dict[str, Any],
-        *,
-        article_text: Optional[str] = None,
-        title: Optional[str] = None,
-        source: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """
-        Integrate FeaturePreparer + src.inference.prediction_pipeline + ReportGenerator.
-        """
-        if self.feature_preparer is None:
-            raise RuntimeError("FeaturePreparer not configured")
-        if self.prediction_pipeline is None:
-            raise RuntimeError("PredictionPipeline not configured")
-
-        prepared = self.feature_preparer.prepare_single(features)
-        if isinstance(prepared, torch.Tensor):
-            tensor = prepared
-        else:
-            tensor = torch.tensor(prepared, dtype=torch.float32)
-
-        prediction = self.prediction_pipeline.predict(tensor)
-
-        report = self.report_generator.generate_report(
-            article_text=article_text or str(features.get("text", "")),
-            title=title,
-            source=source,
-            bias_analysis={"bias": prediction.get("bias")},
-            emotion_analysis={"emotion": prediction.get("emotion")},
-            narrative_structure={},
-            entity_graph={},
-            credibility_score=prediction.get("credibility_score"),
-        )
-
-        return {
-            "prediction": prediction,
-            "report": report,
-        }
-
-    def analyze_text(
-        self,
-        text: str,
-        *,
-        title: Optional[str] = None,
-        source: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """
-        Integrate src.inference.analyze_article + ReportGenerator via engine.
-        """
-        if self.article_analyzer is None:
-            raise RuntimeError("ArticleAnalyzer not configured")
-
-        analysis = self.article_analyzer.analyze(text)
-
-        report = self.report_generator.generate_report(
-            article_text=text,
-            title=title,
-            source=source,
-            bias_analysis=analysis.get("bias_features", {}),
-            emotion_analysis=analysis.get("emotion_features", {}),
-            narrative_structure=analysis.get("narrative_features", {}),
-            entity_graph=analysis.get("graph_pipeline", {}),
-            credibility_score=analysis.get("scores", {}).get("truthlens_credibility_score"),
-        )
-
-        return {
-            "analysis": analysis,
-            "report": report,
-        }
-
-    def set_temperature_scaler(self, scaler: TemperatureScaler) -> None:
-        self.temperature_scaler = scaler
-
-    def set_isotonic_calibrator(self, calibrator: IsotonicCalibrator) -> None:
-        self.isotonic_calibrator = calibrator
-
-    def set_ensemble_model(self, ensemble_model: torch.nn.Module) -> None:
-        self.ensemble_model = ensemble_model
-        self.ensemble_model.to(self.device)
-        self.ensemble_model.eval()
-
-    def _apply_calibration(
-        self,
-        logits: torch.Tensor,
-        probabilities: torch.Tensor,
-    ) -> torch.Tensor:
-        if self.temperature_scaler is not None:
-            try:
-                calibrated = self.temperature_scaler.predict_proba(
-                    logits.to(self.temperature_scaler.device)
-                )
-                return calibrated.to(probabilities.device)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Temperature scaling skipped in InferenceEngine: %s", exc)
-
-        if self.isotonic_calibrator is not None:
-            try:
-                probs_cpu = probabilities.detach().cpu()
-                probs_np = probs_cpu.numpy().astype(np.float64)
-                calibrated_np = self.isotonic_calibrator.predict_proba(probs_np)
-                return torch.tensor(
-                    calibrated_np,
-                    dtype=probabilities.dtype,
-                    device=probabilities.device,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Isotonic calibration skipped in InferenceEngine: %s", exc)
-
-        return probabilities
-
-    def _compute_logits(self, encoded: Dict[str, torch.Tensor]) -> torch.Tensor:
-        if self.model is None:
-            raise RuntimeError("Model not loaded")
-        outputs = self.model(**encoded)
-        if not hasattr(outputs, "logits"):
-            raise RuntimeError("Inference model output missing logits")
-        return outputs.logits
-
-    def _apply_ensemble(
-        self,
-        encoded: Dict[str, torch.Tensor],
-    ) -> Optional[torch.Tensor]:
-        if self.ensemble_model is None:
-            return None
-
-        try:
-            maybe_outputs = self.ensemble_model(**encoded)
-            if isinstance(maybe_outputs, torch.Tensor):
-                logits = maybe_outputs
-            elif isinstance(maybe_outputs, dict) and "logits" in maybe_outputs:
-                logits = maybe_outputs["logits"]
-            else:
-                logits = None
-        except Exception:  # noqa: BLE001
-            logits = None
-
-        if logits is None:
-            logger.warning("Ensemble fallback skipped: incompatible signature")
-            return None
-
-        if not isinstance(logits, torch.Tensor):
-            logger.warning("Ensemble model output is not a tensor. Skipping ensemble.")
-            return None
-
-        return torch.softmax(logits, dim=-1)

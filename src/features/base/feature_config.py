@@ -1,88 +1,93 @@
-"""
-File Name: feature_config.py
-Module: Feature Engineering Configuration
-Description:
-    Defines configuration structures and validation utilities for the
-    TruthLens feature extraction system. This module enables configuration-
-    driven feature activation, parameterization, and grouping using
-    dataclasses compatible with YAML configuration files.
 
-    The configuration layer integrates with the FeatureRegistry to build
-    feature pipelines dynamically and ensures consistent, validated feature
-    initialization across experiments and production inference systems.
+#File Name: feature_config.py
 
-Dependencies:
-    dataclasses
-    typing
-    logging
-
-Inputs:
-    YAML configuration dictionaries loaded by config_loader
-
-Outputs:
-    Validated FeatureConfig objects used by feature pipelines
-"""
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from src.features.base.feature_registry import FeatureRegistry
 
 logger = logging.getLogger(__name__)
 
 
+# =========================================================
+# UTILS
+# =========================================================
+
+def merge_params(
+    global_params: Dict[str, Any],
+    group_params: Dict[str, Any],
+    feature_params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Merge parameters with priority:
+    feature > group > global
+    """
+    merged = {}
+    merged.update(global_params)
+    merged.update(group_params)
+    merged.update(feature_params)
+    return merged
+
+
+# =========================================================
+# FEATURE DEFINITION
+# =========================================================
+
 @dataclass
 class FeatureDefinition:
     """
-    Defines configuration for a single feature extractor.
+    Configuration for a single feature.
     """
 
     name: str
     enabled: bool = True
     params: Dict[str, Any] = field(default_factory=dict)
 
+    # 🔥 NEW
+    priority: int = 0
+    depends_on: List[str] = field(default_factory=list)
+    condition: Optional[str] = None  # evaluated using global_params
+
+    # -----------------------------------------------------
+
     def validate(self) -> None:
-        """
-        Validate the feature definition.
-        """
 
         if not self.name:
             raise ValueError("FeatureDefinition must include a feature name")
 
         if not isinstance(self.params, dict):
-            raise ValueError(
-                f"Feature '{self.name}' params must be a dictionary"
-            )
+            raise ValueError(f"{self.name}: params must be dict")
 
         if not FeatureRegistry.has_feature(self.name):
-            raise ValueError(
-                f"Feature '{self.name}' is not registered in FeatureRegistry"
-            )
+            raise ValueError(f"{self.name} not registered in FeatureRegistry")
 
+
+# =========================================================
+# GROUP CONFIG
+# =========================================================
 
 @dataclass
 class FeatureGroupConfig:
     """
-    Represents a logical group of features.
-
-    Example groups:
-    - bias
-    - emotion
-    - narrative
-    - propaganda
+    Logical group of features.
     """
 
     group_name: str
     enabled: bool = True
+
     features: List[FeatureDefinition] = field(default_factory=list)
 
+    # 🔥 NEW
+    group_params: Dict[str, Any] = field(default_factory=dict)
+    priority: int = 0
+
+    # -----------------------------------------------------
+
     def validate(self) -> None:
-        """
-        Validate the group configuration.
-        """
 
         if not self.group_name:
             raise ValueError("FeatureGroupConfig must define group_name")
@@ -91,30 +96,53 @@ class FeatureGroupConfig:
             feature.validate()
 
 
+# =========================================================
+# PIPELINE CONFIG
+# =========================================================
+
 @dataclass
 class FeaturePipelineConfig:
     """
-    Top-level configuration controlling the entire feature pipeline.
+    Top-level pipeline configuration.
     """
 
     groups: List[FeatureGroupConfig] = field(default_factory=list)
     global_params: Dict[str, Any] = field(default_factory=dict)
 
+    # =====================================================
+    # VALIDATION
+    # =====================================================
+
     def validate(self) -> None:
-        """
-        Validate pipeline configuration.
-        """
 
         if not isinstance(self.groups, list):
-            raise ValueError("FeaturePipelineConfig.groups must be a list")
+            raise ValueError("groups must be list")
 
         for group in self.groups:
             group.validate()
 
+        self._validate_dependencies()
+
+    # -----------------------------------------------------
+
+    def _validate_dependencies(self) -> None:
+
+        enabled = set(self.enabled_features())
+
+        for group in self.groups:
+            for feature in group.features:
+
+                for dep in feature.depends_on:
+                    if dep not in enabled:
+                        raise ValueError(
+                            f"{feature.name} depends on {dep}, but it is disabled"
+                        )
+
+    # =====================================================
+    # ENABLED FEATURES
+    # =====================================================
+
     def enabled_features(self) -> List[str]:
-        """
-        Return names of all enabled features.
-        """
 
         enabled = []
 
@@ -128,78 +156,132 @@ class FeaturePipelineConfig:
 
         return enabled
 
+    # =====================================================
+    # PARAM RETRIEVAL
+    # =====================================================
+
     def feature_parameters(self, feature_name: str) -> Dict[str, Any]:
-        """
-        Retrieve parameters for a specific feature.
-
-        Parameters
-        ----------
-        feature_name : str
-
-        Returns
-        -------
-        Dict[str, Any]
-        """
 
         for group in self.groups:
             for feature in group.features:
                 if feature.name == feature_name:
-                    return feature.params
+                    return merge_params(
+                        self.global_params,
+                        group.group_params,
+                        feature.params,
+                    )
 
-        raise KeyError(f"No parameters defined for feature '{feature_name}'")
+        raise KeyError(f"No parameters defined for '{feature_name}'")
 
+    # =====================================================
+    # CONDITION CHECK
+    # =====================================================
+
+    def _check_condition(self, condition: Optional[str]) -> bool:
+
+        if not condition:
+            return True
+
+        try:
+            return bool(eval(condition, {}, self.global_params))
+        except Exception as e:
+            logger.warning("Condition failed: %s", e)
+            return False
+
+    # =====================================================
+    # BUILD PIPELINE (CRITICAL)
+    # =====================================================
+
+    def build_features(self) -> List:
+
+        features = []
+
+        for group in sorted(self.groups, key=lambda g: g.priority):
+
+            if not group.enabled:
+                continue
+
+            for feat in sorted(group.features, key=lambda f: f.priority):
+
+                if not feat.enabled:
+                    continue
+
+                if not self._check_condition(feat.condition):
+                    continue
+
+                cls = FeatureRegistry.get_feature(feat.name)
+
+                params = merge_params(
+                    self.global_params,
+                    group.group_params,
+                    feat.params,
+                )
+
+                try:
+                    instance = cls(**params)
+                except TypeError:
+                    # fallback if feature has no params
+                    instance = cls()
+
+                features.append(instance)
+
+        logger.info("Built %d features", len(features))
+
+        return features
+
+    # =====================================================
+    # EXPLAINABILITY SUPPORT
+    # =====================================================
+
+    def feature_to_group_map(self) -> Dict[str, str]:
+
+        mapping = {}
+
+        for group in self.groups:
+            for feature in group.features:
+                mapping[feature.name] = group.group_name
+
+        return mapping
+
+
+# =========================================================
+# CONFIG LOADER
+# =========================================================
 
 class FeatureConfigLoader:
     """
-    Utility class responsible for converting raw dictionaries
-    (usually loaded from YAML files) into validated FeaturePipelineConfig
-    objects.
+    Convert dict (YAML) → FeaturePipelineConfig
     """
 
     @staticmethod
     def from_dict(config_dict: Dict[str, Any]) -> FeaturePipelineConfig:
-        """
-        Construct FeaturePipelineConfig from a dictionary.
-
-        Parameters
-        ----------
-        config_dict : Dict[str, Any]
-
-        Returns
-        -------
-        FeaturePipelineConfig
-        """
 
         if not isinstance(config_dict, dict):
-            raise TypeError("Feature config must be a dictionary")
+            raise TypeError("Feature config must be dict")
 
         groups_raw = config_dict.get("groups")
+
         if not isinstance(groups_raw, list):
-            raise ValueError("Feature config must contain 'groups' as a list")
+            raise ValueError("config must contain 'groups' list")
 
         groups: List[FeatureGroupConfig] = []
 
         for group_data in groups_raw:
-            if not isinstance(group_data, dict):
-                raise ValueError("Each group must be a dictionary")
-            if "group_name" not in group_data:
-                raise ValueError("Each group must define 'group_name'")
 
             features_raw = group_data.get("features", [])
-            if not isinstance(features_raw, list):
-                raise ValueError("group.features must be a list")
 
-            feature_defs: List[FeatureDefinition] = []
-            for feature_data in features_raw:
-                if not isinstance(feature_data, dict):
-                    raise ValueError("Each feature entry must be a dictionary")
-                if "name" not in feature_data:
-                    raise ValueError("Each feature must define 'name'")
+            feature_defs = []
+
+            for f in features_raw:
+
                 feature_defs.append(
                     FeatureDefinition(
-                        name=feature_data["name"],
-                        enabled=feature_data.get("enabled", True),
-                        params=feature_data.get("params", {}),
+                        name=f["name"],
+                        enabled=f.get("enabled", True),
+                        params=f.get("params", {}),
+                        priority=f.get("priority", 0),
+                        depends_on=f.get("depends_on", []),
+                        condition=f.get("condition"),
                     )
                 )
 
@@ -208,17 +290,22 @@ class FeatureConfigLoader:
                     group_name=group_data["group_name"],
                     enabled=group_data.get("enabled", True),
                     features=feature_defs,
+                    group_params=group_data.get("group_params", {}),
+                    priority=group_data.get("priority", 0),
                 )
             )
 
-        pipeline_config = FeaturePipelineConfig(
+        pipeline = FeaturePipelineConfig(
             groups=groups,
             global_params=config_dict.get("global_params", {}),
         )
-        pipeline_config.validate()
+
+        pipeline.validate()
+
         logger.info(
-            "Loaded feature configuration with %d groups and %d enabled features",
+            "Loaded config | groups=%d | features=%d",
             len(groups),
-            len(pipeline_config.enabled_features()),
+            len(pipeline.enabled_features()),
         )
-        return pipeline_config
+
+        return pipeline

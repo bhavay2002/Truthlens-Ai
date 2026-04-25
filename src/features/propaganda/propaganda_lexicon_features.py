@@ -1,29 +1,4 @@
-"""
-File Name: propaganda_lexicon_features.py
-Module: Feature Engineering - Propaganda Lexicon Features
-Description:
-    Extracts propaganda-related linguistic signals using curated lexicons.
-    The module measures the density and diversity of propaganda techniques
-    present in the text such as name-calling, fear appeals, exaggeration,
-    bandwagon language, and slogan-like phrasing.
-
-    These features provide interpretable indicators useful for propaganda
-    detection models and explainability components within the TruthLens
-    system.
-
-Dependencies:
-    dataclasses
-    typing
-    logging
-    re
-    collections
-
-Inputs:
-    FeatureContext containing input text and optional tokens
-
-Outputs:
-    Dict[str, float] representing propaganda lexicon statistics
-"""
+# src/features/propaganda_lexicon_features.py
 
 from __future__ import annotations
 
@@ -33,10 +8,15 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, List, Set
 
+import numpy as np
+
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
 
 logger = logging.getLogger(__name__)
+
+EPS = 1e-8
+MAX_CLIP = 1.0
 
 
 # ---------------------------------------------------------
@@ -45,14 +25,26 @@ logger = logging.getLogger(__name__)
 
 TOKEN_PATTERN = re.compile(r"[A-Za-z']+")
 
-
 def _tokenize(text: str) -> List[str]:
-    """Robust tokenizer for lexical propaganda detection."""
     return TOKEN_PATTERN.findall(text.lower())
 
 
 # ---------------------------------------------------------
-# Utility Functions
+# Lexicons (reuse yours)
+# ---------------------------------------------------------
+
+NAME_CALLING = {...}
+FEAR_APPEAL = {...}
+EXAGGERATION = {...}
+BANDWAGON = {...}
+SLOGANS = {...}
+
+BANDWAGON_PHRASES = [...]
+SLOGAN_PHRASES = [...]
+
+
+# ---------------------------------------------------------
+# Helpers
 # ---------------------------------------------------------
 
 def _count(counter: Counter, lexicon: Set[str]) -> int:
@@ -60,234 +52,136 @@ def _count(counter: Counter, lexicon: Set[str]) -> int:
 
 
 def _ratio(counter: Counter, lexicon: Set[str], total: int) -> float:
-    if total == 0:
-        return 0.0
-    return _count(counter, lexicon) / total
+    return _count(counter, lexicon) / (total + EPS)
+
+
+def _phrase_hits(text: str, patterns: List[str]) -> int:
+    return sum(bool(re.search(p, text)) for p in patterns)
 
 
 # ---------------------------------------------------------
-# Propaganda Lexicons
-# ---------------------------------------------------------
-
-# ---------------------------------------------------------
-# Name Calling / Labeling Opponents
-# ---------------------------------------------------------
-
-NAME_CALLING: Set[str] = {
-    "traitor", "traitors",
-    "enemy", "enemies",
-    "corrupt", "corruption",
-    "liar", "liars", "lying",
-    "radical", "radicals",
-    "extremist", "extremists",
-    "fraud", "fraudulent",
-    "criminal", "criminals",
-    "crooked", "fake",
-    "dishonest", "evil",
-    "scandal", "scandalous",
-    "propagandist",
-    "hypocrite", "hypocrisy",
-    "thug", "terrorist",
-    "dictator", "tyrant",
-    "puppet", "stooge",
-    "conspirator"
-}
-
-
-# ---------------------------------------------------------
-# Fear Appeal Framing
-# ---------------------------------------------------------
-
-FEAR_APPEAL: Set[str] = {
-    "danger", "dangerous",
-    "threat", "threats", "threatening",
-    "terror", "terrorist", "terrorism",
-    "crisis", "emergency",
-    "attack", "attacks", "attacking",
-    "invasion", "invading",
-    "collapse", "breakdown",
-    "disaster", "catastrophe", "catastrophic",
-    "chaos", "panic",
-    "violence", "violent",
-    "war", "conflict",
-    "instability"
-}
-
-
-# ---------------------------------------------------------
-# Exaggeration / Absolutist Language
-# ---------------------------------------------------------
-
-EXAGGERATION: Set[str] = {
-    "always", "never",
-    "everyone", "everybody",
-    "nobody",
-    "all", "none",
-    "everything", "nothing",
-    "completely", "absolutely",
-    "totally", "entirely",
-    "undeniable", "certainly",
-    "guaranteed", "inevitable",
-    "perfectly"
-}
-
-
-# ---------------------------------------------------------
-# Bandwagon Language
-# ---------------------------------------------------------
-
-BANDWAGON: Set[str] = {
-    "everyone", "everybody",
-    "majority", "millions",
-    "many", "most",
-    "all", "nation",
-    "people", "citizens",
-    "community", "society",
-    "public", "population"
-}
-
-
-# ---------------------------------------------------------
-# Ideological Slogans / Values
-# ---------------------------------------------------------
-
-SLOGANS: Set[str] = {
-    "freedom", "democracy", "justice",
-    "patriotism", "honor", "truth",
-    "liberty", "unity", "rights",
-    "equality", "fairness",
-    "values", "principles",
-    "prosperity", "progress",
-    "security", "strength"
-}
-
-# Phrase-based patterns (important for propaganda slogans)
-
-BANDWAGON_PHRASES = [
-    r"everyone\s+knows",
-    r"most\s+people",
-    r"the\s+people",
-    r"the\s+nation",
-]
-
-SLOGAN_PHRASES = [
-    r"fight\s+for\s+freedom",
-    r"defend\s+democracy",
-    r"stand\s+for\s+justice",
-]
-
-
-# ---------------------------------------------------------
-# Feature Extractor
+# Feature
 # ---------------------------------------------------------
 
 @dataclass
 @register_feature
 class PropagandaLexiconFeatures(BaseFeature):
 
-    """
-    Extract propaganda lexicon features.
-
-    Output Features
-    ---------------
-
-    propaganda_name_calling_ratio
-    propaganda_fear_ratio
-    propaganda_exaggeration_ratio
-    propaganda_bandwagon_ratio
-    propaganda_slogan_ratio
-
-    propaganda_phrase_bandwagon
-    propaganda_phrase_slogan
-
-    propaganda_exclamation_density
-    propaganda_caps_ratio
-
-    propaganda_lexicon_density
-    propaganda_lexicon_diversity
-    """
-
     name: str = "propaganda_lexicon_features"
-    description: str = "Lexicon-based propaganda detection features"
+    group: str = "propaganda"
+    description: str = "Normalized propaganda lexicon + phrase features"
 
     # -----------------------------------------------------
 
     def extract(self, context: FeatureContext) -> Dict[str, float]:
 
-        if not context.text:
-            raise ValueError("FeatureContext.text cannot be empty")
+        text = context.text.strip().lower()
+        if not text:
+            return {}
 
-        text = context.text
         tokens = context.tokens or _tokenize(text)
+        n = len(tokens)
 
-        if not tokens:
-            logger.warning("No tokens available for propaganda lexicon extraction")
+        if n == 0:
             return {}
 
         counter = Counter(tokens)
-        total_tokens = len(tokens)
 
-        # -------------------------------------------------
-        # Lexicon ratios
-        # -------------------------------------------------
-
-        name_ratio = _ratio(counter, NAME_CALLING, total_tokens)
-        fear_ratio = _ratio(counter, FEAR_APPEAL, total_tokens)
-        exaggeration_ratio = _ratio(counter, EXAGGERATION, total_tokens)
-        bandwagon_ratio = _ratio(counter, BANDWAGON, total_tokens)
-        slogan_ratio = _ratio(counter, SLOGANS, total_tokens)
-
-        counts = [
-            _count(counter, NAME_CALLING),
-            _count(counter, FEAR_APPEAL),
-            _count(counter, EXAGGERATION),
-            _count(counter, BANDWAGON),
-            _count(counter, SLOGANS),
-        ]
-
-        total_prop_tokens = sum(counts)
-
-        density = total_prop_tokens / total_tokens
-        diversity = sum(1 for c in counts if c > 0) / len(counts)
-
-        # -------------------------------------------------
-        # Phrase patterns
-        # -------------------------------------------------
-
-        phrase_bandwagon = sum(bool(re.search(p, text.lower())) for p in BANDWAGON_PHRASES)
-        phrase_slogan = sum(bool(re.search(p, text.lower())) for p in SLOGAN_PHRASES)
-
-        # -------------------------------------------------
-        # Structural rhetoric signals
-        # -------------------------------------------------
-
-        exclamation_density = text.count("!") / max(len(text), 1)
-
-        caps_words = sum(1 for w in text.split() if w.isupper() and len(w) > 2)
-        caps_ratio = caps_words / total_tokens
-
-        features: Dict[str, float] = {
-
-            "propaganda_name_calling_ratio": name_ratio,
-            "propaganda_fear_ratio": fear_ratio,
-            "propaganda_exaggeration_ratio": exaggeration_ratio,
-            "propaganda_bandwagon_ratio": bandwagon_ratio,
-            "propaganda_slogan_ratio": slogan_ratio,
-
-            "propaganda_phrase_bandwagon": float(phrase_bandwagon),
-            "propaganda_phrase_slogan": float(phrase_slogan),
-
-            "propaganda_exclamation_density": exclamation_density,
-            "propaganda_caps_ratio": caps_ratio,
-
-            "propaganda_lexicon_density": density,
-            "propaganda_lexicon_diversity": diversity,
+        raw = {
+            "name_calling": _ratio(counter, NAME_CALLING, n),
+            "fear": _ratio(counter, FEAR_APPEAL, n),
+            "exaggeration": _ratio(counter, EXAGGERATION, n),
+            "bandwagon": _ratio(counter, BANDWAGON, n),
+            "slogan": _ratio(counter, SLOGANS, n),
         }
 
-        logger.debug(
-            "Propaganda lexicon features extracted | density=%.4f diversity=%.4f",
-            density,
-            diversity,
-        )
+        # -------------------------
+        # PHRASE SIGNALS (INTEGRATED)
+        # -------------------------
 
-        return features
+        phrase_bandwagon = _phrase_hits(text, BANDWAGON_PHRASES)
+        phrase_slogan = _phrase_hits(text, SLOGAN_PHRASES)
+
+        raw["bandwagon"] += phrase_bandwagon * 0.1
+        raw["slogan"] += phrase_slogan * 0.1
+
+        # -------------------------
+        # NORMALIZED DISTRIBUTION
+        # -------------------------
+
+        values = np.array(list(raw.values()), dtype=np.float32)
+        total = values.sum()
+
+        if total < EPS:
+            dist = {k: 0.0 for k in raw}
+        else:
+            norm = values / (total + EPS)
+            dist = dict(zip(raw.keys(), norm.astype(float)))
+
+        probs = np.array(list(dist.values()), dtype=np.float32)
+
+        # -------------------------
+        # INTENSITY
+        # -------------------------
+
+        intensity = float(np.linalg.norm(values))
+
+        # -------------------------
+        # ENTROPY (CRITICAL)
+        # -------------------------
+
+        if probs.sum() > 0:
+            entropy_raw = -np.sum(probs * np.log(probs + EPS))
+            entropy = entropy_raw / (np.log(len(probs)) + EPS)
+        else:
+            entropy = 0.0
+
+        # -------------------------
+        # DIVERSITY
+        # -------------------------
+
+        diversity = float(np.count_nonzero(values) / len(values))
+
+        # -------------------------
+        # RHETORIC
+        # -------------------------
+
+        rhetoric = (text.count("!") + text.count("?")) / (n + EPS)
+
+        # -------------------------
+        # CAPS EMPHASIS
+        # -------------------------
+
+        caps_tokens = sum(
+            1 for w in text.split() if w.isupper() and len(w) > 2
+        )
+        caps_ratio = caps_tokens / (n + EPS)
+
+        # -------------------------
+        # OUTPUT
+        # -------------------------
+
+        return {
+            "prop_lex_name_calling": self._safe(dist["name_calling"]),
+            "prop_lex_fear": self._safe(dist["fear"]),
+            "prop_lex_exaggeration": self._safe(dist["exaggeration"]),
+            "prop_lex_bandwagon": self._safe(dist["bandwagon"]),
+            "prop_lex_slogan": self._safe(dist["slogan"]),
+
+            "prop_lex_phrase_bandwagon": float(phrase_bandwagon),
+            "prop_lex_phrase_slogan": float(phrase_slogan),
+
+            "prop_lex_intensity": self._safe(intensity),
+            "prop_lex_entropy": self._safe(entropy),
+            "prop_lex_diversity": self._safe(diversity),
+
+            "prop_lex_rhetoric": self._safe(rhetoric),
+            "prop_lex_caps_ratio": self._safe(caps_ratio),
+        }
+
+    # -----------------------------------------------------
+
+    def _safe(self, v: float) -> float:
+        if not np.isfinite(v):
+            return 0.0
+        return float(np.clip(v, 0.0, MAX_CLIP))

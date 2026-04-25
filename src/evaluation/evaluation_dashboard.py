@@ -1,7 +1,3 @@
-"""
-Final Production Dashboard (TruthLens)
-"""
-
 from __future__ import annotations
 
 import json
@@ -23,6 +19,7 @@ logger = logging.getLogger(__name__)
 # =========================================================
 # UTILS
 # =========================================================
+
 def _ensure_streamlit():
     if st is None:
         raise RuntimeError("Install streamlit")
@@ -36,6 +33,7 @@ def load_report(path):
 # =========================================================
 # TASK SELECTOR
 # =========================================================
+
 def select_task(tasks):
     return st.sidebar.selectbox("Task", list(tasks.keys()))
 
@@ -43,7 +41,10 @@ def select_task(tasks):
 # =========================================================
 # METRICS
 # =========================================================
-def render_metrics(metrics: Dict):
+
+def render_metrics(task_data: Dict):
+
+    metrics = task_data.get("metrics", {})
 
     st.subheader("Metrics")
 
@@ -60,10 +61,27 @@ def render_metrics(metrics: Dict):
 
 
 # =========================================================
-# CONFUSION (FIXED)
+# DATASET STATS
 # =========================================================
-def render_confusion(metrics):
 
+def render_dataset_stats(task_data):
+
+    stats = task_data.get("dataset_stats", {})
+
+    if not stats:
+        return
+
+    st.subheader("Dataset Statistics")
+    st.json(stats)
+
+
+# =========================================================
+# CONFUSION MATRIX
+# =========================================================
+
+def render_confusion(task_data):
+
+    metrics = task_data.get("metrics", {})
     confusion = metrics.get("confusion")
 
     if not confusion:
@@ -74,13 +92,67 @@ def render_confusion(metrics):
     matrix = np.array(confusion["matrix"])
 
     fig, ax = plt.subplots()
-    ax.imshow(matrix, cmap="Blues")
+    im = ax.imshow(matrix, cmap="Blues")
+
+    for i in range(matrix.shape[0]):
+        for j in range(matrix.shape[1]):
+            ax.text(j, i, matrix[i, j], ha="center", va="center")
+
+    fig.colorbar(im)
     st.pyplot(fig)
 
 
 # =========================================================
-# CALIBRATION (FIXED)
+#  RELIABILITY DIAGRAM
 # =========================================================
+
+def render_reliability(cal):
+
+    rd = cal.get("reliability_diagram")
+
+    if not rd:
+        return
+
+    st.subheader("Reliability Diagram")
+
+    conf = rd.get("confidence")
+    acc = rd.get("accuracy")
+
+    if conf and acc:
+        fig, ax = plt.subplots()
+
+        ax.plot(conf, acc, marker="o", label="Model")
+        ax.plot([0, 1], [0, 1], "--", label="Perfect")
+
+        ax.set_xlabel("Confidence")
+        ax.set_ylabel("Accuracy")
+        ax.legend()
+
+        st.pyplot(fig)
+
+
+# =========================================================
+#  CONFIDENCE DISTRIBUTION
+# =========================================================
+
+def render_confidence(cal):
+
+    conf = cal.get("confidence")
+
+    if not conf:
+        return
+
+    st.subheader("Confidence Distribution")
+
+    fig, ax = plt.subplots()
+    ax.hist(conf, bins=20)
+    st.pyplot(fig)
+
+
+# =========================================================
+# CALIBRATION
+# =========================================================
+
 def render_calibration(report, task):
 
     cal = report.get("calibration", {}).get(task)
@@ -94,10 +166,52 @@ def render_calibration(report, task):
         if isinstance(v, (int, float)):
             st.metric(k, f"{v:.4f}")
 
+    render_confidence(cal)        #  NEW
+    render_reliability(cal)       #  NEW
+
+
+# =========================================================
+#  ERROR ANALYSIS
+# =========================================================
+
+def render_error_analysis(report, task):
+
+    err = report.get("error_analysis", {}).get(task)
+
+    if not err:
+        return
+
+    st.subheader("Error Analysis")
+
+    st.json(err)
+
+    if "error_rate_per_class" in err:
+        fig, ax = plt.subplots()
+        ax.bar(err["error_rate_per_class"].keys(),
+               err["error_rate_per_class"].values())
+        st.pyplot(fig)
+
+
+# =========================================================
+# THRESHOLD
+# =========================================================
+
+def render_thresholds(report, task):
+
+    th = report.get("optimal_thresholds", {}).get(task)
+
+    if not th:
+        return
+
+    st.subheader("Optimal Threshold")
+
+    st.metric("Threshold", f"{th:.4f}")
+
 
 # =========================================================
 # UNCERTAINTY
 # =========================================================
+
 def render_uncertainty(report, task):
 
     unc = report.get("uncertainty", {}).get(task)
@@ -114,6 +228,7 @@ def render_uncertainty(report, task):
 # =========================================================
 # CORRELATION
 # =========================================================
+
 def render_correlation(report):
 
     corr = report.get("task_correlation")
@@ -123,32 +238,47 @@ def render_correlation(report):
 
     st.subheader("Task Correlation")
 
-    df = pd.DataFrame(corr)
+    keys = list(corr.keys())
+    tasks = list(set(k.split("_")[0] for k in keys))
+
+    matrix = pd.DataFrame(0.0, index=tasks, columns=tasks)
+
+    for k, v in corr.items():
+        t1, t2 = k.split("_")
+        matrix.loc[t1, t2] = v
+        matrix.loc[t2, t1] = v
 
     fig, ax = plt.subplots()
-    cax = ax.matshow(df, cmap="coolwarm")
+    cax = ax.matshow(matrix, cmap="coolwarm")
     fig.colorbar(cax)
+
+    ax.set_xticks(range(len(tasks)))
+    ax.set_yticks(range(len(tasks)))
+    ax.set_xticklabels(tasks, rotation=45)
+    ax.set_yticklabels(tasks)
 
     st.pyplot(fig)
 
 
 # =========================================================
-# EXPLAINABILITY
+# ADVANCED
 # =========================================================
-def render_explainability(report):
 
-    explain = report.get("explainability")
+def render_advanced(report):
 
-    if not explain:
+    adv = report.get("advanced_analysis")
+
+    if not adv:
         return
 
-    st.subheader("Explainability")
-    st.json(explain)
+    st.subheader("Advanced Analysis")
+    st.json(adv)
 
 
 # =========================================================
 # MAIN
 # =========================================================
+
 def launch_dashboard(report_path):
 
     _ensure_streamlit()
@@ -160,18 +290,22 @@ def launch_dashboard(report_path):
     st.title("TruthLens AI Dashboard")
 
     tasks = report["tasks"]
-
     task = select_task(tasks)
+
+    task_data = tasks[task]
 
     col1, col2 = st.columns(2)
 
     with col1:
-        render_metrics(tasks[task])
+        render_metrics(task_data)
+        render_dataset_stats(task_data)
         render_calibration(report, task)
+        render_thresholds(report, task)
 
     with col2:
         render_uncertainty(report, task)
-        render_confusion(tasks[task])
+        render_confusion(task_data)
+        render_error_analysis(report, task)
 
     st.divider()
 
@@ -179,4 +313,4 @@ def launch_dashboard(report_path):
 
     st.divider()
 
-    render_explainability(report)
+    render_advanced(report)

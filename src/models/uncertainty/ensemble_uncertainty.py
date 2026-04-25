@@ -1,0 +1,202 @@
+from __future__ import annotations
+
+import logging
+from typing import List, Dict, Any, Optional
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+logger = logging.getLogger(__name__)
+
+EPS = 1e-12
+
+
+# =========================================================
+# UTILS
+# =========================================================
+
+def _to_numpy(x: torch.Tensor) -> np.ndarray:
+    return x.detach().cpu().numpy()
+
+
+def _softmax(logits: torch.Tensor) -> torch.Tensor:
+    return F.softmax(logits, dim=-1)
+
+
+def _sigmoid(logits: torch.Tensor) -> torch.Tensor:
+    return torch.sigmoid(logits)
+
+
+# =========================================================
+# ENSEMBLE UNCERTAINTY
+# =========================================================
+
+class EnsembleUncertainty:
+    """
+    Deep Ensemble uncertainty estimator.
+
+    Uses multiple independently trained models to estimate:
+    - predictive mean
+    - variance
+    - entropy
+    - mutual information (epistemic uncertainty)
+    """
+
+    def __init__(
+        self,
+        models: List[nn.Module],
+        task_type: str,
+        device: Optional[torch.device] = None,
+    ) -> None:
+        if not models:
+            raise ValueError("models list cannot be empty")
+
+        self.models = models
+        self.task_type = task_type
+        self.device = device or torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )
+
+        for model in self.models:
+            model.to(self.device)
+            model.eval()
+
+    # =====================================================
+    # FORWARD
+    # =====================================================
+
+    def _forward_model(
+        self,
+        model: nn.Module,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        task: Optional[str],
+    ) -> torch.Tensor:
+
+        with torch.no_grad():
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                task=task,
+            )
+
+        return outputs["logits"]
+
+    def predict_proba(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        task: Optional[str] = None,
+    ) -> np.ndarray:
+        """
+        Returns:
+            prob_samples: (M, B, C)
+        """
+
+        input_ids = input_ids.to(self.device)
+        attention_mask = attention_mask.to(self.device)
+
+        probs_list = []
+
+        for model in self.models:
+
+            logits = self._forward_model(
+                model=model,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                task=task,
+            )
+
+            if self.task_type == "multiclass":
+                probs = _softmax(logits)
+            else:
+                probs = _sigmoid(logits)
+
+            probs_list.append(_to_numpy(probs))
+
+        return np.stack(probs_list, axis=0)
+
+    # =====================================================
+    # METRICS
+    # =====================================================
+
+    @staticmethod
+    def predictive_mean(prob_samples: np.ndarray) -> np.ndarray:
+        return np.mean(prob_samples, axis=0)
+
+    @staticmethod
+    def predictive_variance(prob_samples: np.ndarray) -> np.ndarray:
+        return np.var(prob_samples, axis=0).mean(axis=1)
+
+    @staticmethod
+    def predictive_entropy(prob_samples: np.ndarray) -> np.ndarray:
+        mean_probs = np.mean(prob_samples, axis=0)
+        return -np.sum(mean_probs * np.log(mean_probs + EPS), axis=1)
+
+    @staticmethod
+    def mutual_information(prob_samples: np.ndarray) -> np.ndarray:
+        mean_probs = np.mean(prob_samples, axis=0)
+
+        entropy_mean = -np.sum(mean_probs * np.log(mean_probs + EPS), axis=1)
+        entropy_expected = -np.mean(
+            np.sum(prob_samples * np.log(prob_samples + EPS), axis=2),
+            axis=0,
+        )
+
+        return entropy_mean - entropy_expected
+
+    # =====================================================
+    # MAIN API
+    # =====================================================
+
+    def predict_with_uncertainty(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        task: Optional[str] = None,
+    ) -> Dict[str, Any]:
+
+        prob_samples = self.predict_proba(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            task=task,
+        )
+
+        mean_probs = self.predictive_mean(prob_samples)
+
+        results = {
+            "mean_probabilities": mean_probs,
+            "variance": self.predictive_variance(prob_samples),
+            "entropy": self.predictive_entropy(prob_samples),
+            "mutual_information": self.mutual_information(prob_samples),
+            "confidence": np.max(mean_probs, axis=1),
+            "num_models": len(self.models),
+        }
+
+        return results
+
+
+# =========================================================
+# FUNCTIONAL API
+# =========================================================
+
+def ensemble_inference(
+    models: List[nn.Module],
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    task_type: str,
+    task: Optional[str] = None,
+) -> Dict[str, Any]:
+
+    ensemble = EnsembleUncertainty(
+        models=models,
+        task_type=task_type,
+    )
+
+    return ensemble.predict_with_uncertainty(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        task=task,
+    )

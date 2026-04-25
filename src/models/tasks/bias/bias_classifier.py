@@ -1,33 +1,3 @@
-"""
-File Name: bias_classifier.py
-Module: models.tasks.bias
-Description:
-    Implements a binary bias classification model used in the TruthLens AI system.
-    The classifier predicts whether an article or text segment exhibits bias or
-    is non-biased. The model uses a transformer encoder backbone (e.g., RoBERTa,
-    BERT) followed by a classification head.
-
-    This module is designed for production-grade ML pipelines and supports
-    deterministic execution, structured outputs, and optional loss computation.
-
-Author: TruthLens Engineering
-Date: 2026-04-02
-Dependencies:
-    logging
-    typing
-    dataclasses
-    torch
-    torch.nn
-    models.encoder.transformer_encoder
-    models.heads.classification_head
-Inputs:
-    input_ids: Tensor (batch_size, sequence_length)
-    attention_mask: Tensor (batch_size, sequence_length)
-    labels (optional): Tensor (batch_size)
-Outputs:
-    Dictionary containing logits, probabilities, predictions, and optional loss
-"""
-
 from __future__ import annotations
 
 import logging
@@ -55,10 +25,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class BiasClassifierConfig:
-    """
-    Configuration for the BiasClassifier.
-    """
-
     model_name: str = "roberta-base"
     pooling: str = "cls"
     dropout: float = 0.1
@@ -71,13 +37,6 @@ class BiasClassifierConfig:
 
 
 class BiasClassifier(BaseModel):
-    """
-    Binary bias classifier.
-
-    Predicts:
-        0 → non_bias
-        1 → bias
-    """
 
     NUM_CLASSES = 2
 
@@ -90,7 +49,7 @@ class BiasClassifier(BaseModel):
         self.config = config
 
         # --------------------------------------------------
-        # Transformer Encoder
+        # Encoder
         # --------------------------------------------------
 
         self.encoder = EncoderFactory.create_transformer_encoder(
@@ -108,15 +67,21 @@ class BiasClassifier(BaseModel):
         # Classification Head
         # --------------------------------------------------
 
-        head_config = ClassificationHeadConfig(
-            input_dim=self.encoder.hidden_size,
-            num_classes=self.NUM_CLASSES,
-            dropout=config.dropout,
+        self.classifier_head = ClassificationHead(
+            ClassificationHeadConfig(
+                input_dim=self.encoder.hidden_size,
+                num_classes=self.NUM_CLASSES,
+                dropout=config.dropout,
+                return_features=False,
+            )
         )
 
-        self.classifier_head = ClassificationHead(head_config)
+        # --------------------------------------------------
+        # Optional Regression Head
+        # --------------------------------------------------
 
         self.regression_head: Optional[RegressionHead] = None
+
         if config.use_regression_head:
             self.regression_head = RegressionHead(
                 RegressionHeadConfig(
@@ -140,7 +105,7 @@ class BiasClassifier(BaseModel):
         )
 
         # --------------------------------------------------
-        # Temperature scaling for calibration
+        # Calibration
         # --------------------------------------------------
 
         self.temperature = nn.Parameter(torch.ones(1))
@@ -170,26 +135,24 @@ class BiasClassifier(BaseModel):
 
         pooled_output = encoder_outputs["pooled_output"]
 
-        logits = self.classifier_head(pooled_output)
+        head_output = self.classifier_head(pooled_output)
 
-        # Temperature scaling
+        logits = head_output["logits"]
+
+        # temperature scaling
         temperature = torch.clamp(self.temperature, 0.5, 5.0)
         logits = logits / temperature
 
-        if not self.training:
-            probabilities = F.softmax(logits, dim=-1)
-            predictions = probabilities.argmax(dim=-1)
-            confidence = probabilities.max(dim=-1).values
-        else:
-            probabilities = None
-            predictions = None
-            confidence = None
+        probs = F.softmax(logits, dim=-1)
+        preds = probs.argmax(dim=-1)
+        confidence = probs.max(dim=-1).values
 
         outputs: Dict[str, Any] = {
             "logits": logits,
-            "probabilities": probabilities,
-            "predictions": predictions,
+            "probabilities": probs,
+            "predictions": preds,
             "confidence": confidence,
+            "entropy": head_output["entropy"],
             "embeddings": pooled_output,
         }
 
@@ -200,11 +163,6 @@ class BiasClassifier(BaseModel):
 
             if labels.dim() != 1:
                 raise ValueError("labels must be 1D tensor")
-
-            if not ((labels >= 0).all() and (labels < self.NUM_CLASSES).all()):
-                raise ValueError(
-                    f"labels contain values outside [0, {self.NUM_CLASSES})"
-                )
 
             loss = self.loss_fn(logits, labels.long())
             outputs["loss"] = loss
@@ -236,11 +194,12 @@ class BiasClassifier(BaseModel):
     # --------------------------------------------------
 
     def get_output_labels(self) -> Dict[int, str]:
-
         return {
             0: "non_bias",
             1: "bias",
         }
+
+    # --------------------------------------------------
 
     @classmethod
     def from_task_config(
@@ -252,28 +211,7 @@ class BiasClassifier(BaseModel):
         device: Optional[str] = None,
         label_smoothing: float = 0.1,
     ) -> "BiasClassifier":
-        """
-        Instantiate a ``BiasClassifier`` from central config dataclasses.
 
-        Parameters
-        ----------
-        task_config:
-            Task-level descriptor from ``MultiTaskModelConfig.tasks["bias"]``.
-        head_config:
-            Head-level dimensions/dropout from ``model_config.HeadConfig``.
-        model_name:
-            HuggingFace model identifier.
-        pooling:
-            Encoder pooling strategy (``"cls"`` or ``"mean"``).
-        device:
-            Target device string or ``None`` for auto-detection.
-        label_smoothing:
-            Label smoothing factor for CrossEntropyLoss.
-
-        Returns
-        -------
-        BiasClassifier
-        """
         cfg = BiasClassifierConfig(
             model_name=model_name,
             pooling=pooling,
@@ -301,21 +239,21 @@ class BiasClassifier(BaseModel):
                 else "gelu"
             ),
         )
-        logger.info(
-            "BiasClassifier.from_task_config | task=%s num_labels=%d",
-            task_config.name,
-            task_config.num_labels,
-        )
+
         return cls(cfg)
+
+    # --------------------------------------------------
 
     @classmethod
     def from_model_config(
         cls,
         model_config: MultiTaskModelConfig,
     ) -> "BiasClassifier":
+
         task_cfg = model_config.tasks.get("bias")
+
         if task_cfg is None:
-            raise KeyError("Task 'bias' not found in MultiTaskModelConfig")
+            raise KeyError("Task 'bias' not found")
 
         return cls.from_task_config(
             task_config=task_cfg,
@@ -332,34 +270,25 @@ class BiasClassifier(BaseModel):
             ),
         )
 
+    # --------------------------------------------------
+
     def create_trainer(
         self,
         optimizer: torch.optim.Optimizer,
         scheduler: Optional[Any] = None,
         config: Optional[TrainerConfig] = None,
     ) -> Trainer:
-        """
-        Build a TruthLensTrainer for this model.
 
-        Parameters
-        ----------
-        optimizer : torch.optim.Optimizer
-        scheduler : optional LR scheduler
-        config : TrainerConfig, optional
-            Falls back to a default TrainerConfig if not supplied.
-
-        Returns
-        -------
-        Trainer
-        """
         from dataclasses import replace as _replace
 
         effective_config = config if config is not None else TrainerConfig()
+
         effective_config = _replace(
             effective_config,
             architecture=type(self).__name__,
             model_name=self.config.model_name,
         )
+
         return Trainer(
             model=self,
             optimizer=optimizer,

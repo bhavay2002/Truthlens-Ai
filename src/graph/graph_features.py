@@ -1,250 +1,213 @@
-"""
-File Name: graph_features.py
-Module: Graph Analysis - Unified Graph Feature Extraction
-Description:
-    Provides a unified feature extraction layer for graph-based discourse
-    analysis in the TruthLens AI system. This module orchestrates multiple
-    graph subsystems including entity interaction graphs, narrative transition
-    graphs, and network structural metrics. It centralizes graph feature
-    generation to avoid duplication across pipelines.
-
-Dependencies:
-    logging
-    typing
-    dataclasses
-    numpy
-    src.graph.entity_graph
-    src.graph.narrative_graph_builder
-    src.graph.graph_analysis
-
-Inputs:
-    Raw article text
-
-Outputs:
-    Unified graph feature dictionary and numerical vector
-"""
-
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 
 from src.graph.entity_graph import EntityGraphBuilder, ordered_entity_graph_vector
 from src.graph.graph_analysis import GraphAnalyzer, ordered_graph_metrics_vector
 from src.graph.narrative_graph_builder import NarrativeGraphBuilder
-
+from src.graph.graph_embeddings import graph_embedding_vector, GraphEmbeddingConfig
 
 logger = logging.getLogger(__name__)
+EPS = 1e-12
 
 
-_NARRATIVE_GRAPH_KEYS: List[str] = [
-    "narrative_graph_nodes",
-    "narrative_graph_edges",
-    "narrative_graph_avg_degree",
-    "narrative_graph_density",
-    "narrative_graph_isolated_nodes",
-    "narrative_graph_components",
-]
-
-
-def ordered_narrative_graph_vector(features: Dict[str, float]) -> np.ndarray:
-    """
-    Return fixed-order numpy vector of narrative-graph features.
-    """
-    return np.array(
-        [float(features.get(k, 0.0)) for k in _NARRATIVE_GRAPH_KEYS],
-        dtype=np.float32,
-    )
-
-
-def merge_feature_blocks_strict(*blocks: Dict[str, float]) -> Dict[str, float]:
-    """
-    Merge feature dictionaries; error on duplicate keys.
-    """
-    merged: Dict[str, float] = {}
-    for block in blocks:
-        for key, value in block.items():
-            if key in merged:
-                raise ValueError(
-                    f"Duplicate feature key '{key}' found during merge"
-                )
-            merged[key] = value
-    return merged
-
+# =========================================================
+# CONFIG
+# =========================================================
 
 @dataclass(slots=True)
 class GraphFeatureExtractorConfig:
-    """
-    Configuration for graph feature extraction.
-    """
-
     enable_entity_graph: bool = True
     enable_narrative_graph: bool = True
+    enable_embeddings: bool = True
+    embedding_config: Optional[GraphEmbeddingConfig] = None
+    normalize_features: bool = True
 
+
+# =========================================================
+# UTIL
+# =========================================================
+
+def _normalize_vector(vec: np.ndarray) -> np.ndarray:
+    norm = np.linalg.norm(vec) + EPS
+    return vec / norm
+
+
+def merge_feature_blocks_strict(*blocks: Dict[str, float]) -> Dict[str, float]:
+    merged: Dict[str, float] = {}
+
+    for block in blocks:
+        for k, v in block.items():
+            if k in merged:
+                raise ValueError(f"Duplicate feature key: {k}")
+            merged[k] = float(v)
+
+    return merged
+
+
+# =========================================================
+# MAIN
+# =========================================================
 
 class GraphFeatureExtractor:
-    """
-    Unified graph feature extraction pipeline.
 
-    Responsibilities
-    ----------------
-    - Build entity interaction graph
-    - Build narrative transition graph
-    - Compute graph structural metrics
-    - Merge all graph features into one dictionary
-    """
+    def __init__(self, config: Optional[GraphFeatureExtractorConfig] = None):
 
-    def __init__(
-        self,
-        config: GraphFeatureExtractorConfig | None = None,
-    ) -> None:
-        if config is None:
-            config = GraphFeatureExtractorConfig()
+        self.config = config or GraphFeatureExtractorConfig()
 
-        self.config = config
-
-        self.entity_graph_builder = (
-            EntityGraphBuilder() if config.enable_entity_graph else None
+        self.entity_builder = (
+            EntityGraphBuilder() if self.config.enable_entity_graph else None
         )
 
-        self.narrative_graph_builder = (
-            NarrativeGraphBuilder() if config.enable_narrative_graph else None
+        self.narrative_builder = (
+            NarrativeGraphBuilder() if self.config.enable_narrative_graph else None
         )
 
-        self.graph_analyzer = GraphAnalyzer()
+        self.analyzer = GraphAnalyzer()
 
         logger.info("GraphFeatureExtractor initialized")
 
+    # =====================================================
+    # FULL PIPELINE
+    # =====================================================
+
     def extract_features(self, text: str) -> Dict[str, float]:
-        """
-        Extract unified graph features from raw text.
-
-        Parameters
-        ----------
-        text : str
-            Input article text.
-
-        Returns
-        -------
-        Dict[str, float]
-            Combined graph feature dictionary.
-        """
 
         if not isinstance(text, str) or not text.strip():
-            raise ValueError("text must be a non-empty string")
+            raise ValueError("Invalid text")
 
         entity_graph = None
         narrative_graph = None
 
-        # -------------------------------------------------
-        # Entity Graph
-        # -------------------------------------------------
-        if self.entity_graph_builder:
-            entity_graph = self.entity_graph_builder.build_graph(text)
+        if self.entity_builder:
+            entity_graph = self.entity_builder.build_graph(text)
 
-        # -------------------------------------------------
-        # Narrative Graph
-        # -------------------------------------------------
-        if self.narrative_graph_builder:
-            narrative_graph = self.narrative_graph_builder.build_graph(text)
+        if self.narrative_builder:
+            narrative_graph = self.narrative_builder.build_graph(text)
 
-        features = self.extract_from_graphs(
-            entity_graph=entity_graph,
-            narrative_graph=narrative_graph,
-        )
+        return self.extract_from_graphs(entity_graph, narrative_graph)
 
-        logger.debug("Graph features extracted: %d features", len(features))
-
-        return features
-
-    def extract_feature_vector(self, text: str) -> np.ndarray:
-        """
-        Extract graph features and convert to vector.
-
-        Parameters
-        ----------
-        text : str
-
-        Returns
-        -------
-        np.ndarray
-        """
-
-        features = self.extract_features(text)
-
-        return self.extract_feature_vector_from_features(features)
+    # =====================================================
+    # CORE LOGIC
+    # =====================================================
 
     def extract_from_graphs(
         self,
-        entity_graph: Dict[str, List[str]] | None = None,
-        narrative_graph: Dict[str, List[str]] | None = None,
+        entity_graph: Optional[Dict[str, List[str]]] = None,
+        narrative_graph: Optional[Dict[str, List[str]]] = None,
     ) -> Dict[str, float]:
-        feature_blocks: List[Dict[str, float]] = []
 
-        if entity_graph is not None:
-            if self.entity_graph_builder is None:
-                raise RuntimeError("Entity graph builder is not available")
-            entity_features_obj = self.entity_graph_builder.extract_graph_features(entity_graph)
-            entity_features = entity_features_obj.to_dict()
-            graph_metrics_obj = self.graph_analyzer.analyze(entity_graph)
-            graph_metrics = graph_metrics_obj.to_dict()
-            feature_blocks.append(entity_features)
-            feature_blocks.append(graph_metrics)
+        blocks: List[Dict[str, float]] = []
 
-        if narrative_graph is not None:
-            if self.narrative_graph_builder is None:
-                raise RuntimeError("Narrative graph builder is not available")
-            narrative_features_obj = self.narrative_graph_builder.extract_graph_features(narrative_graph)
-            narrative_features = narrative_features_obj.to_dict()
-            feature_blocks.append(narrative_features)
+        # -------------------------
+        # ENTITY GRAPH
+        # -------------------------
+        if entity_graph and self.entity_builder:
 
-        if feature_blocks:
-            return merge_feature_blocks_strict(*feature_blocks)
+            entity_features = (
+                self.entity_builder.extract_graph_features(entity_graph).to_dict()
+            )
 
-        return {}
+            metrics = self.analyzer.analyze(entity_graph).to_dict()
+
+            blocks.append(entity_features)
+            blocks.append(metrics)
+
+            # 🔥 embeddings
+            if self.config.enable_embeddings:
+                emb = graph_embedding_vector(
+                    entity_graph,
+                    self.config.embedding_config,
+                )
+                for i, val in enumerate(emb):
+                    blocks.append({f"graph_embedding_{i}": float(val)})
+
+        # -------------------------
+        # NARRATIVE GRAPH
+        # -------------------------
+        if narrative_graph and self.narrative_builder:
+
+            narrative_features = (
+                self.narrative_builder.extract_graph_features(narrative_graph).to_dict()
+            )
+
+            blocks.append(narrative_features)
+
+        if not blocks:
+            return {}
+
+        return merge_feature_blocks_strict(*blocks)
+
+    # =====================================================
+    # VECTOR
+    # =====================================================
+
+    def extract_feature_vector(self, text: str) -> np.ndarray:
+
+        features = self.extract_features(text)
+        return self.extract_feature_vector_from_features(features)
 
     def extract_feature_vector_from_features(
         self,
         features: Dict[str, float],
     ) -> np.ndarray:
-        if not isinstance(features, dict):
-            raise ValueError("features must be a dictionary")
+
+        if not features:
+            return np.zeros(0, dtype=np.float32)
 
         vectors: List[np.ndarray] = []
 
-        if self.config.enable_entity_graph:
-            required_entity = {
-                "entity_graph_nodes", "entity_graph_edges", "entity_graph_avg_degree",
-                "entity_graph_density", "entity_graph_dominant_degree", "entity_graph_degree_variance",
-                "graph_nodes", "graph_edges", "graph_avg_degree", "graph_max_degree",
-                "graph_min_degree", "graph_degree_variance", "graph_density",
-                "graph_centralization", "graph_clustering_estimate",
-            }
-            if required_entity.issubset(features.keys()):
-                vectors.append(ordered_entity_graph_vector(features))
-                vectors.append(ordered_graph_metrics_vector(features))
-            else:
-                logger.warning("Missing required entity graph feature keys; skipping entity vectors")
+        # -------------------------
+        # ENTITY + METRICS
+        # -------------------------
+        try:
+            vectors.append(ordered_entity_graph_vector(features))
+            vectors.append(ordered_graph_metrics_vector(features))
+        except Exception:
+            logger.warning("Skipping entity/metrics vector")
 
-        if self.config.enable_narrative_graph:
-            required_narrative = {
-                "narrative_graph_nodes", "narrative_graph_edges", "narrative_graph_avg_degree",
-                "narrative_graph_density", "narrative_graph_isolated_nodes", "narrative_graph_components",
-            }
-            if required_narrative.issubset(features.keys()):
-                vectors.append(ordered_narrative_graph_vector(features))
-            else:
-                logger.warning("Missing required narrative graph feature keys; skipping narrative vector")
+        # -------------------------
+        # EMBEDDINGS
+        # -------------------------
+        emb_keys = sorted(
+            [k for k in features if k.startswith("graph_embedding_")]
+        )
+
+        if emb_keys:
+            emb_vec = np.array(
+                [features[k] for k in emb_keys],
+                dtype=np.float32,
+            )
+            vectors.append(emb_vec)
+
+        # -------------------------
+        # NARRATIVE
+        # -------------------------
+        narrative_keys = [
+            "narrative_graph_nodes",
+            "narrative_graph_edges",
+            "narrative_graph_avg_degree",
+            "narrative_graph_density",
+            "narrative_graph_isolated_nodes",
+            "narrative_graph_components",
+        ]
+
+        if all(k in features for k in narrative_keys):
+            vectors.append(
+                np.array([features[k] for k in narrative_keys], dtype=np.float32)
+            )
 
         if not vectors:
             return np.zeros(0, dtype=np.float32)
 
-        try:
-            vector = np.concatenate(vectors).astype(np.float32)
-            return vector
-        except Exception as exc:
-            logger.exception("Graph feature vector conversion failed")
-            raise RuntimeError("Failed to convert graph features") from exc
+        vec = np.concatenate(vectors).astype(np.float32)
+
+        # 🔥 normalization
+        if self.config.normalize_features:
+            vec = _normalize_vector(vec)
+
+        return vec

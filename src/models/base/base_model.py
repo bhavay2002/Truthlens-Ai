@@ -1,26 +1,3 @@
-"""
-File Name: base_model.py
-Module: models.base
-Description:
-    Defines the abstract base class for all models in the TruthLens ML framework.
-    This module establishes a consistent interface for training, inference, and
-    checkpoint management across all model implementations. It provides common
-    utilities for device management, forward execution, model saving/loading,
-    and parameter inspection. Designed for compatibility with PyTorch-based
-    architectures and extensibility for research and production deployments.
-
-Dependencies:
-    torch
-    torch.nn
-    logging
-    pathlib
-    typing
-Inputs:
-    Model inputs (tensor batches) defined by child classes.
-Outputs:
-    Model outputs defined by child implementations.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -35,83 +12,84 @@ logger = logging.getLogger(__name__)
 
 
 class BaseModel(nn.Module, ABC):
-    """
-    Abstract base class for all TruthLens models.
-
-    This class defines a consistent interface for:
-    - forward passes
-    - model checkpointing
-    - device management
-    - parameter inspection
-
-    All task-specific models and multitask models should inherit from this class.
-    """
 
     def __init__(self) -> None:
         super().__init__()
         self._device: torch.device = torch.device("cpu")
 
+    # =====================================================
+    # FORWARD
+    # =====================================================
+
     @abstractmethod
     def forward(self, *inputs: torch.Tensor, **kwargs: Any) -> Any:
-        """
-        Executes a forward pass of the model.
+        raise NotImplementedError
 
-        Args:
-            *inputs: Positional tensor inputs.
-            **kwargs: Additional named inputs.
+    # =====================================================
+    # DEVICE
+    # =====================================================
 
-        Returns:
-            Model-specific outputs.
-        """
-        raise NotImplementedError("Forward method must be implemented by subclass.")
+    def set_device(self, device: torch.device | str) -> None:
 
-    def set_device(self, device: torch.device) -> None:
-        """
-        Moves model parameters to a specified device.
+        if isinstance(device, str):
+            device = torch.device(device)
 
-        Args:
-            device: Target device (CPU or CUDA).
-        """
         if not isinstance(device, torch.device):
-            raise TypeError("device must be an instance of torch.device")
+            raise TypeError("device must be torch.device or str")
 
         logger.info("Moving model to device: %s", device)
+
         self._device = device
         self.to(device)
 
     @property
     def device(self) -> torch.device:
-        """
-        Returns the device where the model resides.
-        """
+
         try:
             return next(self.parameters()).device
         except StopIteration:
             pass
+
         try:
             return next(self.buffers()).device
         except StopIteration:
             pass
+
         return self._device
 
+    # =====================================================
+    # PARAMS
+    # =====================================================
+
     def num_parameters(self, trainable_only: bool = True) -> int:
-        """
-        Computes the number of model parameters.
 
-        Args:
-            trainable_only: If True, count only trainable parameters.
-
-        Returns:
-            Total number of parameters.
-        """
         if trainable_only:
             params = (p for p in self.parameters() if p.requires_grad)
         else:
             params = self.parameters()
 
-        count = sum(p.numel() for p in params)
-        logger.debug("Parameter count (trainable_only=%s): %d", trainable_only, count)
-        return count
+        return sum(p.numel() for p in params)
+
+    def parameter_breakdown(self) -> Dict[str, int]:
+
+        result: Dict[str, int] = {}
+
+        if hasattr(self, "encoder"):
+            result["encoder"] = sum(p.numel() for p in self.encoder.parameters())
+
+        if hasattr(self, "task_heads"):
+            for name, head in self.task_heads.items():
+                result[f"head_{name}"] = sum(p.numel() for p in head.parameters())
+
+        elif hasattr(self, "heads"):
+            for name, head in self.heads.items():
+                result[f"head_{name}"] = sum(p.numel() for p in head.parameters())
+
+        return result
+
+    # =====================================================
+    # CHECKPOINT
+    # =====================================================
 
     def save_checkpoint(
         self,
@@ -119,16 +97,9 @@ class BaseModel(nn.Module, ABC):
         optimizer_state: Optional[Dict[str, Any]] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """
-        Saves model checkpoint.
 
-        Args:
-            path: Destination checkpoint path.
-            optimizer_state: Optional optimizer state dictionary.
-            metadata: Optional experiment metadata.
-        """
         if not isinstance(path, Path):
-            raise TypeError("path must be a pathlib.Path instance")
+            raise TypeError("path must be Path")
 
         path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -140,9 +111,9 @@ class BaseModel(nn.Module, ABC):
 
         try:
             torch.save(checkpoint, path)
-            logger.info("Checkpoint saved to %s", path)
-        except Exception as exc:
-            logger.exception("Failed to save checkpoint: %s", exc)
+            logger.info("Checkpoint saved: %s", path)
+        except Exception as e:
+            logger.exception("Checkpoint save failed")
             raise
 
     def load_checkpoint(
@@ -150,139 +121,122 @@ class BaseModel(nn.Module, ABC):
         path: Path | str,
         optimizer: Optional[torch.optim.Optimizer] = None,
         map_location: Optional[str | torch.device] = None,
+        strict: bool = False,
     ) -> Dict[str, Any]:
-        """
-        Loads a model checkpoint.
 
-        Args:
-            path: Path to checkpoint file.
-            optimizer: Optional optimizer to restore state.
-            map_location: Device mapping for loading.
-
-        Returns:
-            Metadata dictionary stored with checkpoint.
-        """
         path = Path(path)
+
         if not path.exists():
-            raise FileNotFoundError(f"Checkpoint not found: {path}")
+            raise FileNotFoundError(path)
 
-        try:
-            checkpoint = torch.load(path, map_location=map_location, weights_only=False)
-            _lr = self.load_state_dict(checkpoint["model_state_dict"], strict=False)
-            if _lr.missing_keys:
-                logger.warning(
-                    "[CHECKPOINT] Missing keys (new heads or params not in ckpt): %s",
-                    _lr.missing_keys,
-                )
-            if _lr.unexpected_keys:
-                logger.warning(
-                    "[CHECKPOINT] Unexpected keys (ckpt has params not in model): %s",
-                    _lr.unexpected_keys,
-                )
+        checkpoint = torch.load(
+            path,
+            map_location=map_location,
+            weights_only=False,
+        )
 
-            if optimizer and checkpoint.get("optimizer_state_dict"):
-                optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        load_result = self.load_state_dict(
+            checkpoint["model_state_dict"],
+            strict=strict,
+        )
 
-            logger.info("Checkpoint loaded from %s", path)
+        if load_result.missing_keys:
+            logger.warning("Missing keys: %s", load_result.missing_keys)
 
-            return checkpoint.get("metadata", {})
+        if load_result.unexpected_keys:
+            logger.warning("Unexpected keys: %s", load_result.unexpected_keys)
 
-        except Exception as exc:
-            logger.exception("Failed to load checkpoint: %s", exc)
-            raise
+        if optimizer and checkpoint.get("optimizer_state_dict"):
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+        logger.info("Checkpoint loaded: %s", path)
+
+        return checkpoint.get("metadata", {})
+
+    # =====================================================
+    # FREEZE
+    # =====================================================
 
     def freeze(self) -> None:
-        """
-        Freezes all model parameters.
-        """
-        for param in self.parameters():
-            param.requires_grad = False
-
-        logger.info("All model parameters frozen.")
+        for p in self.parameters():
+            p.requires_grad = False
+        logger.info("Model frozen")
 
     def unfreeze(self) -> None:
-        """
-        Unfreezes all model parameters.
-        """
-        for param in self.parameters():
-            param.requires_grad = True
-
-        logger.info("All model parameters unfrozen.")
+        for p in self.parameters():
+            p.requires_grad = True
+        logger.info("Model unfrozen")
 
     def freeze_encoder(self) -> None:
-        """Freeze shared encoder parameters only (heads remain trainable)."""
+
         if not hasattr(self, "encoder"):
-            raise AttributeError(f"{self.__class__.__name__} has no 'encoder' attribute")
+            raise AttributeError("No encoder")
+
         for p in self.encoder.parameters():
             p.requires_grad = False
-        logger.info("Encoder frozen.")
+
+        logger.info("Encoder frozen")
 
     def unfreeze_encoder(self) -> None:
-        """Unfreeze shared encoder parameters."""
+
         if not hasattr(self, "encoder"):
-            raise AttributeError(f"{self.__class__.__name__} has no 'encoder' attribute")
+            raise AttributeError("No encoder")
+
         for p in self.encoder.parameters():
             p.requires_grad = True
-        logger.info("Encoder unfrozen.")
+
+        logger.info("Encoder unfrozen")
 
     def freeze_head(self, task: str) -> None:
-        """Freeze a single task head by name."""
+
         heads = getattr(self, "task_heads", None)
-        if heads is None or task not in heads:
-            head_attr = f"{task}_head"
-            head = getattr(self, head_attr, None)
-            if head is None:
-                raise ValueError(f"No head found for task {task!r}")
-            for p in head.parameters():
-                p.requires_grad = False
-        else:
+
+        if heads and task in heads:
             for p in heads[task].parameters():
                 p.requires_grad = False
-        logger.info("Head '%s' frozen.", task)
+        else:
+            attr = f"{task}_head"
+            head = getattr(self, attr, None)
+
+            if head is None:
+                raise ValueError(f"No head: {task}")
+
+            for p in head.parameters():
+                p.requires_grad = False
+
+        logger.info("Head frozen: %s", task)
+
+    # =====================================================
+    # META
+    # =====================================================
 
     @property
     def model_type(self) -> str:
-        """Return 'multitask' if task_heads/heads exist, else 'single_task'."""
         if hasattr(self, "task_heads") or hasattr(self, "heads"):
             return "multitask"
         return "single_task"
 
     def get_tasks(self) -> list:
-        """Return registered task names, or [] for single-task models."""
+
         if hasattr(self, "task_heads"):
             return list(self.task_heads.keys())
+
         if hasattr(self, "heads"):
             return list(self.heads.keys())
+
         return []
 
-    def parameter_breakdown(self) -> Dict[str, int]:
-        """Return parameter counts per component (encoder + each head)."""
-        result: Dict[str, int] = {}
-        if hasattr(self, "encoder"):
-            result["encoder"] = sum(
-                p.numel() for p in self.encoder.parameters()
-            )
-        if hasattr(self, "task_heads"):
-            for name, head in self.task_heads.items():
-                result[f"head_{name}"] = sum(p.numel() for p in head.parameters())
-        elif hasattr(self, "heads"):
-            for name, head in self.heads.items():
-                result[f"head_{name}"] = sum(p.numel() for p in head.parameters())
-        return result
+    # =====================================================
+    # SUMMARY
+    # =====================================================
 
     def summary(self) -> Dict[str, Any]:
-        """
-        Returns a summary of model properties.
 
-        Returns:
-            Dictionary containing model metadata.
-        """
-        summary_data = {
+        return {
             "model_class": self.__class__.__name__,
             "device": str(self.device),
             "trainable_parameters": self.num_parameters(True),
             "total_parameters": self.num_parameters(False),
+            "model_type": self.model_type,
+            "tasks": self.get_tasks(),
         }
-
-        logger.debug("Model summary: %s", summary_data)
-        return summary_data

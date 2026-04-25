@@ -1,32 +1,8 @@
-"""
-File Name: base_classifier.py
-Module: models.base
-Description:
-    Provides a reusable base class for classification models in the TruthLens ML
-    framework. This module extends the BaseModel abstraction with functionality
-    specific to classification tasks, including logits generation, probability
-    computation, prediction utilities, and loss handling. It is designed to work
-    with PyTorch-based architectures and supports both single-label and
-    multi-label classification tasks.
-
-Dependencies:
-    torch
-    torch.nn
-    torch.nn.functional
-    typing
-    logging
-    models.base.base_model
-Inputs:
-    Tensor inputs representing encoded features or embeddings.
-Outputs:
-    Logits, probabilities, predicted labels, and loss values.
-"""
-
 from __future__ import annotations
 
 import logging
 from abc import abstractmethod
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 import torch
 import torch.nn.functional as F
@@ -38,14 +14,6 @@ logger = logging.getLogger(__name__)
 
 
 class BaseClassifier(BaseModel):
-    """
-    Base class for classification models.
-
-    This abstraction provides common functionality for classification-based
-    neural networks, including prediction helpers, probability computation,
-    and loss calculation. Specific classifier implementations must implement
-    the `encode` method to generate feature representations.
-    """
 
     def __init__(
         self,
@@ -53,16 +21,8 @@ class BaseClassifier(BaseModel):
         input_dim: int,
         dropout: float = 0.1,
         multi_label: bool = False,
+        label_smoothing: float = 0.0,
     ) -> None:
-        """
-        Initializes the classifier.
-
-        Args:
-            num_classes: Number of output classes.
-            input_dim: Dimension of input feature representation.
-            dropout: Dropout probability.
-            multi_label: Whether the task is multi-label classification.
-        """
         super().__init__()
 
         if num_classes <= 0:
@@ -72,11 +32,12 @@ class BaseClassifier(BaseModel):
             raise ValueError("input_dim must be positive")
 
         if not (0.0 <= dropout <= 1.0):
-            raise ValueError("dropout must be in [0.0, 1.0]")
+            raise ValueError("dropout must be in [0,1]")
 
         self.num_classes = num_classes
         self.input_dim = input_dim
         self.multi_label = multi_label
+        self.label_smoothing = label_smoothing
 
         self.dropout = nn.Dropout(dropout)
         self.classifier = nn.Linear(input_dim, num_classes)
@@ -84,53 +45,46 @@ class BaseClassifier(BaseModel):
         if multi_label:
             self.loss_fn: nn.Module = nn.BCEWithLogitsLoss()
         else:
-            self.loss_fn = nn.CrossEntropyLoss()
+            self.loss_fn = nn.CrossEntropyLoss(
+                label_smoothing=label_smoothing
+            )
+
+    # =====================================================
+    # ENCODE
+    # =====================================================
 
     @abstractmethod
     def encode(self, *inputs: torch.Tensor, **kwargs: Any) -> torch.Tensor:
-        """
-        Encodes raw inputs into a feature representation.
+        raise NotImplementedError
 
-        This method must be implemented by subclasses.
-
-        Returns:
-            Tensor of shape (batch_size, input_dim)
-        """
-        raise NotImplementedError("Subclasses must implement encode().")
+    # =====================================================
+    # FORWARD
+    # =====================================================
 
     def forward(
         self,
         *inputs: torch.Tensor,
         labels: Optional[torch.Tensor] = None,
+        return_features: bool = False,
         **kwargs: Any,
     ) -> Dict[str, torch.Tensor]:
-        """
-        Executes a forward pass.
 
-        Args:
-            *inputs: Input tensors.
-            labels: Optional labels for computing loss.
-
-        Returns:
-            Dictionary containing logits, probabilities, predictions,
-            and optionally loss.
-        """
         features = self.encode(*inputs, **kwargs)
 
         if features.dim() != 2:
-            raise ValueError(
-                f"Encoded features must be 2D (batch_size, feature_dim), "
-                f"got shape {features.shape}"
-            )
+            raise ValueError(f"Expected 2D features, got {features.shape}")
+
         if features.size(1) != self.input_dim:
             raise ValueError(
-                f"Encoded feature dim mismatch: expected {self.input_dim}, got {features.size(1)}"
+                f"Feature dim mismatch: expected {self.input_dim}, got {features.size(1)}"
             )
 
         features = self.dropout(features)
         logits = self.classifier(features)
 
-        output: Dict[str, torch.Tensor] = {"logits": logits}
+        # -------------------------------------------------
+        # PROBS
+        # -------------------------------------------------
 
         if self.multi_label:
             probs = torch.sigmoid(logits)
@@ -139,91 +93,103 @@ class BaseClassifier(BaseModel):
             probs = F.softmax(logits, dim=-1)
             preds = torch.argmax(probs, dim=-1)
 
-        output["probabilities"] = probs
-        output["predictions"] = preds
+        confidence = probs.max(dim=-1).values
+        entropy = -torch.sum(probs * torch.log(probs + 1e-12), dim=-1)
+
+        output: Dict[str, torch.Tensor] = {
+            "logits": logits,
+            "probabilities": probs,
+            "predictions": preds,
+            "confidence": confidence,
+            "entropy": entropy,
+        }
+
+        # -------------------------------------------------
+        # LOSS
+        # -------------------------------------------------
 
         if labels is not None:
             loss = self.compute_loss(logits, labels)
             output["loss"] = loss
 
+        if return_features:
+            output["features"] = features
+
         return output
+
+    # =====================================================
+    # LOSS
+    # =====================================================
 
     def compute_loss(
         self,
         logits: torch.Tensor,
         labels: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Computes classification loss.
 
-        Args:
-            logits: Model output logits.
-            labels: Ground truth labels.
-
-        Returns:
-            Loss tensor.
-        """
         if self.multi_label:
             labels = labels.float()
+            return self.loss_fn(logits, labels)
 
-        loss = self.loss_fn(logits, labels)
-        return loss
+        return self.loss_fn(logits, labels.long())
 
-    @torch.no_grad()
+    # =====================================================
+    # PREDICT
+    # =====================================================
+
+    @torch.inference_mode()
     def predict(
         self,
         *inputs: torch.Tensor,
         **kwargs: Any,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Performs inference and returns predictions and probabilities.
+    ) -> Dict[str, torch.Tensor]:
 
-        Args:
-            *inputs: Input tensors.
-
-        Returns:
-            Tuple (predictions, probabilities)
-        """
+        was_training = self.training
         self.eval()
 
-        outputs = self.forward(*inputs, **kwargs)
+        try:
+            outputs = self.forward(*inputs, **kwargs)
+        finally:
+            if was_training:
+                self.train()
 
-        predictions = outputs["predictions"]
-        probabilities = outputs["probabilities"]
+        return {
+            "predictions": outputs["predictions"],
+            "probabilities": outputs["probabilities"],
+            "confidence": outputs["confidence"],
+        }
 
-        return predictions, probabilities
+    # =====================================================
+    # LOGITS
+    # =====================================================
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def predict_logits(
         self,
         *inputs: torch.Tensor,
         **kwargs: Any,
     ) -> torch.Tensor:
-        """
-        Returns raw logits for inference.
 
-        Args:
-            *inputs: Input tensors.
-
-        Returns:
-            Logits tensor.
-        """
+        was_training = self.training
         self.eval()
-        outputs = self.forward(*inputs, **kwargs)
+
+        try:
+            outputs = self.forward(*inputs, **kwargs)
+        finally:
+            if was_training:
+                self.train()
+
         return outputs["logits"]
 
-    def get_config(self) -> Dict[str, Any]:
-        """
-        Returns classifier configuration.
+    # =====================================================
+    # CONFIG
+    # =====================================================
 
-        Returns:
-            Dictionary containing model configuration.
-        """
-        config = {
+    def get_config(self) -> Dict[str, Any]:
+
+        return {
             "num_classes": self.num_classes,
             "input_dim": self.input_dim,
             "multi_label": self.multi_label,
+            "label_smoothing": self.label_smoothing,
         }
-
-        logger.debug("Classifier config: %s", config)
-        return config

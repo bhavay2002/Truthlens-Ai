@@ -1,7 +1,3 @@
-"""
-File: calibration.py
-"""
-
 from __future__ import annotations
 
 import logging
@@ -14,6 +10,9 @@ import torch.optim as optim
 
 from src.models.calibration import CalibrationMetricConfig, CalibrationMetrics
 
+# 🔥 NEW
+from src.evaluation.reliability_diagram import ReliabilityDiagram
+
 logger = logging.getLogger(__name__)
 
 EPS = 1e-12
@@ -22,6 +21,7 @@ EPS = 1e-12
 # =========================================================
 # VALIDATION
 # =========================================================
+
 def _validate_inputs(y_true, probs):
     y = np.asarray(y_true)
     p = np.asarray(probs)
@@ -33,51 +33,79 @@ def _validate_inputs(y_true, probs):
 
 
 # =========================================================
-# TEMPERATURE SCALING (NEW 🔥)
+# TEMPERATURE SCALER
 # =========================================================
+
 class TemperatureScaler(nn.Module):
     def __init__(self):
         super().__init__()
         self.temperature = nn.Parameter(torch.ones(1))
 
     def forward(self, logits):
-        return logits / self.temperature
+        return logits / torch.clamp(self.temperature, min=EPS)
 
 
-def fit_temperature(logits, labels, max_iter=50):
+# =========================================================
+# TEMPERATURE FITTING
+# =========================================================
+
+def fit_temperature(
+    logits: np.ndarray,
+    labels: np.ndarray,
+    task_type: str,
+    max_iter: int = 50,
+) -> float:
+
     logits = torch.tensor(logits, dtype=torch.float32)
-    labels = torch.tensor(labels, dtype=torch.long)
+    labels = torch.tensor(labels)
 
     model = TemperatureScaler()
-
     optimizer = optim.LBFGS([model.temperature], lr=0.01, max_iter=max_iter)
 
-    def loss_fn():
-        optimizer.zero_grad()
-        scaled_logits = model(logits)
-        loss = nn.CrossEntropyLoss()(scaled_logits, labels)
-        loss.backward()
-        return loss
+    if task_type == "multiclass":
 
-    optimizer.step(loss_fn)
+        loss_fn = nn.CrossEntropyLoss()
 
-    T = model.temperature.item()
+        def closure():
+            optimizer.zero_grad()
+            loss = loss_fn(model(logits), labels.long())
+            loss.backward()
+            return loss
 
+    elif task_type == "binary":
+
+        loss_fn = nn.BCEWithLogitsLoss()
+        labels = labels.float()
+
+        def closure():
+            optimizer.zero_grad()
+            loss = loss_fn(model(logits).squeeze(-1), labels)
+            loss.backward()
+            return loss
+
+    else:
+        raise ValueError("Temperature scaling not supported for multilabel")
+
+    optimizer.step(closure)
+
+    T = float(model.temperature.detach().cpu().item())
     logger.info(f"[CALIBRATION] Learned temperature: {T:.4f}")
 
     return T
 
 
-def apply_temperature(logits, T):
-    return logits / T
+def apply_temperature(logits: np.ndarray, T: float):
+    return logits / max(T, EPS)
 
 
 # =========================================================
 # ACTIVATIONS
 # =========================================================
+
 def softmax(x):
-    e = np.exp(x - np.max(x, axis=1, keepdims=True))
-    return e / e.sum(axis=1, keepdims=True)
+    x = x - np.max(x, axis=1, keepdims=True)
+    e = np.exp(x)
+    return e / (np.sum(e, axis=1, keepdims=True) + EPS)
 
 
 def sigmoid(x):
@@ -85,27 +113,34 @@ def sigmoid(x):
 
 
 # =========================================================
-# CLASS-WISE ECE (NEW 🔥)
+# CONFIDENCE (NEW)
 # =========================================================
-def classwise_ece(y_true, probs, n_bins=10):
-    y, p = _validate_inputs(y_true, probs)
 
-    num_classes = p.shape[1]
-    results = {}
-
-    for c in range(num_classes):
-        y_binary = (y == c).astype(int)
-        p_class = p[:, c]
-
-        ece = expected_calibration_error(y_binary, p_class, n_bins)
-        results[f"class_{c}"] = ece
-
-    return results
+def extract_confidence(probs: np.ndarray) -> np.ndarray:
+    if probs.ndim == 1:
+        return probs
+    return np.max(probs, axis=1)
 
 
 # =========================================================
-# MAIN ECE
+# BRIER SCORE
 # =========================================================
+
+def brier_score(y_true, probs, task_type: str):
+    y = np.asarray(y_true)
+    p = np.asarray(probs)
+
+    if task_type == "multiclass":
+        one_hot = np.eye(p.shape[1])[y]
+        return float(np.mean((p - one_hot) ** 2))
+
+    return float(np.mean((p - y) ** 2))
+
+
+# =========================================================
+# ECE
+# =========================================================
+
 def expected_calibration_error(y_true, probs, n_bins=10):
     y, p = _validate_inputs(y_true, probs)
 
@@ -120,8 +155,60 @@ def expected_calibration_error(y_true, probs, n_bins=10):
 
 
 # =========================================================
-# FULL CALIBRATION PIPELINE (UPGRADED 🔥)
+# CLASSWISE ECE
 # =========================================================
+
+def classwise_ece(y_true, probs, n_bins=10):
+    y, p = _validate_inputs(y_true, probs)
+
+    num_classes = p.shape[1]
+    result = {}
+
+    for c in range(num_classes):
+        y_bin = (y == c).astype(int)
+        p_c = p[:, c]
+        result[f"class_{c}"] = expected_calibration_error(y_bin, p_c, n_bins)
+
+    return result
+
+
+# =========================================================
+# MULTILABEL ECE
+# =========================================================
+
+def multilabel_ece(y_true, probs, n_bins=10):
+    y = np.asarray(y_true)
+    p = np.asarray(probs)
+
+    per_label = [
+        expected_calibration_error(y[:, i], p[:, i], n_bins)
+        for i in range(p.shape[1])
+    ]
+
+    return {
+        "macro_ece": float(np.mean(per_label)),
+        "per_label_ece": per_label,
+    }
+
+
+# =========================================================
+# 🔥 RELIABILITY DIAGRAM (NEW)
+# =========================================================
+
+def compute_reliability(y_true, probs, n_bins=10):
+
+    try:
+        diagram = ReliabilityDiagram(n_bins=n_bins)
+        return diagram.compute(probs, y_true)
+    except Exception as e:
+        logger.warning(f"Reliability diagram failed: {e}")
+        return {}
+
+
+# =========================================================
+# FULL PIPELINE (UPDATED)
+# =========================================================
+
 def compute_calibration(
     logits: Optional[np.ndarray],
     y_true: Iterable,
@@ -131,55 +218,64 @@ def compute_calibration(
     n_bins: int = 10,
 ) -> Dict[str, Any]:
 
-    y_true = np.asarray(y_true)
-
     if logits is None:
-        raise ValueError("logits required for calibration pipeline")
+        raise ValueError("logits required")
+
+    y_true = np.asarray(y_true)
 
     # ---------------------------
     # TEMPERATURE SCALING
     # ---------------------------
-    if apply_temp_scaling and task_type != "multilabel":
-        T = fit_temperature(logits, y_true)
+    if apply_temp_scaling and task_type in ("multiclass", "binary"):
+        T = fit_temperature(logits, y_true, task_type)
         logits = apply_temperature(logits, T)
     else:
         T = None
 
     # ---------------------------
-    # PROBS
+    # PROBABILITIES
     # ---------------------------
     if task_type == "multiclass":
         probs = softmax(logits)
-    elif task_type == "binary":
-        probs = sigmoid(logits)
-    else:
+
+    elif task_type in ("binary", "multilabel"):
         probs = sigmoid(logits)
 
-    results = {}
+    else:
+        raise ValueError(f"Invalid task_type: {task_type}")
+
+    results: Dict[str, Any] = {}
 
     # ---------------------------
-    # GLOBAL ECE
+    # CONFIDENCE
+    # ---------------------------
+    results["confidence"] = extract_confidence(probs).tolist()
+
+    # ---------------------------
+    # ECE
     # ---------------------------
     if task_type == "multilabel":
-        results["ece"] = float(
-            np.mean([
-                expected_calibration_error(y_true[:, i], probs[:, i], n_bins)
-                for i in range(probs.shape[1])
-            ])
-        )
+        results.update(multilabel_ece(y_true, probs, n_bins))
     else:
         results["ece"] = expected_calibration_error(y_true, probs, n_bins)
 
+        if probs.ndim == 2:
+            results["classwise_ece"] = classwise_ece(y_true, probs, n_bins)
+
     # ---------------------------
-    # CLASS-WISE ECE
+    # RELIABILITY DIAGRAM
     # ---------------------------
-    if probs.ndim == 2:
-        results["classwise_ece"] = classwise_ece(y_true, probs, n_bins)
+    results["reliability_diagram"] = compute_reliability(y_true, probs, n_bins)
+
+    # ---------------------------
+    # BRIER SCORE
+    # ---------------------------
+    results["brier"] = brier_score(y_true, probs, task_type)
 
     # ---------------------------
     # TEMPERATURE
     # ---------------------------
     if T is not None:
-        results["temperature"] = float(T)
+        results["temperature"] = T
 
     return results

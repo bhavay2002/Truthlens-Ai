@@ -1,46 +1,34 @@
-"""
-weighted_ensemble.py
-Module: models.ensemble
-Description:
-    Weighted-average ensemble that assigns explicit per-model weights to logit
-    combination.
-"""
-
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from src.models.ensemble._utils import extract_logits
 
 logger = logging.getLogger(__name__)
 
 
+# =========================================================
+# CONFIG
+# =========================================================
+
 @dataclass
 class WeightedEnsembleConfig:
-    """
-    Configuration for WeightedEnsembleModel.
-
-    Attributes
-    ----------
-    weights : Optional[List[float]]
-        Explicit per-model weights.  If None, equal weights are used.
-    device : str
-        Target device.
-    """
-
     weights: Optional[List[float]] = None
     device: str = "cpu"
+    return_probabilities: bool = True
 
+
+# =========================================================
+# MODEL
+# =========================================================
 
 class WeightedEnsembleModel(nn.Module):
-    """
-    Combines model logits using explicit per-model weights.
-    """
 
     def __init__(
         self,
@@ -50,46 +38,79 @@ class WeightedEnsembleModel(nn.Module):
         super().__init__()
 
         if not models:
-            raise ValueError("At least one model must be provided.")
+            raise ValueError("At least one model must be provided")
 
-        if config is None:
-            config = WeightedEnsembleConfig()
-
-        self.config = config
+        self.config = config or WeightedEnsembleConfig()
         self.models = nn.ModuleList(models)
 
-        if config.weights is not None:
-            if len(config.weights) != len(models):
-                raise ValueError(
-                    "Length of weights must match the number of models."
-                )
-            weights_tensor = torch.tensor(config.weights, dtype=torch.float32)
+        if self.config.weights is not None:
+            if len(self.config.weights) != len(models):
+                raise ValueError("weights length mismatch")
+
+            weights_tensor = torch.tensor(
+                self.config.weights,
+                dtype=torch.float32,
+            )
         else:
             weights_tensor = torch.ones(len(models), dtype=torch.float32)
 
         self.register_buffer("_weights", weights_tensor)
 
+        self.device = torch.device(self.config.device)
+        self.to(self.device)
+
         logger.info(
-            "WeightedEnsembleModel initialised | models=%d",
+            "WeightedEnsembleModel | models=%d",
             len(models),
         )
 
-    def forward(self, *args, **kwargs) -> torch.Tensor:
-        """
-        Combine logits using per-model weights.
+    # =====================================================
+    # FORWARD
+    # =====================================================
 
-        Returns
-        -------
-        torch.Tensor
-            Weighted-average logits.
-        """
-        all_logits: List[torch.Tensor] = [
-            extract_logits(model(*args, **kwargs)) for model in self.models
-        ]
+    def forward(self, *args, **kwargs) -> Dict[str, Any]:
 
-        stacked = torch.stack(all_logits, dim=0)
+        logits_list: List[torch.Tensor] = []
+
+        for model in self.models:
+            model = model.to(self.device)
+            output = model(*args, **kwargs)
+            logits = extract_logits(output)
+            logits_list.append(logits)
+
+        stacked = torch.stack(logits_list, dim=0)
+
         weights = self._weights.to(stacked.device).view(
             -1, *([1] * (stacked.dim() - 1))
         )
 
-        return (stacked * weights).sum(dim=0) / weights.sum()
+        logits = (stacked * weights).sum(dim=0) / weights.sum()
+
+        probs = F.softmax(logits, dim=-1)
+        preds = probs.argmax(dim=-1)
+        confidence = probs.max(dim=-1).values
+        entropy = -torch.sum(probs * torch.log(probs + 1e-12), dim=-1)
+
+        return {
+            "logits": logits,
+            "probabilities": probs if self.config.return_probabilities else None,
+            "predictions": preds,
+            "confidence": confidence,
+            "entropy": entropy,
+        }
+
+    # =====================================================
+    # UTILS
+    # =====================================================
+
+    def set_weights(self, weights: List[float]) -> None:
+        if len(weights) != len(self.models):
+            raise ValueError("weights length mismatch")
+
+        self._weights = torch.tensor(weights, dtype=torch.float32).to(self.device)
+
+    def get_weights(self) -> torch.Tensor:
+        return self._weights.detach().cpu()
+
+    def get_num_models(self) -> int:
+        return len(self.models)

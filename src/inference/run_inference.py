@@ -1,188 +1,211 @@
 """
-File Name: run_inference.py
-Module: inference
-Description:
-    Command-line interface (CLI) for running inference with the TruthLens AI
-    system.
-
-    This script loads a trained model using the PredictionPipeline and allows
-    users to run predictions directly from the terminal.
-
-    Example usage:
-        python run_inference.py --model_dir models/truthlens --article "Some text"
-
-    The script supports both single-article inference and batch inference
-    through text files.
-
-Author: ML Engineering System
-Date: 2026-04-03
-Dependencies:
-    argparse
-    json
-    logging
-    pathlib
-    typing
-    sys
-    src.inference.inference_engine (InferenceEngine)
-Inputs:
-    --model_dir : Path to trained model directory
-    --article : Single article text
-    --input_file : File containing articles (one per line)
-Outputs:
-    Printed JSON prediction results
+File: run_inference.py (FINAL UPGRADED)
 """
 
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
 import json
 import logging
 import sys
 from pathlib import Path
-from typing import List
+from typing import List, Dict
+
+import numpy as np
 
 from src.inference.inference_engine import InferenceConfig, InferenceEngine
+from src.evaluation.calibration import compute_calibration
+from src.evaluation.uncertainty import uncertainty_statistics
+from src.evaluation.task_correlation import compute_task_correlation
+from src.evaluation.report_writer import save_report
+from src.inference.report_generator import ReportGenerator
+from src.inference.result_formatter import ResultFormatter
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
-
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def parse_args() -> argparse.Namespace:
-    """
-    Parse CLI arguments.
-    """
+# =========================================================
+# CLI
+# =========================================================
 
-    parser = argparse.ArgumentParser(
-        description="Run inference using a trained TruthLens model."
-    )
+def parse_args():
+    parser = argparse.ArgumentParser()
 
-    parser.add_argument(
-        "--model_dir",
-        type=str,
-        required=True,
-        help="Path to the trained model directory.",
-    )
+    parser.add_argument("--model_dir", required=True)
+    parser.add_argument("--article", type=str)
+    parser.add_argument("--input_file", type=str)
 
-    parser.add_argument(
-        "--article",
-        type=str,
-        default=None,
-        help="Single article text for prediction.",
-    )
+    parser.add_argument("--labels_file", type=str)
+    parser.add_argument("--evaluate", action="store_true")
 
-    parser.add_argument(
-        "--input_file",
-        type=str,
-        default=None,
-        help="Text file containing articles (one per line).",
-    )
+    parser.add_argument("--output_format", default="api",
+                        choices=["api", "dashboard", "research"])
 
-    parser.add_argument(
-        "--max_length",
-        type=int,
-        default=512,
-        help="Maximum token length for the tokenizer.",
-    )
-
-    parser.add_argument(
-        "--device",
-        type=str,
-        default=None,
-        help="Device to run inference on (cpu or cuda).",
-    )
+    # 🔥 NEW FLAGS
+    parser.add_argument("--save_logits", action="store_true")
+    parser.add_argument("--save_probs", action="store_true")
+    parser.add_argument("--save_uncertainty", action="store_true")
+    parser.add_argument("--save_dir", default="outputs")
 
     return parser.parse_args()
 
 
-def load_text_file(path: str | Path) -> List[str]:
-    """
-    Load input texts from a file.
+# =========================================================
+# DATA
+# =========================================================
 
-    Each line in the file represents a single article.
-    """
+def load_texts(args):
+    if args.article:
+        return [args.article]
 
-    file_path = Path(path)
+    if args.input_file:
+        path = Path(args.input_file)
+        return [l.strip() for l in path.read_text().splitlines() if l.strip()]
 
-    if not file_path.exists():
-        raise FileNotFoundError(f"Input file not found: {file_path}")
-
-    texts: List[str] = []
-
-    try:
-        fctx = file_path.open("r", encoding="utf-8", errors="strict")
-    except UnicodeDecodeError as exc:
-        raise ValueError(f"Input file is not valid UTF-8: {file_path}") from exc
-    with fctx as f:
-        for line in f:
-            text = line.strip()
-            if text:
-                texts.append(text)
-
-    if not texts:
-        raise ValueError("Input file contains no valid texts.")
-
-    return texts
+    raise ValueError("Provide article or input_file")
 
 
-def run_single(engine: InferenceEngine, text: str) -> None:
-    """
-    Run inference for a single article.
-    """
-
-    logger.info("Running single-article inference.")
-
-    result = asdict(engine.predict_single(text))
-
-    print(json.dumps(result, indent=2))
+def load_labels(path) -> Dict:
+    with open(path) as f:
+        return json.load(f)
 
 
-def run_batch(engine: InferenceEngine, texts: List[str]) -> None:
-    """
-    Run inference for multiple articles.
-    """
+# =========================================================
+# SAVE HELPERS
+# =========================================================
 
-    logger.info("Running batch inference for %d texts.", len(texts))
+def save_arrays(outputs, save_dir, *, save_logits, save_probs):
 
-    results = [asdict(item) for item in engine.predict(texts)]
+    save_path = Path(save_dir)
+    save_path.mkdir(parents=True, exist_ok=True)
 
-    print(json.dumps(results, indent=2))
+    for task, out in outputs.items():
+
+        if save_logits and out.get("logits") is not None:
+            np.save(save_path / f"{task}_logits.npy", out["logits"])
+
+        if save_probs and out.get("probabilities") is not None:
+            np.save(save_path / f"{task}_probabilities.npy", out["probabilities"])
 
 
-def main() -> None:
-    """
-    Main CLI entrypoint.
-    """
+def save_uncertainty(uncertainty, save_dir):
+
+    if not uncertainty:
+        return
+
+    save_path = Path(save_dir)
+    save_path.mkdir(parents=True, exist_ok=True)
+
+    with open(save_path / "uncertainty.json", "w") as f:
+        json.dump(uncertainty, f, indent=4)
+
+
+# =========================================================
+# MAIN
+# =========================================================
+
+def main():
 
     args = parse_args()
 
-    if args.article is None and args.input_file is None:
-        logger.error("You must provide either --article or --input_file.")
-        sys.exit(1)
-
     try:
+        texts = load_texts(args)
+
         engine = InferenceEngine(
             InferenceConfig(
                 model_path=args.model_dir,
-                tokenizer_path=None,
-                max_length=args.max_length,
-                device=args.device or "auto",
+                device="auto"
             )
         )
 
-        if args.article:
-            run_single(engine, args.article)
+        # -------------------------------------------------
+        # INFERENCE
+        # -------------------------------------------------
+        outputs = engine.predict_for_evaluation(texts)
 
-        if args.input_file:
-            texts = load_text_file(args.input_file)
-            run_batch(engine, texts)
+        # -------------------------------------------------
+        # EVALUATION
+        # -------------------------------------------------
+        evaluation = {}
+        calibration = {}
+        uncertainty = {}
+        correlation = {}
+
+        if args.evaluate and args.labels_file:
+
+            labels = load_labels(args.labels_file)
+
+            for task, out in outputs.items():
+
+                logits = out["logits"]
+                probs = out["probabilities"]
+
+                y_true = np.asarray(labels[task])
+
+                calibration[task] = compute_calibration(
+                    logits=logits,
+                    y_true=y_true,
+                    task_type="multiclass",
+                )
+
+                uncertainty[task] = uncertainty_statistics(probs)
+
+            correlation = compute_task_correlation(
+                {k: v["probabilities"] for k, v in outputs.items()}
+            )
+
+        # -------------------------------------------------
+        # OPTIONAL SAVE RAW OUTPUTS 🔥
+        # -------------------------------------------------
+        if args.save_logits or args.save_probs:
+            save_arrays(
+                outputs,
+                args.save_dir,
+                save_logits=args.save_logits,
+                save_probs=args.save_probs,
+            )
+
+        if args.save_uncertainty:
+            save_uncertainty(uncertainty, args.save_dir)
+
+        # -------------------------------------------------
+        # REPORT
+        # -------------------------------------------------
+        report_gen = ReportGenerator()
+
+        report = report_gen.generate_report(
+            article_text=" ".join(texts),
+            predictions=outputs,
+            evaluation=evaluation,
+            calibration=calibration,
+            uncertainty=uncertainty,
+            task_correlation=correlation,
+        )
+
+        # -------------------------------------------------
+        # FORMAT OUTPUT
+        # -------------------------------------------------
+        formatter = ResultFormatter()
+
+        if args.output_format == "api":
+            final = formatter.format_api_response(report)
+
+        elif args.output_format == "dashboard":
+            final = formatter.format_dashboard_report(report)
+
+        else:
+            final = formatter.format_research_export(report)
+
+        print(json.dumps(final, indent=2))
+
+        # -------------------------------------------------
+        # SAVE REPORT
+        # -------------------------------------------------
+        save_report(report, Path(args.save_dir) / "report.json")
 
     except Exception:
-        logger.exception("Inference failed.")
+        logger.exception("Inference failed")
         sys.exit(1)
 
 

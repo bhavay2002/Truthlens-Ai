@@ -1,31 +1,4 @@
-"""
-File Name: interaction_graph_features.py
-Module: Feature Engineering - Graph Features
-Description:
-    Builds an interaction graph capturing relationships between entities,
-    actors, and referenced subjects appearing within the same contextual
-    windows (sentences or paragraphs). The graph models interaction
-    structures in narrative discourse and extracts structural metrics
-    describing connectivity, clustering, and interaction complexity.
-
-    These features are useful for analyzing narrative propagation,
-    actor interaction dynamics, and discourse structure.
-
-Dependencies:
-    dataclasses
-    typing
-    logging
-    re
-    itertools
-    networkx (optional)
-    spacy (optional)
-
-Inputs:
-    FeatureContext containing input text
-
-Outputs:
-    Dict[str, float] containing interaction graph metrics
-"""
+# src/features/interaction_graph_features.py
 
 from __future__ import annotations
 
@@ -35,135 +8,163 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List
 
+import numpy as np
+
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
-from src.graph.graph_analysis import GraphAnalyzer
-from src.graph.narrative_graph_builder import NarrativeGraphBuilder
 
 logger = logging.getLogger(__name__)
 
+EPS = 1e-8
+MAX_CLIP = 1.0
+
+
+# ---------------------------------------------------------
+# Fallback utilities
+# ---------------------------------------------------------
+
 def _split_sentences(text: str) -> List[str]:
-    """Basic sentence segmentation."""
     return [s.strip() for s in re.split(r"[.!?]+", text) if s.strip()]
 
 
 def _heuristic_entities(sentence: str) -> List[str]:
-    """Fallback entity detection using capitalized tokens."""
-    tokens = re.findall(r"\b[A-Z][a-zA-Z]+\b", sentence)
-    return list(set(tokens))
+    return list(set(re.findall(r"\b[A-Z][a-zA-Z]+\b", sentence)))
 
 
-def _extract_entities(sentence: str) -> List[str]:
-    """Fallback entity extraction."""
-    return _heuristic_entities(sentence)
-
+# ---------------------------------------------------------
+# Feature
+# ---------------------------------------------------------
 
 @dataclass
 @register_feature
 class InteractionGraphFeatures(BaseFeature):
-    """
-    Extracts structural features from entity interaction graphs.
-
-    Output Features
-    ---------------
-    interaction_node_count
-    interaction_edge_count
-    interaction_avg_degree
-    interaction_density
-    interaction_clustering
-    interaction_component_count
-    """
 
     name: str = "interaction_graph_features"
-    description: str = "Graph-based interaction structure indicators"
-    _builder: NarrativeGraphBuilder | None = field(default=None, init=False, repr=False)
-    _analyzer: GraphAnalyzer | None = field(default=None, init=False, repr=False)
+    group: str = "graph"
+    description: str = "Normalized interaction graph features"
+
+    _builder: object | None = field(default=None, init=False)
+    _analyzer: object | None = field(default=None, init=False)
+
+    # -----------------------------------------------------
 
     def initialize(self) -> None:
-        if self._builder is not None and self._analyzer is not None:
+        if self._builder is not None:
             return
         try:
+            from src.graph.narrative_graph_builder import NarrativeGraphBuilder
+            from src.graph.graph_analysis import GraphAnalyzer
+
             self._builder = NarrativeGraphBuilder()
             self._analyzer = GraphAnalyzer()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "InteractionGraphFeatures using fallback due to graph init failure: %s",
-                exc,
-            )
+
+        except Exception as e:
+            logger.warning("Graph fallback mode: %s", e)
             self._builder = None
             self._analyzer = None
 
+    # -----------------------------------------------------
+
     def extract(self, context: FeatureContext) -> Dict[str, float]:
-        if not isinstance(context.text, str):
-            raise TypeError("FeatureContext.text must be a string")
-        if not context.text.strip():
+
+        text = context.text.strip()
+        if not text:
             return {}
 
-        if self._builder is not None and self._analyzer is not None:
-            graph = self._builder.build_graph(context.text)
-            narrative_metrics = self._builder.extract_graph_features(graph).to_dict()
-            graph_metrics = self._analyzer.analyze(graph).to_dict()
+        self.initialize()
 
-            features: Dict[str, float] = {
-                "interaction_node_count": float(
-                    narrative_metrics.get("narrative_graph_nodes", 0.0)
-                ),
-                "interaction_edge_count": float(
-                    narrative_metrics.get("narrative_graph_edges", 0.0)
-                ),
-                "interaction_avg_degree": float(
-                    narrative_metrics.get("narrative_graph_avg_degree", 0.0)
-                ),
-                "interaction_density": float(
-                    narrative_metrics.get("narrative_graph_density", 0.0)
-                ),
-                "interaction_clustering": float(
-                    graph_metrics.get("graph_clustering_estimate", 0.0)
-                ),
-                "interaction_component_count": float(
-                    narrative_metrics.get("narrative_graph_components", 0.0)
-                ),
-            }
+        # =====================================================
+        # GRAPH BUILD
+        # =====================================================
 
-            for key, value in narrative_metrics.items():
-                features[f"interaction_native_{key}"] = float(value)
+        if self._builder and self._analyzer:
 
-            for key, value in graph_metrics.items():
-                features[f"interaction_native_{key}"] = float(value)
+            graph = self._builder.build_graph(text)
 
-            return features
+            metrics = self._builder.extract_graph_features(graph).to_dict()
+            gmetrics = self._analyzer.analyze(graph).to_dict()
 
-        # Fallback when graph subsystem is unavailable.
-        sentences = _split_sentences(context.text)
-        nodes = set()
-        edges = set()
+            nodes = float(metrics.get("narrative_graph_nodes", 0.0))
+            edges = float(metrics.get("narrative_graph_edges", 0.0))
+            components = float(metrics.get("narrative_graph_components", 1.0))
+            clustering = float(gmetrics.get("graph_clustering_estimate", 0.0))
 
-        for sentence in sentences:
-            entities = _extract_entities(sentence)
-            nodes.update(entities)
-            for pair in itertools.combinations(sorted(set(entities)), 2):
-                edges.add(pair)
+        else:
+            # fallback
+            sentences = _split_sentences(text)
 
-        node_count = len(nodes)
-        edge_count = len(edges)
-        density = 0.0
-        if node_count > 1:
-            max_edges = node_count * (node_count - 1) / 2.0
-            density = edge_count / max_edges
+            nodes_set = set()
+            edges_set = set()
 
-        features = {
-            "interaction_node_count": float(node_count),
-            "interaction_edge_count": float(edge_count),
-            "interaction_avg_degree": float((2.0 * edge_count) / max(node_count, 1)),
-            "interaction_density": float(density),
-            "interaction_clustering": 0.0,
-            "interaction_component_count": 0.0,
+            for s in sentences:
+                ents = _heuristic_entities(s)
+                nodes_set.update(ents)
+
+                for pair in itertools.combinations(sorted(set(ents)), 2):
+                    edges_set.add(pair)
+
+            nodes = float(len(nodes_set))
+            edges = float(len(edges_set))
+            components = 1.0
+            clustering = 0.0
+
+        # =====================================================
+        # NORMALIZATION
+        # =====================================================
+
+        max_edges = nodes * (nodes - 1) / 2.0 if nodes > 1 else 1.0
+
+        density = edges / (max_edges + EPS)
+        sparsity = 1.0 - density
+
+        # normalized degree
+        avg_degree = (2.0 * edges) / (nodes + EPS)
+        degree_norm = avg_degree / (nodes + EPS)
+
+        # component ratio
+        component_ratio = components / (nodes + EPS)
+
+        # =====================================================
+        # ENTROPY (CRITICAL)
+        # =====================================================
+
+        probs = np.array([density, sparsity, clustering], dtype=np.float32)
+
+        if probs.sum() > 0:
+            probs = probs / (probs.sum() + EPS)
+            entropy = -np.sum(probs * np.log(probs + EPS))
+        else:
+            entropy = 0.0
+
+        # =====================================================
+        # INTENSITY
+        # =====================================================
+
+        intensity = float(np.linalg.norm([density, degree_norm, clustering]))
+
+        # =====================================================
+        # OUTPUT
+        # =====================================================
+
+        return {
+            "interaction_nodes_norm": self._safe(np.log1p(nodes) / 10.0),
+            "interaction_edges_norm": self._safe(np.log1p(edges) / 10.0),
+
+            "interaction_density": self._safe(density),
+            "interaction_sparsity": self._safe(sparsity),
+
+            "interaction_degree_norm": self._safe(degree_norm),
+            "interaction_clustering": self._safe(clustering),
+
+            "interaction_component_ratio": self._safe(component_ratio),
+
+            "interaction_entropy": self._safe(entropy),
+            "interaction_intensity": self._safe(intensity),
         }
 
-        logger.debug(
-            "Interaction graph features extracted | nodes=%d edges=%d",
-            node_count,
-            edge_count,
-        )
+    # -----------------------------------------------------
 
-        return features
+    def _safe(self, v: float) -> float:
+        if not np.isfinite(v):
+            return 0.0
+        return float(np.clip(v, 0.0, MAX_CLIP))

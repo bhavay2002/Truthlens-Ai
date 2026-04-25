@@ -1,29 +1,27 @@
-# src/analysis/batch_processor.py
-
 from __future__ import annotations
 
 import logging
-from typing import Iterable, List, Dict, Any, Generator, Optional
+import time
+from typing import Iterable, List, Dict, Any, Generator, Optional, Tuple
 
-from src.analysis.pipeline import AnalysisPipeline
+from src.analysis.analysis_pipeline import AnalysisPipeline
+from src.analysis.feature_context import FeatureContext
 
 logger = logging.getLogger(__name__)
 
 
 # =========================================================
-# Batch Processor
+# CONSTANTS
+# =========================================================
+
+DEFAULT_TIMEOUT = None
+
+
+# =========================================================
+# BATCH PROCESSOR
 # =========================================================
 
 class BatchProcessor:
-    """
-    High-performance batch processor for text analysis.
-
-    Key Features:
-    - Uses spaCy nlp.pipe() under the hood (via pipeline)
-    - Dynamic batching
-    - Memory-safe iteration
-    - Optional streaming output
-    """
 
     def __init__(
         self,
@@ -31,19 +29,27 @@ class BatchProcessor:
         batch_size: int = 32,
         max_length: int = 100_000,
         drop_empty: bool = True,
+        *,
+        enable_profiling: bool = False,
     ):
         self.pipeline = pipeline
-        self.batch_size = batch_size
-        self.max_length = max_length
+        self.batch_size = int(batch_size)
+        self.max_length = int(max_length)
         self.drop_empty = drop_empty
+        self.enable_profiling = enable_profiling
+
+        if self.batch_size <= 0:
+            raise ValueError("batch_size must be > 0")
 
         logger.info(
-            "BatchProcessor initialized | batch_size=%d max_length=%d",
-            batch_size,
-            max_length,
+            "BatchProcessor initialized | batch_size=%d | max_length=%d",
+            self.batch_size,
+            self.max_length,
         )
 
-    # -----------------------------------------------------
+    # =========================================================
+    # PUBLIC API
+    # =========================================================
 
     def process(
         self,
@@ -51,97 +57,165 @@ class BatchProcessor:
         *,
         return_generator: bool = False,
     ) -> List[Dict[str, Any]] | Generator[Dict[str, Any], None, None]:
-        """
-        Process texts in batches.
 
-        Args:
-            texts: iterable of input strings
-            return_generator: if True, yields results lazily
+        generator = self._process_generator(texts)
 
-        Returns:
-            list or generator of results
-        """
+        return generator if return_generator else list(generator)
 
-        if return_generator:
-            return self._process_generator(texts)
-
-        return list(self._process_generator(texts))
-
-    # -----------------------------------------------------
+    # =========================================================
+    # CORE GENERATOR
+    # =========================================================
 
     def _process_generator(
         self,
         texts: Iterable[str],
     ) -> Generator[Dict[str, Any], None, None]:
 
-        batch: List[str] = []
+        batch: List[Tuple[int, str]] = []
+        idx = 0
 
         for text in texts:
 
-            # -----------------------------
-            # Input validation
-            # -----------------------------
+            processed = self._prepare_text(text)
 
-            if not isinstance(text, str):
-                logger.warning("Skipping non-string input")
+            if processed is None:
+                idx += 1
                 continue
 
-            text = text.strip()
-
-            if self.drop_empty and not text:
-                continue
-
-            if len(text) > self.max_length:
-                logger.warning("Text too long, truncating")
-                text = text[: self.max_length]
-
-            batch.append(text)
-
-            # -----------------------------
-            # Batch full → process
-            # -----------------------------
+            batch.append((idx, processed))
+            idx += 1
 
             if len(batch) >= self.batch_size:
                 yield from self._run_batch(batch)
                 batch.clear()
 
-        # -----------------------------
-        # Final batch
-        # -----------------------------
-
         if batch:
             yield from self._run_batch(batch)
 
-    # -----------------------------------------------------
+    # =========================================================
+    # TEXT PREPARATION
+    # =========================================================
+
+    def _prepare_text(self, text: Any) -> Optional[str]:
+
+        if not isinstance(text, str):
+            logger.warning("Skipping non-string input")
+            return None
+
+        text = text.strip()
+
+        if self.drop_empty and not text:
+            return None
+
+        if len(text) > self.max_length:
+            logger.warning("Text too long, truncating")
+            text = text[: self.max_length]
+
+        return text
+
+    # =========================================================
+    # BATCH EXECUTION (UPGRADED)
+    # =========================================================
 
     def _run_batch(
         self,
-        batch: List[str],
+        batch: List[Tuple[int, str]],
     ) -> Generator[Dict[str, Any], None, None]:
 
+        indices, texts = zip(*batch)
+
+        # 🔥 SHARED CACHE FOR ENTIRE BATCH
+        shared_cache: Dict[str, Any] = {}
+
+        contexts = [
+            FeatureContext(
+                text=t,
+                shared=shared_cache,   # CRITICAL
+                cache={}
+            )
+            for t in texts
+        ]
+
+        start_time = time.perf_counter()
+
         try:
-            results = self.pipeline.run_batch(batch)
+            results = self.pipeline.run_batch(contexts)
 
-            for result in results:
-                yield result
+            latency = time.perf_counter() - start_time
 
-        except Exception as e:
-            logger.exception("Batch processing failed")
+            if self.enable_profiling:
+                logger.debug(
+                    "Batch processed | size=%d | latency=%.4f sec | throughput=%.2f/s",
+                    len(texts),
+                    latency,
+                    len(texts) / max(latency, 1e-8),
+                )
 
-            # fallback: process individually
-            for text in batch:
-                try:
-                    yield self.pipeline.run(text)
-                except Exception:
-                    logger.exception("Failed single text processing")
-                    yield self._empty_result()
+            # preserve order
+            for idx, result in zip(indices, results):
+                yield self._attach_meta(result, idx)
 
-    # -----------------------------------------------------
+        except Exception:
+            logger.exception("Batch failed → fallback")
 
-    def _empty_result(self) -> Dict[str, Any]:
+            yield from self._fallback_batch(batch, shared_cache)
+
+    # =========================================================
+    # FALLBACK (ROBUST)
+    # =========================================================
+
+    def _fallback_batch(
+        self,
+        batch: List[Tuple[int, str]],
+        shared_cache: Dict[str, Any],
+    ) -> Generator[Dict[str, Any], None, None]:
+
+        for idx, text in batch:
+
+            ctx = FeatureContext(
+                text=text,
+                shared=shared_cache,
+                cache={}
+            )
+
+            try:
+                result = self.pipeline.run(ctx)
+                yield self._attach_meta(result, idx)
+
+            except Exception:
+                logger.exception("Single item failed")
+
+                yield self._empty_result(idx)
+
+    # =========================================================
+    # METADATA
+    # =========================================================
+
+    def _attach_meta(
+        self,
+        result: Dict[str, Any],
+        idx: int,
+    ) -> Dict[str, Any]:
+
+        meta = result.setdefault("meta", {})
+        meta["index"] = idx
+        meta["success"] = True
+
+        return result
+
+    # =========================================================
+    # EMPTY RESULT
+    # =========================================================
+
+    def _empty_result(self, idx: int) -> Dict[str, Any]:
+
         return {
             "features": {},
             "profile": {},
             "propaganda": {},
-            "meta": {"error": True},
+            "meta": {
+                "index": idx,
+                "success": False,
+                "error": True,
+            },
         }

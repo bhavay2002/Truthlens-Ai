@@ -1,91 +1,79 @@
-"""
-File Name: weight_initialization.py
-Module: models.initialization
-Description:
-    Provides weight initialization utilities for neural network models used
-    in the TruthLens AI system. The module implements commonly used
-    initialization strategies for deep learning models including Xavier,
-    Kaiming, normal, and uniform initialization.
-
-    These utilities ensure consistent model initialization across training
-    pipelines and support deterministic experiments when combined with
-    seed control.
-
-Dependencies:
-    logging
-    typing
-    torch
-    torch.nn
-Inputs:
-    PyTorch model modules
-Outputs:
-    Initialized model parameters
-"""
-
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
+import torch
 import torch.nn as nn
 
 logger = logging.getLogger(__name__)
 
 
+# =========================================================
+# INIT CORE
+# =========================================================
+
 def initialize_weights(
     model: nn.Module,
     method: str = "xavier",
     bias_value: float = 0.0,
+    gain: Optional[float] = None,
 ) -> None:
-    """
-    Initialize model weights.
-
-    Parameters
-    ----------
-    model : nn.Module
-        PyTorch model whose parameters will be initialized.
-    method : str
-        Initialization method ('xavier', 'kaiming', 'normal', 'uniform').
-    bias_value : float
-        Constant value used to initialize bias parameters.
-    """
 
     if not isinstance(model, nn.Module):
-        raise TypeError("model must be an instance of torch.nn.Module")
+        raise TypeError("model must be nn.Module")
 
-    logger.info("Initializing model weights using '%s' method", method)
+    logger.info("Weight init | method=%s", method)
 
     for module in model.modules():
+
+        # -------------------------------------------------
+        # LINEAR / CONV
+        # -------------------------------------------------
 
         if isinstance(module, (nn.Linear, nn.Conv1d, nn.Conv2d, nn.Conv3d)):
 
             if method == "xavier":
-                nn.init.xavier_uniform_(module.weight)
+                nn.init.xavier_uniform_(module.weight, gain=gain or 1.0)
+
+            elif method == "xavier_normal":
+                nn.init.xavier_normal_(module.weight, gain=gain or 1.0)
 
             elif method == "kaiming":
-                nn.init.kaiming_uniform_(module.weight, nonlinearity="relu")
+                nn.init.kaiming_uniform_(
+                    module.weight,
+                    nonlinearity="relu",
+                )
+
+            elif method == "kaiming_normal":
+                nn.init.kaiming_normal_(
+                    module.weight,
+                    nonlinearity="relu",
+                )
 
             elif method == "normal":
                 nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
             elif method == "uniform":
-                nn.init.uniform_(module.weight, a=-0.1, b=0.1)
+                nn.init.uniform_(module.weight, -0.1, 0.1)
 
             else:
-                raise ValueError(f"Unsupported initialization method: {method}")
+                raise ValueError(f"Unsupported method: {method}")
 
             if module.bias is not None:
                 nn.init.constant_(module.bias, bias_value)
 
+        # -------------------------------------------------
+        # EMBEDDING
+        # -------------------------------------------------
+
         elif isinstance(module, nn.Embedding):
 
-            if method in {"xavier", "kaiming"}:
-                nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0.0)
-
-            elif method == "uniform":
-                nn.init.uniform_(module.weight, a=-0.1, b=0.1)
+        # -------------------------------------------------
+        # LAYERNORM
+        # -------------------------------------------------
 
         elif isinstance(module, nn.LayerNorm):
 
@@ -93,35 +81,30 @@ def initialize_weights(
             nn.init.constant_(module.weight, 1.0)
 
 
+# =========================================================
+# RESET
+# =========================================================
+
 def reset_module_parameters(module: nn.Module) -> None:
-    """
-    Reset parameters of a module using its internal reset method if available.
-
-    Parameters
-    ----------
-    module : nn.Module
-        Module to reset.
-    """
-
     if hasattr(module, "reset_parameters"):
         module.reset_parameters()
 
 
+# =========================================================
+# APPLY
+# =========================================================
+
 def apply_weight_initialization(
     model: nn.Module,
     method: str = "xavier",
+    seed: Optional[int] = None,
 ) -> None:
-    """
-    Apply weight initialization to the entire model.
 
-    Parameters
-    ----------
-    model : nn.Module
-        Model to initialize.
-    method : str
-        Initialization method.
-    """
+    if seed is not None:
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
 
     initialize_weights(model, method=method)
 
-    logger.info("Weight initialization applied to model")
+    logger.info("Initialization applied | method=%s | seed=%s", method, seed)

@@ -10,6 +10,8 @@ from typing import Any, Callable, Dict, Sequence, Tuple
 import numpy as np
 
 from src.explainability.utils_validation import validate_tokens_scores
+from src.explainability.explanation_calibrator import calibrate_explanation
+from src.explainability.common_schema import ExplanationOutput, TokenImportance
 
 try:
     import shap
@@ -18,20 +20,28 @@ except ImportError:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 
+# =========================================================
+# CACHE CONFIG
+# =========================================================
+
 _MAX_EXPLAINER_CACHE_SIZE = 8
+_MAX_VALUE_CACHE_SIZE = 64
+
 _EXPLAINER_CACHE: "OrderedDict[Tuple[Any, ...], Any]" = OrderedDict()
+_VALUE_CACHE: "OrderedDict[Tuple[Any, ...], Any]" = OrderedDict()
+
 _LOCK = threading.RLock()
 
-# Cache for computed SHAP Explanation objects so plot_explanation /
-# save_explanation_html do not re-run the (expensive) perturbation loop.
-_MAX_VALUE_CACHE_SIZE = 64
-_VALUE_CACHE: "OrderedDict[Tuple[Any, ...], Any]" = OrderedDict()
+EPS = 1e-12
 
 SPECIAL_TOKENS = {
     "[CLS]", "[SEP]", "<s>", "</s>",
     "[PAD]", "<pad>", "[UNK]", "<unk>",
 }
 
+# =========================================================
+# UTIL
+# =========================================================
 
 def _process_shap_values(values):
     if isinstance(values, list):
@@ -41,78 +51,60 @@ def _process_shap_values(values):
 
     if values.ndim == 3:
         values = values[:, :, -1]
-    elif values.ndim == 2:
-        if values.shape[1] == 1:
-            values = values[:, 0]
+    elif values.ndim == 2 and values.shape[1] == 1:
+        values = values[:, 0]
 
-    values = np.nan_to_num(values, nan=0.0, posinf=1.0, neginf=-1.0)
-
-    return values
+    return np.nan_to_num(values, nan=0.0, posinf=1.0, neginf=-1.0)
 
 
 def _extract_fake_probability(result: Any) -> float:
-    """
-    Extract fake news probability from prediction output.
-    """
-
     if not isinstance(result, dict) or "fake_probability" not in result:
-        raise KeyError(
-            "predict_fn(text) must return a dict with 'fake_probability'."
-        )
+        raise KeyError("predict_fn must return {'fake_probability': float}")
 
-    fake_prob = float(result["fake_probability"])
+    p = float(result["fake_probability"])
 
-    if fake_prob < 0.0 or fake_prob > 1.0:
-        raise ValueError("fake_probability must be between 0 and 1.")
+    if not (0.0 <= p <= 1.0):
+        raise ValueError("fake_probability must be in [0,1]")
 
-    return fake_prob
+    return p
 
+
+# =========================================================
+# PREDICT WRAPPER
+# =========================================================
 
 def shap_predict_wrapper(
     texts: Sequence[str],
     predict_fn: Callable[[str], Dict[str, Any]],
 ) -> np.ndarray:
-    """
-    Convert predictor output into probability matrix required by SHAP.
-    """
 
     batch_fn = getattr(predict_fn, "batch_predict", None)
+
     if callable(batch_fn):
         try:
             results = batch_fn(list(texts))
-            outputs = []
-            for result in results:
-                fake_prob = _extract_fake_probability(result)
-                outputs.append([1.0 - fake_prob, fake_prob])
-            return np.asarray(outputs, dtype=float)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Batch prediction failed, falling back: %s", exc)
+            return np.array(
+                [[1 - _extract_fake_probability(r), _extract_fake_probability(r)]
+                 for r in results],
+                dtype=float,
+            )
+        except Exception as e:
+            logger.warning("Batch prediction failed: %s", e)
 
-    outputs: list[list[float]] = []
-
-    for text in texts:
-        result = predict_fn(text)
-
-        fake_prob = _extract_fake_probability(result)
-
-        real_prob = 1.0 - fake_prob
-
-        outputs.append([real_prob, fake_prob])
+    outputs = []
+    for t in texts:
+        r = predict_fn(t)
+        p = _extract_fake_probability(r)
+        outputs.append([1 - p, p])
 
     return np.asarray(outputs, dtype=float)
 
 
-def _stable_predict_fn_key(
-    predict_fn: Callable[[str], Dict[str, Any]],
-) -> Tuple[Any, ...]:
-    """
-    Generate a stable cache key for predict_fn.
+# =========================================================
+# CACHE KEY
+# =========================================================
 
-    Priority:
-    1. Explicit attribute (recommended)
-    2. Model metadata
-    3. Fallback to module+name
-    """
+def _stable_predict_fn_key(predict_fn) -> Tuple[Any, ...]:
 
     stable_id = getattr(predict_fn, "__cache_key__", None)
     if isinstance(stable_id, str):
@@ -122,212 +114,181 @@ def _stable_predict_fn_key(
     if bound is not None:
         model_name = getattr(bound, "model_name", None)
         tokenizer_name = getattr(bound, "tokenizer_name", None)
-
         if model_name or tokenizer_name:
             return ("model", model_name, tokenizer_name)
 
-    module_name = getattr(predict_fn, "__module__", None)
-    qual_name = getattr(predict_fn, "__qualname__", None)
-
-    if module_name and qual_name:
-        return ("function", module_name, qual_name)
-
-    return ("fallback", repr(predict_fn))
+    return (
+        getattr(predict_fn, "__module__", "unknown"),
+        getattr(predict_fn, "__qualname__", "unknown"),
+    )
 
 
-def _set_cache_entry(cache_key: Tuple[Any, ...], explainer: Any) -> None:
-    """
-    Insert explainer into LRU cache.
-    """
-
-    _EXPLAINER_CACHE[cache_key] = explainer
-
-    _EXPLAINER_CACHE.move_to_end(cache_key)
-
-    while len(_EXPLAINER_CACHE) > _MAX_EXPLAINER_CACHE_SIZE:
-        evicted_key, _ = _EXPLAINER_CACHE.popitem(last=False)
-
-        logger.debug("Evicted SHAP explainer cache key: %s", evicted_key)
+def _set_cache(cache, key, value, max_size):
+    cache[key] = value
+    cache.move_to_end(key)
+    while len(cache) > max_size:
+        cache.popitem(last=False)
 
 
-def get_explainer(
-    predict_fn: Callable[[str], Dict[str, Any]],
-):
-    """
-    Create or reuse SHAP text explainer for prediction function.
-    """
+# =========================================================
+# EXPLAINER CACHE
+# =========================================================
+
+def get_explainer(predict_fn):
 
     if shap is None:
-        raise ImportError(
-            "SHAP is not installed. Install dependency 'shap' "
-            "to use explainability features."
-        )
+        raise ImportError("Install shap to use SHAP explanations")
 
-    cache_key = _stable_predict_fn_key(predict_fn)
+    key = _stable_predict_fn_key(predict_fn)
+
     with _LOCK:
-        if cache_key not in _EXPLAINER_CACHE:
+        if key not in _EXPLAINER_CACHE:
             logger.info("Initializing SHAP explainer")
 
             masker = shap.maskers.Text()
-
             explainer = shap.Explainer(
                 lambda x: shap_predict_wrapper(x, predict_fn),
                 masker,
             )
 
-            _set_cache_entry(cache_key, explainer)
-        else:
-            _EXPLAINER_CACHE.move_to_end(cache_key)
+            _set_cache(_EXPLAINER_CACHE, key, explainer, _MAX_EXPLAINER_CACHE_SIZE)
 
-        return _EXPLAINER_CACHE[cache_key]
+        return _EXPLAINER_CACHE[key]
 
 
-def _get_shap_values(
-    predict_fn: Callable[[str], Dict[str, Any]],
-    text: str,
-) -> Any:
-    """
-    Return SHAP Explanation object for (predict_fn, text), using a
-    bounded LRU cache to avoid recomputing across plot/save/explain calls.
-    """
-    text_hash = hashlib.sha1(text.encode("utf-8")).hexdigest()
-    cache_key = _stable_predict_fn_key(predict_fn) + (text_hash,)
+# =========================================================
+# VALUE CACHE
+# =========================================================
+
+def _get_shap_values(predict_fn, text):
+
+    text_hash = hashlib.sha1(text.encode()).hexdigest()
+    key = _stable_predict_fn_key(predict_fn) + (text_hash,)
+
     with _LOCK:
-        if cache_key in _VALUE_CACHE:
-            _VALUE_CACHE.move_to_end(cache_key)
-            return _VALUE_CACHE[cache_key]
+        if key in _VALUE_CACHE:
+            _VALUE_CACHE.move_to_end(key)
+            return _VALUE_CACHE[key]
 
     explainer = get_explainer(predict_fn)
     shap_values = explainer([text])
 
     with _LOCK:
-        _VALUE_CACHE[cache_key] = shap_values
-        _VALUE_CACHE.move_to_end(cache_key)
-        while len(_VALUE_CACHE) > _MAX_VALUE_CACHE_SIZE:
-            _VALUE_CACHE.popitem(last=False)
+        _set_cache(_VALUE_CACHE, key, shap_values, _MAX_VALUE_CACHE_SIZE)
 
     return shap_values
 
 
-def get_shap_values(
-    predict_fn: Callable[[str], Dict[str, Any]],
-    text: str,
-) -> Any:
-    return _get_shap_values(predict_fn, text)
+# =========================================================
+# 🔥 MAIN EXPLAIN (FINAL)
+# =========================================================
 
+def explain_text(predict_fn, text: str) -> ExplanationOutput:
 
-def explain_text(
-    predict_fn: Callable[[str], Dict[str, Any]],
-    text: str,
-) -> Dict[str, Any]:
-    """
-    Generate SHAP explanation values in a normalized, serializable schema.
-    """
-
-    if not isinstance(text, str) or not text.strip():
-        raise ValueError("text cannot be empty.")
+    if not text.strip():
+        raise ValueError("text cannot be empty")
 
     shap_values = _get_shap_values(predict_fn, text)
+
     data = getattr(shap_values, "data", None)
     if data is None or len(data) == 0:
-        return {
-            "text": text,
-            "token_importance": [],
-        }
+        return ExplanationOutput(
+            method="shap",
+            tokens=[],
+            importance=[],
+            structured=[],
+        )
 
     tokens = list(data[0])
     values = _process_shap_values(shap_values.values[0])
 
-    if len(tokens) == 0 or len(values) == 0:
-        return {
-            "text": text,
-            "token_importance": [],
-        }
+    n = min(len(tokens), len(values))
+    tokens = tokens[:n]
+    values = values[:n]
 
-    min_len = min(len(tokens), len(values))
-    tokens = tokens[:min_len]
-    values = values[:min_len]
+    filtered = [(t, v) for t, v in zip(tokens, values) if t not in SPECIAL_TOKENS]
 
-    if min_len == 0:
-        return {
-            "text": text,
-            "token_importance": [],
-        }
+    if not filtered:
+        return ExplanationOutput(
+            method="shap",
+            tokens=[],
+            importance=[],
+            structured=[],
+        )
 
-    filtered = [
-        (t, v)
-        for t, v in zip(tokens, values)
-        if t not in SPECIAL_TOKENS
+    tokens, values = zip(*filtered)
+    tokens = list(tokens)
+    values = list(values)
+
+    validate_tokens_scores(tokens, values)
+
+    # =====================================================
+    # 🔥 CALIBRATION
+    # =====================================================
+    cal = calibrate_explanation(values, method="shap")
+
+    scores = cal["scores"]              # np.ndarray
+    confidence = cal["confidence"]
+    entropy = cal["entropy"]
+
+    structured = [
+        TokenImportance(token=t, importance=float(s))
+        for t, s in zip(tokens, scores)
     ]
 
-    if filtered:
-        tokens, values = zip(*filtered)
-        tokens = list(tokens)
-        values = list(values)
-        validate_tokens_scores(tokens, values)
-    else:
-        tokens, values = [], []
-
-    if values:
-        max_abs = max((abs(v) for v in values), default=1.0)
-        if max_abs == 0:
-            max_abs = 1.0
-        values = [float(v / max_abs) for v in values]
-
-    token_importance = [
-        {"token": str(tok), "importance": float(val)}
-        for tok, val in zip(tokens, values)
-    ]
-
-    logger.info("SHAP explanation generated")
-
-    return {
-        "text": text,
-        "token_importance": token_importance,
-    }
+    return ExplanationOutput(
+        method="shap",
+        tokens=tokens,
+        importance=scores.tolist(),
+        structured=structured,
+        confidence=confidence,
+        entropy=entropy,
+    )
 
 
-def plot_explanation(
-    predict_fn: Callable[[str], Dict[str, Any]],
-    text: str,
-) -> None:
-    """
-    Render SHAP text explanation in interactive environment.
-    """
+# =========================================================
+# VISUALIZATION
+# =========================================================
+
+def plot_explanation(predict_fn, text):
 
     if shap is None:
-        raise ImportError("SHAP is not installed.")
-    try:
-        shap_values = _get_shap_values(predict_fn, text)
-        shap.plots.text(shap_values[0])
-    except Exception as e:  # noqa: BLE001
-        logger.warning("SHAP plot failed: %s", e)
+        raise ImportError("SHAP not installed")
+
+    shap_values = _get_shap_values(predict_fn, text)
+    shap.plots.text(shap_values[0])
 
 
-def save_explanation_html(
-    predict_fn: Callable[[str], Dict[str, Any]],
-    text: str,
-    output_path: str | Path = "reports/shap_explanation.html",
-) -> Path:
-    """
-    Save SHAP explanation visualization as HTML.
-    """
+def save_explanation_html(predict_fn, text, output_path="reports/shap.html"):
 
     if shap is None:
-        raise ImportError("SHAP is not installed.")
+        raise ImportError("SHAP not installed")
 
     shap_values = _get_shap_values(predict_fn, text)
 
     html = shap.plots.text(shap_values[0], display=False)
-    html_str = str(html) if html is not None else "<p>No SHAP output</p>"
+    html_str = str(html) if html else "<p>No SHAP output</p>"
 
-    output_path = Path(output_path)
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(html_str, encoding="utf-8")
 
-    with output_path.open("w", encoding="utf-8") as f:
-        f.write(html_str)
+    return path
 
-    logger.info("Saved SHAP explanation: %s", output_path)
 
-    return output_path
+# =========================================================
+# CACHE UTIL
+# =========================================================
+
+def cache_stats():
+    return {
+        "explainer_cache": len(_EXPLAINER_CACHE),
+        "value_cache": len(_VALUE_CACHE),
+    }
+
+
+def clear_cache():
+    with _LOCK:
+        _EXPLAINER_CACHE.clear()
+        _VALUE_CACHE.clear()

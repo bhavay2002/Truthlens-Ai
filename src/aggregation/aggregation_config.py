@@ -18,34 +18,75 @@ logger = logging.getLogger(__name__)
 class NormalizationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    method: Literal["minmax", "zscore", "robust"] = "minmax"
+    method: Literal["minmax", "zscore", "robust", "quantile"] = "minmax"
     feature_range: tuple[float, float] = (0.0, 1.0)
-    per_feature: Optional[Dict[str, str]] = None  # feature → method
+    clip: bool = True
+
+    per_feature: Optional[Dict[str, str]] = None
 
     @field_validator("feature_range")
     @classmethod
     def validate_range(cls, v):
-        if not isinstance(v, tuple) or len(v) != 2:
-            raise ValueError("feature_range must be a tuple of length 2")
-        if v[0] >= v[1]:
-            raise ValueError("feature_range must satisfy (min < max)")
+        if len(v) != 2 or v[0] >= v[1]:
+            raise ValueError("feature_range must be (min < max)")
         return v
 
 
 # =========================================================
-# WEIGHT CONFIG
+# CALIBRATION CONFIG (🔥 NEW)
+# =========================================================
+
+class CalibrationConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    method: Literal["temperature", "isotonic", "sigmoid", "none"] = "temperature"
+    n_bins: int = 15
+    enabled: bool = True
+
+
+# =========================================================
+# UNCERTAINTY CONFIG (🔥 NEW)
+# =========================================================
+
+class UncertaintyConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enable_entropy: bool = True
+    track_percentiles: bool = True
+
+    p95_threshold: float = 0.8
+    p99_threshold: float = 0.95
+
+    @field_validator("p95_threshold", "p99_threshold")
+    @classmethod
+    def validate_range(cls, v):
+        if not (0.0 <= v <= 1.0):
+            raise ValueError("Threshold must be in [0,1]")
+        return v
+
+
+# =========================================================
+# WEIGHT CONFIG (UPGRADED)
 # =========================================================
 
 class WeightConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     weights: Dict[str, float] = Field(default_factory=dict)
-    version: str = "default"
+    version: str = "v2"
+
     allow_dynamic_adjustment: bool = True
+
+    # 🔥 adaptive weighting
+    use_confidence: bool = True
+    use_entropy: bool = True
+    use_explainability: bool = True
+
+    smoothing: float = 0.1
 
 
 # =========================================================
-# RISK CONFIG
+# RISK CONFIG (UPGRADED)
 # =========================================================
 
 class RiskConfig(BaseModel):
@@ -53,6 +94,8 @@ class RiskConfig(BaseModel):
 
     low_threshold: float = 0.3
     medium_threshold: float = 0.6
+
+    uncertainty_penalty: float = 0.2
 
     @field_validator("medium_threshold")
     @classmethod
@@ -64,7 +107,7 @@ class RiskConfig(BaseModel):
 
 
 # =========================================================
-# ATTRIBUTION CONFIG
+# ATTRIBUTION CONFIG (UPGRADED)
 # =========================================================
 
 class AttributionConfig(BaseModel):
@@ -78,7 +121,9 @@ class AttributionConfig(BaseModel):
 
     top_k: int = 5
     normalize: bool = True
+
     use_confidence_weighting: bool = True
+    use_entropy_weighting: bool = True
 
     @field_validator("top_k")
     @classmethod
@@ -89,16 +134,48 @@ class AttributionConfig(BaseModel):
 
 
 # =========================================================
-# AGGREGATION CONFIG (ROOT)
+# DRIFT CONFIG (🔥 NEW)
+# =========================================================
+
+class DriftConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+
+    method: Literal["kl", "js", "psi"] = "js"
+    threshold: float = 0.1
+
+
+# =========================================================
+# MONITORING CONFIG (🔥 NEW)
+# =========================================================
+
+class MonitoringConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+
+    track_latency: bool = True
+    track_confidence: bool = True
+    track_entropy: bool = True
+
+
+# =========================================================
+# ROOT CONFIG (UPGRADED)
 # =========================================================
 
 class AggregationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     normalization: NormalizationConfig = NormalizationConfig()
+    calibration: CalibrationConfig = CalibrationConfig()
+    uncertainty: UncertaintyConfig = UncertaintyConfig()
     weights: WeightConfig = WeightConfig()
     risk: RiskConfig = RiskConfig()
     attribution: AttributionConfig = AttributionConfig()
+
+    drift: DriftConfig = DriftConfig()
+    monitoring: MonitoringConfig = MonitoringConfig()
 
     # pipeline behavior
     strict_mode: bool = False
@@ -107,7 +184,7 @@ class AggregationConfig(BaseModel):
     enable_risk: bool = True
 
     # versioning
-    config_version: str = "v1"
+    config_version: str = "v2"
 
 
 # =========================================================
@@ -119,57 +196,38 @@ def load_aggregation_config(
     *,
     override: Optional[Dict[str, Any]] = None,
 ) -> AggregationConfig:
-    """
-    Load aggregation config from YAML file or dict override.
-
-    Priority:
-        override dict > YAML file > defaults
-    """
 
     config_data: Dict[str, Any] = {}
 
-    # -----------------------------
-    # Load from YAML
-    # -----------------------------
     if config_path:
         path = Path(config_path)
 
         if not path.exists():
-            raise FileNotFoundError(f"Config file not found: {path}")
+            raise FileNotFoundError(f"Config not found: {path}")
 
         try:
             with path.open("r", encoding="utf-8") as f:
                 config_data = yaml.safe_load(f) or {}
         except Exception as e:
-            logger.exception("Failed to load aggregation config")
+            logger.exception("Failed to load config")
             raise RuntimeError("Config loading failed") from e
 
-    # -----------------------------
-    # Apply overrides
-    # -----------------------------
     if override:
         config_data.update(override)
 
-    # -----------------------------
-    # Validate & build
-    # -----------------------------
     config = AggregationConfig(**config_data)
 
     logger.info(
-        "[AggregationConfig] Loaded | version=%s | strict=%s",
+        "[AggregationConfig] Loaded | version=%s",
         config.config_version,
-        config.strict_mode,
     )
 
     return config
 
 
 # =========================================================
-# DEFAULT CONFIG (EXPORTABLE)
+# EXPORT
 # =========================================================
 
 def default_config_dict() -> Dict[str, Any]:
-    """
-    Returns default config as dictionary (useful for exporting YAML)
-    """
     return AggregationConfig().model_dump()

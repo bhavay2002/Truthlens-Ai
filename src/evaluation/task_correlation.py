@@ -1,97 +1,144 @@
-"""
-File: task_correlation.py
-"""
-
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Dict, Any, Literal
+from typing import Dict, Any, Literal, Optional
 
 import numpy as np
 import pandas as pd
 
+from src.config.task_config import TASK_CONFIG
+
 logger = logging.getLogger(__name__)
 
-
-# =========================================================
-# VALIDATION
-# =========================================================
-def _to_dataframe(predictions: Dict[str, Any] | pd.DataFrame) -> pd.DataFrame:
-    if isinstance(predictions, pd.DataFrame):
-        df = predictions.copy()
-    elif isinstance(predictions, dict):
-        df = pd.DataFrame(predictions)
-    else:
-        raise TypeError("predictions must be dict or DataFrame")
-
-    if df.empty:
-        raise ValueError("Empty predictions")
-
-    if df.shape[1] < 2:
-        raise ValueError("Need at least 2 tasks")
-
-    return df
+EPS = 1e-12
 
 
 # =========================================================
-# PROBABILITY FLATTENING
+# NORMALIZATION
 # =========================================================
-def _flatten_predictions(predictions: Dict[str, Any]) -> pd.DataFrame:
-    flat = {}
+
+def _normalize(df: pd.DataFrame) -> pd.DataFrame:
+    return (df - df.mean()) / (df.std(ddof=0) + EPS)
+
+
+# =========================================================
+# 🔥 ROBUST CLIPPING (NEW)
+# =========================================================
+
+def _winsorize(df: pd.DataFrame, lower=0.01, upper=0.99):
+    return df.clip(
+        lower=df.quantile(lower),
+        upper=df.quantile(upper),
+        axis=1,
+    )
+
+
+# =========================================================
+# TASK FEATURE EXTRACTION
+# =========================================================
+
+def _extract_task_features(predictions: Dict[str, Any]) -> pd.DataFrame:
+
+    features = {}
 
     for task, values in predictions.items():
+
         arr = np.asarray(values)
+        task_type = TASK_CONFIG[task]["type"]
 
-        if arr.ndim == 1:
-            flat[task] = arr
+        if task_type == "binary":
+            features[task] = arr.reshape(-1)
 
-        elif arr.ndim == 2:
-            # multilabel or probabilities
+        elif task_type == "multiclass":
+
+            if arr.ndim == 1:
+                features[task] = arr
+            else:
+                for i in range(arr.shape[1]):
+                    features[f"{task}_class_{i}"] = arr[:, i]
+
+        elif task_type == "multilabel":
             for i in range(arr.shape[1]):
-                flat[f"{task}_{i}"] = arr[:, i]
+                features[f"{task}_label_{i}"] = arr[:, i]
 
         else:
-            raise ValueError(f"Unsupported shape for {task}")
+            raise ValueError(f"Unsupported task_type: {task_type}")
 
-    return pd.DataFrame(flat)
+    return pd.DataFrame(features)
 
 
 # =========================================================
-# MAIN CORRELATION
+# 🔥 MAIN CORRELATION (UPGRADED)
 # =========================================================
+
 def compute_task_correlation(
     predictions: Dict[str, Any] | pd.DataFrame,
     *,
-    use_probabilities: bool = True,
-    method: Literal["pearson", "spearman"] = "pearson",
+    normalize: bool = True,
+    method: Literal["pearson", "spearman"] = "spearman",
+    robust: bool = True,  # 🔥 NEW
+    confidence: Optional[np.ndarray] = None,
+    uncertainty: Optional[np.ndarray] = None,
+    graph_signal: Optional[np.ndarray] = None,
 ) -> pd.DataFrame:
 
-    logger.info("Computing advanced task correlation")
+    logger.info(f"[CORRELATION] computing (method={method})")
 
-    if isinstance(predictions, dict) and use_probabilities:
-        df = _flatten_predictions(predictions)
+    if isinstance(predictions, dict):
+        df = _extract_task_features(predictions)
     else:
-        df = _to_dataframe(predictions)
+        df = predictions.copy()
 
     df = df.apply(pd.to_numeric, errors="coerce")
     df = df.dropna(axis=1, how="all")
 
     if df.shape[1] < 2:
-        raise ValueError("Insufficient numeric data")
+        raise ValueError("Insufficient data")
 
+    # -------------------------
+    # 🔥 ROBUST HANDLING
+    # -------------------------
+    if robust:
+        df = _winsorize(df)
+
+    # -------------------------
+    # NORMALIZATION
+    # -------------------------
+    if normalize:
+        df = _normalize(df)
+
+    # -------------------------
+    # 🔥 ADD AUX SIGNALS
+    # -------------------------
+    if confidence is not None:
+        df["global_confidence"] = confidence
+
+    if uncertainty is not None:
+        df["global_uncertainty"] = uncertainty
+
+    if graph_signal is not None:
+        df["graph_signal"] = graph_signal
+
+    # -------------------------
+    # CORRELATION
+    # -------------------------
     corr = df.corr(method=method)
+
+    # -------------------------
+    # STABILITY
+    # -------------------------
+    corr = corr.replace([np.inf, -np.inf], 0.0)
+    corr = corr.fillna(0.0)
 
     return corr
 
 
 # =========================================================
-# TASK-LEVEL AGGREGATION
+# 🔥 AGGREGATION (UPGRADED)
 # =========================================================
+
 def aggregate_task_correlation(corr: pd.DataFrame) -> pd.DataFrame:
-    """
-    Aggregate label-level correlations into task-level.
-    """
 
     task_map = {}
 
@@ -105,21 +152,51 @@ def aggregate_task_correlation(corr: pd.DataFrame) -> pd.DataFrame:
         for t2, cols2 in task_map.items():
 
             vals = []
+
             for c1 in cols1:
                 for c2 in cols2:
                     vals.append(corr.loc[c1, c2])
 
-            agg.loc[t1, t2] = np.mean(vals)
+            vals = np.asarray(vals)
 
-    return agg.astype(float)
+            # 🔥 confidence weighting via variance
+            weight = np.var(vals) + EPS
+
+            agg.loc[t1, t2] = float(np.mean(vals) * weight)
+
+    agg = agg.astype(float)
+
+    # diagonal stability
+    for t in agg.index:
+        agg.loc[t, t] = 1.0
+
+    return agg
+
+
+# =========================================================
+# 🔥 MONITORING SIGNALS (NEW)
+# =========================================================
+
+def correlation_statistics(corr: pd.DataFrame) -> Dict[str, float]:
+
+    values = corr.values.flatten()
+
+    return {
+        "mean_correlation": float(np.mean(values)),
+        "std_correlation": float(np.std(values)),
+        "max_correlation": float(np.max(values)),
+        "min_correlation": float(np.min(values)),
+        "high_correlation_ratio": float(np.mean(np.abs(values) > 0.8)),
+    }
 
 
 # =========================================================
 # SAVE
 # =========================================================
+
 def save_correlation_matrix(
     corr: pd.DataFrame,
-    path: str | Path
+    path: str | Path,
 ) -> Path:
 
     path = Path(path)
@@ -127,6 +204,6 @@ def save_correlation_matrix(
 
     corr.to_csv(path)
 
-    logger.info("Saved correlation matrix: %s", path)
+    logger.info(f"Saved correlation matrix: {path}")
 
     return path

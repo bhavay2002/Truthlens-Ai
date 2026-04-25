@@ -1,174 +1,213 @@
-"""
-File Name: explanation_cache.py
-Module: Explainability - Caching
-Description:
-    Provides a caching layer for explainability outputs in the TruthLens AI
-    system. SHAP and LIME explanations are computationally expensive; this
-    module stores previously computed explanations using a deterministic text
-    hash and returns cached results when available.
-
-    Supports:
-        • In-memory LRU caching
-        • Optional disk persistence
-        • Deterministic hashing of text inputs
-        • Safe serialization of explanation outputs
-
-Dependencies:
-    logging
-    hashlib
-    json
-    pathlib
-    typing
-    collections
-
-Inputs:
-    text
-    explanation output
-
-Outputs:
-    cached explanation result
-"""
-
 from __future__ import annotations
 
 import hashlib
 import json
 import logging
+import time
+import zlib
 from collections import OrderedDict
 from pathlib import Path
+from threading import RLock
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
+CACHE_VERSION = "v2"
+EPS = 1e-12
+
 
 class ExplanationCache:
-    """
-    Cache system for expensive explanation computations.
-    """
 
     def __init__(
         self,
         max_size: int = 128,
         cache_dir: Optional[str | Path] = None,
+        ttl_seconds: Optional[int] = None,
+        enable_compression: bool = True,
     ) -> None:
-        if max_size <= 0:
-            raise ValueError("max_size must be greater than 0")
 
         self.max_size = max_size
-        self.memory_cache: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        self.memory_cache: OrderedDict[str, Dict[str, Any]] = OrderedDict()
 
-        self.cache_dir: Optional[Path] = None
-        if cache_dir is not None:
-            self.cache_dir = Path(cache_dir)
+        self.cache_dir = Path(cache_dir) if cache_dir else None
+        if self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-        logger.info("ExplanationCache initialized (max_size=%s)", max_size)
+        self.ttl_seconds = ttl_seconds
+        self.enable_compression = enable_compression
 
-    @staticmethod
-    def _hash_text(text: str) -> str:
-        """
-        Generate deterministic SHA256 hash for text.
-        """
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError("text must be a non-empty string")
+        self._lock = RLock()
 
-        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+        #  stats
+        self.hits = 0
+        self.misses = 0
 
-    def _evict_if_needed(self) -> None:
-        """
-        Enforce LRU eviction policy.
-        """
+        logger.info("[ExplanationCache] initialized")
+
+    # =====================================================
+    # KEY GENERATION ( FIX)
+    # =====================================================
+
+    def _make_key(
+        self,
+        text: str,
+        *,
+        model_version: str = "default",
+        method: Optional[str] = None,
+    ) -> str:
+
+        raw = f"{text}|{model_version}|{method}"
+        return hashlib.sha256(raw.encode()).hexdigest()
+
+    # =====================================================
+    # SERIALIZATION
+    # =====================================================
+
+    def _serialize(self, data: Dict) -> bytes:
+        raw = json.dumps(data).encode("utf-8")
+        return zlib.compress(raw) if self.enable_compression else raw
+
+    def _deserialize(self, data: bytes) -> Dict:
+        raw = zlib.decompress(data) if self.enable_compression else data
+        return json.loads(raw.decode("utf-8"))
+
+    # =====================================================
+    # EVICTION
+    # =====================================================
+
+    def _evict(self):
         while len(self.memory_cache) > self.max_size:
-            evicted_key, _ = self.memory_cache.popitem(last=False)
-            logger.debug("Evicted explanation cache key: %s", evicted_key)
+            self.memory_cache.popitem(last=False)
 
-    def _disk_path(self, key: str) -> Optional[Path]:
-        if self.cache_dir is None:
-            return None
-        return self.cache_dir / f"{key}.json"
+    # =====================================================
+    # TTL CHECK
+    # =====================================================
 
-    def get(self, text: str) -> Optional[Dict[str, Any]]:
-        """
-        Retrieve cached explanation if available.
-        """
-        key = self._hash_text(text)
+    def _is_expired(self, item: Dict) -> bool:
+        if not self.ttl_seconds:
+            return False
 
-        if key in self.memory_cache:
-            logger.debug("Explanation cache hit (memory)")
-            self.memory_cache.move_to_end(key)
-            cached = self.memory_cache[key]
-            if cached.get("__version__") != "v1":
-                return None
-            return cached
+        ts = item.get("__timestamp__", 0)
+        return (time.time() - ts) > self.ttl_seconds
 
-        disk_path = self._disk_path(key)
+    # =====================================================
+    # GET
+    # =====================================================
 
-        if disk_path and disk_path.exists():
-            try:
-                with disk_path.open("r", encoding="utf-8") as f:
-                    data = json.load(f)
+    def get(
+        self,
+        text: str,
+        *,
+        model_version: str = "default",
+        method: Optional[str] = None,
+    ) -> Optional[Dict]:
 
-                if data.get("__version__") != "v1":
+        key = self._make_key(text, model_version=model_version, method=method)
+
+        with self._lock:
+
+            # memory
+            if key in self.memory_cache:
+                item = self.memory_cache[key]
+
+                if self._is_expired(item):
+                    del self.memory_cache[key]
+                    self.misses += 1
                     return None
 
-                self.memory_cache[key] = data
                 self.memory_cache.move_to_end(key)
-                self._evict_if_needed()
+                self.hits += 1
+                return item["data"]
 
-                logger.debug("Explanation cache hit (disk)")
-                return data
+            # disk
+            if self.cache_dir:
+                path = self.cache_dir / key
 
-            except Exception as exc:  # pragma: no cover
-                logger.warning("Failed to read cached explanation: %s", exc)
+                if path.exists():
+                    try:
+                        raw = path.read_bytes()
+                        item = self._deserialize(raw)
 
-        logger.debug("Explanation cache miss")
-        return None
+                        if item.get("__version__") != CACHE_VERSION:
+                            return None
 
-    def set(self, text: str, explanation: Dict[str, Any]) -> None:
-        """
-        Store explanation in cache.
-        """
-        if not isinstance(explanation, dict):
-            raise TypeError("explanation must be a dictionary")
+                        if self._is_expired(item):
+                            path.unlink(missing_ok=True)
+                            self.misses += 1
+                            return None
 
-        key = self._hash_text(text)
+                        self.memory_cache[key] = item
+                        self._evict()
 
-        explanation["__version__"] = "v1"
-        self.memory_cache[key] = explanation
-        self.memory_cache.move_to_end(key)
+                        self.hits += 1
+                        return item["data"]
 
-        self._evict_if_needed()
+                    except Exception:
+                        pass
 
-        disk_path = self._disk_path(key)
+            self.misses += 1
+            return None
 
-        if disk_path:
-            try:
-                with disk_path.open("w", encoding="utf-8") as f:
-                    json.dump(explanation, f, ensure_ascii=False, indent=2)
+    # =====================================================
+    # SET
+    # =====================================================
 
-                logger.debug("Explanation stored on disk cache")
+    def set(
+        self,
+        text: str,
+        data: Dict,
+        *,
+        model_version: str = "default",
+        method: Optional[str] = None,
+    ):
 
-            except Exception as exc:  # pragma: no cover
-                logger.warning("Failed to write explanation cache: %s", exc)
+        key = self._make_key(text, model_version=model_version, method=method)
 
-    def clear_memory(self) -> None:
-        """
-        Clear in-memory cache.
-        """
-        self.memory_cache.clear()
-        logger.info("Explanation memory cache cleared")
+        item = {
+            "__version__": CACHE_VERSION,
+            "__timestamp__": time.time(),
+            "data": data,
+        }
 
-    def clear_disk(self) -> None:
-        """
-        Remove disk cache files.
-        """
-        if self.cache_dir is None:
+        with self._lock:
+
+            self.memory_cache[key] = item
+            self.memory_cache.move_to_end(key)
+            self._evict()
+
+            if self.cache_dir:
+                try:
+                    path = self.cache_dir / key
+                    path.write_bytes(self._serialize(item))
+                except Exception:
+                    pass
+
+    # =====================================================
+    # STATS ( NEW)
+    # =====================================================
+
+    def stats(self) -> Dict[str, float]:
+        total = self.hits + self.misses + EPS
+        return {
+            "hits": self.hits,
+            "misses": self.misses,
+            "hit_rate": self.hits / total,
+        }
+
+    # =====================================================
+    # CLEAR
+    # =====================================================
+
+    def clear_memory(self):
+        with self._lock:
+            self.memory_cache.clear()
+
+    def clear_disk(self):
+        if not self.cache_dir:
             return
 
-        for file in self.cache_dir.glob("*.json"):
+        for f in self.cache_dir.glob("*"):
             try:
-                file.unlink()
-            except Exception as exc:  # pragma: no cover
-                logger.warning("Failed to delete cache file %s: %s", file, exc)
-
-        logger.info("Explanation disk cache cleared")
+                f.unlink()
+            except Exception:
+                pass

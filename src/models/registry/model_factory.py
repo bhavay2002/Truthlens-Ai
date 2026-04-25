@@ -35,9 +35,6 @@ logger = logging.getLogger(__name__)
 
 
 class ModelFactory:
-    """
-    Factory for constructing TruthLens models.
-    """
 
     SUPPORTED_MODELS = {
         "bias_classifier",
@@ -48,25 +45,30 @@ class ModelFactory:
         "multitask_truthlens",
     }
 
+    # =====================================================
+    # INTERNAL RESOLUTION
+    # =====================================================
+
     @staticmethod
     def _resolve_encoder_fields(config: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(config, dict):
             return {}
 
-        raw_encoder_cfg = config.get("encoder_config")
-        if isinstance(raw_encoder_cfg, EncoderConfig):
+        raw = config.get("encoder_config")
+
+        if isinstance(raw, EncoderConfig):
             return {
-                "model_name": raw_encoder_cfg.model_name,
-                "pooling": raw_encoder_cfg.pooling,
-                "device": raw_encoder_cfg.device,
+                "model_name": raw.model_name,
+                "pooling": raw.pooling,
+                "device": raw.device,
             }
 
-        if isinstance(raw_encoder_cfg, dict):
-            encoder_cfg = EncoderConfig.from_dict(raw_encoder_cfg)
+        if isinstance(raw, dict):
+            cfg = EncoderConfig(**raw)
             return {
-                "model_name": encoder_cfg.model_name,
-                "pooling": encoder_cfg.pooling,
-                "device": encoder_cfg.device,
+                "model_name": cfg.model_name,
+                "pooling": cfg.pooling,
+                "device": cfg.device,
             }
 
         return {}
@@ -80,97 +82,71 @@ class ModelFactory:
         if not isinstance(raw, dict):
             return {}
 
-        resolved: Dict[str, Any] = {}
+        return {
+            "use_regression_head": bool(raw.get("enabled", False)),
+            "regression_output_dim": raw.get("output_dim", 1),
+            "regression_hidden_dim": raw.get("hidden_dim"),
+            "regression_activation": raw.get("activation", "gelu"),
+        }
 
-        if "enabled" in raw:
-            resolved["use_regression_head"] = bool(raw["enabled"])
-        if "output_dim" in raw:
-            resolved["regression_output_dim"] = int(raw["output_dim"])
-        if "hidden_dim" in raw:
-            resolved["regression_hidden_dim"] = (
-                int(raw["hidden_dim"]) if raw["hidden_dim"] is not None else None
-            )
-        if "activation" in raw:
-            resolved["regression_activation"] = str(raw["activation"])
-
-        return resolved
+    # =====================================================
+    # CORE CREATE
+    # =====================================================
 
     @staticmethod
     def create(model_type: str, config: Dict[str, Any]) -> nn.Module:
-        """
-        Create model instance.
-
-        Args:
-            model_type:
-                Type of model to construct.
-            config:
-                Configuration dictionary.
-
-        Returns:
-            Instantiated PyTorch model.
-        """
 
         if not isinstance(model_type, str) or not model_type.strip():
-            raise ValueError("model_type must be a non-empty string")
+            raise ValueError("model_type must be non-empty")
 
-        normalized_model_type = model_type.strip().lower()
+        model_type = model_type.lower().strip()
 
-        if normalized_model_type not in ModelFactory.SUPPORTED_MODELS:
-            raise ValueError(
-                f"Unsupported model_type '{normalized_model_type}'. "
-                f"Supported models: {ModelFactory.SUPPORTED_MODELS}"
-            )
-
-        logger.info(
-            "Creating model: %s | keys=%s",
-            normalized_model_type,
-            list(config.keys()) if isinstance(config, dict) else [],
-        )
+        if model_type not in ModelFactory.SUPPORTED_MODELS:
+            raise ValueError(f"Unsupported model_type: {model_type}")
 
         import copy
-        merged_config = copy.deepcopy(config)
-        for key, value in ModelFactory._resolve_encoder_fields(config).items():
-            merged_config.setdefault(key, value)
-        for key, value in ModelFactory._resolve_regression_fields(config).items():
-            merged_config.setdefault(key, value)
+        merged = copy.deepcopy(config)
+
+        merged.update(ModelFactory._resolve_encoder_fields(config))
+        merged.update(ModelFactory._resolve_regression_fields(config))
+
+        logger.info("[MODEL FACTORY] Creating: %s", model_type)
 
         try:
-            if normalized_model_type == "bias_classifier":
-                cfg = BiasClassifierConfig(**merged_config)
-                model = BiasClassifier(cfg)
 
-            elif normalized_model_type == "ideology_classifier":
-                cfg = IdeologyClassifierConfig(**merged_config)
-                model = IdeologyClassifier(cfg)
+            if model_type == "bias_classifier":
+                model = BiasClassifier(BiasClassifierConfig(**merged))
 
-            elif normalized_model_type == "propaganda_detector":
-                cfg = PropagandaDetectorConfig(**merged_config)
-                model = PropagandaDetector(cfg)
+            elif model_type == "ideology_classifier":
+                model = IdeologyClassifier(IdeologyClassifierConfig(**merged))
 
-            elif normalized_model_type == "narrative_detector":
-                cfg = NarrativeDetectorConfig(**merged_config)
-                model = NarrativeDetector(cfg)
+            elif model_type == "propaganda_detector":
+                model = PropagandaDetector(PropagandaDetectorConfig(**merged))
 
-            elif normalized_model_type == "emotion_classifier":
-                cfg = EmotionClassifierConfig(**merged_config)
-                model = EmotionClassifier(cfg)
+            elif model_type == "narrative_detector":
+                model = NarrativeDetector(NarrativeDetectorConfig(**merged))
 
-            elif normalized_model_type == "multitask_truthlens":
-                cfg = MultiTaskTruthLensConfig(**merged_config)
-                model = MultiTaskTruthLensModel(cfg)
+            elif model_type == "emotion_classifier":
+                model = EmotionClassifier(EmotionClassifierConfig(**merged))
+
+            elif model_type == "multitask_truthlens":
+                model = MultiTaskTruthLensModel(MultiTaskTruthLensConfig(**merged))
 
             else:
-                raise RuntimeError("Model creation failed unexpectedly")
-        except TypeError as exc:
-            raise ValueError(
-                f"Invalid config for {normalized_model_type}: {exc}"
-            ) from exc
+                raise RuntimeError("Invalid model type")
 
-        device = merged_config.get("device") if isinstance(merged_config, dict) else None
+        except TypeError as e:
+            raise ValueError(f"Invalid config for {model_type}: {e}") from e
+
+        device = merged.get("device")
         if device:
             model.to(device)
 
         return model
+
+    # =====================================================
+    # WRAPPERS
+    # =====================================================
 
     @staticmethod
     def create_wrapper(
@@ -196,29 +172,20 @@ class ModelFactory:
         model = ModelFactory.create(model_type, config)
         return Predictor(model=model, device=device)
 
+    # =====================================================
+    # MULTITASK CONFIG
+    # =====================================================
+
     @staticmethod
     def create_from_model_config(
         model_config: MultiTaskModelConfig,
     ) -> nn.Module:
-        """
-        Build a ``MultiTaskTruthLensModel`` directly from a
-        ``MultiTaskModelConfig``.
 
-        Parameters
-        ----------
-        model_config:
-            Structured configuration loaded via
-            ``ModelConfigLoader.load_multitask_config()``.
-
-        Returns
-        -------
-        nn.Module
-            Instantiated ``MultiTaskTruthLensModel``.
-        """
         logger.info(
-            "ModelFactory.create_from_model_config | encoder=%s",
+            "[MODEL FACTORY] multitask from config | encoder=%s",
             model_config.encoder.model_name,
         )
+
         return MultiTaskTruthLensModel.from_model_config(model_config)
 
     @staticmethod
@@ -226,67 +193,55 @@ class ModelFactory:
         task_name: str,
         model_config: MultiTaskModelConfig,
     ) -> nn.Module:
-        if task_name == "bias":
-            return BiasClassifier.from_model_config(model_config)
-        if task_name == "ideology":
-            return IdeologyClassifier.from_model_config(model_config)
-        if task_name == "propaganda":
-            return PropagandaDetector.from_model_config(model_config)
-        if task_name == "narrative":
-            return NarrativeDetector.from_model_config(model_config)
-        if task_name == "emotion":
-            return EmotionClassifier.from_model_config(model_config)
 
-        raise ValueError(f"Unsupported task_name '{task_name}' for task model creation")
+        mapping = {
+            "bias": BiasClassifier,
+            "ideology": IdeologyClassifier,
+            "propaganda": PropagandaDetector,
+            "narrative": NarrativeDetector,
+            "emotion": EmotionClassifier,
+        }
+
+        if task_name not in mapping:
+            raise ValueError(f"Unsupported task: {task_name}")
+
+        return mapping[task_name].from_model_config(model_config)
+
+    # =====================================================
+    # YAML
+    # =====================================================
 
     @staticmethod
-    def create_from_yaml(yaml_path: "str | Path") -> nn.Module:
-        """
-        Load a ``MultiTaskModelConfig`` from a YAML file and instantiate the
-        corresponding model.
+    def create_from_yaml(yaml_path: str | Path) -> nn.Module:
 
-        The loader expects a YAML file structured as::
-
-            encoder:
-              model_name: roberta-base
-              pooling: cls
-            tasks:
-              bias:
-                num_labels: 2
-                task_type: multi_class
-              ...
-            dropout: 0.1
-
-        Parameters
-        ----------
-        yaml_path:
-            Path to the model YAML configuration file.
-
-        Returns
-        -------
-        nn.Module
-        """
         yaml_path = Path(yaml_path)
+
         if not yaml_path.exists():
-            raise FileNotFoundError(f"Config file not found: {yaml_path}")
-        model_config = ModelConfigLoader.load_multitask_config(yaml_path)
-        logger.info("ModelFactory.create_from_yaml | path=%s", yaml_path)
-        return ModelFactory.create_from_model_config(model_config)
+            raise FileNotFoundError(f"Config not found: {yaml_path}")
+
+        config = ModelConfigLoader.load_multitask_config(yaml_path)
+
+        logger.info("[MODEL FACTORY] from yaml: %s", yaml_path)
+
+        return ModelFactory.create_from_model_config(config)
+
+    # =====================================================
+    # CHECKPOINT
+    # =====================================================
 
     @staticmethod
     def create_from_checkpoint(
         model_dir: str | Path,
         device: str | None = None,
     ) -> nn.Module:
-        """
-        Construct model from checkpoint bundle/configured artifacts.
-        """
+
         from ..checkpointing.model_loader import ModelLoader
 
         loaded = ModelLoader(model_dir=model_dir, device=device).load()
+
         model = loaded.get("model")
 
         if not isinstance(model, nn.Module):
-            raise RuntimeError("Loaded checkpoint did not provide a valid torch model")
+            raise RuntimeError("Invalid checkpoint model")
 
         return model

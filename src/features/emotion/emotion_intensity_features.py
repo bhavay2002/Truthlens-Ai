@@ -1,33 +1,4 @@
-"""
-File Name: emotion_intensity_features.py
-Module: Feature Engineering - Emotion Intensity Features
-Description:
-    Computes emotion intensity metrics from text using transformer-based
-    emotion predictions when available, or a lexicon-based fallback.
-    The goal of this module is to measure the strength, concentration,
-    and volatility of emotional signals within a piece of text.
-
-    These features are particularly useful for detecting emotional
-    manipulation, propaganda, outrage narratives, and polarizing language.
-
-    The module integrates with the TruthLens feature framework via
-    BaseFeature and FeatureRegistry.
-
-Dependencies:
-    dataclasses
-    typing
-    logging
-    numpy
-    transformers (optional)
-    torch (optional)
-    re
-
-Inputs:
-    FeatureContext containing input text
-
-Outputs:
-    Dict[str, float] representing emotion intensity statistics
-"""
+# src/features/emotion/emotion_intensity_features.py
 
 from __future__ import annotations
 
@@ -48,21 +19,17 @@ from src.features.emotion.emotion_schema import (
 
 logger = logging.getLogger(__name__)
 
-
-# ------------------------------------------------------------
-# Build Reverse Emotion Lookup (fast lexicon lookup)
-# ------------------------------------------------------------
-
-WORD_TO_EMOTION = {}
-
-for emotion, words in EMOTION_TERMS.items():
-    for word in words:
-        WORD_TO_EMOTION[word] = emotion
+EPS = 1e-8
+MAX_CLIP = 1.0
 
 
-# ------------------------------------------------------------
-# Optional Transformer Emotion Model
-# ------------------------------------------------------------
+# =========================================================
+# TRANSFORMER SETUP (SAFE)
+# =========================================================
+
+TRANSFORMER_AVAILABLE = False
+_tokenizer = None
+_model = None
 
 try:
     import torch
@@ -78,81 +45,72 @@ try:
     TRANSFORMER_AVAILABLE = True
 
     TRANSFORMER_LABELS = [
-        "anger",
-        "disgust",
-        "fear",
-        "joy",
-        "neutral",
-        "sadness",
-        "surprise",
+        "anger", "disgust", "fear",
+        "joy", "neutral", "sadness", "surprise"
     ]
 
-except Exception:  # noqa: BLE001
-    TRANSFORMER_AVAILABLE = False
-    _tokenizer = None
-    _model = None
-
+except Exception as e:
     logger.warning(
-        "Transformer emotion model not available. "
-        "EmotionIntensityFeatures will use lexicon fallback."
+        "Transformer not available, using lexicon fallback | %s", str(e)
     )
 
 
-# ------------------------------------------------------------
-# Fast Lexicon-based Emotion Detection
-# ------------------------------------------------------------
+# =========================================================
+# REVERSE LOOKUP (LEXICON)
+# =========================================================
 
-def _lexicon_emotions(text: str) -> Dict[str, float]:
-    """
-    Fast lexicon-based emotion detection using reverse lookup.
-    Complexity: O(tokens)
-    """
+WORD_TO_EMOTION = {
+    word: emotion
+    for emotion, words in EMOTION_TERMS.items()
+    for word in words
+}
 
-    tokens = re.findall(r"\b\w+\b", text.lower())
+
+# =========================================================
+# TOKENIZATION
+# =========================================================
+
+def _tokenize(text: str):
+    return re.findall(r"\b\w+\b", text.lower())
+
+
+# =========================================================
+# LEXICON EMOTION DETECTOR
+# =========================================================
+
+def _lexicon_emotions(text: str):
+
+    tokens = _tokenize(text)
 
     counts = {emotion: 0 for emotion in EMOTION_LABELS}
 
     for token in tokens:
+        emo = WORD_TO_EMOTION.get(token)
+        if emo:
+            counts[emo] += 1
 
-        emotion = WORD_TO_EMOTION.get(token)
+    total_hits = sum(counts.values())
+    total_tokens = len(tokens)
 
-        if emotion:
-            counts[emotion] += 1
-
-    total = sum(counts.values()) or 1
-
-    return {emotion: counts[emotion] / total for emotion in EMOTION_LABELS}
+    return counts, total_hits, total_tokens
 
 
-# ------------------------------------------------------------
-# Feature Extractor
-# ------------------------------------------------------------
+# =========================================================
+# FEATURE EXTRACTOR
+# =========================================================
 
 @dataclass
 @register_feature
 class EmotionIntensityFeatures(BaseFeature):
-    """
-    Computes higher-level emotion intensity statistics.
-
-    Output Features
-    ---------------
-    emotion_intensity_max
-    emotion_intensity_mean
-    emotion_intensity_std
-    emotion_intensity_range
-    emotion_intensity_entropy
-    """
 
     name: str = "emotion_intensity_features"
-    description: str = "Emotion strength and concentration metrics"
+    group: str = "emotion"
+    description: str = "Robust emotion intensity + hybrid modeling"
 
-    # --------------------------------------------------------
+    # -----------------------------------------------------
 
     def _transformer_emotions(self, text: str) -> Dict[str, float]:
-        """
-        Compute emotion distribution using transformer model.
-        Maps transformer outputs into TruthLens 20-emotion schema.
-        """
+
         if not TRANSFORMER_AVAILABLE or _tokenizer is None or _model is None:
             return {emotion: 0.0 for emotion in EMOTION_LABELS}
 
@@ -172,72 +130,103 @@ class EmotionIntensityFeatures(BaseFeature):
         scores = {emotion: 0.0 for emotion in EMOTION_LABELS}
 
         for label, prob in zip(TRANSFORMER_LABELS, probs):
-
             if label in scores:
                 scores[label] = float(prob)
 
         return scores
 
-    # --------------------------------------------------------
+    # -----------------------------------------------------
 
-    def _hybrid_emotions(self, text: str) -> Dict[str, float]:
-        """
-        Combine transformer and lexicon emotion signals.
-        """
+    def _hybrid_emotions(self, text: str):
 
-        transformer_scores = {}
-        lexicon_scores = _lexicon_emotions(text)
+        # -------- Lexicon --------
+        counts, hits, tokens = _lexicon_emotions(text)
 
-        if TRANSFORMER_AVAILABLE:
-            transformer_scores = self._transformer_emotions(text)
-
-        scores = {}
-
-        for emotion in EMOTION_LABELS:
-
-            t = transformer_scores.get(emotion, 0.0)
-            l = lexicon_scores.get(emotion, 0.0)
-
-            scores[emotion] = 0.7 * t + 0.3 * l
-        total = sum(scores.values())
-        if total > 0:
-            scores = {k: v / total for k, v in scores.items()}
-
-        return scores
-
-    # --------------------------------------------------------
-
-    def extract(self, context: FeatureContext) -> Dict[str, float]:
-        if not isinstance(context.text, str):
-            raise TypeError("FeatureContext.text must be a string")
-        if not context.text.strip():
-            return {}
-
-        scores = self._hybrid_emotions(context.text)
-
-        values = np.array(list(scores.values()), dtype=np.float32)
-
-        max_intensity = float(np.max(values))
-        mean_intensity = float(np.mean(values))
-        std_intensity = float(np.std(values))
-        range_intensity = float(np.max(values) - np.min(values))
-
-        # Entropy of emotion distribution
-        eps = 1e-9
-        entropy = float(-np.sum(values * np.log(values + eps)))
-
-        features: Dict[str, float] = {
-            "emotion_intensity_max": max_intensity,
-            "emotion_intensity_mean": mean_intensity,
-            "emotion_intensity_std": std_intensity,
-            "emotion_intensity_range": range_intensity,
-            "emotion_intensity_entropy": entropy,
-        }
-
-        logger.debug(
-            "Emotion intensity features extracted | max=%.4f mean=%.4f",
-            max_intensity,
-            mean_intensity,
+        lex_scores = (
+            np.array([counts[e] for e in EMOTION_LABELS], dtype=np.float32)
+            / (hits + EPS)
+            if hits > 0 else np.zeros(len(EMOTION_LABELS))
         )
 
-        return features
+        # -------- Transformer --------
+        if TRANSFORMER_AVAILABLE:
+            t_scores = np.array(
+                list(self._transformer_emotions(text).values()),
+                dtype=np.float32,
+            )
+        else:
+            t_scores = np.zeros(len(EMOTION_LABELS))
+
+        # -------- Adaptive fusion --------
+        alpha = 0.7 if t_scores.sum() > 0 else 0.0
+
+        scores = alpha * t_scores + (1 - alpha) * lex_scores
+
+        total = scores.sum()
+        if total > 0:
+            scores = scores / total
+
+        return scores, hits, tokens
+
+    # -----------------------------------------------------
+
+    def extract(self, context: FeatureContext) -> Dict[str, float]:
+
+        text = context.text.strip()
+        if not text:
+            return {}
+
+        scores, hits, token_count = self._hybrid_emotions(text)
+
+        token_count = max(token_count, 1)
+
+        # -------------------------
+        # Coverage
+        # -------------------------
+
+        coverage = hits / token_count
+
+        # -------------------------
+        # Core statistics
+        # -------------------------
+
+        max_val = float(np.max(scores))
+        mean_val = float(np.mean(scores))
+        std_val = float(np.std(scores))
+        range_val = float(np.max(scores) - np.min(scores))
+
+        # Strong intensity signal
+        l2_intensity = float(np.linalg.norm(scores))
+
+        # -------------------------
+        # Entropy (normalized)
+        # -------------------------
+
+        if scores.sum() > 0:
+            entropy_raw = -np.sum(scores * np.log(scores + EPS))
+            entropy = entropy_raw / (np.log(len(scores)) + EPS)
+        else:
+            entropy = 0.0
+
+        # -------------------------
+        # Output
+        # -------------------------
+
+        return {
+            "emotion_intensity_max": self._safe(max_val),
+            "emotion_intensity_mean": self._safe(mean_val),
+            "emotion_intensity_std": self._safe(std_val),
+            "emotion_intensity_range": self._safe(range_val),
+
+            "emotion_intensity_l2": self._safe(l2_intensity),
+            "emotion_intensity_entropy": self._safe(entropy),
+
+            "emotion_coverage": self._safe(coverage),
+        }
+
+    # -----------------------------------------------------
+
+    def _safe(self, v: float) -> float:
+        if not np.isfinite(v):
+            return 0.0
+        return float(np.clip(v, 0.0, MAX_CLIP))

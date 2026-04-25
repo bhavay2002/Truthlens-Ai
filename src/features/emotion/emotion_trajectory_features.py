@@ -1,31 +1,4 @@
-"""
-File Name: emotion_trajectory_features.py
-Module: Feature Engineering - Emotion Trajectory Features
-Description:
-    Computes features describing how emotional signals evolve across
-    the progression of a text. The module splits text into segments
-    (sentences or fixed windows) and estimates emotion scores per segment.
-    It then derives trajectory statistics such as trend, volatility,
-    peak position, and emotional shifts.
-
-    Transformer-based emotion models are used when available. Otherwise,
-    a lexicon-based fallback is applied to estimate segment-level emotions.
-
-Dependencies:
-    dataclasses
-    typing
-    logging
-    numpy
-    re
-    transformers (optional)
-    torch (optional)
-
-Inputs:
-    FeatureContext containing input text
-
-Outputs:
-    Dict[str, float] representing emotion trajectory statistics
-"""
+# src/features/emotion/emotion_trajectory_features.py
 
 from __future__ import annotations
 
@@ -41,56 +14,13 @@ from src.features.base.feature_registry import register_feature
 
 from src.features.emotion.emotion_schema import (
     EMOTION_LABELS,
-    EMOTION_TERMS,
+    WORD_TO_EMOTION,
 )
 
 logger = logging.getLogger(__name__)
 
-
-# ------------------------------------------------------------
-# Reverse Emotion Lookup (fast)
-# ------------------------------------------------------------
-
-WORD_TO_EMOTION: Dict[str, str] = {}
-
-for emotion, words in EMOTION_TERMS.items():
-    for word in words:
-        WORD_TO_EMOTION[word] = emotion
-
-EMOTION_VOCAB = set(WORD_TO_EMOTION.keys())
-
-
-# ------------------------------------------------------------
-# Optional Transformer Model
-# ------------------------------------------------------------
-
-try:
-    import torch
-    from transformers import AutoTokenizer, AutoModelForSequenceClassification
-
-    MODEL_NAME = "j-hartmann/emotion-english-distilroberta-base"
-
-    _tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    _model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME)
-    _model.eval()
-
-    TRANSFORMER_AVAILABLE = True
-
-    TRANSFORMER_LABELS = [
-        "anger",
-        "disgust",
-        "fear",
-        "joy",
-        "neutral",
-        "sadness",
-        "surprise",
-    ]
-
-except Exception:
-    TRANSFORMER_AVAILABLE = False
-    _tokenizer = None
-    _model = None
-    logger.warning("Transformer emotion model unavailable. Using lexicon fallback.")
+EPS = 1e-8
+MAX_CLIP = 1.0
 
 
 # ------------------------------------------------------------
@@ -98,139 +28,153 @@ except Exception:
 # ------------------------------------------------------------
 
 def _split_sentences(text: str) -> List[str]:
-    sentences = re.split(r"[.!?]+", text)
-    return [s.strip() for s in sentences if s.strip()]
+    return [s.strip() for s in re.split(r"[.!?]+", text) if s.strip()]
 
 
 # ------------------------------------------------------------
-# Lexicon score
+# Lexicon vector scoring (CRITICAL UPGRADE)
 # ------------------------------------------------------------
 
-def _lexicon_score(text: str) -> float:
+def _lexicon_vector(text: str) -> np.ndarray:
 
     tokens = re.findall(r"\b\w+\b", text.lower())
 
-    if not tokens:
-        return 0.0
+    vec = np.zeros(len(EMOTION_LABELS), dtype=np.float32)
 
-    emotion_count = 0
+    for t in tokens:
+        emo = WORD_TO_EMOTION.get(t)
+        if emo:
+            idx = EMOTION_LABELS.index(emo)
+            vec[idx] += 1
 
-    for token in tokens:
-        if token in EMOTION_VOCAB:
-            emotion_count += 1
+    total = vec.sum()
+    if total > 0:
+        vec /= total
 
-    return emotion_count / len(tokens)
-
-
-# ------------------------------------------------------------
-# Transformer score
-# ------------------------------------------------------------
-
-def _transformer_score(text: str) -> float:
-
-    inputs = _tokenizer(
-        text,
-        return_tensors="pt",
-        truncation=True,
-        padding=True,
-        max_length=256,
-    )
-
-    with torch.no_grad():
-        outputs = _model(**inputs)
-
-    probs = torch.softmax(outputs.logits, dim=1).squeeze(0).cpu().numpy()
-
-    return float(np.max(probs) - np.mean(probs))
+    return vec
 
 
 # ------------------------------------------------------------
-# Hybrid segment score
-# ------------------------------------------------------------
-
-def _hybrid_score(text: str) -> float:
-
-    lex_score = _lexicon_score(text)
-
-    if TRANSFORMER_AVAILABLE:
-        tr_score = _transformer_score(text)
-        return 0.7 * tr_score + 0.3 * lex_score
-
-    return lex_score
-
-
-# ------------------------------------------------------------
-# Feature Extractor
+# Feature extractor
 # ------------------------------------------------------------
 
 @dataclass
 @register_feature
 class EmotionTrajectoryFeatures(BaseFeature):
-    """
-    Captures how emotion evolves through the text.
-
-    Output features:
-        emotion_traj_mean
-        emotion_traj_std
-        emotion_traj_slope
-        emotion_traj_peak_position
-        emotion_traj_volatility
-        emotion_traj_range
-    """
 
     name: str = "emotion_trajectory_features"
-    description: str = "Emotion evolution and trajectory statistics"
+    group: str = "emotion"
+    description: str = "Emotion trajectory modeling (vector-based)"
 
-    def _segment_scores(self, text: str) -> List[float]:
+    # -----------------------------------------------------
+
+    def _segment_vectors(self, text: str) -> List[np.ndarray]:
 
         sentences = _split_sentences(text)
 
         if not sentences:
-            return [0.0]
+            return [np.zeros(len(EMOTION_LABELS))]
 
-        scores: List[float] = []
+        return [_lexicon_vector(s) for s in sentences]
 
-        for sentence in sentences:
-            score = _hybrid_score(sentence)
-            scores.append(score)
-
-        return scores
+    # -----------------------------------------------------
 
     def extract(self, context: FeatureContext) -> Dict[str, float]:
 
-        if not context.text:
-            raise ValueError("FeatureContext.text cannot be empty")
+        text = context.text.strip()
+        if not text:
+            return self._empty()
 
-        scores = np.array(self._segment_scores(context.text), dtype=np.float32)
+        vectors = self._segment_vectors(text)
 
-        if len(scores) == 1:
-            scores = np.append(scores, scores)
+        if len(vectors) == 1:
+            vectors.append(vectors[0])
 
-        mean_val = float(np.mean(scores))
-        std_val = float(np.std(scores))
+        mat = np.stack(vectors)  # shape: (T, E)
 
-        x = np.arange(len(scores))
-        slope = float(np.polyfit(x, scores, 1)[0])
+        # -------------------------
+        # Intensity trajectory
+        # -------------------------
 
-        peak_position = float(np.argmax(scores) / len(scores))
+        intensities = np.linalg.norm(mat, axis=1)
 
-        volatility = float(np.mean(np.abs(np.diff(scores))))
+        # -------------------------
+        # Core stats
+        # -------------------------
 
-        range_val = float(np.max(scores) - np.min(scores))
+        mean_val = float(np.mean(intensities))
+        std_val = float(np.std(intensities))
 
-        features: Dict[str, float] = {
-            "emotion_traj_mean": mean_val,
-            "emotion_traj_std": std_val,
-            "emotion_traj_slope": slope,
-            "emotion_traj_peak_position": peak_position,
-            "emotion_traj_volatility": volatility,
-            "emotion_traj_range": range_val,
+        # normalized slope
+        x = np.linspace(0, 1, len(intensities))
+        slope = float(np.polyfit(x, intensities, 1)[0])
+
+        # peak (smoothed)
+        peak_idx = int(np.argmax(intensities))
+        peak_position = peak_idx / max(len(intensities) - 1, 1)
+
+        volatility = float(np.mean(np.abs(np.diff(intensities))))
+
+        range_val = float(np.max(intensities) - np.min(intensities))
+
+        # -------------------------
+        # NEW: Distribution shift
+        # -------------------------
+
+        shifts = [
+            np.linalg.norm(mat[i] - mat[i - 1])
+            for i in range(1, len(mat))
+        ]
+
+        shift_mean = float(np.mean(shifts)) if shifts else 0.0
+
+        # -------------------------
+        # NEW: Entropy over time
+        # -------------------------
+
+        entropies = []
+        for v in mat:
+            if v.sum() > 0:
+                e = -np.sum(v * np.log(v + EPS))
+                e /= np.log(len(v))
+                entropies.append(e)
+            else:
+                entropies.append(0.0)
+
+        entropy_mean = float(np.mean(entropies))
+
+        # -------------------------
+        # Output (bounded)
+        # -------------------------
+
+        return {
+            "emotion_traj_mean": self._safe(mean_val),
+            "emotion_traj_std": self._safe(std_val),
+            "emotion_traj_slope": self._safe((slope + 1) / 2),  # normalize
+            "emotion_traj_peak_position": self._safe(peak_position),
+            "emotion_traj_volatility": self._safe(volatility),
+            "emotion_traj_range": self._safe(range_val),
+
+            # advanced signals
+            "emotion_traj_shift_mean": self._safe(shift_mean),
+            "emotion_traj_entropy_mean": self._safe(entropy_mean),
         }
 
-        logger.debug(
-            "Emotion trajectory features extracted | mean=%.4f slope=%.4f",
-            mean_val,
-            slope,
-        )
+    # -----------------------------------------------------
 
-        return features
+    def _empty(self) -> Dict[str, float]:
+        return {
+            "emotion_traj_mean": 0.0,
+            "emotion_traj_std": 0.0,
+            "emotion_traj_slope": 0.0,
+            "emotion_traj_peak_position": 0.0,
+            "emotion_traj_volatility": 0.0,
+            "emotion_traj_range": 0.0,
+            "emotion_traj_shift_mean": 0.0,
+            "emotion_traj_entropy_mean": 0.0,
+        }
+
+    def _safe(self, v: float) -> float:
+        if not np.isfinite(v):
+            return 0.0
+        return float(np.clip(v, 0.0, MAX_CLIP))

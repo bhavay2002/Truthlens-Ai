@@ -10,174 +10,179 @@ import torch
 
 from src.explainability.token_alignment import align_tokens
 from src.explainability.utils_validation import validate_tokens_scores
+from src.explainability.attention_rollout import AttentionRollout
 
 try:
     import shap
-except ImportError:  # optional
+except ImportError:
     shap = None
 
 logger = logging.getLogger(__name__)
+EPS = 1e-12
 
-BIAS_TERMS = {
-    "radical","extremist","far_left","far_right","socialist","communist","fascist","elitist",
-    "ultra","hardline","reactionary","authoritarian","corrupt","crooked","rigged","fraud",
-    "fraudulent","illegitimate","dishonest","deceptive","manipulative","propaganda",
-    "brainwashing","indoctrination","fake","fake_news","misleading","fabricated","distorted",
-    "biased","partisan","agenda_driven","media_bias","spin","coverup","elite","establishment",
-    "bureaucrat","globalist","oligarch","corporate_elite","power_elite","political_elite",
-    "technocrat","disgraceful","outrageous","shocking","terrible","horrible","evil","dangerous",
-    "disgusting","absurd","ridiculous","conspiracy","scheme","plot","agenda","hidden_agenda",
-    "secret_plan","manipulated","controlled","staged","engineered"
-}
 
+# =========================================================
+# DATA MODEL
+# =========================================================
 
 @dataclass
 class BiasExplanation:
-    token_importance: List[Dict[str, Any]]
-    integrated_gradients: List[Dict[str, Any]]
-    attention_scores: List[Dict[str, Any]]
+    tokens: List[str]
+    importance: List[float]
+
+    shap: List[float]
+    integrated_gradients: List[float]
+    attention: List[float]
+
+    fused_importance: List[float]
+
     biased_tokens: List[str]
-    sentence_bias_scores: List[Dict[str, Any]]
     bias_intensity: float
-    bias_heatmap: List[Dict[str, Any]]
+
+    method_weights: Dict[str, float]
 
 
-def _resolve_device(model: Any) -> Optional[torch.device]:
+# =========================================================
+# UTILS
+# =========================================================
+
+def _normalize(x):
+    x = np.asarray(x, dtype=float)
+    if len(x) == 0:
+        return x
+    x = np.maximum(x, 0)
+    return x / (np.sum(x) + EPS)
+
+
+def _safe_mean(arrs):
+    arrs = [a for a in arrs if a is not None]
+    if not arrs:
+        return None
+    return np.mean(arrs, axis=0)
+
+
+# =========================================================
+# CORE METHODS
+# =========================================================
+
+def compute_shap(model, tokenizer, text):
+    if shap is None:
+        return None
+
     try:
-        return next(model.parameters()).device
+        def predict(texts):
+            enc = tokenizer(texts, return_tensors="pt", padding=True, truncation=True)
+            with torch.no_grad():
+                out = model(**enc)
+            return out.logits.detach().cpu().numpy()
+
+        explainer = shap.Explainer(predict, tokenizer)
+        sv = explainer([text])
+
+        values = sv.values[0]
+        if values.ndim > 1:
+            values = values.mean(axis=-1)
+
+        return _normalize(values)
+
     except Exception:
         return None
 
 
-def tokenize_sentences(text: str) -> List[str]:
-    return [s.strip() for s in re.split(r"[.!?]+", text) if s.strip()]
-
-
-def normalize_scores(values):
-    values = np.asarray(values, dtype=float)
-    if len(values) == 0:
-        return values
-    min_v = values.min()
-    max_v = values.max()
-    if max_v - min_v < 1e-9:
-        return np.zeros_like(values, dtype=float)
-    return (values - min_v) / (max_v - min_v)
-
-
-def compute_lexicon_bias(text: str):
-    tokens = re.findall(r"\b[a-z]+\b", text.lower())
-    matched = [t for t in tokens if t in BIAS_TERMS]
-    score = len(matched) / max(len(tokens), 1)
-    return score, list(set(matched))
-
-
-def compute_sentence_bias(text):
-    results = []
-    for sentence in tokenize_sentences(text):
-        score, tokens = compute_lexicon_bias(sentence)
-        results.append({"sentence": sentence, "bias_score": score, "biased_tokens": tokens})
-    return results
-
-
-def compute_shap_importance(model, tokenizer, text):
-    if shap is None:
-        raise ImportError("SHAP not installed")
-
-    device = _resolve_device(model)
-
-    def predict(texts):
-        encodings = tokenizer(texts, padding=True, truncation=True, return_tensors="pt")
-        if device is not None:
-            encodings = {k: v.to(device) for k, v in encodings.items()}
-        with torch.no_grad():
-            outputs = model(**encodings)
-        return outputs.logits.detach().cpu().numpy()
-
-    explainer = shap.Explainer(predict, tokenizer)
-    shap_values = explainer([text])
-
-    tokens = list(shap_values.data[0])
-    values = np.asarray(shap_values.values[0], dtype=float)
-    if values.ndim > 1:
-        values = values.mean(axis=-1)
-
-    return [{"token": t, "importance": float(v)} for t, v in zip(tokens, values)]
-
-
-def compute_integrated_gradients(model, tokenizer, text):
-    device = _resolve_device(model)
+def compute_ig(model, tokenizer, text):
     inputs = tokenizer(text, return_tensors="pt")
-    if device is not None:
-        inputs = {k: v.to(device) for k, v in inputs.items()}
 
-    model.zero_grad(set_to_none=True)
-    embeddings = model.get_input_embeddings()(inputs["input_ids"]).detach().requires_grad_(True)
-    outputs = model(inputs_embeds=embeddings, attention_mask=inputs.get("attention_mask"))
-    outputs.logits.max().backward()
+    emb = model.get_input_embeddings()(inputs["input_ids"]).detach().requires_grad_(True)
 
-    grads = embeddings.grad.abs().sum(dim=-1)[0]
-    tokens = tokenizer.convert_ids_to_tokens(inputs["input_ids"][0].detach().cpu())
-    return [{"token": t, "importance": float(g)} for t, g in zip(tokens, grads.detach().cpu().numpy())]
+    out = model(inputs_embeds=emb)
+    out.logits.max().backward()
+
+    grads = emb.grad.abs().sum(dim=-1)[0].detach().cpu().numpy()
+
+    return _normalize(grads)
 
 
-def compute_attention_scores(model, tokenizer, text):
-    device = _resolve_device(model)
+def compute_attention_rollout(model, tokenizer, text):
     inputs = tokenizer(text, return_tensors="pt")
-    if device is not None:
-        inputs = {k: v.to(device) for k, v in inputs.items()}
 
     with torch.no_grad():
         outputs = model(**inputs, output_attentions=True)
 
-    matrix = outputs.attentions[-1].mean(dim=1)[0]
-    token_scores = matrix.mean(dim=0)
-    tokens = tokenizer.convert_ids_to_tokens(inputs["input_ids"][0].detach().cpu())
-    return [{"token": t, "attention": float(a)} for t, a in zip(tokens, token_scores.detach().cpu().numpy())]
+    rollout = AttentionRollout().compute_rollout(
+        attentions=outputs.attentions,
+        tokens=tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
+    )
+
+    return np.asarray(rollout["rollout_scores"], dtype=float)
 
 
-def compute_bias_intensity(token_importance):
-    vals = [abs(t["importance"]) for t in token_importance]
-    return float(np.mean(vals)) if vals else 0.0
+# =========================================================
+# FUSION ENGINE 🔥
+# =========================================================
+
+def fuse_methods(shap_vals, ig_vals, attn_vals):
+
+    weights = {
+        "shap": 0.4 if shap_vals is not None else 0.0,
+        "ig": 0.3 if ig_vals is not None else 0.0,
+        "attn": 0.3 if attn_vals is not None else 0.0,
+    }
+
+    total = sum(weights.values()) + EPS
+    weights = {k: v / total for k, v in weights.items()}
+
+    fused = (
+        (weights["shap"] * shap_vals if shap_vals is not None else 0) +
+        (weights["ig"] * ig_vals if ig_vals is not None else 0) +
+        (weights["attn"] * attn_vals if attn_vals is not None else 0)
+    )
+
+    return _normalize(fused), weights
 
 
-def extract_biased_tokens(token_importance, threshold=0.05):
-    return [t["token"] for t in token_importance if abs(t["importance"]) >= threshold]
-
-
-def generate_bias_heatmap(token_importance):
-    return [{"token": t["token"], "bias_strength": abs(float(t["importance"]))} for t in token_importance]
-
+# =========================================================
+# MAIN API
+# =========================================================
 
 def explain_bias(model, tokenizer, text):
-    if not isinstance(text, str) or not text.strip():
-        raise ValueError("text must not be empty")
 
-    integrated_gradients_result: List[Dict[str, Any]] = []
-    try:
-        shap_importance = compute_shap_importance(model, tokenizer, text)
-    except Exception as e:
-        logger.warning("SHAP failed: %s", e)
-        integrated_gradients_result = compute_integrated_gradients(model, tokenizer, text)
-        shap_importance = integrated_gradients_result
+    if not text.strip():
+        raise ValueError("Empty text")
 
-    tokens = [t["token"] for t in shap_importance]
-    scores = normalize_scores([t["importance"] for t in shap_importance])
-    validate_tokens_scores(tokens, scores)
-    tokens, scores = align_tokens(tokens, scores)
+    tokens = tokenizer.tokenize(text)
 
-    token_importance = [{"token": t, "importance": float(s)} for t, s in zip(tokens, scores)]
-    attention_scores = compute_attention_scores(model, tokenizer, text)
+    shap_vals = compute_shap(model, tokenizer, text)
+    ig_vals = compute_ig(model, tokenizer, text)
+    attn_vals = compute_attention_rollout(model, tokenizer, text)
 
-    if not integrated_gradients_result:
-        integrated_gradients_result = compute_integrated_gradients(model, tokenizer, text)
+    # alignment
+    base = shap_vals or ig_vals or attn_vals
+    tokens, base = align_tokens(tokens, base)
 
-    explanation = BiasExplanation(
-        token_importance=token_importance,
-        integrated_gradients=integrated_gradients_result,
-        attention_scores=attention_scores,
-        biased_tokens=extract_biased_tokens(token_importance),
-        sentence_bias_scores=compute_sentence_bias(text),
-        bias_intensity=compute_bias_intensity(token_importance),
-        bias_heatmap=generate_bias_heatmap(token_importance),
-    )
-    return explanation.__dict__
+    shap_vals = shap_vals if shap_vals is not None else np.zeros_like(base)
+    ig_vals = ig_vals if ig_vals is not None else np.zeros_like(base)
+    attn_vals = attn_vals if attn_vals is not None else np.zeros_like(base)
+
+    fused, weights = fuse_methods(shap_vals, ig_vals, attn_vals)
+
+    validate_tokens_scores(tokens, fused)
+
+    biased_tokens = [
+        t for t, s in zip(tokens, fused) if s > 0.05
+    ]
+
+    return BiasExplanation(
+        tokens=tokens,
+        importance=fused.tolist(),
+
+        shap=shap_vals.tolist(),
+        integrated_gradients=ig_vals.tolist(),
+        attention=attn_vals.tolist(),
+
+        fused_importance=fused.tolist(),
+
+        biased_tokens=biased_tokens,
+        bias_intensity=float(np.mean(fused)),
+
+        method_weights=weights,
+    ).__dict__

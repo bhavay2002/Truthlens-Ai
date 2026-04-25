@@ -2,39 +2,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, asdict
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 
 import numpy as np
 
-
 logger = logging.getLogger(__name__)
-
-
-# =========================================================
-# FEATURE CONFIG (RESEARCH-GRADE)
-# =========================================================
-
-PRIMARY_FEATURES: Dict[str, set[str]] = {
-    "bias": {"prediction"},
-    "emotion": {"intensity"},
-    "narrative": {"score"},
-    "discourse": {"coherence"},
-    "graph": {"consistency"},
-    "ideology": {"score"},
-    "analysis": {"confidence"},
-}
-
-SECTION_ALPHA: Dict[str, float] = {
-    "bias": 0.80,
-    "emotion": 0.75,
-    "narrative": 0.75,
-    "discourse": 0.70,
-    "graph": 0.70,
-    "ideology": 0.80,
-    "analysis": 0.65,
-}
-
-DEFAULT_ALPHA = 0.75
+EPS = 1e-12
 
 
 # =========================================================
@@ -68,172 +41,157 @@ class TruthLensScoreCalculator:
         self,
         *,
         weights: Optional[Dict[str, float]] = None,
-        strict: bool = False,
-    ) -> None:
-        self.strict = strict
-        self.defaults = asdict(ScoreWeights())
-        self.weights = self._prepare_weights(weights or self.defaults)
+        uncertainty_penalty: float = 0.2,
+    ):
+        self.weights = asdict(ScoreWeights()) if weights is None else weights
+        self.uncertainty_penalty = uncertainty_penalty
 
-        logger.info("[Calculator] Initialized")
+    # =====================================================
+    # MAIN
+    # =====================================================
 
-    # -----------------------------
-    # Weight Handling
-    # -----------------------------
-    def _prepare_weights(self, w: Dict[str, float]) -> Dict[str, float]:
-        self._validate_weights(w)
-        w = w.copy()
-
-        self._normalize_group(w, ["bias", "emotion", "narrative", "analysis_influence_manipulation"])
-        self._normalize_group(w, ["discourse", "graph", "analysis_influence_credibility"])
-        self._normalize_group(w, ["final_credibility", "final_manipulation", "final_ideology"])
-
-        return w
-
-    def _validate_weights(self, w: Dict[str, float]) -> None:
-        for k, v in w.items():
-            if isinstance(v, bool) or not isinstance(v, (int, float)):
-                raise TypeError(f"Weight '{k}' must be numeric")
-            if not np.isfinite(v) or v < 0:
-                raise ValueError(f"Invalid weight '{k}': {v}")
-
-    def _normalize_group(self, w: Dict[str, float], keys: list[str]) -> None:
-        total = sum(w.get(k, 0.0) for k in keys)
-        if total <= 0:
-            raise ValueError(f"Invalid weight group: {keys}")
-        for k in keys:
-            w[k] = w.get(k, 0.0) / total
-
-    # =========================================================
-    # PUBLIC API (SINGLE)
-    # =========================================================
     def compute_scores(
         self,
         profile: Dict[str, Any],
         *,
         confidence: Optional[Dict[str, float]] = None,
-    ) -> Dict[str, float]:
+        entropy: Optional[Dict[str, float]] = None,
+        explanation_scores: Optional[Dict[str, float]] = None,
+    ) -> Dict[str, Any]:
 
-        scores = {}
+        section_scores = {}
+        section_debug = {}
 
-        sections = list(PRIMARY_FEATURES.keys())
+        # 🔥 Extract graph signal once
+        graph_signal = float(
+            profile.get("graph", {}).get("graph_centrality_mean", 0.0)
+        )
 
-        for sec in sections:
-            val = self._aggregate(profile.get(sec), section_name=sec)
+        for section, data in profile.items():
 
-            if confidence and sec in confidence:
-                val *= float(np.clip(confidence[sec], 0.0, 1.0))
+            base_val = self._aggregate(data)
 
-            scores[sec] = val
+            # 🔥 Inject graph influence
+            val = base_val + 0.1 * graph_signal
 
-        manipulation = self._manipulation(scores, self.weights)
-        credibility = self._credibility(scores, self.weights)
-        final_score = self._final(credibility, manipulation, scores.get("ideology", 0.0), self.weights)
+            debug_info = {
+                "base": base_val,
+                "graph_signal": graph_signal,
+                "graph_influence": 0.1 * graph_signal,
+            }
+
+            # -------------------------
+            # confidence scaling
+            # -------------------------
+            if confidence and section in confidence:
+                val *= confidence[section]
+                debug_info["confidence"] = confidence[section]
+
+            # -------------------------
+            # uncertainty penalty
+            # -------------------------
+            if entropy and section in entropy:
+                penalty = (1.0 - self.uncertainty_penalty * entropy[section])
+                val *= penalty
+                debug_info["entropy"] = entropy[section]
+                debug_info["uncertainty_penalty"] = penalty
+
+            # -------------------------
+            # explanation alignment
+            # -------------------------
+            if explanation_scores and section in explanation_scores:
+                val = 0.5 * val + 0.5 * explanation_scores[section]
+                debug_info["explanation_score"] = explanation_scores[section]
+
+            final_val = float(np.clip(val, 0.0, 1.0))
+
+            section_scores[section] = final_val
+            section_debug[section] = {
+                **debug_info,
+                "final": final_val,
+            }
+
+        # =====================================================
+        # FINAL COMPONENTS
+        # =====================================================
+
+        manipulation = self._manipulation(section_scores)
+        credibility = self._credibility(section_scores)
+
+        final_score = self._final(
+            credibility,
+            manipulation,
+            section_scores.get("ideology", 0.0),
+        )
 
         return {
-            "truthlens_bias_score": scores["bias"],
-            "truthlens_emotion_score": scores["emotion"],
-            "truthlens_narrative_score": scores["narrative"],
-            "truthlens_discourse_score": scores["discourse"],
-            "truthlens_graph_score": scores["graph"],
-            "truthlens_ideology_score": scores["ideology"],
-            "truthlens_manipulation_risk": manipulation,
-            "truthlens_credibility_score": credibility,
-            "truthlens_final_score": final_score,
+            "section_scores": section_scores,
+            "manipulation_risk": manipulation,
+            "credibility_score": credibility,
+            "final_score": final_score,
+
+            # 🔥 DEBUG BLOCK
+            "debug": {
+                "inputs": profile,
+                "confidence": confidence,
+                "entropy": entropy,
+                "explanation_scores": explanation_scores,
+                "graph_signal": graph_signal,
+                "section_breakdown": section_debug,
+            }
         }
 
-    # =========================================================
-    # PUBLIC API (BATCH)
-    # =========================================================
-    def compute_batch_scores(
-        self,
-        profiles: List[Dict[str, Any]],
-        *,
-        confidence_list: Optional[List[Dict[str, float]]] = None,
-    ) -> List[Dict[str, float]]:
+    # =====================================================
+    # AGGREGATION
+    # =====================================================
 
-        results = []
+    def _aggregate(self, section_data: Any) -> float:
 
-        for i, profile in enumerate(profiles):
-            confidence = None
-            if confidence_list and i < len(confidence_list):
-                confidence = confidence_list[i]
-
-            result = self.compute_scores(profile, confidence=confidence)
-            results.append(result)
-
-        return results
-
-    # =========================================================
-    # AGGREGATION (ALPHA + PRIMARY FEATURES)
-    # =========================================================
-    def _aggregate(self, section_data: Any, *, section_name: str) -> float:
-
-        if not isinstance(section_data, dict) or not section_data:
+        if not isinstance(section_data, dict):
             return 0.0
 
-        primary_keys = PRIMARY_FEATURES.get(section_name, set())
-        alpha = SECTION_ALPHA.get(section_name, DEFAULT_ALPHA)
+        vals = [
+            v for v in section_data.values()
+            if isinstance(v, (int, float)) and np.isfinite(v)
+        ]
 
-        primary_vals = []
-        aux_vals = []
-
-        for k, v in section_data.items():
-
-            if not isinstance(v, (int, float)) or isinstance(v, bool):
-                if self.strict:
-                    raise TypeError(f"Invalid feature {k}")
-                continue
-
-            if not np.isfinite(v):
-                if self.strict:
-                    raise ValueError(f"Non-finite value {k}")
-                continue
-
-            if k in primary_keys:
-                primary_vals.append(v)
-            else:
-                aux_vals.append(v)
-
-        primary_mean = np.mean(primary_vals) if primary_vals else None
-        aux_mean = np.mean(aux_vals) if aux_vals else None
-
-        if primary_mean is not None and aux_mean is not None:
-            score = alpha * primary_mean + (1 - alpha) * aux_mean
-        elif primary_mean is not None:
-            score = primary_mean
-        elif aux_mean is not None:
-            score = aux_mean
-        else:
+        if not vals:
             return 0.0
 
-        return float(np.clip(score, 0.0, 1.0))
+        return float(np.clip(np.mean(vals), 0.0, 1.0))
 
-    # =========================================================
-    # FINAL COMPONENTS
-    # =========================================================
-    def _manipulation(self, s: Dict[str, float], w: Dict[str, float]) -> float:
+    # =====================================================
+    # COMPONENTS
+    # =====================================================
+
+    def _manipulation(self, s: Dict[str, float]) -> float:
+        w = self.weights
         return float(np.clip(
-            w["bias"] * s["bias"] +
-            w["emotion"] * s["emotion"] +
-            w["narrative"] * s["narrative"] +
-            w["analysis_influence_manipulation"] * s["analysis"],
+            w["bias"] * s.get("bias", 0) +
+            w["emotion"] * s.get("emotion", 0) +
+            w["narrative"] * s.get("narrative", 0) +
+            w["analysis_influence_manipulation"] * s.get("analysis", 0),
             0.0, 1.0
         ))
 
-    def _credibility(self, s: Dict[str, float], w: Dict[str, float]) -> float:
+    def _credibility(self, s: Dict[str, float]) -> float:
+        w = self.weights
+
         positive = (
-            w["discourse"] * s["discourse"] +
-            w["graph"] * s["graph"] +
-            w["analysis_influence_credibility"] * s["analysis"]
+            w["discourse"] * s.get("discourse", 0) +
+            w["graph"] * s.get("graph", 0) +
+            w["analysis_influence_credibility"] * s.get("analysis", 0)
         )
 
-        penalty = np.clip(w["credibility_bias_penalty"] * s["bias"], 0.0, 1.0)
-        return float(np.clip(positive * (1.0 - penalty), 0.0, 1.0))
+        penalty = w["credibility_bias_penalty"] * s.get("bias", 0)
 
-    def _final(self, c: float, m: float, i: float, w: Dict[str, float]) -> float:
+        return float(np.clip(positive * (1 - penalty), 0.0, 1.0))
+
+    def _final(self, c, m, i):
+        w = self.weights
         return float(np.clip(
             w["final_credibility"] * c +
-            w["final_manipulation"] * (1.0 - m) +
-            w["final_ideology"] * (1.0 - i),
+            w["final_manipulation"] * (1 - m) +
+            w["final_ideology"] * (1 - i),
             0.0, 1.0
         ))

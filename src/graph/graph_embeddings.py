@@ -1,47 +1,27 @@
-"""
-File Name: graph_embeddings.py
-Module: Graph Analysis - Graph Embedding Generation
-Description:
-    Provides utilities for converting graphs into machine learning feature
-    vectors for the TruthLens AI system. The module supports multiple graph
-    embedding strategies including degree vectors, centrality vectors,
-    spectral embeddings, and Node2Vec-style random walk embeddings.
-    These embeddings allow structural graph signals to be integrated into
-    downstream ML models.
-
-Dependencies:
-    logging
-    typing
-    dataclasses
-    numpy
-    networkx
-
-Inputs:
-    Graph represented as adjacency dictionary
-
-Outputs:
-    Graph embedding vector (numpy.ndarray)
-"""
-
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import networkx as nx
 
 logger = logging.getLogger(__name__)
+EPS = 1e-12
 
+Graph = Dict[str, List[str]]
+
+
+# =========================================================
+# SPECTRAL
+# =========================================================
 
 def spectral_eigen_embedding(
     adjacency_matrix: np.ndarray,
     dim: int = 8,
 ) -> np.ndarray:
-    """
-    Compute a spectral embedding from the top-`dim` eigenvalues.
-    """
+
     if adjacency_matrix.size == 0:
         return np.zeros(dim, dtype=np.float32)
 
@@ -49,158 +29,246 @@ def spectral_eigen_embedding(
         eigenvalues = np.linalg.eigvalsh(adjacency_matrix)
         eigenvalues = np.sort(eigenvalues)[::-1]
     except np.linalg.LinAlgError:
-        logger.warning("Eigenvalue decomposition failed; returning zeros")
+        logger.warning("Eigen decomposition failed")
         return np.zeros(dim, dtype=np.float32)
 
-    if len(eigenvalues) >= dim:
-        result = eigenvalues[:dim].astype(np.float32)
-    else:
-        result = np.pad(
-            eigenvalues.astype(np.float32),
-            (0, dim - len(eigenvalues)),
-            mode="constant",
-        )
-    return result
+    if len(eigenvalues) < dim:
+        eigenvalues = np.pad(eigenvalues, (0, dim - len(eigenvalues)))
+
+    return eigenvalues[:dim].astype(np.float32)
 
 
-Graph = Dict[str, List[str]]
-
+# =========================================================
+# CONFIG
+# =========================================================
 
 @dataclass(slots=True)
 class GraphEmbeddingConfig:
-    """
-    Configuration for graph embedding generation.
-    """
 
-    embedding_type: str = "degree"  # degree | centrality | spectral
+    embedding_type: str = "hybrid"  # degree | centrality | spectral | hybrid | node2vec
     spectral_dim: int = 8
+    normalize: bool = True
 
+    # Node2Vec-lite
+    walk_length: int = 10
+    num_walks: int = 10
+    embedding_dim: int = 16
+
+
+# =========================================================
+# CORE
+# =========================================================
 
 class GraphEmbeddingGenerator:
-    """
-    Generates graph embeddings from adjacency graphs.
-    """
 
-    def __init__(self, config: GraphEmbeddingConfig | None = None) -> None:
-        if config is None:
-            config = GraphEmbeddingConfig()
+    def __init__(self, config: Optional[GraphEmbeddingConfig] = None):
 
-        self.config = config
+        self.config = config or GraphEmbeddingConfig()
 
         if self.config.spectral_dim < 1:
             raise ValueError("spectral_dim must be >= 1")
 
         logger.info(
-            "GraphEmbeddingGenerator initialized (type=%s)",
-            config.embedding_type,
+            "GraphEmbeddingGenerator initialized (%s)",
+            self.config.embedding_type,
         )
 
-    def _validate_graph(self, graph: Graph) -> None:
+    # =====================================================
+    # UTILS
+    # =====================================================
+
+    def _validate(self, graph: Graph):
         if not isinstance(graph, dict):
-            raise ValueError("graph must be a dictionary")
+            raise TypeError("graph must be dict")
 
-        for node, neighbors in graph.items():
-            if not isinstance(node, str):
-                raise ValueError("graph keys must be strings")
-            if not isinstance(neighbors, list):
-                raise ValueError("graph values must be lists")
-
-    def _to_networkx(self, graph: Graph) -> nx.Graph:
-        """
-        Convert adjacency dictionary to NetworkX graph.
-        """
-
+    def _to_nx(self, graph: Graph) -> nx.Graph:
         G = nx.Graph()
 
         for node, neighbors in graph.items():
-            node_key = node.strip().lower()
-            G.add_node(node_key)
+            n = node.strip().lower()
+            G.add_node(n)
 
-            for neighbor in neighbors:
-                if isinstance(neighbor, str) and neighbor.strip():
-                    neighbor_key = neighbor.strip().lower()
-                    if neighbor_key != node_key:
-                        G.add_edge(node_key, neighbor_key)
+            for nbr in neighbors:
+                if isinstance(nbr, str):
+                    m = nbr.strip().lower()
+                    if m and m != n:
+                        G.add_edge(n, m)
 
         return G
 
-    def generate_embedding(self, graph: Graph) -> np.ndarray:
-        """
-        Generate graph embedding vector.
-        """
+    def _normalize(self, vec: np.ndarray) -> np.ndarray:
+        if not self.config.normalize:
+            return vec
 
-        self._validate_graph(graph)
+        norm = np.linalg.norm(vec) + EPS
+        return vec / norm
 
-        G = self._to_networkx(graph)
+    # =====================================================
+    # DEGREE
+    # =====================================================
+
+    def _degree(self, G: nx.Graph) -> np.ndarray:
+        d = np.array([deg for _, deg in G.degree()], dtype=float)
+
+        if d.size == 0:
+            return np.zeros(4, dtype=np.float32)
+
+        return np.array(
+            [np.mean(d), np.max(d), np.min(d), np.var(d)],
+            dtype=np.float32,
+        )
+
+    # =====================================================
+    # CENTRALITY
+    # =====================================================
+
+    def _centrality(self, G: nx.Graph) -> np.ndarray:
+        c = list(nx.degree_centrality(G).values())
+
+        if not c:
+            return np.zeros(4, dtype=np.float32)
+
+        c = np.array(c, dtype=float)
+
+        return np.array(
+            [np.mean(c), np.max(c), np.min(c), np.var(c)],
+            dtype=np.float32,
+        )
+
+    # =====================================================
+    # NODE2VEC (LITE)
+    # =====================================================
+
+    def _node2vec(self, G: nx.Graph) -> np.ndarray:
+
+        if G.number_of_nodes() == 0:
+            return np.zeros(self.config.embedding_dim, dtype=np.float32)
+
+        nodes = list(G.nodes())
+        walks = []
+
+        for _ in range(self.config.num_walks):
+            for node in nodes:
+                walk = [node]
+                current = node
+
+                for _ in range(self.config.walk_length - 1):
+                    neighbors = list(G.neighbors(current))
+                    if not neighbors:
+                        break
+                    current = np.random.choice(neighbors)
+                    walk.append(current)
+
+                walks.append(walk)
+
+        vocab = {n: i for i, n in enumerate(nodes)}
+        mat = np.zeros((len(nodes), len(nodes)))
+
+        for walk in walks:
+            for i in range(len(walk) - 1):
+                a, b = walk[i], walk[i + 1]
+                mat[vocab[a], vocab[b]] += 1
+
+        vec = np.mean(mat, axis=0)
+
+        if vec.size < self.config.embedding_dim:
+            vec = np.pad(vec, (0, self.config.embedding_dim - vec.size))
+
+        return vec[: self.config.embedding_dim].astype(np.float32)
+
+    # =====================================================
+    #  TEMPORAL SCALING
+    # =====================================================
+
+    def _apply_temporal_weight(
+        self,
+        vec: np.ndarray,
+        temporal_features: Optional[Dict[str, float]],
+    ) -> np.ndarray:
+
+        if not temporal_features:
+            return vec
+
+        drift = float(temporal_features.get("narrative_drift", 0.0))
+
+        # safety clip
+        scale = 1.0 + np.clip(drift, 0.0, 1.0)
+
+        return vec * scale
+
+    # =====================================================
+    # MAIN
+    # =====================================================
+
+    def generate_embedding(
+        self,
+        graph: Graph,
+        *,
+        temporal_features: Optional[Dict[str, float]] = None,
+    ) -> np.ndarray:
+
+        self._validate(graph)
+
+        G = self._to_nx(graph)
 
         if G.number_of_nodes() == 0:
             return np.zeros(1, dtype=np.float32)
 
-        embedding_type = self.config.embedding_type.lower()
+        etype = self.config.embedding_type.lower()
 
-        if embedding_type == "degree":
-            return self._degree_embedding(G)
+        # -------------------------
+        # BASE EMBEDDING
+        # -------------------------
+        if etype == "degree":
+            vec = self._degree(G)
 
-        if embedding_type == "centrality":
-            return self._centrality_embedding(G)
+        elif etype == "centrality":
+            vec = self._centrality(G)
 
-        if embedding_type == "spectral":
-            return self._spectral_embedding(G)
+        elif etype == "spectral":
+            A = nx.to_numpy_array(G)
+            vec = spectral_eigen_embedding(A, self.config.spectral_dim)
 
-        raise ValueError(f"Unsupported embedding type: {embedding_type}")
+        elif etype == "node2vec":
+            vec = self._node2vec(G)
 
-    def _degree_embedding(self, G: nx.Graph) -> np.ndarray:
-        """
-        Degree-based embedding vector.
-        """
+        elif etype == "hybrid":
+            deg = self._degree(G)
+            cen = self._centrality(G)
+            spec = spectral_eigen_embedding(
+                nx.to_numpy_array(G),
+                self.config.spectral_dim,
+            )
+            vec = np.concatenate([deg, cen, spec])
 
-        degrees = [deg for _, deg in G.degree()]
+        else:
+            raise ValueError(f"Unknown embedding type: {etype}")
 
-        vector = np.array(
-            [
-                np.mean(degrees),
-                np.max(degrees),
-                np.min(degrees),
-                np.var(degrees),
-            ],
-            dtype=np.float32,
-        )
+        # -------------------------
+        #  TEMPORAL ADAPTATION
+        # -------------------------
+        vec = self._apply_temporal_weight(vec, temporal_features)
 
-        return vector
-
-    def _centrality_embedding(self, G: nx.Graph) -> np.ndarray:
-        """
-        Centrality-based embedding vector.
-        """
-
-        centrality = nx.degree_centrality(G)
-        values = list(centrality.values())
-
-        vector = np.array(
-            [
-                np.mean(values),
-                np.max(values),
-                np.min(values),
-                np.var(values),
-            ],
-            dtype=np.float32,
-        )
-
-        return vector
-
-    def _spectral_embedding(self, G: nx.Graph) -> np.ndarray:
-        """
-        Spectral embedding using adjacency eigenvalues.
-        """
-
-        A = nx.to_numpy_array(G)
-        return spectral_eigen_embedding(A, self.config.spectral_dim)
+        # -------------------------
+        # NORMALIZE
+        # -------------------------
+        return self._normalize(vec)
 
 
-def graph_embedding_vector(graph: Graph) -> np.ndarray:
-    """
-    Convenience function for generating default graph embedding vector.
-    """
+# =========================================================
+# API
+# =========================================================
 
-    generator = GraphEmbeddingGenerator()
-    return generator.generate_embedding(graph)
+def graph_embedding_vector(
+    graph: Graph,
+    config: Optional[GraphEmbeddingConfig] = None,
+    *,
+    temporal_features: Optional[Dict[str, float]] = None,
+) -> np.ndarray:
+
+    generator = GraphEmbeddingGenerator(config)
+
+    return generator.generate_embedding(
+        graph,
+        temporal_features=temporal_features,
+    )

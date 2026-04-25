@@ -1,35 +1,3 @@
-"""
-File Name: propaganda_detector.py
-Module: models.tasks.propaganda
-Description:
-    Implements a transformer-based propaganda detection model used in the
-    TruthLens AI system. The classifier predicts whether a text contains
-    propaganda or not using contextual embeddings from a pretrained
-    transformer encoder followed by a binary classification head.
-
-    Dataset labels:
-        0 -> non_propaganda
-        1 -> propaganda
-
-    The model performs binary classification using CrossEntropyLoss
-    with two output logits.
-
-Dependencies:
-    logging
-    typing
-    dataclasses
-    torch
-    torch.nn
-    models.encoder.transformer_encoder
-    models.heads.classification_head
-Inputs:
-    input_ids: Tensor (batch_size, sequence_length)
-    attention_mask: Tensor (batch_size, sequence_length)
-    labels (optional): Tensor (batch_size)
-Outputs:
-    Dictionary containing logits, probabilities, predictions, and optional loss
-"""
-
 from __future__ import annotations
 
 import logging
@@ -55,16 +23,8 @@ from ...training.trainer import Trainer, TrainerConfig
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------
-
 @dataclass
 class PropagandaDetectorConfig:
-    """
-    Configuration for PropagandaDetector.
-    """
-
     model_name: str = "roberta-base"
     pooling: str = "cls"
     dropout: float = 0.1
@@ -76,18 +36,7 @@ class PropagandaDetectorConfig:
     regression_activation: str = "gelu"
 
 
-# ---------------------------------------------------------
-# Propaganda Detector
-# ---------------------------------------------------------
-
 class PropagandaDetector(BaseModel):
-    """
-    Transformer-based propaganda detection model.
-
-    Label mapping:
-        0 -> non_propaganda
-        1 -> propaganda
-    """
 
     NUM_CLASSES = 2
 
@@ -115,18 +64,20 @@ class PropagandaDetector(BaseModel):
             self.encoder.gradient_checkpointing_enable()
 
         # -------------------------------------------------
-        # Classification Head
+        # Head
         # -------------------------------------------------
 
-        head_config = ClassificationHeadConfig(
-            input_dim=self.encoder.hidden_size,
-            num_classes=self.NUM_CLASSES,
-            dropout=config.dropout,
+        self.classifier_head = ClassificationHead(
+            ClassificationHeadConfig(
+                input_dim=self.encoder.hidden_size,
+                num_classes=self.NUM_CLASSES,
+                dropout=config.dropout,
+                return_features=False,
+            )
         )
 
-        self.classifier_head = ClassificationHead(head_config)
-
         self.regression_head: Optional[RegressionHead] = None
+
         if config.use_regression_head:
             self.regression_head = RegressionHead(
                 RegressionHeadConfig(
@@ -139,7 +90,7 @@ class PropagandaDetector(BaseModel):
             )
 
         # -------------------------------------------------
-        # Loss Function
+        # Loss
         # -------------------------------------------------
 
         self.loss_fn = LossFactory.create(
@@ -150,7 +101,7 @@ class PropagandaDetector(BaseModel):
         )
 
         # -------------------------------------------------
-        # Temperature Scaling (probability calibration)
+        # Calibration
         # -------------------------------------------------
 
         self.temperature = nn.Parameter(torch.ones(1))
@@ -162,7 +113,7 @@ class PropagandaDetector(BaseModel):
         )
 
     # -----------------------------------------------------
-    # Forward Pass
+    # FORWARD
     # -----------------------------------------------------
 
     def forward(
@@ -185,35 +136,28 @@ class PropagandaDetector(BaseModel):
         if not pooled_output.is_contiguous():
             pooled_output = pooled_output.contiguous()
 
-        logits = self.classifier_head(pooled_output)
+        head_output = self.classifier_head(pooled_output)
 
-        # Temperature scaling
+        logits = head_output["logits"]
+
         temperature = torch.clamp(self.temperature, 0.5, 5.0)
         logits = logits / temperature
 
-        if not self.training:
-            probabilities = F.softmax(logits, dim=-1)
-            predictions = probabilities.argmax(dim=-1)
-            confidence = probabilities.max(dim=-1).values
-        else:
-            probabilities = None
-            predictions = None
-            confidence = None
+        probs = F.softmax(logits, dim=-1)
+        preds = probs.argmax(dim=-1)
+        confidence = probs.max(dim=-1).values
 
         outputs: Dict[str, Any] = {
             "logits": logits,
-            "probabilities": probabilities,
-            "predictions": predictions,
+            "probabilities": probs,
+            "predictions": preds,
             "confidence": confidence,
+            "entropy": head_output["entropy"],
             "embeddings": pooled_output,
         }
 
         if self.regression_head is not None:
             outputs["regression"] = self.regression_head(pooled_output)
-
-        # -------------------------------------------------
-        # Loss (training)
-        # -------------------------------------------------
 
         if labels is not None:
 
@@ -221,18 +165,15 @@ class PropagandaDetector(BaseModel):
                 raise ValueError("labels must be 1D tensor")
 
             if not ((labels >= 0).all() and (labels < self.NUM_CLASSES).all()):
-                raise ValueError(
-                    f"labels contain values outside [0, {self.NUM_CLASSES})"
-                )
+                raise ValueError("labels out of range")
 
             loss = self.loss_fn(logits, labels.long())
-
             outputs["loss"] = loss
 
         return outputs
 
     # -----------------------------------------------------
-    # Inference
+    # PREDICT
     # -----------------------------------------------------
 
     @torch.inference_mode()
@@ -245,13 +186,14 @@ class PropagandaDetector(BaseModel):
         was_training = self.training
         self.eval()
 
-        outputs = self.forward(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-        )
-
-        if was_training:
-            self.train()
+        try:
+            outputs = self.forward(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            )
+        finally:
+            if was_training:
+                self.train()
 
         return {
             "predictions": outputs["predictions"],
@@ -260,15 +202,18 @@ class PropagandaDetector(BaseModel):
         }
 
     # -----------------------------------------------------
-    # Label Mapping
+    # LABELS
     # -----------------------------------------------------
 
     def get_output_labels(self) -> Dict[int, str]:
-
         return {
             0: "non_propaganda",
             1: "propaganda",
         }
+
+    # -----------------------------------------------------
+    # FACTORIES
+    # -----------------------------------------------------
 
     @classmethod
     def from_task_config(
@@ -280,29 +225,7 @@ class PropagandaDetector(BaseModel):
         device: Optional[str] = None,
         label_smoothing: float = 0.1,
     ) -> "PropagandaDetector":
-        """
-        Instantiate a ``PropagandaDetector`` from central config dataclasses.
 
-        Parameters
-        ----------
-        task_config:
-            Task-level descriptor from
-            ``MultiTaskModelConfig.tasks["propaganda"]``.
-        head_config:
-            Head-level dimensions/dropout from ``model_config.HeadConfig``.
-        model_name:
-            HuggingFace model identifier.
-        pooling:
-            Encoder pooling strategy (``"cls"`` or ``"mean"``).
-        device:
-            Target device string or ``None`` for auto-detection.
-        label_smoothing:
-            Label smoothing factor for CrossEntropyLoss.
-
-        Returns
-        -------
-        PropagandaDetector
-        """
         cfg = PropagandaDetectorConfig(
             model_name=model_name,
             pooling=pooling,
@@ -330,11 +253,7 @@ class PropagandaDetector(BaseModel):
                 else "gelu"
             ),
         )
-        logger.info(
-            "PropagandaDetector.from_task_config | task=%s num_labels=%d",
-            task_config.name,
-            task_config.num_labels,
-        )
+
         return cls(cfg)
 
     @classmethod
@@ -342,9 +261,11 @@ class PropagandaDetector(BaseModel):
         cls,
         model_config: MultiTaskModelConfig,
     ) -> "PropagandaDetector":
+
         task_cfg = model_config.tasks.get("propaganda")
+
         if task_cfg is None:
-            raise KeyError("Task 'propaganda' not found in MultiTaskModelConfig")
+            raise KeyError("Task 'propaganda' not found")
 
         return cls.from_task_config(
             task_config=task_cfg,
@@ -361,23 +282,27 @@ class PropagandaDetector(BaseModel):
             ),
         )
 
+    # -----------------------------------------------------
+    # TRAINER
+    # -----------------------------------------------------
+
     def create_trainer(
         self,
         optimizer: torch.optim.Optimizer,
         scheduler: Optional[Any] = None,
         config: Optional[TrainerConfig] = None,
     ) -> Trainer:
-        """
-        Build a TruthLensTrainer for this model.
-        """
+
         from dataclasses import replace as _replace
 
         effective_config = config if config is not None else TrainerConfig()
+
         effective_config = _replace(
             effective_config,
             architecture=type(self).__name__,
             model_name=self.config.model_name,
         )
+
         return Trainer(
             model=self,
             optimizer=optimizer,

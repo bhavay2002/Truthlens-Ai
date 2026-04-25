@@ -1,28 +1,3 @@
-"""
-File Name: training_step.py
-Module: models.training
-Description:
-    Implements a reusable training step abstraction for TruthLens models.
-    The module encapsulates the logic required to execute a single forward
-    and backward pass during training, including loss computation, gradient
-    accumulation, gradient clipping, optimizer stepping, and scheduler updates.
-
-    This separation allows the Trainer to remain clean and orchestrational
-    while the step logic remains modular and testable.
-
-Dependencies:
-    logging
-    typing
-    dataclasses
-    torch
-    torch.nn
-    torch.optim
-Inputs:
-    Model
-    Batch dictionary
-Outputs:
-    Loss tensor and optional training metrics
-"""
 from __future__ import annotations
 
 import inspect
@@ -39,21 +14,13 @@ from src.utils import move_to_device
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------
-# GPU PERFORMANCE SETTINGS  (M5: opt-in, called from training entrypoint)
-# ---------------------------------------------------------
 
 def configure_training_precision() -> None:
-    """Enable TF32 matmul/cudnn paths. Call ONLY from training entrypoint."""
     if torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
         torch.set_float32_matmul_precision("high")
 
-
-# ---------------------------------------------------------
-# UTIL
-# ---------------------------------------------------------
 
 def _get_autocast_dtype():
     if torch.cuda.is_available():
@@ -63,13 +30,8 @@ def _get_autocast_dtype():
     return torch.float32
 
 
-# ---------------------------------------------------------
-# CONFIG
-# ---------------------------------------------------------
-
 @dataclass
 class TrainingStepConfig:
-
     gradient_accumulation_steps: int = 1
     max_grad_norm: float = 1.0
     use_mixed_precision: bool = True
@@ -78,10 +40,6 @@ class TrainingStepConfig:
     checkpoint_every_steps: int = 0
     max_checkpoints: int = 3
 
-
-# ---------------------------------------------------------
-# STEP
-# ---------------------------------------------------------
 
 class TrainingStep:
 
@@ -114,7 +72,6 @@ class TrainingStep:
             except Exception as e:
                 logger.warning(f"torch.compile failed: {e}")
 
-        # AMP setup
         self.use_amp = config.use_mixed_precision and torch.cuda.is_available()
         self.autocast_dtype = _get_autocast_dtype()
 
@@ -122,7 +79,6 @@ class TrainingStep:
             enabled=self.use_amp and self.autocast_dtype == torch.float16
         )
 
-        # Forward signature cache
         try:
             sig = inspect.signature(self.model.forward)
             self._forward_params = set(sig.parameters.keys()) - {"self"}
@@ -141,7 +97,6 @@ class TrainingStep:
 
         logger.info("TrainingStep initialized on device %s", self.device)
 
-
     def __call__(
         self,
         batch: Dict[str, torch.Tensor] | tuple | list,
@@ -155,21 +110,22 @@ class TrainingStep:
             dtype=self.autocast_dtype,
             enabled=self.use_amp,
         ):
-
             outputs = self.model(**self._prepare_model_inputs(batch))
             raw_loss = self._extract_loss(outputs)
-
             loss = raw_loss / self.config.gradient_accumulation_steps
 
-        if (step % self.config.gradient_accumulation_steps) == 0:
+        if step % self.config.gradient_accumulation_steps == 0:
             self.optimizer.zero_grad(set_to_none=True)
 
-        self.scaler.scale(loss).backward()
+        if self.scaler.is_enabled():
+            self.scaler.scale(loss).backward()
+        else:
+            loss.backward()
 
         if (step + 1) % self.config.gradient_accumulation_steps == 0:
 
-            # unscale before clipping (correct)
-            self.scaler.unscale_(self.optimizer)
+            if self.scaler.is_enabled():
+                self.scaler.unscale_(self.optimizer)
 
             if self.config.max_grad_norm is not None:
                 torch.nn.utils.clip_grad_norm_(
@@ -177,26 +133,25 @@ class TrainingStep:
                     self.config.max_grad_norm,
                 )
 
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
+            if self.scaler.is_enabled():
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                self.optimizer.step()
 
             if self.scheduler is not None:
                 try:
                     self.scheduler.step()
                 except TypeError:
-                    # ReduceLROnPlateau requires a Python float metric (M4).
                     self.scheduler.step(float(raw_loss.detach().item()))
 
-            #  faster zero_grad
             self.optimizer.zero_grad(set_to_none=True)
 
-            # checkpointing
             if (
                 self.checkpoint_manager
                 and self.config.checkpoint_every_steps > 0
                 and (step + 1) % self.config.checkpoint_every_steps == 0
             ):
-
                 self.checkpoint_manager.save_checkpoint(
                     step=step + 1,
                     model=self.model,
@@ -209,8 +164,7 @@ class TrainingStep:
                     max_checkpoints=self.config.max_checkpoints
                 )
 
-        return raw_loss.detach()
-
+        return loss.detach()
 
     def _extract_loss(self, outputs: Any) -> torch.Tensor:
 
@@ -237,7 +191,6 @@ class TrainingStep:
 
         raise RuntimeError("Unable to extract loss from model output")
 
-
     def _move_batch_to_device(self, batch):
         if isinstance(batch, dict):
             return move_to_device(batch, self.device, non_blocking=True)
@@ -246,7 +199,6 @@ class TrainingStep:
             return move_to_device({"inputs": batch}, self.device, non_blocking=True)
 
         raise TypeError("Unsupported batch format")
-
 
     def _prepare_model_inputs(self, batch: Dict[str, Any]):
 

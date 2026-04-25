@@ -1,121 +1,185 @@
-"""
-File: advanced_analysis.py (REFRACTORED - MULTI-TASK READY)
-
-Key Upgrades:
-- Task-aware prediction (task routing)
-- Batched inference (no OOM)
-- Proper logits → predictions handling
-- GPU-safe execution
-- Attention alignment strategies
-- Scalable SHAP + importance methods
-"""
-
 from __future__ import annotations
 
 import logging
-from typing import Callable, Dict, Any, List, Optional, Literal
+from typing import Callable, Dict, Any, List, Optional
 
 import numpy as np
 import pandas as pd
 import torch
 import networkx as nx
+from transformers import AutoTokenizer
 
-from src.explainability.attention_rollout import AttentionRollout
-from src.features.importance.feature_ablation import FeatureAblation
-from src.features.importance.permutation_importance import PermutationImportance
-from src.features.importance.shap_importance import ShapImportance
+from src.utils.device_utils import move_batch, autocast_context
+from src.utils.metrics_utils import logits_to_predictions
+from src.config.task_config import TASK_CONFIG
+
+# 🔥 NEW
+from src.inference.prediction_service import PredictionService
 
 logger = logging.getLogger(__name__)
-_rollout = AttentionRollout()
 
 
 # =========================================================
-# DEVICE UTIL
+# DEVICE
 # =========================================================
+
 def get_device():
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 # =========================================================
-# BATCHED PREDICTION (CRITICAL)
+# TOKENIZATION
 # =========================================================
+
+def tokenize_batch(tokenizer, texts: List[str], max_length: int = 512):
+    return tokenizer(
+        texts,
+        padding=True,
+        truncation=True,
+        max_length=max_length,
+        return_tensors="pt",
+    )
+
+
+# =========================================================
+# BATCHED PREDICT
+# =========================================================
+
 def batched_predict(
     model,
-    X: np.ndarray,
+    texts: List[str],
     task: str,
+    tokenizer: AutoTokenizer,
     batch_size: int = 32,
     device: Optional[torch.device] = None,
 ):
     device = device or get_device()
+
     model.to(device)
     model.eval()
 
-    outputs = []
+    all_logits = []
 
     with torch.no_grad():
-        for i in range(0, len(X), batch_size):
-            batch = X[i : i + batch_size]
+        for i in range(0, len(texts), batch_size):
 
-            batch_tensor = torch.tensor(batch, dtype=torch.float32).to(device)
+            batch_texts = texts[i: i + batch_size]
+            encoded = tokenize_batch(tokenizer, batch_texts)
+            encoded = move_batch(encoded, device)
 
-            result = model.predict(batch_tensor, task=task)
-            logits = result["logits"].detach().cpu().numpy()
+            with autocast_context():
+                outputs = model(
+                    input_ids=encoded["input_ids"],
+                    attention_mask=encoded["attention_mask"],
+                    task=task,
+                )
 
-            outputs.append(logits)
+            logits = outputs["logits"].detach().cpu().numpy()
+            all_logits.append(logits)
 
-    return np.vstack(outputs)
+    return np.vstack(all_logits)
 
 
 # =========================================================
-# PREDICTION POST-PROCESSING
+# 🔥 POSTPROCESS (UPGRADED)
 # =========================================================
-def postprocess_predictions(logits: np.ndarray, task_type: str):
+
+def postprocess_predictions(
+    logits: np.ndarray,
+    task: str,
+    threshold: Optional[float] = None,
+):
+
+    task_type = TASK_CONFIG[task]["type"]
+
+    logits_tensor = torch.tensor(logits)
+
+    preds = logits_to_predictions(
+        logits_tensor,
+        task_type=task_type,
+    ).numpy()
+
     if task_type == "multiclass":
-        probs = softmax(logits)
-        preds = np.argmax(probs, axis=1)
-
-    elif task_type == "multilabel":
-        probs = sigmoid(logits)
-        preds = (probs > 0.5).astype(int)
-
-    elif task_type == "binary":
-        probs = sigmoid(logits)
-        preds = (probs > 0.5).astype(int)
+        probs = torch.softmax(logits_tensor, dim=-1).numpy()
+        confidence = np.max(probs, axis=1)
 
     else:
-        raise ValueError(f"Unknown task_type: {task_type}")
+        probs = torch.sigmoid(logits_tensor).numpy()
+        confidence = probs if probs.ndim == 1 else np.max(probs, axis=1)
 
-    return preds, probs
+        # 🔥 threshold override
+        if threshold is not None:
+            preds = (confidence >= threshold).astype(int)
 
-
-def softmax(x):
-    e = np.exp(x - np.max(x, axis=1, keepdims=True))
-    return e / e.sum(axis=1, keepdims=True)
-
-
-def sigmoid(x):
-    return 1 / (1 + np.exp(-x))
+    return preds, probs, confidence
 
 
 # =========================================================
-# ACTOR GRAPH (UPGRADED)
+# 🔥 HIGH-LEVEL PREDICT (SERVICE-AWARE)
 # =========================================================
+
+def predict_texts(
+    model=None,
+    texts: List[str] = None,
+    task: str = None,
+    tokenizer=None,
+    batch_size: int = 32,
+    prediction_service: Optional[PredictionService] = None,
+):
+
+    # 🔥 NEW: use full pipeline if available
+    if prediction_service:
+        outputs = [prediction_service.predict(t) for t in texts]
+
+        return {
+            "predictions": [o.get("predictions") for o in outputs],
+            "probabilities": [o.get("probabilities") for o in outputs],
+            "raw": outputs,
+        }
+
+    # fallback
+    logits = batched_predict(
+        model=model,
+        texts=texts,
+        task=task,
+        tokenizer=tokenizer,
+        batch_size=batch_size,
+    )
+
+    preds, probs, confidence = postprocess_predictions(logits, task)
+
+    return {
+        "predictions": preds,
+        "probabilities": probs,
+        "confidence": confidence,
+        "logits": logits,
+    }
+
+
+# =========================================================
+# 🔥 GRAPH METRICS (UPGRADED)
+# =========================================================
+
 def actor_graph_metrics(df: pd.DataFrame) -> Dict[str, float]:
+
     graph = nx.DiGraph()
 
-    for h, v in zip(df["hero_entities"], df["villain_entities"]):
+    for h, v in zip(df.get("hero_entities", []), df.get("villain_entities", [])):
         if pd.notna(h) and pd.notna(v):
             graph.add_edge(str(h), str(v))
 
     if graph.number_of_nodes() == 0:
         return {}
 
+    pagerank = nx.pagerank(graph)
+
     return {
         "nodes": graph.number_of_nodes(),
         "edges": graph.number_of_edges(),
         "density": nx.density(graph),
         "avg_degree": float(np.mean([d for _, d in graph.degree()])),
-        "pagerank_mean": float(np.mean(list(nx.pagerank(graph).values()))),
+        "pagerank_mean": float(np.mean(list(pagerank.values()))),
+        "centrality_max": float(np.max(list(pagerank.values()))),  # 🔥 NEW
         "components": nx.number_weakly_connected_components(graph),
     }
 
@@ -123,6 +187,7 @@ def actor_graph_metrics(df: pd.DataFrame) -> Dict[str, float]:
 # =========================================================
 # FRAME COHERENCE
 # =========================================================
+
 def frame_coherence(pred, true) -> float:
     pred = np.asarray(pred)
     true = np.asarray(true)
@@ -134,90 +199,38 @@ def frame_coherence(pred, true) -> float:
 
 
 # =========================================================
-# ATTENTION ALIGNMENT
+# 🔥 ABLATION (SERVICE-AWARE)
 # =========================================================
-def align_attention(a, b, strategy="truncate"):
-    if a.size == b.size:
-        return a, b
 
-    if strategy == "truncate":
-        min_len = min(len(a), len(b))
-        return a[:min_len], b[:min_len]
-
-    elif strategy == "pad":
-        max_len = max(len(a), len(b))
-        a = np.pad(a, (0, max_len - len(a)))
-        b = np.pad(b, (0, max_len - len(b)))
-        return a, b
-
-    else:
-        raise ValueError("Invalid alignment strategy")
-
-
-# =========================================================
-# CROSS TASK ATTENTION (FIXED)
-# =========================================================
-def cross_task_attention(
-    attention_maps: Dict[str, Any],
-    use_rollout: bool = True,
-    align_strategy: str = "truncate",
-):
-    task_vectors = {}
-
-    for task, value in attention_maps.items():
-        if use_rollout and isinstance(value, list):
-            rollout = _rollout.compute_rollout(attentions=value)
-            vec = np.asarray(rollout["rollout_scores"])
-        else:
-            vec = np.asarray(value).ravel()
-
-        task_vectors[task] = vec
-
-    correlations = {}
-
-    tasks = list(task_vectors.keys())
-
-    for i in range(len(tasks)):
-        for j in range(i + 1, len(tasks)):
-            a, b = align_attention(
-                task_vectors[tasks[i]],
-                task_vectors[tasks[j]],
-                align_strategy,
-            )
-
-            if len(a) < 2:
-                corr = 0.0
-            else:
-                corr = np.corrcoef(a, b)[0, 1]
-
-            correlations[f"{tasks[i]}_{tasks[j]}"] = float(
-                0.0 if np.isnan(corr) else corr
-            )
-
-    return correlations
-
-
-# =========================================================
-# ABLATION IMPORTANCE (MULTI-TASK SAFE)
-# =========================================================
 def ablation_importance(
     model,
-    X,
+    texts,
     y,
     feature_names,
-    task: str,
-    task_type: str,
+    task,
+    tokenizer,
     metric: Callable,
-    batch_size: int = 32,
+    batch_size=32,
+    prediction_service: Optional[PredictionService] = None,
 ):
-    def predict_fn(X_batch):
-        logits = batched_predict(model, X_batch, task, batch_size)
-        preds, _ = postprocess_predictions(logits, task_type)
-        return preds
 
-    ablator = FeatureAblation(model=None, metric=metric)
+    def predict_fn(text_batch):
+        result = predict_texts(
+            model=model,
+            texts=text_batch,
+            task=task,
+            tokenizer=tokenizer,
+            batch_size=batch_size,
+            prediction_service=prediction_service,
+        )
+        return result["predictions"]
+
+    from src.features.importance.feature_ablation import FeatureAblation
+
+    ablator = FeatureAblation(metric=metric)
+
     return ablator.single_feature_ablation(
-        X=X,
+        X=texts,
         y=y,
         feature_names=feature_names,
         predict_fn=predict_fn,
@@ -225,28 +238,39 @@ def ablation_importance(
 
 
 # =========================================================
-# PERMUTATION IMPORTANCE
+# 🔥 PERMUTATION (SERVICE-AWARE)
 # =========================================================
+
 def permutation_importance(
     model,
-    X,
+    texts,
     y,
     feature_names,
     task,
-    task_type,
+    tokenizer,
     metric,
     n_repeats=5,
     batch_size=32,
+    prediction_service: Optional[PredictionService] = None,
 ):
-    def predict_fn(X_batch):
-        logits = batched_predict(model, X_batch, task, batch_size)
-        preds, _ = postprocess_predictions(logits, task_type)
-        return preds
+
+    def predict_fn(text_batch):
+        result = predict_texts(
+            model=model,
+            texts=text_batch,
+            task=task,
+            tokenizer=tokenizer,
+            batch_size=batch_size,
+            prediction_service=prediction_service,
+        )
+        return result["predictions"]
+
+    from src.features.importance.permutation_importance import PermutationImportance
 
     perm = PermutationImportance(metric=metric)
 
     return perm.compute(
-        X=X,
+        X=texts,
         y=y,
         feature_names=feature_names,
         predict_fn=predict_fn,
@@ -255,47 +279,38 @@ def permutation_importance(
 
 
 # =========================================================
-# SHAP IMPORTANCE (OPTIMIZED)
+# 🔥 SHAP (SERVICE-AWARE)
 # =========================================================
+
 def shap_importance(
     model,
-    X,
-    feature_names,
+    texts,
+    tokenizer,
     task,
-    task_type,
-    max_samples=500,
-    batch_size=32,
+    max_samples=200,
+    batch_size=16,
+    prediction_service: Optional[PredictionService] = None,
 ):
-    X_small = X[:max_samples]
 
-    def predict_fn(X_batch):
-        logits = batched_predict(model, X_batch, task, batch_size)
-        _, probs = postprocess_predictions(logits, task_type)
-        return probs
+    texts_small = texts[:max_samples]
 
-    shap_calc = ShapImportance(model=None)
-    scores = shap_calc.compute_with_function(
+    def predict_fn(text_batch):
+        result = predict_texts(
+            model=model,
+            texts=text_batch,
+            task=task,
+            tokenizer=tokenizer,
+            batch_size=batch_size,
+            prediction_service=prediction_service,
+        )
+        return result["probabilities"]
+
+    from src.features.importance.shap_importance import ShapImportance
+
+    shap_calc = ShapImportance()
+
+    return shap_calc.compute_with_function(
         predict_fn=predict_fn,
-        X=X_small,
-        feature_names=feature_names,
+        X=texts_small,
+        feature_names=None,
     )
-
-    return scores
-
-
-# =========================================================
-# FEATURE DIAGNOSTICS (UNCHANGED CORE, SAFE)
-# =========================================================
-def feature_diagnostics(texts: List[str]) -> Dict[str, Any]:
-    from src.features.dataset_feature_generator import DatasetFeatureGenerator
-    from src.features.feature_statistics import FeatureStatistics
-
-    generator = DatasetFeatureGenerator()
-    X, names = generator.generate(texts)
-
-    stats = FeatureStatistics()
-
-    return {
-        "summary": stats.dataset_summary(X),
-        "variance": stats.compute_variance(X),
-    }

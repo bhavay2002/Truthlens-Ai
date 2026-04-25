@@ -1,7 +1,4 @@
-"""
-File Name: syntactic_features.py
-Module: Text Feature Engineering - Syntactic Features
-"""
+# src/features/syntactic_features.py
 
 from __future__ import annotations
 
@@ -18,24 +15,38 @@ from src.features.base.feature_registry import register_feature
 
 logger = logging.getLogger(__name__)
 
+EPS = 1e-8
+MAX_CLIP = 1.0
+
+
+# ---------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------
 
 def _simple_sentence_split(text: str) -> List[str]:
-    sentences = re.split(r"[.!?]+", text)
-    return [s.strip() for s in sentences if s.strip()]
+    return [s.strip() for s in re.split(r"[.!?]+", text) if s.strip()]
 
 
 def _simple_tokenize(text: str) -> List[str]:
     return re.findall(r"\b\w+\b", text.lower())
 
 
+# ---------------------------------------------------------
+# Feature
+# ---------------------------------------------------------
+
 @dataclass
 @register_feature
 class SyntacticFeatures(BaseFeature):
+
     name: str = "syntactic_features"
-    description: str = "Sentence structure and POS distribution features"
+    group: str = "syntactic"
+    description: str = "Advanced syntactic structure features"
 
     _nlp: Any = field(default=None, init=False, repr=False)
     _spacy_available: bool = field(default=False, init=False, repr=False)
+
+    # -----------------------------------------------------
 
     def initialize(self) -> None:
         if self._nlp is not None or self._spacy_available:
@@ -44,90 +55,147 @@ class SyntacticFeatures(BaseFeature):
             import spacy
             self._nlp = spacy.load("en_core_web_sm")
             self._spacy_available = True
-        except Exception:  # noqa: BLE001
+        except Exception:
             self._nlp = None
             self._spacy_available = False
-            logger.warning("spaCy not available. Falling back to heuristic syntactic features.")
+            logger.warning("spaCy unavailable → fallback mode")
+
+    # -----------------------------------------------------
+    # spaCy version
+    # -----------------------------------------------------
 
     def _extract_spacy_doc(self, doc) -> Dict[str, float]:
+
         tokens = [t for t in doc if not t.is_space]
+        n = len(tokens) or 1
+
+        # -------------------------
+        # POS DISTRIBUTION
+        # -------------------------
+
+        pos_counts = Counter(t.pos_ for t in tokens)
+
+        pos_keys = ["NOUN", "VERB", "ADJ", "ADV"]
+        pos_vals = np.array([pos_counts.get(k, 0) for k in pos_keys], dtype=np.float32)
+
+        pos_probs = pos_vals / (pos_vals.sum() + EPS)
+
+        # entropy
+        entropy_raw = -np.sum(pos_probs * np.log(pos_probs + EPS))
+        pos_entropy = entropy_raw / np.log(len(pos_probs) + EPS)
+
+        # -------------------------
+        # SENTENCE STRUCTURE
+        # -------------------------
+
         sentences = list(doc.sents)
 
-        pos_counter = Counter(token.pos_ for token in tokens)
-        token_count = len(tokens) if tokens else 1
-
-        noun_ratio = pos_counter.get("NOUN", 0) / token_count
-        verb_ratio = pos_counter.get("VERB", 0) / token_count
-        adj_ratio = pos_counter.get("ADJ", 0) / token_count
-        adv_ratio = pos_counter.get("ADV", 0) / token_count
-        punct_ratio = pos_counter.get("PUNCT", 0) / token_count
-
-        sentence_lengths = np.array(
-            [len([t for t in sent if not t.is_punct]) for sent in sentences],
+        lengths = np.array(
+            [len([t for t in s if not t.is_punct]) for s in sentences],
             dtype=np.float32,
         )
-        avg_sentence_length = float(sentence_lengths.mean()) if sentence_lengths.size else 0.0
+
+        avg_len = float(lengths.mean()) if lengths.size else 0.0
+        std_len = float(lengths.std()) if lengths.size else 0.0
+
+        # normalized dispersion
+        dispersion = std_len / (avg_len + EPS)
+
+        # entropy of sentence lengths
+        if lengths.size > 1:
+            probs = lengths / (lengths.sum() + EPS)
+            ent_raw = -np.sum(probs * np.log(probs + EPS))
+            sent_entropy = ent_raw / np.log(len(probs) + EPS)
+        else:
+            sent_entropy = 0.0
+
+        # -------------------------
+        # SYNTACTIC COMPLEXITY
+        # -------------------------
+
+        depths = []
+
+        for token in tokens:
+            depth = 0
+            head = token
+            while head.head != head:
+                depth += 1
+                head = head.head
+                if depth > 20:
+                    break
+            depths.append(depth)
+
+        complexity = float(np.mean(depths)) if depths else 0.0
+
+        # -------------------------
+        # COORDINATION / SUBORDINATION
+        # -------------------------
+
+        conj = sum(1 for t in tokens if t.dep_ == "conj")
+        subord = sum(1 for t in tokens if t.dep_ in {"ccomp", "advcl", "relcl"})
+
+        coord_ratio = conj / (n + EPS)
+        subord_ratio = subord / (n + EPS)
+
+        # -------------------------
+        # OUTPUT
+        # -------------------------
 
         return {
-            "sentence_count": float(len(sentences)),
-            "avg_sentence_length": float(avg_sentence_length),
-            "noun_ratio": float(noun_ratio),
-            "verb_ratio": float(verb_ratio),
-            "adjective_ratio": float(adj_ratio),
-            "adverb_ratio": float(adv_ratio),
-            "punctuation_ratio": float(punct_ratio),
+            "syn_pos_entropy": self._safe(pos_entropy),
+
+            "syn_sentence_avg_len": self._safe(avg_len / 50.0),
+            "syn_sentence_dispersion": self._safe(dispersion),
+            "syn_sentence_entropy": self._safe(sent_entropy),
+
+            "syn_complexity": self._safe(complexity / 10.0),
+
+            "syn_coordination": self._safe(coord_ratio),
+            "syn_subordination": self._safe(subord_ratio),
         }
 
-    def _extract_spacy(self, text: str) -> Dict[str, float]:
-        doc = self._nlp(text)
-        return self._extract_spacy_doc(doc)
+    # -----------------------------------------------------
+    # fallback
+    # -----------------------------------------------------
 
     def _extract_fallback(self, text: str) -> Dict[str, float]:
+
         tokens = _simple_tokenize(text)
         sentences = _simple_sentence_split(text)
 
-        token_count = len(tokens) if tokens else 1
-        punctuation_count = len(re.findall(r"[^\w\s]", text))
+        n = len(tokens) or 1
 
-        avg_sentence_length = token_count / len(sentences) if sentences else float(token_count)
+        avg_len = n / len(sentences) if sentences else n
 
         return {
-            "sentence_count": float(len(sentences)),
-            "avg_sentence_length": float(avg_sentence_length),
-            "noun_ratio": 0.0,
-            "verb_ratio": 0.0,
-            "adjective_ratio": 0.0,
-            "adverb_ratio": 0.0,
-            "punctuation_ratio": float(punctuation_count / token_count),
+            "syn_pos_entropy": 0.0,
+            "syn_sentence_avg_len": self._safe(avg_len / 50.0),
+            "syn_sentence_dispersion": 0.0,
+            "syn_sentence_entropy": 0.0,
+            "syn_complexity": 0.0,
+            "syn_coordination": 0.0,
+            "syn_subordination": 0.0,
         }
 
+    # -----------------------------------------------------
+
     def extract(self, context: FeatureContext) -> Dict[str, float]:
-        if not isinstance(context.text, str):
-            raise TypeError("FeatureContext.text must be a string")
-        if not context.text.strip():
+
+        text = context.text.strip()
+        if not text:
             return {}
 
         self.initialize()
+
         if self._spacy_available and self._nlp is not None:
-            features = self._extract_spacy(context.text)
-        else:
-            features = self._extract_fallback(context.text)
+            doc = self._nlp(text)
+            return self._extract_spacy_doc(doc)
 
-        logger.debug(
-            "Syntactic features extracted | sentences=%s avg_len=%.2f",
-            features["sentence_count"],
-            features["avg_sentence_length"],
-        )
-        return features
+        return self._extract_fallback(text)
 
-    def extract_batch(self, contexts: List[FeatureContext]) -> List[Dict[str, float]]:
-        if not contexts:
-            return []
+    # -----------------------------------------------------
 
-        self.initialize()
-        if self._spacy_available and self._nlp is not None:
-            texts = [c.text if isinstance(c.text, str) else "" for c in contexts]
-            docs = list(self._nlp.pipe(texts, batch_size=32))
-            return [self._extract_spacy_doc(doc) for doc in docs]
-
-        return [self.extract(context) for context in contexts]
+    def _safe(self, v: float) -> float:
+        if not np.isfinite(v):
+            return 0.0
+        return float(np.clip(v, 0.0, MAX_CLIP))

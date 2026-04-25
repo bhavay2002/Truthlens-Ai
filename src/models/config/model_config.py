@@ -1,32 +1,8 @@
-"""
-File Name: model_config.py
-Module: models.config
-Description:
-    Defines configuration structures and utilities for TruthLens models.
-    This module centralizes model configuration management including
-    architecture parameters, encoder settings, training parameters,
-    and artifact metadata.
-
-    Configurations are typically loaded from YAML files and converted
-    into strongly-typed dataclasses for safer use across the training,
-    evaluation, and inference pipelines.
-
-Dependencies:
-    dataclasses
-    typing
-    pathlib
-    yaml
-Inputs:
-    YAML configuration files or configuration dictionaries
-Outputs:
-    Structured model configuration dataclasses
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import yaml
 
 
@@ -40,17 +16,19 @@ class EncoderConfig:
     pooling: str = "cls"
     device: Optional[str] = None
 
-    # -------- Memory / Performance --------
     gradient_checkpointing: bool = False
     enable_fused_attention: bool = True
 
-    # -------- Precision --------
     use_amp: bool = True
-    amp_dtype: str = "bf16"  # "fp16" | "bf16"
+    amp_dtype: str = "bf16"
 
-    # -------- Compilation --------
     use_compile: bool = False
-    compile_mode: str = "default"  # "default" | "reduce-overhead" | "max-autotune"
+    compile_mode: str = "default"
+
+    freeze_layers: int = 0
+    enable_adapters: bool = False
+    adapter_type: str = "lora"
+    adapter_dim: int = 16
 
 
 # =========================================================
@@ -62,8 +40,6 @@ class HeadConfig:
     input_dim: int
     output_dim: int
     dropout: float = 0.1
-
-    # Optimization
     use_layernorm: bool = False
 
 
@@ -86,9 +62,73 @@ class TaskConfig:
     num_labels: int
     task_type: str = "multi_class"
     regression: Optional[RegressionConfig] = None
-
-    # Optimization
     use_label_smoothing: bool = False
+
+
+# =========================================================
+# Training Configuration
+# =========================================================
+
+@dataclass
+class TrainingConfig:
+    learning_rate: float = 2e-5
+    weight_decay: float = 0.01
+    batch_size: int = 32
+    num_epochs: int = 3
+
+    gradient_accumulation_steps: int = 1
+    max_grad_norm: float = 1.0
+
+    use_scheduler: bool = True
+    scheduler_type: str = "linear"
+    warmup_steps: int = 0
+
+    early_stopping: bool = True
+    early_stopping_patience: int = 3
+
+    seed: int = 42
+
+
+# =========================================================
+# Uncertainty Configuration
+# =========================================================
+
+@dataclass
+class UncertaintyConfig:
+    enable_mc_dropout: bool = False
+    mc_samples: int = 10
+
+    enable_deep_ensemble: bool = False
+    ensemble_size: int = 3
+
+
+# =========================================================
+# Regularization Configuration
+# =========================================================
+
+@dataclass
+class RegularizationConfig:
+    label_smoothing: float = 0.0
+    dropout: float = 0.1
+
+    use_mixup: bool = False
+    mixup_alpha: float = 0.2
+
+    use_adversarial_training: bool = False
+    adv_epsilon: float = 1e-5
+
+
+# =========================================================
+# Monitoring Configuration
+# =========================================================
+
+@dataclass
+class MonitoringConfig:
+    enable_drift_detection: bool = True
+    drift_threshold: float = 0.1
+
+    enable_uncertainty_monitoring: bool = True
+    enable_confidence_tracking: bool = True
 
 
 # =========================================================
@@ -101,15 +141,15 @@ class MultiTaskModelConfig:
     encoder: EncoderConfig
     tasks: Dict[str, TaskConfig]
 
+    training: TrainingConfig = field(default_factory=TrainingConfig)
+    uncertainty: UncertaintyConfig = field(default_factory=UncertaintyConfig)
+    regularization: RegularizationConfig = field(default_factory=RegularizationConfig)
+    monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
+
     dropout: float = 0.1
-
-    # -------- Shared Optimization --------
-    shared_encoder: bool = True  # avoid repeated encoder calls
-
-    # -------- Memory --------
+    shared_encoder: bool = True
     reduce_intermediate_allocation: bool = True
 
-    # -------- Metadata --------
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -131,19 +171,11 @@ class ModelConfigLoader:
             return yaml.safe_load(f)
 
     @staticmethod
-    def load_multitask_config(config_path: str | Path) -> MultiTaskModelConfig:
-
-        raw = ModelConfigLoader.load_yaml(config_path)
-
-        # ---------------- Encoder ----------------
-
-        encoder_cfg = EncoderConfig(**raw.get("encoder", {}))
-
-        # ---------------- Tasks ----------------
+    def _load_tasks(raw_tasks: Dict[str, Any]) -> Dict[str, TaskConfig]:
 
         tasks_cfg = {}
 
-        for name, task_data in raw["tasks"].items():
+        for name, task_data in raw_tasks.items():
 
             regression_cfg = None
 
@@ -158,11 +190,29 @@ class ModelConfigLoader:
                 use_label_smoothing=task_data.get("use_label_smoothing", False),
             )
 
-        # ---------------- Final Config ----------------
+        return tasks_cfg
+
+    @staticmethod
+    def load_multitask_config(config_path: str | Path) -> MultiTaskModelConfig:
+
+        raw = ModelConfigLoader.load_yaml(config_path)
+
+        encoder_cfg = EncoderConfig(**raw.get("encoder", {}))
+
+        tasks_cfg = ModelConfigLoader._load_tasks(raw["tasks"])
+
+        training_cfg = TrainingConfig(**raw.get("training", {}))
+        uncertainty_cfg = UncertaintyConfig(**raw.get("uncertainty", {}))
+        regularization_cfg = RegularizationConfig(**raw.get("regularization", {}))
+        monitoring_cfg = MonitoringConfig(**raw.get("monitoring", {}))
 
         return MultiTaskModelConfig(
             encoder=encoder_cfg,
             tasks=tasks_cfg,
+            training=training_cfg,
+            uncertainty=uncertainty_cfg,
+            regularization=regularization_cfg,
+            monitoring=monitoring_cfg,
             dropout=raw.get("dropout", 0.1),
             shared_encoder=raw.get("shared_encoder", True),
             reduce_intermediate_allocation=raw.get(

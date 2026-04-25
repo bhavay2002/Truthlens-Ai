@@ -1,10 +1,8 @@
-# src/analysis/emotion_target_analysis.py
-
 from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from typing import Dict, DefaultDict, Tuple
+from typing import Dict, DefaultDict, Tuple, Set, Optional
 
 import numpy as np
 from spacy.matcher import PhraseMatcher
@@ -12,129 +10,143 @@ from spacy.matcher import PhraseMatcher
 from src.analysis.base_analyzer import BaseAnalyzer
 from src.analysis.feature_context import FeatureContext
 from src.analysis.feature_schema import EMOTION_TARGET_KEYS, make_vector
+from src.analysis.spacy_loader import get_doc
+
+from src.analysis.emotion_lexicon import (
+    EMOTION_TERMS,
+    EMOTION_INTENSITY,
+    DEFAULT_INTENSITY,
+)
 
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------
-# Emotion Terms (keep your existing dictionary)
-# ---------------------------------------------------------
-EMOTION_TERMS = {
-    # ... (UNCHANGED: your full dict)
-}
+# =========================================================
+# CONSTANTS
+# =========================================================
+
+EPS = 1e-8
+MAX_CLIP = 1.0
+MAX_EMOTION_TYPES = 20
 
 
-# ---------------------------------------------------------
-# Optional intensity weights (can be tuned or learned)
-# ---------------------------------------------------------
-# Default: 1.0 if not specified
-EMOTION_INTENSITY = {
-    # stronger signals can be >1.0
-    "anger": 1.2,
-    "disgust": 1.2,
-    "joy": 1.1,
-    "sadness": 1.1,
-    # others default to 1.0
-}
-
-
-# ---------------------------------------------------------
-# Analyzer
-# ---------------------------------------------------------
+# =========================================================
+# ANALYZER
+# =========================================================
 
 class EmotionTargetAnalyzer(BaseAnalyzer):
 
-    def __init__(self, nlp=None):
-        """
-        Args:
-            nlp: shared spaCy pipeline (pass from pipeline to avoid reloading)
-        """
-        #  O(1) lemma → emotion
+    name = "emotion_target"
+    expected_keys = set(EMOTION_TARGET_KEYS)
+
+    def __init__(self):
+
         self.term_to_emotion: Dict[str, str] = {}
         self.term_weights: Dict[str, float] = {}
 
+        # -------------------------
+        # BUILD TERM MAPS
+        # -------------------------
         for emotion, terms in EMOTION_TERMS.items():
+            weight = EMOTION_INTENSITY.get(emotion, DEFAULT_INTENSITY)
+
             for t in terms:
-                normalized = t.replace("_", " ").lower()
-                self.term_to_emotion[normalized] = emotion
-                self.term_weights[normalized] = EMOTION_INTENSITY.get(emotion, 1.0)
+                norm = t.replace("_", " ").lower()
+                self.term_to_emotion[norm] = emotion
+                self.term_weights[norm] = weight
 
-        #  PhraseMatcher for multi-token phrases
-        self.matcher = None
-        if nlp is not None:
-            self.matcher = self._build_phrase_matcher(nlp)
+        # Lazy matcher (IMPORTANT)
+        self.matcher: Optional[PhraseMatcher] = None
+        self._matcher_initialized = False
 
-        logger.info("EmotionTargetAnalyzer initialized (hybrid + weighted)")
+        logger.info("EmotionTargetAnalyzer initialized")
 
-    # -----------------------------------------------------
+    # =========================================================
+    # MATCHER (LAZY INIT — CRITICAL)
+    # =========================================================
 
-    def _build_phrase_matcher(self, nlp):
-        matcher = PhraseMatcher(nlp.vocab, attr="LOWER")
+    def _ensure_matcher(self, doc):
 
-        patterns = []
+        if self._matcher_initialized:
+            return
+
+        self.matcher = PhraseMatcher(doc.vocab, attr="LOWER")
+
         self.phrase_to_emotion: Dict[Tuple[str, ...], str] = {}
         self.phrase_weights: Dict[Tuple[str, ...], float] = {}
 
+        patterns = []
+
         for emotion, terms in EMOTION_TERMS.items():
+            weight = EMOTION_INTENSITY.get(emotion, DEFAULT_INTENSITY)
+
             for term in terms:
                 if " " in term or "_" in term:
                     text = term.replace("_", " ")
-                    doc = nlp.make_doc(text)
-                    patterns.append(doc)
+                    span_doc = doc.vocab.make_doc(text)
 
-                    key = tuple([t.lower_ for t in doc])
+                    patterns.append(span_doc)
+
+                    key = tuple(t.lower_ for t in span_doc)
                     self.phrase_to_emotion[key] = emotion
-                    self.phrase_weights[key] = EMOTION_INTENSITY.get(emotion, 1.0)
+                    self.phrase_weights[key] = weight
 
         if patterns:
-            matcher.add("EMOTION_PHRASES", patterns)
+            self.matcher.add("EMOTION_PHRASES", patterns)
 
-        return matcher
+        self._matcher_initialized = True
 
-    # -----------------------------------------------------
+    # =========================================================
 
     def analyze(self, ctx: FeatureContext) -> Dict[str, float]:
 
         if ctx.n_tokens == 0:
             return self._empty_features()
 
+        # 🔥 shared spaCy doc
+        doc = get_doc(ctx, task="ner")
+
+        self._ensure_matcher(doc)
+
         entity_emotion_map: DefaultDict[str, float] = defaultdict(float)
         emotion_type_counter: DefaultDict[str, float] = defaultdict(float)
 
         emotion_score_total = 0.0
+        matched_spans: Set[int] = set()
 
-        doc = ctx.doc
-
-        # -------------------------------------------------
-        #  1. Phrase matching (multi-token)
-        # -------------------------------------------------
+        # -----------------------------------------------------
+        # PHRASE MATCHING
+        # -----------------------------------------------------
 
         if self.matcher:
-            matches = self.matcher(doc)
+            for _, start, end in self.matcher(doc):
 
-            for _, start, end in matches:
                 span = doc[start:end]
-                key = tuple([t.lower_ for t in span])
+                key = tuple(t.lower_ for t in span)
 
                 emotion = self.phrase_to_emotion.get(key)
-                weight = self.phrase_weights.get(key, 1.0)
+                weight = self.phrase_weights.get(key, DEFAULT_INTENSITY)
 
                 if not emotion:
                     continue
+
+                matched_spans.update(range(start, end))
 
                 emotion_score_total += weight
                 emotion_type_counter[emotion] += weight
 
                 target = self._resolve_target(span.root)
-
                 if target:
                     entity_emotion_map[target] += weight
 
-        # -------------------------------------------------
-        #  2. Token-level matching (fast path)
-        # -------------------------------------------------
+        # -----------------------------------------------------
+        # TOKEN MATCHING
+        # -----------------------------------------------------
 
-        for token in doc:
+        for i, token in enumerate(doc):
+
+            if i in matched_spans:
+                continue
 
             lemma = token.lemma_.lower()
             emotion = self.term_to_emotion.get(lemma)
@@ -142,87 +154,98 @@ class EmotionTargetAnalyzer(BaseAnalyzer):
             if not emotion:
                 continue
 
-            weight = self.term_weights.get(lemma, 1.0)
+            weight = self.term_weights.get(lemma, DEFAULT_INTENSITY)
 
             emotion_score_total += weight
             emotion_type_counter[emotion] += weight
 
             target = self._resolve_target(token)
-
             if target:
                 entity_emotion_map[target] += weight
 
-        # -------------------------------------------------
+        # -----------------------------------------------------
+        # FEATURE COMPUTATION
+        # -----------------------------------------------------
 
-        total_entities = sum(entity_emotion_map.values())
-        expression_ratio = emotion_score_total / max(len(doc), 1)
+        total_tokens = max(len(doc), 1)
+        total_entity_weight = sum(entity_emotion_map.values())
+
+        expression_ratio = emotion_score_total / (total_tokens + EPS)
 
         emotion_types = len(emotion_type_counter)
+
         dominant_emotion_strength = (
-            max(emotion_type_counter.values())
-            if emotion_type_counter else 0.0
+            max(emotion_type_counter.values(), default=0.0)
+            / (emotion_score_total + EPS)
         )
 
-        if total_entities == 0:
+        # diversity (log scaled)
+        diversity = len(entity_emotion_map)
+        diversity_norm = np.log1p(diversity) / np.log1p(20)
+
+        # -----------------------------------------------------
+        # OUTPUT
+        # -----------------------------------------------------
+
+        if total_entity_weight == 0:
             return {
-                "emotion_target_diversity": 0.0,
+                "emotion_target_diversity": self._safe(diversity_norm),
                 "emotion_target_focus": 0.0,
-                "emotion_expression_ratio": float(expression_ratio),
-                "emotion_type_diversity": float(emotion_types),
-                "dominant_emotion_strength": float(dominant_emotion_strength),
+                "emotion_expression_ratio": self._safe(expression_ratio),
+                "emotion_type_diversity": self._safe(emotion_types / MAX_EMOTION_TYPES),
+                "dominant_emotion_strength": self._safe(dominant_emotion_strength),
             }
 
-        diversity = len(entity_emotion_map)
         dominant_target = max(entity_emotion_map.values())
-        focus_score = dominant_target / max(total_entities, 1)
+        focus_score = dominant_target / (total_entity_weight + EPS)
 
         return {
-            "emotion_target_diversity": float(diversity),
-            "emotion_target_focus": float(focus_score),
-            "emotion_expression_ratio": float(expression_ratio),
-            "emotion_type_diversity": float(emotion_types),
-            "dominant_emotion_strength": float(dominant_emotion_strength),
+            "emotion_target_diversity": self._safe(diversity_norm),
+            "emotion_target_focus": self._safe(focus_score),
+            "emotion_expression_ratio": self._safe(expression_ratio),
+            "emotion_type_diversity": self._safe(emotion_types / MAX_EMOTION_TYPES),
+            "dominant_emotion_strength": self._safe(dominant_emotion_strength),
         }
 
-    # -----------------------------------------------------
-    #  Hybrid Target Resolution
-    # -----------------------------------------------------
+    # =========================================================
+    # TARGET RESOLUTION (IMPROVED)
+    # =========================================================
 
-    def _resolve_target(self, token) -> str | None:
+    def _resolve_target(self, token) -> Optional[str]:
 
-        # 1️ Named entity
+        # Named entity
         if token.ent_iob_ in {"B", "I"} and token.ent_type_:
             span = token.doc[token.ent_start: token.ent_end]
-            if span.text.strip():
-                return span.text.lower().strip()
+            text = span.text.lower().strip()
+            if len(text) > 2:
+                return text
 
-        # 2️ Dependency-based (subject/object)
+        # dependency relations
         for child in token.children:
             if child.dep_ in {"nsubj", "dobj", "pobj"}:
                 return child.lemma_.lower()
 
-        if token.head and token.head != token:
-            if token.dep_ in {"amod", "acomp"}:
-                return token.head.lemma_.lower()
+        if token.head and token.dep_ in {"amod", "acomp"}:
+            return token.head.lemma_.lower()
 
-        # 3️ Fallback
-        return token.lemma_.lower()
+        return None
 
-    # -----------------------------------------------------
+    # =========================================================
+
+    def _safe(self, value: float) -> float:
+        if not np.isfinite(value):
+            return 0.0
+        return float(np.clip(value, 0.0, MAX_CLIP))
+
+    # =========================================================
 
     def _empty_features(self) -> Dict[str, float]:
-        return {
-            "emotion_target_diversity": 0.0,
-            "emotion_target_focus": 0.0,
-            "emotion_expression_ratio": 0.0,
-            "emotion_type_diversity": 0.0,
-            "dominant_emotion_strength": 0.0,
-        }
+        return {k: 0.0 for k in EMOTION_TARGET_KEYS}
 
 
-# ---------------------------------------------------------
-# Vector Conversion
-# ---------------------------------------------------------
+# =========================================================
+# VECTOR CONVERSION
+# =========================================================
 
 def emotion_target_vector(features: Dict[str, float]) -> np.ndarray:
     return make_vector(features, EMOTION_TARGET_KEYS)

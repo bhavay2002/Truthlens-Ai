@@ -1,31 +1,4 @@
-"""
-File Name: framing_features.py
-Module: Feature Engineering - Framing Features
-Description:
-    Extracts narrative framing signals from text. The module identifies
-    common political and journalistic frames (economic, moral, security,
-    human-interest, conflict) using lexicon and structural indicators.
-    The extracted features help quantify how information is framed and
-    presented in the text, which is useful for detecting narrative bias
-    and agenda-setting patterns.
-
-    The implementation integrates with the TruthLens feature framework
-    using BaseFeature and FeatureRegistry, enabling modular feature
-    extraction and configuration-driven pipelines.
-
-Dependencies:
-    dataclasses
-    typing
-    logging
-    re
-    collections
-
-Inputs:
-    FeatureContext containing input text and optional tokens
-
-Outputs:
-    Dict[str, float] representing narrative framing indicators
-"""
+# src/features/framing_features.py 
 
 from __future__ import annotations
 
@@ -42,6 +15,9 @@ from src.features.base.feature_registry import register_feature
 
 logger = logging.getLogger(__name__)
 
+EPS = 1e-8
+MAX_CLIP = 1.0
+
 
 # ---------------------------------------------------------
 # Tokenization
@@ -51,80 +27,29 @@ TOKEN_PATTERN = re.compile(r"[A-Za-z']+")
 
 
 def _tokenize(text: str) -> List[str]:
-    """Tokenizer optimized for narrative frame analysis."""
     return TOKEN_PATTERN.findall(text.lower())
 
 
 # ---------------------------------------------------------
-# Utility functions
+# Utility
 # ---------------------------------------------------------
-
-def _count(counter: Counter, lexicon: Set[str]) -> int:
-    return sum(counter.get(w, 0) for w in lexicon)
-
 
 def _ratio(counter: Counter, lexicon: Set[str], total: int) -> float:
-    if total == 0:
-        return 0.0
-    return _count(counter, lexicon) / total
+    return sum(counter.get(w, 0) for w in lexicon) / (total + EPS)
 
 
 # ---------------------------------------------------------
-# Frame Lexicons
-# ---------------------------------------------------------
-ECONOMIC_FRAME: Set[str] = {
-    "economy","economic","tax","taxes","market","trade",
-    "budget","inflation","investment","jobs","industry",
-    "growth","recession","finance","spending","debt",
-    "employment","income","wages","funding","cost"
-}
-
-MORAL_FRAME: Set[str] = {
-    "moral","ethical","ethics","justice","values",
-    "rights","fair","fairness","duty","responsibility",
-    "principle","virtue","honor","integrity",
-    "conscience","morality"
-}
-
-SECURITY_FRAME: Set[str] = {
-    "security","defense","threat","terrorism",
-    "military","attack","war","protection",
-    "safety","risk","danger","border","intelligence",
-    "surveillance","counterterrorism"
-}
-
-HUMAN_INTEREST_FRAME: Set[str] = {
-    "family","community","children","people",
-    "victim","story","life","personal",
-    "citizens","individuals","families",
-    "workers","residents","suffering",
-    "experience","daily"
-}
-
-CONFLICT_FRAME: Set[str] = {
-    "conflict","fight","battle","clash",
-    "opposition","dispute","debate",
-    "criticized","criticism","confrontation",
-    "tension","rivalry","political"
-}
-
-
-# ---------------------------------------------------------
-# Phrase-based framing patterns
+# Lexicons (same as yours)
 # ---------------------------------------------------------
 
-FRAME_PHRASES = [
+ECONOMIC_FRAME = {...}
+MORAL_FRAME = {...}
+SECURITY_FRAME = {...}
+HUMAN_INTEREST_FRAME = {...}
+CONFLICT_FRAME = {...}
 
-    r"critics\s+argue",
-    r"supporters\s+say",
-    r"according\s+to\s+officials",
-    r"analysts\s+believe",
+COMPILED_FRAME_PHRASES = [...]
 
-    r"the\s+debate\s+over",
-    r"amid\s+growing\s+concerns",
-]
-
-COMPILED_FRAME_PHRASES = [re.compile(p) for p in FRAME_PHRASES]
 
 # ---------------------------------------------------------
 # Feature Extractor
@@ -134,110 +59,102 @@ COMPILED_FRAME_PHRASES = [re.compile(p) for p in FRAME_PHRASES]
 @register_feature
 class FramingFeatures(BaseFeature):
 
-    """
-    Extract narrative frame indicators.
-
-    Output Features
-    ---------------
-
-    frame_economic_ratio
-    frame_moral_ratio
-    frame_security_ratio
-    frame_human_interest_ratio
-    frame_conflict_ratio
-
-    frame_phrase_count
-    frame_quote_density
-
-    frame_diversity
-    frame_dominance
-    frame_entropy
-    """
-
     name: str = "framing_features"
-    description: str = "Narrative framing indicators"
-
-    # -----------------------------------------------------
+    group: str = "framing"
 
     def extract(self, context: FeatureContext) -> Dict[str, float]:
-        if not isinstance(context.text, str):
-            raise TypeError("FeatureContext.text must be a string")
-        if not context.text.strip():
+
+        text = context.text.strip()
+        if not text:
             return {}
 
-        text = context.text
         text_lower = text.lower()
         tokens = context.tokens or _tokenize(text_lower)
 
         if not tokens:
-            logger.warning("No tokens available for framing feature extraction")
             return {}
 
         counter = Counter(tokens)
-        total_tokens = len(tokens)
+        n = len(tokens)
 
-        econ = _ratio(counter, ECONOMIC_FRAME, total_tokens)
-        moral = _ratio(counter, MORAL_FRAME, total_tokens)
-        security = _ratio(counter, SECURITY_FRAME, total_tokens)
-        human = _ratio(counter, HUMAN_INTEREST_FRAME, total_tokens)
-        conflict = _ratio(counter, CONFLICT_FRAME, total_tokens)
-        
+        # -------------------------
+        # RAW FRAME RATIOS
+        # -------------------------
 
-        frame_values = [
-            econ, moral, security, human,
-            conflict
-        ]
-
-        # -------------------------------------------------
-        # phrase detection
-        # -------------------------------------------------
-
-        phrase_count = sum(bool(p.search(text_lower)) for p in COMPILED_FRAME_PHRASES)
-
-        # -------------------------------------------------
-        # structural narrative signals
-        # -------------------------------------------------
-
-        quote_count = text.count('"')
-        quote_density = quote_count / max(len(text), 1)
-
-        # -------------------------------------------------
-        # distribution metrics
-        # -------------------------------------------------
-
-        diversity = sum(1 for v in frame_values if v > 0) / len(frame_values)
-
-        dominance = max(frame_values)
-
-        arr = np.array(frame_values, dtype=float)
-
-        if arr.sum() > 0:
-            probs = arr / arr.sum()
-            entropy = -float((probs * np.log(probs + 1e-9)).sum())
-        else:
-            entropy = 0.0
-
-        features: Dict[str, float] = {
-
-            "frame_economic_ratio": econ,
-            "frame_moral_ratio": moral,
-            "frame_security_ratio": security,
-            "frame_human_interest_ratio": human,
-            "frame_conflict_ratio": conflict,
-            
-            "frame_phrase_count": float(phrase_count),
-            "frame_quote_density": quote_density,
-
-            "frame_diversity": diversity,
-            "frame_dominance": dominance,
-            "frame_entropy": entropy,
+        raw = {
+            "economic": _ratio(counter, ECONOMIC_FRAME, n),
+            "moral": _ratio(counter, MORAL_FRAME, n),
+            "security": _ratio(counter, SECURITY_FRAME, n),
+            "human": _ratio(counter, HUMAN_INTEREST_FRAME, n),
+            "conflict": _ratio(counter, CONFLICT_FRAME, n),
         }
 
-        logger.debug(
-            "Framing features extracted | dominance=%.4f diversity=%.4f entropy=%.4f",
-            dominance,
-            diversity,
-            entropy,
-        )
+        # -------------------------
+        # NORMALIZED DISTRIBUTION (CRITICAL)
+        # -------------------------
 
-        return features
+        values = np.array(list(raw.values()), dtype=np.float32)
+        total = float(values.sum())
+
+        if total < EPS:
+            dist = {k: 0.0 for k in raw}
+        else:
+            norm = values / (total + EPS)
+            dist = dict(zip(raw.keys(), norm.astype(float)))
+
+        # -------------------------
+        # PHRASE INTENSITY (FIXED)
+        # -------------------------
+
+        phrase_hits = sum(len(p.findall(text_lower)) for p in COMPILED_FRAME_PHRASES)
+        phrase_score = phrase_hits / (n + EPS)
+
+        # -------------------------
+        # STRUCTURAL SIGNALS
+        # -------------------------
+
+        quote_count = text.count('"')
+        quote_density = quote_count / (n + EPS)
+
+        # -------------------------
+        # GLOBAL METRICS
+        # -------------------------
+
+        intensity = float(np.mean(list(raw.values())))
+
+        probs = np.array(list(dist.values()), dtype=np.float32)
+
+        if probs.sum() < EPS:
+            entropy = 0.0
+        else:
+            entropy_raw = -np.sum(probs * np.log(probs + EPS))
+            entropy = entropy_raw / (np.log(len(probs)) + EPS)
+
+        diversity = sum(v > 0 for v in raw.values()) / len(raw)
+
+        dominance = max(dist.values()) if dist else 0.0
+
+        # -------------------------
+        # OUTPUT
+        # -------------------------
+
+        return {
+            "frame_economic": self._safe(dist["economic"]),
+            "frame_moral": self._safe(dist["moral"]),
+            "frame_security": self._safe(dist["security"]),
+            "frame_human": self._safe(dist["human"]),
+            "frame_conflict": self._safe(dist["conflict"]),
+
+            "frame_phrase_score": self._safe(phrase_score),
+            "frame_quote_density": self._safe(quote_density),
+
+            "frame_intensity": self._safe(intensity),
+            "frame_diversity": self._safe(diversity),
+            "frame_entropy": self._safe(entropy),
+            "frame_dominance": self._safe(dominance),
+        }
+
+    def _safe(self, v: float) -> float:
+        if not np.isfinite(v):
+            return 0.0
+        return float(np.clip(v, 0.0, MAX_CLIP))

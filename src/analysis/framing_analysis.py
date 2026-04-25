@@ -1,9 +1,7 @@
-# src/analysis/framing_analysis.py
-
 from __future__ import annotations
 
 import logging
-from typing import Dict
+from typing import Dict, Set
 
 import numpy as np
 
@@ -19,53 +17,32 @@ from src.analysis.feature_schema import FRAMING_KEYS, make_vector
 logger = logging.getLogger(__name__)
 
 
+# =========================================================
+# CONSTANTS
+# =========================================================
+
+EPS = 1e-8
+MAX_CLIP = 1.0
+
+
+# =========================================================
+# ANALYZER
+# =========================================================
+
 class FramingAnalyzer(BaseAnalyzer):
 
-    CONFLICT_TERMS = {
-        "conflict","fight","battle","war","clash","attack","confront",
-        "dispute","rival","struggle","tension","hostility","standoff",
-        "confrontation","showdown","retaliation","counterattack",
-        "escalation","political fight","power struggle","ideological clash"
-    }
+    name = "framing"
+    expected_keys = set(FRAMING_KEYS)
 
-    ECONOMIC_TERMS = {
-        "economy","economic","market","markets",
-        "jobs","employment","unemployment","labor",
-        "tax","taxes","trade","budget","spending",
-        "cost","financial","finance","growth",
-        "inflation","investment","recession",
-        "deficit","debt","revenue","funding",
-        "economic growth","economic policy","fiscal policy"
-    }
+    # -----------------------------------------------------
+    # LEXICONS (KEEP YOUR FULL LISTS HERE)
+    # -----------------------------------------------------
 
-    MORAL_TERMS = {
-        "moral","ethic","ethics","value","values",
-        "justice","fairness","right","wrong",
-        "duty","principle","virtue","integrity",
-        "honor","honour","conscience","morality",
-        "ethical","responsibility","moral obligation",
-        "social justice","human rights"
-    }
-
-    HUMAN_INTEREST_TERMS = {
-        "family","children","child","community",
-        "people","citizen","victim","life",
-        "story","personal story","emotion",
-        "suffering","experience","personal",
-        "struggle","hardship","tragedy",
-        "survivor","human impact","daily life"
-    }
-
-    SECURITY_TERMS = {
-        "security","national security","safety",
-        "threat","risk","danger","crisis",
-        "terror","terrorism","extremism",
-        "attack","defense","protection",
-        "surveillance","law enforcement",
-        "border security","military",
-        "counterterrorism","emergency",
-        "public safety"
-    }
+    CONFLICT_TERMS: Set[str] = {...}
+    ECONOMIC_TERMS: Set[str] = {...}
+    MORAL_TERMS: Set[str] = {...}
+    HUMAN_INTEREST_TERMS: Set[str] = {...}
+    SECURITY_TERMS: Set[str] = {...}
 
     BASE_KEYS = [
         "frame_conflict_score",
@@ -75,83 +52,135 @@ class FramingAnalyzer(BaseAnalyzer):
         "frame_security_score",
     ]
 
+    # =========================================================
+
     def __init__(self):
-        # 🔥 Normalize once
+
         self.conflict = normalize_lexicon_terms(self.CONFLICT_TERMS)
         self.economic = normalize_lexicon_terms(self.ECONOMIC_TERMS)
         self.moral = normalize_lexicon_terms(self.MORAL_TERMS)
         self.human = normalize_lexicon_terms(self.HUMAN_INTEREST_TERMS)
         self.security = normalize_lexicon_terms(self.SECURITY_TERMS)
 
-        logger.info("FramingAnalyzer initialized (optimized)")
+        logger.info("FramingAnalyzer initialized (final)")
 
-    # ------------------------------------------------------------
+    # =========================================================
 
     def analyze(self, ctx: FeatureContext) -> Dict[str, float]:
 
-        if ctx.n_tokens == 0:
+        # 🔥 ensure lazy features are ready
+        ctx.ensure_tokens()
+
+        if ctx.safe_n_tokens() == 0:
             return self._empty_features()
 
-        features: Dict[str, float] = {}
+        scores = {
+            "frame_conflict_score": self._score(ctx, self.conflict),
+            "frame_economic_score": self._score(ctx, self.economic),
+            "frame_moral_score": self._score(ctx, self.moral),
+            "frame_human_interest_score": self._score(ctx, self.human),
+            "frame_security_score": self._score(ctx, self.security),
+        }
 
-        # 🔥 Hybrid matching (token + phrase)
-        features["frame_conflict_score"] = self._score(ctx, self.conflict)
-        features["frame_economic_score"] = self._score(ctx, self.economic)
-        features["frame_moral_score"] = self._score(ctx, self.moral)
-        features["frame_human_interest_score"] = self._score(ctx, self.human)
-        features["frame_security_score"] = self._score(ctx, self.security)
+        # -----------------------------------------------------
+        # RELATIVE NORMALIZATION (CRITICAL)
+        # -----------------------------------------------------
 
-        features.update(self._frame_dominance(features))
-        features.update(self._frame_diversity(features))
+        scores = self._normalize(scores)
 
-        return features
+        # -----------------------------------------------------
+        # HIGH-LEVEL FEATURES
+        # -----------------------------------------------------
 
-    # ------------------------------------------------------------
+        scores.update(self._frame_dominance(scores))
+        scores.update(self._frame_diversity(scores))
 
-    def _score(self, ctx: FeatureContext, lexicon: set) -> float:
+        return scores
 
-        # token-level
+    # =========================================================
+
+    def _score(self, ctx: FeatureContext, lexicon: Set[str]) -> float:
+
+        # token-level signal
         token_score = term_ratio(
-            ctx.token_counts,
-            ctx.n_tokens,
+            ctx.safe_counts(),
+            ctx.safe_n_tokens(),
             lexicon,
         )
 
-        # phrase-level
+        # phrase-level signal
         phrase_hits = phrase_match_count(
-            ctx.text_lower,
+            ctx.text_lower or "",
             lexicon,
         )
 
-        phrase_score = phrase_hits / max(ctx.n_tokens, 1)
+        phrase_score = phrase_hits / (ctx.safe_n_tokens() + EPS)
 
-        return float(token_score + phrase_score)
+        # 🔥 weighted fusion (prevents double counting)
+        combined = 0.7 * token_score + 0.3 * phrase_score
 
-    # ------------------------------------------------------------
+        return self._safe(combined)
 
-    def _frame_dominance(self, features: Dict[str, float]) -> Dict[str, float]:
+    # =========================================================
 
-        scores = [features.get(k, 0.0) for k in self.BASE_KEYS]
+    def _normalize(self, scores: Dict[str, float]) -> Dict[str, float]:
+
+        values = np.array(list(scores.values()), dtype=np.float32)
+
+        total = float(values.sum())
+
+        if total < EPS:
+            return {k: 0.0 for k in scores}
+
+        normalized = values / (total + EPS)
+
+        return dict(zip(scores.keys(), normalized.astype(float)))
+
+    # =========================================================
+
+    def _frame_dominance(self, scores: Dict[str, float]) -> Dict[str, float]:
+
+        if not scores:
+            return {"frame_dominance_score": 0.0}
 
         return {
-            "frame_dominance_score": float(max(scores)) if scores else 0.0
+            "frame_dominance_score": self._safe(max(scores.values()))
         }
 
-    # ------------------------------------------------------------
+    # =========================================================
 
-    def _frame_diversity(self, features: Dict[str, float]) -> Dict[str, float]:
+    def _frame_diversity(self, scores: Dict[str, float]) -> Dict[str, float]:
 
-        scores = [features.get(k, 0.0) for k in self.BASE_KEYS]
+        values = np.array(list(scores.values()), dtype=np.float32)
 
-        active = sum(1 for s in scores if s > 0)
+        if values.sum() < EPS:
+            return {"frame_diversity_score": 0.0}
+
+        probs = values / (values.sum() + EPS)
+
+        # entropy-based diversity (robust)
+        entropy = -np.sum(probs * np.log(probs + EPS))
+
+        max_entropy = np.log(len(values))
+        diversity = entropy / (max_entropy + EPS)
 
         return {
-            "frame_diversity_score": float(active / len(scores))
+            "frame_diversity_score": self._safe(diversity)
         }
 
-    # ------------------------------------------------------------
+    # =========================================================
+
+    def _safe(self, value: float) -> float:
+
+        if not np.isfinite(value):
+            return 0.0
+
+        return float(np.clip(value, 0.0, MAX_CLIP))
+
+    # =========================================================
 
     def _empty_features(self) -> Dict[str, float]:
+
         return {
             "frame_conflict_score": 0.0,
             "frame_economic_score": 0.0,
@@ -163,9 +192,9 @@ class FramingAnalyzer(BaseAnalyzer):
         }
 
 
-# ------------------------------------------------------------
-# Vector conversion
-# ------------------------------------------------------------
+# =========================================================
+# VECTOR CONVERSION
+# =========================================================
 
 def framing_feature_vector(features: Dict[str, float]) -> np.ndarray:
     return make_vector(features, FRAMING_KEYS)

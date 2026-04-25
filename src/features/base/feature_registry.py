@@ -1,32 +1,12 @@
-"""
-File Name: feature_registry.py
-Module: Feature Engineering Registry
-Description:
-    Implements a centralized registry for feature extractors used in the
-    TruthLens feature engineering system. The registry enables automatic
-    discovery, registration, and retrieval of feature classes used by the
-    feature pipelines.
-
-    This design supports modular feature development, dynamic feature loading,
-    and configuration-driven feature activation.
-
-Dependencies:
-    dataclasses
-    typing
-    logging
-
-Inputs:
-    Feature classes inheriting from BaseFeature
-
-Outputs:
-    Registry of available feature extractors
-"""
+# src/features/base/feature_registry.py
 
 from __future__ import annotations
 
+import importlib
 import logging
+import pkgutil
 import threading
-from typing import Dict, List, Type
+from typing import Dict, List, Type, Any
 
 from src.features.base.base_feature import BaseFeature
 
@@ -35,206 +15,173 @@ logger = logging.getLogger(__name__)
 
 class FeatureRegistry:
     """
-    Central registry responsible for managing feature extractors.
-
-    The registry maps feature names to their implementing classes,
-    enabling dynamic instantiation and configuration-driven pipelines.
+    Advanced Feature Registry with metadata, grouping, and auto-discovery.
     """
 
     _registry: Dict[str, Type[BaseFeature]] = {}
-    _lock = threading.Lock()
+    _metadata: Dict[str, Dict[str, Any]] = {}
 
-    # ------------------------------------------------------------------
-    # Registration Methods
-    # ------------------------------------------------------------------
+    _lock = threading.Lock()
+    _frozen = False
+
+    # =====================================================
+    # REGISTRATION
+    # =====================================================
 
     @classmethod
-    def register(cls, feature_cls: Type[BaseFeature]) -> Type[BaseFeature]:
-        """
-        Register a feature extractor class.
-
-        Parameters
-        ----------
-        feature_cls : Type[BaseFeature]
-
-        Returns
-        -------
-        Type[BaseFeature]
-            The registered feature class.
-
-        Raises
-        ------
-        ValueError
-            If feature class is invalid or duplicate.
-        """
+    def register(
+        cls,
+        feature_cls: Type[BaseFeature],
+        *,
+        override: bool = False,
+    ) -> Type[BaseFeature]:
 
         if not issubclass(feature_cls, BaseFeature):
-            raise ValueError(
-                f"{feature_cls.__name__} must inherit from BaseFeature"
-            )
+            raise ValueError(f"{feature_cls} must inherit BaseFeature")
 
         feature_name = getattr(feature_cls, "name", feature_cls.__name__)
+        group = getattr(feature_cls, "group", "general")
+        description = getattr(feature_cls, "description", "")
+        version = getattr(feature_cls, "version", "1.0")
 
         with cls._lock:
-            if feature_name in cls._registry:
-                raise ValueError(
-                    f"Feature '{feature_name}' already registered"
-                )
+
+            if cls._frozen:
+                raise RuntimeError("Registry is frozen")
+
+            if feature_name in cls._registry and not override:
+                raise ValueError(f"Feature '{feature_name}' already registered")
 
             cls._registry[feature_name] = feature_cls
 
-        logger.debug("Registered feature: %s", feature_name)
+            cls._metadata[feature_name] = {
+                "group": group,
+                "description": description,
+                "version": version,
+                "module": feature_cls.__module__,
+            }
+
+        logger.debug("Registered feature: %s (%s)", feature_name, group)
 
         return feature_cls
 
-    # ------------------------------------------------------------------
-    # Retrieval Methods
-    # ------------------------------------------------------------------
+    # =====================================================
+    # RETRIEVAL
+    # =====================================================
 
     @classmethod
     def get_feature(cls, name: str) -> Type[BaseFeature]:
-        """
-        Retrieve a registered feature class.
-
-        Parameters
-        ----------
-        name : str
-            Feature name.
-
-        Returns
-        -------
-        Type[BaseFeature]
-
-        Raises
-        ------
-        KeyError
-            If feature is not registered.
-        """
 
         if name not in cls._registry:
-            raise KeyError(f"Feature '{name}' not found in registry")
+            raise KeyError(f"Feature '{name}' not found")
 
         return cls._registry[name]
 
     @classmethod
     def create_feature(cls, name: str, **kwargs) -> BaseFeature:
-        """
-        Instantiate a feature from the registry.
-
-        Parameters
-        ----------
-        name : str
-            Registered feature name.
-        kwargs : dict
-            Parameters passed to feature constructor.
-
-        Returns
-        -------
-        BaseFeature
-        """
 
         feature_cls = cls.get_feature(name)
 
-        feature = feature_cls(**kwargs)
+        try:
+            return feature_cls(**kwargs)
+        except TypeError:
+            return feature_cls()
 
-        logger.debug("Instantiated feature: %s", name)
+    # =====================================================
+    # METADATA
+    # =====================================================
 
-        return feature
+    @classmethod
+    def get_metadata(cls, name: str) -> Dict[str, Any]:
 
-    # ------------------------------------------------------------------
-    # Registry Inspection
-    # ------------------------------------------------------------------
+        if name not in cls._metadata:
+            raise KeyError(f"No metadata for '{name}'")
+
+        return cls._metadata[name]
 
     @classmethod
     def list_features(cls) -> List[str]:
-        """
-        List all registered features.
-
-        Returns
-        -------
-        List[str]
-        """
-
         return sorted(cls._registry.keys())
 
     @classmethod
-    def has_feature(cls, name: str) -> bool:
-        """
-        Check if a feature exists in registry.
+    def list_by_group(cls, group: str) -> List[str]:
 
-        Parameters
-        ----------
-        name : str
-
-        Returns
-        -------
-        bool
-        """
-
-        return name in cls._registry
+        return [
+            name for name, meta in cls._metadata.items()
+            if meta["group"] == group
+        ]
 
     @classmethod
-    def clear_registry(cls) -> None:
+    def groups(cls) -> List[str]:
+
+        return sorted(set(meta["group"] for meta in cls._metadata.values()))
+
+    @classmethod
+    def has_feature(cls, name: str) -> bool:
+        return name in cls._registry
+
+    # =====================================================
+    # AUTO DISCOVERY (CRITICAL)
+    # =====================================================
+
+    @classmethod
+    def auto_discover(cls, package: str) -> None:
         """
-        Clear the registry (mainly used in tests).
+        Automatically import all modules in a package.
+
+        Example:
+            FeatureRegistry.auto_discover("src.features")
         """
 
-        with cls._lock:
-            cls._registry.clear()
-        logger.warning("Feature registry cleared")
+        logger.info("Auto-discovering features in %s", package)
 
-    # ------------------------------------------------------------------
-    # Bulk Registration
-    # ------------------------------------------------------------------
+        module = importlib.import_module(package)
+
+        for _, name, _ in pkgutil.walk_packages(module.__path__, module.__name__ + "."):
+            try:
+                importlib.import_module(name)
+            except Exception as e:
+                logger.warning("Failed to import %s: %s", name, e)
+
+    # =====================================================
+    # BULK
+    # =====================================================
 
     @classmethod
     def register_many(cls, features: List[Type[BaseFeature]]) -> None:
-        """
-        Register multiple feature classes.
+        for f in features:
+            cls.register(f)
 
-        Parameters
-        ----------
-        features : List[Type[BaseFeature]]
-        """
-
-        for feature in features:
-            cls.register(feature)
-
-    # ------------------------------------------------------------------
-    # Debug Utilities
-    # ------------------------------------------------------------------
+    # =====================================================
+    # SAFETY
+    # =====================================================
 
     @classmethod
-    def describe_registry(cls) -> Dict[str, str]:
-        """
-        Return registry metadata useful for debugging.
+    def freeze(cls) -> None:
+        cls._frozen = True
+        logger.info("Feature registry frozen")
 
-        Returns
-        -------
-        Dict[str, str]
-        """
+    @classmethod
+    def clear_registry(cls) -> None:
 
-        description = {}
+        with cls._lock:
+            cls._registry.clear()
+            cls._metadata.clear()
 
-        for name, feature_cls in cls._registry.items():
-            description[name] = feature_cls.__module__
+        logger.warning("Registry cleared")
 
-        return description
+    # =====================================================
+    # DEBUG
+    # =====================================================
+
+    @classmethod
+    def describe_registry(cls) -> Dict[str, Dict[str, Any]]:
+        return dict(cls._metadata)
 
 
-# ----------------------------------------------------------------------
-# Decorator for Automatic Registration
-# ----------------------------------------------------------------------
+# =========================================================
+# DECORATOR
+# =========================================================
 
 def register_feature(feature_cls: Type[BaseFeature]) -> Type[BaseFeature]:
-    """
-    Decorator used for automatic feature registration.
-
-    Example
-    -------
-    @register_feature
-    class BiasFeature(BaseFeature):
-        ...
-    """
-
     return FeatureRegistry.register(feature_cls)

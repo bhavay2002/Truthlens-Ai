@@ -26,7 +26,7 @@ class ModelLoader:
         self.model_dir = Path(model_dir)
 
         if not self.model_dir.exists():
-            raise FileNotFoundError(f"Model directory not found: {self.model_dir}")
+            raise FileNotFoundError(self.model_dir)
 
         self.device = torch.device(
             device if device else ("cuda" if torch.cuda.is_available() else "cpu")
@@ -35,36 +35,31 @@ class ModelLoader:
         self.use_half = use_half
         self.compile_model = compile_model
 
-    # -------------------------------------------------
-    # Public API
-    # -------------------------------------------------
+    # =====================================================
+    # PUBLIC
+    # =====================================================
 
     def load(self) -> Dict[str, Any]:
 
-        logger.info("Loading model from: %s", self.model_dir)
+        logger.info("Loading model: %s", self.model_dir)
 
         tokenizer = self._load_tokenizer()
         model = self._load_model()
 
-        # Efficient device transfer
         model.to(self.device)
 
-        # Optional inference optimization
         if self.use_half and self.device.type == "cuda":
             model = model.half()
 
-        # torch.compile (PyTorch 2+)
         if self.compile_model:
             try:
                 model = torch.compile(model, mode="max-autotune")
             except Exception:
-                logger.warning("torch.compile failed, continuing without it")
+                logger.warning("compile failed")
 
         model.eval()
 
-        metadata = self._load_metadata_optional()
-
-        logger.info("Model ready on device: %s", self.device)
+        metadata = self._load_metadata()
 
         return {
             "model": model,
@@ -73,39 +68,38 @@ class ModelLoader:
             "metadata": metadata,
         }
 
-    # -------------------------------------------------
-    # Tokenizer (cached loading)
-    # -------------------------------------------------
+    # =====================================================
+    # TOKENIZER
+    # =====================================================
 
     def _load_tokenizer(self):
 
-        tokenizer_path = self.model_dir / "tokenizer"
+        tok_path = self.model_dir / "tokenizer"
 
         try:
-            if tokenizer_path.exists():
-                return AutoTokenizer.from_pretrained(tokenizer_path, use_fast=True)
+            if tok_path.exists():
+                return AutoTokenizer.from_pretrained(tok_path, use_fast=True)
 
             return AutoTokenizer.from_pretrained(self.model_dir, use_fast=True)
 
-        except Exception as exc:
+        except Exception as e:
             logger.exception("Tokenizer load failed")
-            raise RuntimeError("Tokenizer loading failed") from exc
+            raise RuntimeError from e
 
-    # -------------------------------------------------
-    # Model Loader
-    # -------------------------------------------------
+    # =====================================================
+    # MODEL
+    # =====================================================
 
     def _load_model(self):
 
         config_file = self.model_dir / "model_config.json"
         checkpoint_file = self.model_dir / "model.pt"
 
-        # -------------------------------------------------
-        # HuggingFace direct load (fast path)
-        # -------------------------------------------------
+        # -------------------------
+        # HF MODEL
+        # -------------------------
 
         if not config_file.exists():
-            logger.info("Loading HuggingFace model")
 
             return AutoModelForSequenceClassification.from_pretrained(
                 self.model_dir,
@@ -113,119 +107,97 @@ class ModelLoader:
                 low_cpu_mem_usage=True,
             )
 
-        # -------------------------------------------------
-        # TruthLens model
-        # -------------------------------------------------
+        # -------------------------
+        # CUSTOM MODEL
+        # -------------------------
 
         try:
             from src.models.registry.model_factory import ModelFactory
             from src.models.checkpointing.checkpoint_manager import CheckpointManager
 
-            with open(config_file, "r", encoding="utf-8") as f:
-                config_data = json.load(f)
+            with open(config_file, "r") as f:
+                cfg = json.load(f)
 
-            model_type = config_data.get("model_type")
-            model_params = config_data.get("model_params", {})
+            model_type = cfg["model_type"]
+            params = cfg.get("model_params", {})
 
-            if model_type is None:
-                raise ValueError("model_config.json missing 'model_type'")
+            model = ModelFactory.create(model_type, params)
 
-            model = ModelFactory.create(model_type, model_params)
-
-            # -------------------------------------------------
-            # Direct checkpoint (fastest)
-            # -------------------------------------------------
+            # -------------------------
+            # DIRECT CHECKPOINT
+            # -------------------------
 
             if checkpoint_file.exists():
 
                 checkpoint = torch.load(
                     checkpoint_file,
-                    map_location="cpu",  # avoid GPU spike
-                    weights_only=True if hasattr(torch, "load") else False,
+                    map_location="cpu",
                 )
 
-                state_dict = (
+                state = (
                     checkpoint.get("model_state_dict")
                     if isinstance(checkpoint, dict)
                     else checkpoint
                 )
 
-                validate_checkpoint(state_dict)
+                validate_checkpoint(state)
 
-                # Remove unnecessary keys
-                if "_orig_mod" in str(type(model)):
-                    model = model._orig_mod
+                res = model.load_state_dict(state, strict=False)
 
-                _lr = model.load_state_dict(state_dict, strict=False)
-                if _lr.missing_keys:
-                    raise RuntimeError(
-                        f"[CHECKPOINT ERROR] Missing keys: {_lr.missing_keys}"
-                    )
-                if _lr.unexpected_keys:
-                    raise RuntimeError(
-                        f"[CHECKPOINT ERROR] Unexpected keys: {_lr.unexpected_keys}"
-                    )
-                logger.info("Checkpoint loaded successfully with full parameter match.")
+                if res.missing_keys:
+                    raise RuntimeError(res.missing_keys)
+                if res.unexpected_keys:
+                    raise RuntimeError(res.unexpected_keys)
 
                 return model
 
-            # -------------------------------------------------
-            # Checkpoint bundle fallback
-            # -------------------------------------------------
+            # -------------------------
+            # BUNDLE
+            # -------------------------
 
-            checkpoint_dir = self.model_dir / "checkpoint_bundle"
+            bundle = self.model_dir / "checkpoint_bundle"
 
-            if checkpoint_dir.exists():
+            if bundle.exists():
 
-                manager = CheckpointManager(checkpoint_dir)
-                latest = manager.get_latest_checkpoint()
+                manager = CheckpointManager(bundle)
+                latest = manager.latest()
 
                 if latest:
                     checkpoint = manager.load_checkpoint(latest)
 
-                    state_dict = checkpoint.get("model")
+                    state = checkpoint.get("model_state_dict") or checkpoint.get("model")
 
-                    if state_dict is None:
-                        raise RuntimeError("Invalid checkpoint format")
+                    validate_checkpoint(state)
 
-                    validate_checkpoint(state_dict)
-                    _lr2 = model.load_state_dict(state_dict, strict=False)
-                    if _lr2.missing_keys:
-                        raise RuntimeError(
-                            f"[CHECKPOINT ERROR] Missing keys: {_lr2.missing_keys}"
-                        )
-                    if _lr2.unexpected_keys:
-                        raise RuntimeError(
-                            f"[CHECKPOINT ERROR] Unexpected keys: {_lr2.unexpected_keys}"
-                        )
-                    logger.info("Checkpoint loaded successfully with full parameter match.")
+                    res = model.load_state_dict(state, strict=False)
+
+                    if res.missing_keys:
+                        raise RuntimeError(res.missing_keys)
+                    if res.unexpected_keys:
+                        raise RuntimeError(res.unexpected_keys)
 
             return model
 
-        except Exception as exc:
-            logger.exception("Model construction failed")
-            raise RuntimeError("Model construction failed") from exc
+        except Exception as e:
+            logger.exception("Model load failed")
+            raise RuntimeError from e
 
-    # -------------------------------------------------
-    # Metadata
-    # -------------------------------------------------
+    # =====================================================
+    # METADATA
+    # =====================================================
 
-    def _load_metadata_optional(self) -> Dict[str, Any]:
+    def _load_metadata(self) -> Dict[str, Any]:
 
-        bundle_dir = self.model_dir / "checkpoint_bundle"
+        bundle = self.model_dir / "checkpoint_bundle"
 
-        if not bundle_dir.exists():
+        if not bundle.exists():
             return {}
 
         try:
             from src.models.checkpointing.artifact_manager import ArtifactManager
 
-            manager = ArtifactManager(bundle_dir)
+            manager = ArtifactManager(bundle)
             return manager.load_metadata()
 
-        except FileNotFoundError:
-            return {}
-
         except Exception:
-            logger.warning("Metadata load failed", exc_info=True)
             return {}

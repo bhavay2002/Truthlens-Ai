@@ -1,47 +1,3 @@
-"""
-File Name: narrative_detector.py
-Module: models.tasks.narrative
-Description:
-    Implements a transformer-based narrative detection model for the TruthLens AI
-    system. The model detects narrative roles and narrative frame signals within
-    text using contextual embeddings produced by a pretrained transformer
-    encoder followed by a multi-label classification head.
-
-    The dataset contains the following narrative labels:
-
-        hero
-        villain
-        victim
-        hero_entities
-        villain_entities
-        victim_entities
-        RE
-        HI
-        CO
-        MO
-        EC
-
-    These labels represent narrative actors and narrative frame indicators.
-    Because multiple narrative signals may appear simultaneously in a single
-    article, the model performs multi-label classification using sigmoid
-    activation and BCEWithLogitsLoss.
-
-Dependencies:
-    logging
-    typing
-    dataclasses
-    torch
-    torch.nn
-    models.encoder.transformer_encoder
-    models.heads.multilabel_head
-Inputs:
-    input_ids: Tensor (batch_size, sequence_length)
-    attention_mask: Tensor (batch_size, sequence_length)
-    labels (optional): Tensor (batch_size, 11)
-Outputs:
-    Dictionary containing logits, probabilities, predictions, and optional loss
-"""
-
 from __future__ import annotations
 
 import logging
@@ -64,7 +20,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class NarrativeDetectorConfig:
-
     model_name: str = "roberta-base"
     pooling: str = "cls"
     dropout: float = 0.1
@@ -97,10 +52,16 @@ class NarrativeDetector(BaseModel):
     LABEL_MAPPING = {i: label for i, label in enumerate(LABELS)}
 
     def __init__(self, config: NarrativeDetectorConfig):
-
         super().__init__()
 
+        if not isinstance(config, NarrativeDetectorConfig):
+            raise TypeError("config must be NarrativeDetectorConfig")
+
         self.config = config
+
+        # -------------------------------------------------
+        # Encoder
+        # -------------------------------------------------
 
         self.encoder = EncoderFactory.create_transformer_encoder(
             EncoderConfig(
@@ -113,16 +74,22 @@ class NarrativeDetector(BaseModel):
         if hasattr(self.encoder, "gradient_checkpointing_enable"):
             self.encoder.gradient_checkpointing_enable()
 
-        head_config = MultiLabelHeadConfig(
-            input_dim=self.encoder.hidden_size,
-            num_labels=self.NUM_LABELS,
-            dropout=config.dropout,
-            threshold=config.threshold,
+        # -------------------------------------------------
+        # Head
+        # -------------------------------------------------
+
+        self.classifier_head = MultiLabelHead(
+            MultiLabelHeadConfig(
+                input_dim=self.encoder.hidden_size,
+                num_labels=self.NUM_LABELS,
+                dropout=config.dropout,
+                threshold=config.threshold,
+                return_features=False,
+            )
         )
 
-        self.classifier_head = MultiLabelHead(head_config)
-
         self.regression_head: Optional[RegressionHead] = None
+
         if config.use_regression_head:
             self.regression_head = RegressionHead(
                 RegressionHeadConfig(
@@ -140,12 +107,19 @@ class NarrativeDetector(BaseModel):
             self.NUM_LABELS,
         )
 
+    # -----------------------------------------------------
+    # FORWARD
+    # -----------------------------------------------------
+
     def forward(
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         labels: Optional[torch.Tensor] = None,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> Dict[str, Any]:
+
+        if input_ids is None or attention_mask is None:
+            raise ValueError("input_ids and attention_mask must be provided")
 
         encoder_outputs = self.encoder(
             input_ids=input_ids,
@@ -157,52 +131,79 @@ class NarrativeDetector(BaseModel):
         if not pooled_output.is_contiguous():
             pooled_output = pooled_output.contiguous()
 
-        outputs = self.classifier_head(
+        head_outputs = self.classifier_head(
             pooled_output,
             labels=labels,
         )
+
+        outputs: Dict[str, Any] = {
+            "logits": head_outputs["logits"],
+            "probabilities": head_outputs["probabilities"],
+            "predictions": head_outputs["predictions"],
+            "confidence": head_outputs["confidence"],
+            "entropy": head_outputs["entropy"],
+            "loss": head_outputs.get("loss"),
+            "embeddings": pooled_output,
+        }
 
         if self.regression_head is not None:
             outputs["regression"] = self.regression_head(pooled_output)
 
         return outputs
 
-    @torch.no_grad()
+    # -----------------------------------------------------
+    # PREDICT
+    # -----------------------------------------------------
+
+    @torch.inference_mode()
     def predict(
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         threshold: Optional[float] = None,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> Dict[str, Any]:
 
         was_training = self.training
         self.eval()
 
-        outputs = self.forward(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-        )
+        try:
+            outputs = self.forward(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            )
+        finally:
+            if was_training:
+                self.train()
 
-        if was_training:
-            self.train()
+        probs = outputs["probabilities"]
+
+        if threshold is not None:
+            preds = (probs >= float(threshold)).long()
+        else:
+            preds = outputs["predictions"]
 
         return {
-            "predictions": outputs["predictions"],
-            "probabilities": outputs["probabilities"],
+            "predictions": preds,
+            "probabilities": probs,
+            "confidence": outputs["confidence"],
             "labels": self.LABEL_MAPPING,
         }
 
-    def get_output_labels(self) -> Dict[int, str]:
+    # -----------------------------------------------------
+    # LABELS
+    # -----------------------------------------------------
 
+    def get_output_labels(self) -> Dict[int, str]:
         return self.LABEL_MAPPING
 
     def get_label_list(self) -> List[str]:
+        return list(self.LABELS)
 
-                # thread-safe: avoid mutating config
-                if threshold is not None:
-                    outputs["probabilities"] = (
-                        outputs["probabilities"] > float(threshold)
-                    ).float()
+    # -----------------------------------------------------
+    # FACTORIES
+    # -----------------------------------------------------
+
+    @classmethod
     def from_task_config(
         cls,
         task_config: TaskConfig,
@@ -212,29 +213,7 @@ class NarrativeDetector(BaseModel):
         device: Optional[str] = None,
         threshold: float = 0.5,
     ) -> "NarrativeDetector":
-        """
-        Instantiate a ``NarrativeDetector`` from central config dataclasses.
 
-        Parameters
-        ----------
-        task_config:
-            Task-level descriptor from
-            ``MultiTaskModelConfig.tasks["narrative"]``.
-        head_config:
-            Head-level dimensions/dropout from ``model_config.HeadConfig``.
-        model_name:
-            HuggingFace model identifier.
-        pooling:
-            Encoder pooling strategy (``"cls"`` or ``"mean"``).
-        device:
-            Target device string or ``None`` for auto-detection.
-        threshold:
-            Sigmoid threshold for multi-label prediction (default ``0.5``).
-
-        Returns
-        -------
-        NarrativeDetector
-        """
         cfg = NarrativeDetectorConfig(
             model_name=model_name,
             pooling=pooling,
@@ -262,11 +241,7 @@ class NarrativeDetector(BaseModel):
                 else "gelu"
             ),
         )
-        logger.info(
-            "NarrativeDetector.from_task_config | task=%s num_labels=%d",
-            task_config.name,
-            task_config.num_labels,
-        )
+
         return cls(cfg)
 
     @classmethod
@@ -274,9 +249,11 @@ class NarrativeDetector(BaseModel):
         cls,
         model_config: MultiTaskModelConfig,
     ) -> "NarrativeDetector":
+
         task_cfg = model_config.tasks.get("narrative")
+
         if task_cfg is None:
-            raise KeyError("Task 'narrative' not found in MultiTaskModelConfig")
+            raise KeyError("Task 'narrative' not found")
 
         return cls.from_task_config(
             task_config=task_cfg,
@@ -288,8 +265,14 @@ class NarrativeDetector(BaseModel):
             model_name=model_config.encoder.model_name,
             pooling=model_config.encoder.pooling,
             device=model_config.encoder.device,
-            threshold=float(model_config.metadata.get("narrative_threshold", 0.5)),
+            threshold=float(
+                model_config.metadata.get("narrative_threshold", 0.5)
+            ),
         )
+
+    # -----------------------------------------------------
+    # TRAINER
+    # -----------------------------------------------------
 
     def create_trainer(
         self,
@@ -297,17 +280,17 @@ class NarrativeDetector(BaseModel):
         scheduler: Optional[Any] = None,
         config: Optional[TrainerConfig] = None,
     ) -> Trainer:
-        """
-        Build a TruthLensTrainer for this model.
-        """
+
         from dataclasses import replace as _replace
 
         effective_config = config if config is not None else TrainerConfig()
+
         effective_config = _replace(
             effective_config,
             architecture=type(self).__name__,
             model_name=self.config.model_name,
         )
+
         return Trainer(
             model=self,
             optimizer=optimizer,

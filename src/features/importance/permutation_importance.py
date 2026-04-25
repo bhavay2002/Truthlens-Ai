@@ -1,80 +1,82 @@
-"""
-File Name: permutation_importance.py
-Module: Feature Engineering - Feature Importance
-Description:
-    Implements permutation feature importance used for model interpretability
-    and feature analysis. The algorithm measures the importance of each
-    feature by randomly shuffling its values and observing the resulting
-    drop in model performance.
-
-    This implementation is framework-agnostic and works with any model that
-    exposes a predict or predict_proba interface. It supports custom metric
-    functions and deterministic reproducibility through controlled random
-    seeds.
-
-    The module is useful for:
-        • model interpretability
-        • feature ranking
-        • feature pruning
-        • experiment diagnostics
-
-Dependencies:
-    dataclasses
-    typing
-    logging
-    numpy
-
-Inputs:
-    model
-    feature matrix (numpy.ndarray)
-    labels
-    evaluation metric
-
-Outputs:
-    Feature importance scores
-"""
+# src/features/permutation_importance.py
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Tuple
+from typing import Callable, Dict, List, Tuple, Optional
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
-
 MetricFn = Callable[[np.ndarray, np.ndarray], float]
+EPS = 1e-8
 
+
+# =========================================================
+# DEFAULT METRICS
+# =========================================================
 
 def accuracy_metric(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """
-    Default accuracy metric.
-    """
     return float(np.mean(y_true == y_pred))
 
 
+def mse_metric(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    return float(np.mean((y_true - y_pred) ** 2))
+
+
+# =========================================================
+# PERMUTATION IMPORTANCE
+# =========================================================
+
 @dataclass
 class PermutationImportance:
-    """
-    Permutation feature importance calculator.
-    """
 
     model: object
     metric: MetricFn = accuracy_metric
+
     n_repeats: int = 5
     random_seed: int = 42
 
+    normalize: bool = True
+    use_proba: bool = False
+
+    _baseline_cache: Optional[float] = None
+
+    # -----------------------------------------------------
+
     def _predict(self, X: np.ndarray) -> np.ndarray:
-        """
-        Run model prediction using predict or predict_proba.
-        """
+
+        if self.use_proba and hasattr(self.model, "predict_proba"):
+            return self.model.predict_proba(X)
 
         if hasattr(self.model, "predict"):
             return self.model.predict(X)
 
         raise RuntimeError("Model must implement predict()")
+
+    # -----------------------------------------------------
+
+    def _baseline(self, X: np.ndarray, y: np.ndarray) -> float:
+
+        if self._baseline_cache is not None:
+            return self._baseline_cache
+
+        pred = self._predict(X)
+        score = self.metric(y, pred)
+
+        if not np.isfinite(score):
+            raise ValueError("Baseline metric invalid")
+
+        self._baseline_cache = score
+
+        logger.info("Baseline score: %.6f", score)
+        return score
+
+    # -----------------------------------------------------
+    # CORE COMPUTE
+    # -----------------------------------------------------
 
     def compute(
         self,
@@ -82,75 +84,147 @@ class PermutationImportance:
         y: np.ndarray,
         feature_names: List[str],
     ) -> Dict[str, float]:
-        """
-        Compute permutation importance scores.
-
-        Parameters
-        ----------
-        X : np.ndarray
-        y : np.ndarray
-        feature_names : List[str]
-
-        Returns
-        -------
-        Dict[str, float]
-        """
 
         if self.n_repeats <= 0:
             raise ValueError("n_repeats must be > 0")
-        if X.ndim != 2:
-            raise ValueError("X must be 2D")
-        if y.ndim != 1 or len(y) != X.shape[0]:
-            raise ValueError("y must be 1D and match X rows")
-        if X.shape[1] != len(feature_names):
-            raise ValueError("Feature name count must match feature dimension")
+
+        baseline = self._baseline(X, y)
 
         rng = np.random.default_rng(self.random_seed)
 
-        baseline_pred = self._predict(X)
-        baseline_score = self.metric(y, baseline_pred)
-
-        if not np.isfinite(baseline_score):
-            raise ValueError("Baseline metric is not finite")
-
-        logger.info("Baseline model score: %.6f", baseline_score)
-
         importances: Dict[str, float] = {}
 
-        for feature_idx, name in enumerate(feature_names):
+        for j, name in enumerate(feature_names):
 
             scores = []
 
+            col = X[:, j].copy()
+
             for _ in range(self.n_repeats):
 
-                X_permuted = X.copy()
+                shuffled = rng.permutation(col)
 
-                shuffled = rng.permutation(X_permuted[:, feature_idx])
+                X[:, j] = shuffled
 
-                X_permuted[:, feature_idx] = shuffled
-
-                pred = self._predict(X_permuted)
-
+                pred = self._predict(X)
                 score = self.metric(y, pred)
 
                 if not np.isfinite(score):
-                    raise ValueError(
-                        f"Metric returned non-finite score for feature '{name}'"
-                    )
+                    raise ValueError(f"Invalid score for feature {name}")
 
-                scores.append(baseline_score - score)
+                scores.append(baseline - score)
 
-            importance = float(np.mean(scores))
+            # restore original column
+            X[:, j] = col
 
-            importances[name] = importance
+            mean_imp = float(np.mean(scores))
 
-            logger.debug(
-                "Permutation importance | feature=%s score=%.6f",
-                name,
-                importance,
-            )
+            if self.normalize:
+                mean_imp = mean_imp / (abs(baseline) + EPS)
+
+            importances[name] = mean_imp
 
         return importances
+
+    # -----------------------------------------------------
+    # VARIANCE (IMPORTANT)
+    # -----------------------------------------------------
+
+    def compute_with_variance(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        feature_names: List[str],
+    ) -> Dict[str, Tuple[float, float]]:
+
+        baseline = self._baseline(X, y)
+
+        rng = np.random.default_rng(self.random_seed)
+
+        results = {}
+
+        for j, name in enumerate(feature_names):
+
+            scores = []
+            col = X[:, j].copy()
+
+            for _ in range(self.n_repeats):
+
+                X[:, j] = rng.permutation(col)
+
+                pred = self._predict(X)
+                score = self.metric(y, pred)
+
+                scores.append(baseline - score)
+
+            X[:, j] = col
+
+            arr = np.array(scores)
+
+            mean = float(arr.mean())
+            std = float(arr.std())
+
+            if self.normalize:
+                mean = mean / (abs(baseline) + EPS)
+                std = std / (abs(baseline) + EPS)
+
+            results[name] = (mean, std)
+
+        return results
+
+    # -----------------------------------------------------
+    # GROUP PERMUTATION (ADVANCED)
+    # -----------------------------------------------------
+
+    def group_permutation(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        feature_names: List[str],
+        groups: Dict[str, List[str]],
+    ) -> Dict[str, float]:
+
+        baseline = self._baseline(X, y)
+
+        name_to_idx = {n: i for i, n in enumerate(feature_names)}
+        rng = np.random.default_rng(self.random_seed)
+
+        results = {}
+
+        for group, feats in groups.items():
+
+            indices = [name_to_idx[f] for f in feats if f in name_to_idx]
+
+            if not indices:
+                results[group] = 0.0
+                continue
+
+            scores = []
+
+            original = X[:, indices].copy()
+
+            for _ in range(self.n_repeats):
+
+                for idx in indices:
+                    X[:, idx] = rng.permutation(X[:, idx])
+
+                pred = self._predict(X)
+                score = self.metric(y, pred)
+
+                scores.append(baseline - score)
+
+            X[:, indices] = original
+
+            val = float(np.mean(scores))
+
+            if self.normalize:
+                val = val / (abs(baseline) + EPS)
+
+            results[group] = val
+
+        return results
+
+    # -----------------------------------------------------
 
     def rank_features(
         self,
@@ -158,17 +232,12 @@ class PermutationImportance:
         y: np.ndarray,
         feature_names: List[str],
     ) -> List[Tuple[str, float]]:
-        """
-        Compute and rank features by importance.
-        """
 
         scores = self.compute(X, y, feature_names)
 
-        ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        return sorted(scores.items(), key=lambda x: x[1], reverse=True)
 
-        logger.info("Computed permutation feature ranking")
-
-        return ranked
+    # -----------------------------------------------------
 
     def top_k(
         self,
@@ -177,10 +246,5 @@ class PermutationImportance:
         feature_names: List[str],
         k: int = 20,
     ) -> List[Tuple[str, float]]:
-        """
-        Return top-k important features.
-        """
 
-        ranked = self.rank_features(X, y, feature_names)
-
-        return ranked[:k]
+        return self.rank_features(X, y, feature_names)[:k]

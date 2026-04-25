@@ -1,36 +1,3 @@
-"""
-File Name: explanation_visualizer.py
-Module: Explainability - Visualization
-Description:
-    Centralized visualization utilities for explainability outputs in the
-    TruthLens AI system. This module consolidates plotting functions used
-    across explanation methods and provides standardized visualizations for:
-
-        • Token importance heatmaps
-        • Token importance bar charts
-        • Attention maps
-        • Explanation comparison plots
-
-    The module is designed to support research analysis, debugging,
-    dashboards, and reporting pipelines.
-
-Author: TruthLens Engineering Team
-Date: 2026-04-02
-
-Dependencies:
-    logging
-    typing
-    numpy
-    matplotlib
-
-Inputs:
-    tokens
-    explanation scores
-
-Outputs:
-    Matplotlib visualizations
-"""
-
 from __future__ import annotations
 
 import logging
@@ -40,175 +7,239 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 logger = logging.getLogger(__name__)
+EPS = 1e-12
+
+try:
+   l import plotly.graph_objects as go
+except ImportError:  # optiona
+    go = None
 
 
 class ExplanationVisualizer:
-    """
-    Visualization utilities for explanation outputs.
-    """
 
     def __init__(self) -> None:
         logger.info("ExplanationVisualizer initialized")
 
+    # =====================================================
+    # VALIDATION
+    # =====================================================
+
     @staticmethod
-    def _validate_tokens_scores(tokens: List[str], scores: List[float]) -> None:
+    def _validate(tokens: List[str], scores: List[float]) -> None:
         if not tokens or not scores:
             raise ValueError("tokens and scores must not be empty")
-
         if len(tokens) != len(scores):
-            raise ValueError("tokens and scores must have the same length")
+            raise ValueError("tokens and scores must match length")
+
+    # =====================================================
+    # NORMALIZATION
+    # =====================================================
+
+    @staticmethod
+    def _normalize(scores: List[float]) -> np.ndarray:
+        s = np.asarray(scores, dtype=float)
+        s = np.abs(s)
+        return s / (np.sum(s) + EPS)
+
+    # =====================================================
+    # SAVE HANDLER
+    # =====================================================
+
+    def _finalize(self, fig, save_path: Optional[str]):
+        if save_path:
+            fig.savefig(save_path)
+        else:
+            plt.show()
+        plt.close(fig)
+
+    # =====================================================
+    #  MULTI-METHOD OVERLAY (NEW)
+    # =====================================================
+
+    def plot_multi_method_overlay(
+        self,
+        tokens: List[str],
+        explanations: Dict[str, List[float]],
+        *,
+        normalize: bool = True,
+        save_path: Optional[str] = None,
+    ):
+        """
+        Overlay multiple explanation methods on same token axis.
+        """
+
+        for scores in explanations.values():
+            self._validate(tokens, scores)
+
+        if normalize:
+            explanations = {
+                k: self._normalize(v) for k, v in explanations.items()
+            }
+
+        fig, ax = plt.subplots(figsize=(12, 6))
+
+        for name, scores in explanations.items():
+            ax.plot(tokens, scores, marker="o", label=name)
+
+        ax.set_title("Multi-Method Explanation Overlay")
+        ax.legend()
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+
+        self._finalize(fig, save_path)
+
+    # =====================================================
+    #  PLOTLY INTERACTIVE (NEW)
+    # =====================================================
+
+    def plot_interactive(
+        self,
+        tokens: List[str],
+        explanations: Dict[str, List[float]],
+        *,
+        normalize: bool = True,
+    ):
+        """
+        Interactive Plotly visualization.
+        """
+
+        if go is None:
+            raise ImportError("Install plotly for interactive visualization")
+
+        for scores in explanations.values():
+            self._validate(tokens, scores)
+
+        if normalize:
+            explanations = {
+                k: self._normalize(v) for k, v in explanations.items()
+            }
+
+        fig = go.Figure()
+
+        for name, scores in explanations.items():
+            fig.add_trace(
+                go.Scatter(
+                    x=tokens,
+                    y=scores,
+                    mode="lines+markers",
+                    name=name,
+                )
+            )
+
+        fig.update_layout(
+            title="Interactive Explanation Visualization",
+            xaxis_title="Tokens",
+            yaxis_title="Importance",
+        )
+
+        fig.show()
+
+    # =====================================================
+    # TOKEN HEATMAP
+    # =====================================================
 
     def plot_token_heatmap(
         self,
         tokens: List[str],
         scores: List[float],
+        *,
+        normalize: bool = True,
         title: str = "Token Importance Heatmap",
-    ) -> None:
-        """
-        Plot token importance heatmap.
-        """
+        save_path: Optional[str] = None,
+    ):
 
-        self._validate_tokens_scores(tokens, scores)
+        self._validate(tokens, scores)
+
+        if normalize:
+            scores = self._normalize(scores)
 
         matrix = np.array(scores).reshape(1, -1)
 
         fig, ax = plt.subplots(figsize=(max(len(tokens) * 0.5, 8), 2))
 
-        heatmap = ax.imshow(matrix, cmap="viridis", aspect="auto")
-
+        im = ax.imshow(matrix, aspect="auto")
         ax.set_xticks(range(len(tokens)))
         ax.set_xticklabels(tokens, rotation=90)
-
         ax.set_yticks([])
-
         ax.set_title(title)
 
-        fig.colorbar(heatmap, ax=ax)
-
+        fig.colorbar(im, ax=ax)
         plt.tight_layout()
-        plt.show()
-        plt.close(fig)
+
+        self._finalize(fig, save_path)
+
+    # =====================================================
+    # BAR CHART
+    # =====================================================
 
     def plot_importance_bar(
         self,
         tokens: List[str],
         scores: List[float],
-        top_k: Optional[int] = 20,
-        title: str = "Token Importance",
-    ) -> None:
-        """
-        Plot token importance as a bar chart.
-        """
+        *,
+        top_k: int = 20,
+        normalize: bool = True,
+        save_path: Optional[str] = None,
+    ):
 
-        self._validate_tokens_scores(tokens, scores)
+        self._validate(tokens, scores)
+
+        if normalize:
+            scores = self._normalize(scores)
 
         tokens_arr = np.array(tokens)
         scores_arr = np.array(scores)
 
-        order = np.argsort(np.abs(scores_arr))[::-1]
-
-        if top_k:
-            order = order[:top_k]
-
-        tokens_sorted = tokens_arr[order]
-        scores_sorted = scores_arr[order]
+        order = np.argsort(scores_arr)[::-1][:top_k]
 
         fig, ax = plt.subplots(figsize=(10, 6))
+        ax.barh(tokens_arr[order][::-1], scores_arr[order][::-1])
 
-        ax.barh(tokens_sorted[::-1], scores_sorted[::-1])
-
-        ax.set_xlabel("Importance Score")
-        ax.set_title(title)
-
+        ax.set_title("Top Token Importance")
         plt.tight_layout()
-        plt.show()
-        plt.close(fig)
 
-    def plot_attention_map(
+        self._finalize(fig, save_path)
+
+    # =====================================================
+    #  UPDATED FULL VIEW
+    # =====================================================
+
+    def visualize_aggregated(
         self,
-        attention_matrix: np.ndarray,
-        tokens: List[str],
-        title: str = "Attention Map",
-    ) -> None:
-        """
-        Plot transformer attention matrix.
-        """
+        aggregated_output: Dict,
+        *,
+        method_outputs: Optional[Dict[str, List[float]]] = None,
+        save_prefix: Optional[str] = None,
+        interactive: bool = False,
+    ):
 
-        if attention_matrix.ndim != 2:
-            raise ValueError("attention_matrix must be 2D")
+        tokens = aggregated_output.get("tokens", [])
+        importance = aggregated_output.get("final_token_importance", [])
 
-        if len(tokens) != attention_matrix.shape[0]:
-            raise ValueError("tokens length must match attention matrix size")
+        if not tokens or not importance:
+            raise ValueError("Invalid aggregated output")
 
-        fig, ax = plt.subplots(figsize=(8, 8))
+        # Base plots
+        self.plot_token_heatmap(
+            tokens,
+            importance,
+            save_path=f"{save_prefix}_heatmap.png" if save_prefix else None,
+        )
 
-        im = ax.imshow(attention_matrix, cmap="viridis")
+        self.plot_importance_bar(
+            tokens,
+            importance,
+            save_path=f"{save_prefix}_bar.png" if save_prefix else None,
+        )
 
-        ax.set_xticks(range(len(tokens)))
-        ax.set_xticklabels(tokens, rotation=90)
+        # multi-method overlay
+        if method_outputs:
+            self.plot_multi_method_overlay(
+                tokens,
+                method_outputs,
+                save_path=f"{save_prefix}_overlay.png" if save_prefix else None,
+            )
 
-        ax.set_yticks(range(len(tokens)))
-        ax.set_yticklabels(tokens)
-
-        ax.set_title(title)
-
-        fig.colorbar(im, ax=ax)
-
-        plt.tight_layout()
-        plt.show()
-        plt.close(fig)
-
-    def plot_explanation_comparison(
-        self,
-        tokens: List[str],
-        explanations: Dict[str, List[float]],
-        top_k: Optional[int] = 15,
-        title: str = "Explanation Comparison",
-    ) -> None:
-        """
-        Compare explanation methods side-by-side.
-
-        explanations format example:
-        {
-            "shap": [...],
-            "integrated_gradients": [...],
-            "attention": [...]
-        }
-        """
-
-        if not explanations:
-            raise ValueError("explanations dictionary cannot be empty")
-
-        for name, scores in explanations.items():
-            if len(scores) != len(tokens):
-                raise ValueError(
-                    f"Explanation '{name}' scores must match tokens length"
-                )
-
-        scores_matrix = np.vstack(list(explanations.values()))
-
-        avg_scores = np.mean(np.abs(scores_matrix), axis=0)
-
-        order = np.argsort(avg_scores)[::-1]
-
-        if top_k:
-            order = order[:top_k]
-
-        tokens_top = np.array(tokens)[order]
-
-        fig, ax = plt.subplots(figsize=(12, 6))
-
-        for name, scores in explanations.items():
-            scores_arr = np.array(scores)[order]
-            ax.plot(tokens_top, scores_arr, marker="o", label=name)
-
-        ax.set_title(title)
-        ax.set_ylabel("Importance Score")
-
-        ax.legend()
-
-        plt.xticks(rotation=45)
-
-        plt.tight_layout()
-        plt.show()
-        plt.close(fig)
+            #  interactive
+            if interactive:
+                self.plot_interactive(tokens, method_outputs)

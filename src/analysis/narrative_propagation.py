@@ -1,5 +1,3 @@
-# src/analysis/narrative_propagation.py
-
 from __future__ import annotations
 
 import logging
@@ -18,58 +16,32 @@ from src.analysis.feature_schema import NARRATIVE_PROPAGATION_KEYS, make_vector
 logger = logging.getLogger(__name__)
 
 
+# =========================================================
+# CONSTANTS
+# =========================================================
+
+EPS = 1e-8
+MAX_CLIP = 1.0
+
+
+# =========================================================
+# ANALYZER
+# =========================================================
+
 class NarrativePropagationAnalyzer(BaseAnalyzer):
 
-    CONFLICT_VERBS = {
-        "violent_conflict": {
-            "attack","assault","strike","bomb","invade","raid",
-            "kill","destroy","eliminate","retaliate","counterattack",
-            "fight","battle","clash"
-        },
-        "political_conflict": {
-            "oppose","challenge","confront","block","resist",
-            "defy","undermine","topple","overthrow"
-        },
-        "discursive_conflict": {
-            "accuse","blame","criticize","condemn","denounce",
-            "slam","rebuke","mock","dismiss"
-        },
-        "institutional_conflict": {
-            "sue","investigate","prosecute","charge","sanction","impeach"
-        },
-        "coercion_conflict": {
-            "threaten","warn","pressure","intimidate","coerce"
-        },
-    }
+    name = "narrative_propagation"
+    expected_keys = set(NARRATIVE_PROPAGATION_KEYS)
 
-    OPPOSITION_MARKERS = {
-        "against","versus","vs","opposed","opposing",
-        "conflict","confrontation","showdown","standoff",
-        "rival","rivalry","competitor","adversary",
-        "struggle","battle","fight","clash",
-    }
+    CONFLICT_VERBS: Dict[str, Set[str]] = {...}
+    OPPOSITION_MARKERS: Set[str] = {...}
+    POLARIZATION_TERMS: Set[str] = {...}
+    CONFLICT_PHRASES: Set[str] = {...}
 
-    POLARIZATION_TERMS = {
-        "us","we","our","ours",
-        "them","they","their","others",
-        "enemy","opponent","adversary",
-        "elite","establishment","globalists",
-        "extremists","radicals",
-    }
-
-    CONFLICT_PHRASES = {
-        "war against","fight against","battle against",
-        "clash with","conflict with","power struggle",
-        "political fight","ideological battle",
-        "direct confrontation","rising tensions",
-        "growing conflict",
-    }
-
-    # -----------------------------------------------------
+    # =========================================================
 
     def __init__(self):
 
-        # 🔥 normalize ONCE
         self.conflict_verbs = {
             k: normalize_lexicon_terms(v)
             for k, v in self.CONFLICT_VERBS.items()
@@ -79,9 +51,9 @@ class NarrativePropagationAnalyzer(BaseAnalyzer):
         self.polarization = normalize_lexicon_terms(self.POLARIZATION_TERMS)
         self.conflict_phrases = normalize_lexicon_terms(self.CONFLICT_PHRASES)
 
-        logger.info("NarrativePropagationAnalyzer initialized (optimized)")
+        logger.info("NarrativePropagationAnalyzer initialized (final)")
 
-    # -----------------------------------------------------
+    # =========================================================
 
     def analyze(
         self,
@@ -91,65 +63,114 @@ class NarrativePropagationAnalyzer(BaseAnalyzer):
         victim_entities: Optional[List[str]] = None,
     ) -> Dict[str, float]:
 
-        if ctx.n_tokens == 0:
+        # 🔥 lazy-safe
+        ctx.ensure_tokens()
+
+        if ctx.safe_n_tokens() == 0:
             return self._empty()
 
-        features: Dict[str, float] = {}
+        n_tokens = ctx.safe_n_tokens()
 
-        features.update(self._conflict_verb_features(ctx))
-        features.update(self._opposition(ctx))
-        features.update(self._polarization(ctx))
-        features.update(self._conflict_phrase_features(ctx))
-        features.update(
-            self._actor_roles(
-                ctx,
-                hero_entities,
-                villain_entities,
-                victim_entities,
-            )
+        # -----------------------------------------------------
+        # CONFLICT DISTRIBUTION
+        # -----------------------------------------------------
+
+        raw = self._conflict_distribution(ctx)
+        dist = self._normalize(raw)
+
+        # -----------------------------------------------------
+        # OTHER SIGNALS
+        # -----------------------------------------------------
+
+        opposition = self._density(ctx, self.opposition)
+        polarization = self._density(ctx, self.polarization)
+        phrase = self._density(ctx, self.conflict_phrases)
+
+        # -----------------------------------------------------
+        # ACTOR STRUCTURE
+        # -----------------------------------------------------
+
+        actor = self._actor_roles(
+            ctx,
+            hero_entities,
+            villain_entities,
+            victim_entities,
         )
-        features.update(self._punctuation(ctx))
 
-        return features
+        # -----------------------------------------------------
+        # PROPAGATION INTENSITY
+        # -----------------------------------------------------
 
-    # -----------------------------------------------------
+        propagation = (
+            0.4 * sum(dist.values()) +
+            0.2 * opposition +
+            0.2 * polarization +
+            0.2 * phrase
+        )
 
-    def _conflict_verb_features(self, ctx: FeatureContext) -> Dict[str, float]:
+        # -----------------------------------------------------
+        # DIVERSITY
+        # -----------------------------------------------------
 
-        features = {}
-        total = max(ctx.n_tokens, 1)
+        diversity = self._entropy(dist)
 
-        for category, lexicon in self.conflict_verbs.items():
-            count = sum(ctx.token_counts.get(t, 0) for t in lexicon)
-            features[f"{category}_ratio"] = float(count / total)
+        # -----------------------------------------------------
+        # PUNCTUATION (FIXED)
+        # -----------------------------------------------------
 
-        return features
+        exclaim = self._punctuation(ctx, "!")
+        question = self._punctuation(ctx, "?")
 
-    # -----------------------------------------------------
-
-    def _opposition(self, ctx: FeatureContext) -> Dict[str, float]:
-
-        count = sum(ctx.token_counts.get(t, 0) for t in self.opposition)
-        return {"opposition_marker_ratio": float(count / max(ctx.n_tokens, 1))}
-
-    # -----------------------------------------------------
-
-    def _polarization(self, ctx: FeatureContext) -> Dict[str, float]:
-
-        count = sum(ctx.token_counts.get(t, 0) for t in self.polarization)
-        return {"polarization_ratio": float(count / max(ctx.n_tokens, 1))}
-
-    # -----------------------------------------------------
-
-    def _conflict_phrase_features(self, ctx: FeatureContext) -> Dict[str, float]:
-
-        hits = phrase_match_count(ctx.text_lower, self.conflict_phrases)
+        # -----------------------------------------------------
+        # OUTPUT
+        # -----------------------------------------------------
 
         return {
-            "conflict_phrase_ratio": float(hits / max(ctx.n_tokens, 1))
+            **{f"{k}_ratio": self._safe(v) for k, v in dist.items()},
+            "opposition_marker_ratio": self._safe(opposition),
+            "polarization_ratio": self._safe(polarization),
+            "conflict_phrase_ratio": self._safe(phrase),
+            **actor,
+            "conflict_propagation_intensity": self._safe(propagation),
+            "conflict_diversity": self._safe(diversity),
+            "conflict_exclamation_ratio": self._safe(exclaim),
+            "conflict_question_ratio": self._safe(question),
         }
 
-    # -----------------------------------------------------
+    # =========================================================
+
+    def _conflict_distribution(self, ctx: FeatureContext) -> Dict[str, float]:
+
+        n_tokens = ctx.safe_n_tokens()
+
+        return {
+            k: sum(ctx.safe_counts().get(t, 0) for t in lexicon) / (n_tokens + EPS)
+            for k, lexicon in self.conflict_verbs.items()
+        }
+
+    # =========================================================
+
+    def _density(self, ctx: FeatureContext, lexicon: Set[str]) -> float:
+
+        n_tokens = ctx.safe_n_tokens()
+
+        token_hits = sum(
+            ctx.safe_counts().get(t, 0)
+            for t in lexicon
+            if " " not in t
+        )
+
+        phrase_hits = phrase_match_count(
+            ctx.text_lower or "",
+            lexicon
+        )
+
+        # 🔥 weighted fusion
+        combined = 0.7 * token_hits + 0.3 * phrase_hits
+
+        return combined / (n_tokens + EPS)
+
+    # =========================================================
 
     def _actor_roles(
         self,
@@ -159,7 +180,7 @@ class NarrativePropagationAnalyzer(BaseAnalyzer):
         victims: Optional[List[str]],
     ) -> Dict[str, float]:
 
-        text = ctx.text_lower
+        text = ctx.text_lower or ""
 
         heroes = heroes or []
         villains = villains or []
@@ -169,31 +190,79 @@ class NarrativePropagationAnalyzer(BaseAnalyzer):
         villain_mentions = sum(text.count(v.lower()) for v in villains)
         victim_mentions = sum(text.count(v.lower()) for v in victims)
 
+        total = hero_mentions + villain_mentions + victim_mentions
+
+        if total == 0:
+            return {
+                "hero_villain_conflict_score": 0.0,
+                "villain_victim_harm_score": 0.0,
+                "hero_victim_protection_score": 0.0,
+            }
+
         return {
             "hero_villain_conflict_score":
-                float(min(hero_mentions, villain_mentions)),
+                self._safe(min(hero_mentions, villain_mentions) / total),
             "villain_victim_harm_score":
-                float(min(villain_mentions, victim_mentions)),
+                self._safe(min(villain_mentions, victim_mentions) / total),
             "hero_victim_protection_score":
-                float(min(hero_mentions, victim_mentions)),
+                self._safe(min(hero_mentions, victim_mentions) / total),
         }
 
-    # -----------------------------------------------------
+    # =========================================================
 
-    def _punctuation(self, ctx: FeatureContext) -> Dict[str, float]:
+    def _normalize(self, scores: Dict[str, float]) -> Dict[str, float]:
 
-        text = ctx.text_lower
+        values = np.array(list(scores.values()), dtype=np.float32)
 
-        return {
-            "conflict_exclamation_ratio":
-                text.count("!") / max(ctx.n_tokens, 1),
-            "conflict_question_ratio":
-                text.count("?") / max(ctx.n_tokens, 1),
-        }
+        total = float(values.sum())
 
-    # -----------------------------------------------------
+        if total < EPS:
+            return {k: 0.0 for k in scores}
+
+        norm = values / (total + EPS)
+
+        return dict(zip(scores.keys(), norm.astype(float)))
+
+    # =========================================================
+
+    def _entropy(self, dist: Dict[str, float]) -> float:
+
+        values = np.array(list(dist.values()), dtype=np.float32)
+
+        if values.sum() < EPS:
+            return 0.0
+
+        probs = values / (values.sum() + EPS)
+
+        entropy = -np.sum(probs * np.log(probs + EPS))
+        max_entropy = np.log(len(probs))
+
+        return float(entropy / (max_entropy + EPS))
+
+    # =========================================================
+
+    def _punctuation(self, ctx: FeatureContext, symbol: str) -> float:
+
+        text = ctx.text_lower or ""
+
+        # FIX: no double counting
+        count = text.count(symbol)
+
+        return count / (ctx.safe_n_tokens() + EPS)
+
+    # =========================================================
+
+    def _safe(self, value: float) -> float:
+
+        if not np.isfinite(value):
+            return 0.0
+
+        return float(np.clip(value, 0.0, MAX_CLIP))
+
+    # =========================================================
 
     def _empty(self) -> Dict[str, float]:
+
         return {
             "violent_conflict_ratio": 0.0,
             "political_conflict_ratio": 0.0,
@@ -206,14 +275,16 @@ class NarrativePropagationAnalyzer(BaseAnalyzer):
             "hero_villain_conflict_score": 0.0,
             "villain_victim_harm_score": 0.0,
             "hero_victim_protection_score": 0.0,
+            "conflict_propagation_intensity": 0.0,
+            "conflict_diversity": 0.0,
             "conflict_exclamation_ratio": 0.0,
             "conflict_question_ratio": 0.0,
         }
 
 
-# ---------------------------------------------------------
-# Vector
-# ---------------------------------------------------------
+# =========================================================
+# VECTOR
+# =========================================================
 
 def narrative_propagation_vector(features: Dict[str, float]) -> np.ndarray:
     return make_vector(features, NARRATIVE_PROPAGATION_KEYS)

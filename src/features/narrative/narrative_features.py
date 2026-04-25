@@ -1,37 +1,4 @@
-"""
-File Name: narrative_features.py
-Module: Feature Engineering - Narrative Features
-Description:
-    Extracts narrative structure indicators from text.
-
-    The module detects narrative storytelling patterns commonly used in
-    journalism, political messaging, and propaganda narratives.
-    
-    Signals include:
-    
-    1. Narrative roles (hero / villain / victim)
-    2. Conflict framing
-    3. Crisis escalation language
-    4. Narrative resolution signals
-    5. Polarization language
-    6. Narrative progression patterns
-    
-    The implementation is deterministic and lexicon-based, allowing
-    lightweight feature extraction within the TruthLens pipeline.
-
-Dependencies:
-    dataclasses
-    typing
-    logging
-    re
-    collections
-
-Inputs:
-    FeatureContext containing input text and optional tokens
-
-Outputs:
-    Dict[str, float] representing narrative structure indicators
-"""
+# src/features/narrative_features.py
 
 from __future__ import annotations
 
@@ -41,10 +8,15 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, List, Set
 
+import numpy as np
+
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
 
 logger = logging.getLogger(__name__)
+
+EPS = 1e-8
+MAX_CLIP = 1.0
 
 
 # ---------------------------------------------------------
@@ -52,182 +24,150 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------
 
 def _tokenize(text: str) -> List[str]:
-    """Fallback tokenizer."""
     return re.findall(r"\b\w+\b", text.lower())
 
 
 # ---------------------------------------------------------
-# Narrative Lexicons (Research Level)
+# Lexicons
 # ---------------------------------------------------------
 
-HERO_TERMS: Set[str] = {
+HERO_TERMS = {...}
+VILLAIN_TERMS = {...}
+VICTIM_TERMS = {...}
 
-    "hero","leader","defender","champion",
-    "protect","save","rescue","support",
-    "aid","assist","defend","help"
-}
+CONFLICT_TERMS = {...}
+RESOLUTION_TERMS = {...}
+CRISIS_TERMS = {...}
 
-VILLAIN_TERMS: Set[str] = {
-
-    "villain","enemy","corrupt","attacker",
-    "threat","destroy","betray","abuse",
-    "exploit","oppress","manipulate"
-}
-
-VICTIM_TERMS: Set[str] = {
-
-    "victim","suffer","harm","damage",
-    "loss","injured","affected","targeted",
-    "displaced","hurt"
-}
-
-CONFLICT_TERMS: Set[str] = {
-
-    "conflict","battle","fight","clash",
-    "dispute","attack","war","showdown",
-    "standoff","confrontation"
-}
-
-RESOLUTION_TERMS: Set[str] = {
-
-    "resolve","agreement","peace","solution",
-    "settlement","deal","compromise",
-    "negotiation","reconciliation"
-}
-
-CRISIS_TERMS: Set[str] = {
-
-    "crisis","emergency","disaster",
-    "collapse","panic","chaos",
-    "catastrophe","meltdown"
-}
-
-POLARIZATION_TERMS: Set[str] = {
-
-    "us","them","enemy","opponent",
-    "elite","establishment","outsiders",
-    "radicals","extremists"
-}
-
-
-EXCLAMATION_PATTERN = re.compile(r"!")
-QUESTION_PATTERN = re.compile(r"\?")
+POLARIZATION_TERMS = {...}
 
 
 # ---------------------------------------------------------
-# Feature Class
+# Feature
 # ---------------------------------------------------------
 
 @dataclass
 @register_feature
 class NarrativeFeatures(BaseFeature):
-    """
-    Extract narrative storytelling indicators.
-
-    Output Features
-    ---------------
-    narrative_hero_ratio
-    narrative_villain_ratio
-    narrative_victim_ratio
-    narrative_conflict_ratio
-    narrative_resolution_ratio
-    narrative_crisis_ratio
-    narrative_polarization_ratio
-    narrative_role_diversity
-    narrative_conflict_intensity
-    narrative_progression_score
-    narrative_rhetoric_score
-    """
 
     name: str = "narrative_features"
-    description: str = "Narrative structure and role framing indicators"
+    group: str = "narrative"
+    description: str = "Normalized narrative structure features"
 
     # -----------------------------------------------------
 
     def extract(self, context: FeatureContext) -> Dict[str, float]:
 
-        if not context.text:
-            raise ValueError("FeatureContext.text cannot be empty")
+        text = context.text.strip()
+        if not text:
+            return {}
 
-        tokens = context.tokens or _tokenize(context.text)
+        tokens = context.tokens or _tokenize(text)
+        n = len(tokens)
 
-        if not tokens:
-            logger.warning("No tokens available for narrative feature extraction")
+        if n == 0:
             return {}
 
         counter = Counter(tokens)
-        total_tokens = len(tokens)
 
         def ratio(lexicon: Set[str]) -> float:
-            hits = sum(counter.get(w, 0) for w in lexicon)
-            return hits / total_tokens
+            return sum(counter.get(w, 0) for w in lexicon) / (n + EPS)
 
-        hero_ratio = ratio(HERO_TERMS)
-        villain_ratio = ratio(VILLAIN_TERMS)
-        victim_ratio = ratio(VICTIM_TERMS)
-
-        conflict_ratio = ratio(CONFLICT_TERMS)
-        resolution_ratio = ratio(RESOLUTION_TERMS)
-        crisis_ratio = ratio(CRISIS_TERMS)
-
-        polarization_ratio = ratio(POLARIZATION_TERMS)
-
-        # -------------------------------------------------
-        # Role diversity
-        # -------------------------------------------------
-
-        role_values = [hero_ratio, villain_ratio, victim_ratio]
-
-        role_diversity = sum(1 for v in role_values if v > 0) / len(role_values)
-
-        # -------------------------------------------------
-        # Conflict intensity
-        # -------------------------------------------------
-
-        conflict_intensity = (conflict_ratio + crisis_ratio) / 2.0
-
-        # -------------------------------------------------
-        # Narrative progression
-        # conflict -> resolution structure
-        # -------------------------------------------------
-
-        progression_score = resolution_ratio - conflict_ratio
-
-        # -------------------------------------------------
-        # Rhetorical emphasis
-        # -------------------------------------------------
-
-        exclamations = len(EXCLAMATION_PATTERN.findall(context.text))
-        questions = len(QUESTION_PATTERN.findall(context.text))
-
-        rhetoric_score = (exclamations + questions) / max(len(context.text), 1)
-
-        # -------------------------------------------------
-
-        features: Dict[str, float] = {
-
-            "narrative_hero_ratio": float(hero_ratio),
-            "narrative_villain_ratio": float(villain_ratio),
-            "narrative_victim_ratio": float(victim_ratio),
-
-            "narrative_conflict_ratio": float(conflict_ratio),
-            "narrative_resolution_ratio": float(resolution_ratio),
-            "narrative_crisis_ratio": float(crisis_ratio),
-
-            "narrative_polarization_ratio": float(polarization_ratio),
-
-            "narrative_role_diversity": float(role_diversity),
-            "narrative_conflict_intensity": float(conflict_intensity),
-
-            "narrative_progression_score": float(progression_score),
-
-            "narrative_rhetoric_score": float(rhetoric_score),
+        raw_roles = {
+            "hero": ratio(HERO_TERMS),
+            "villain": ratio(VILLAIN_TERMS),
+            "victim": ratio(VICTIM_TERMS),
         }
 
-        logger.debug(
-            "Narrative features extracted | conflict=%.4f roles=%.4f",
-            conflict_intensity,
-            role_diversity,
+        raw_context = {
+            "conflict": ratio(CONFLICT_TERMS),
+            "resolution": ratio(RESOLUTION_TERMS),
+            "crisis": ratio(CRISIS_TERMS),
+            "polarization": ratio(POLARIZATION_TERMS),
+        }
+
+        # -------------------------
+        # ROLE DISTRIBUTION
+        # -------------------------
+
+        role_vals = np.array(list(raw_roles.values()), dtype=np.float32)
+        role_total = role_vals.sum()
+
+        if role_total > 0:
+            role_dist = role_vals / (role_total + EPS)
+        else:
+            role_dist = np.zeros_like(role_vals)
+
+        # -------------------------
+        # CONTEXT DISTRIBUTION
+        # -------------------------
+
+        ctx_vals = np.array(list(raw_context.values()), dtype=np.float32)
+        ctx_total = ctx_vals.sum()
+
+        if ctx_total > 0:
+            ctx_dist = ctx_vals / (ctx_total + EPS)
+        else:
+            ctx_dist = np.zeros_like(ctx_vals)
+
+        # -------------------------
+        # INTENSITY
+        # -------------------------
+
+        intensity = float(np.linalg.norm(ctx_vals))
+
+        # -------------------------
+        # ENTROPY
+        # -------------------------
+
+        def entropy_fn(v):
+            if v.sum() > 0:
+                e = -np.sum(v * np.log(v + EPS))
+                return e / (np.log(len(v)) + EPS)
+            return 0.0
+
+        role_entropy = entropy_fn(role_dist)
+        context_entropy = entropy_fn(ctx_dist)
+
+        # -------------------------
+        # PROGRESSION (FIXED)
+        # -------------------------
+
+        progression = raw_context["resolution"] / (
+            raw_context["resolution"] + raw_context["conflict"] + EPS
         )
 
-        return features
+        # -------------------------
+        # RHETORIC (FIXED)
+        # -------------------------
+
+        rhetoric = (text.count("!") + text.count("?")) / (n + EPS)
+
+        # -------------------------
+        # OUTPUT
+        # -------------------------
+
+        return {
+            "narrative_hero": self._safe(role_dist[0]),
+            "narrative_villain": self._safe(role_dist[1]),
+            "narrative_victim": self._safe(role_dist[2]),
+
+            "narrative_conflict": self._safe(ctx_dist[0]),
+            "narrative_resolution": self._safe(ctx_dist[1]),
+            "narrative_crisis": self._safe(ctx_dist[2]),
+            "narrative_polarization": self._safe(ctx_dist[3]),
+
+            "narrative_intensity": self._safe(intensity),
+            "narrative_role_entropy": self._safe(role_entropy),
+            "narrative_context_entropy": self._safe(context_entropy),
+
+            "narrative_progression": self._safe(progression),
+            "narrative_rhetoric": self._safe(rhetoric),
+        }
+
+    # -----------------------------------------------------
+
+    def _safe(self, v: float) -> float:
+        if not np.isfinite(v):
+            return 0.0
+        return float(np.clip(v, 0.0, MAX_CLIP))

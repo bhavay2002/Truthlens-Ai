@@ -1,37 +1,3 @@
-"""
-File Name: ideology_classifier.py
-Module: models.tasks.ideology
-Description:
-    Implements a transformer-based ideology classification model used in the
-    TruthLens AI system. The classifier predicts ideological orientation from
-    textual input using contextual embeddings from a pretrained transformer
-    encoder and a task-specific classification head.
-
-    The dataset contains three labels representing political ideology:
-        0 -> left
-        1 -> center
-        2 -> right
-
-    The model performs multi-class classification using CrossEntropyLoss.
-
-Author: TruthLens Engineering
-Date: 2026-04-02
-Dependencies:
-    logging
-    typing
-    dataclasses
-    torch
-    torch.nn
-    models.encoder.transformer_encoder
-    models.heads.classification_head
-Inputs:
-    input_ids: Tensor (batch_size, sequence_length)
-    attention_mask: Tensor (batch_size, sequence_length)
-    labels (optional): Tensor (batch_size)
-Outputs:
-    Dictionary containing logits, probabilities, predictions, and optional loss
-"""
-
 from __future__ import annotations
 
 import logging
@@ -57,16 +23,8 @@ from ...training.trainer import Trainer, TrainerConfig
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------
-
 @dataclass
 class IdeologyClassifierConfig:
-    """
-    Configuration for IdeologyClassifier.
-    """
-
     model_name: str = "roberta-base"
     pooling: str = "cls"
     dropout: float = 0.1
@@ -78,19 +36,7 @@ class IdeologyClassifierConfig:
     regression_activation: str = "gelu"
 
 
-# ---------------------------------------------------------
-# Ideology Classifier
-# ---------------------------------------------------------
-
 class IdeologyClassifier(BaseModel):
-    """
-    Transformer-based ideology classification model.
-
-    Predicts:
-        0 -> left
-        1 -> center
-        2 -> right
-    """
 
     NUM_CLASSES = 3
 
@@ -118,18 +64,20 @@ class IdeologyClassifier(BaseModel):
             self.encoder.gradient_checkpointing_enable()
 
         # -------------------------------------------------
-        # Classification Head
+        # Head
         # -------------------------------------------------
 
-        head_config = ClassificationHeadConfig(
-            input_dim=self.encoder.hidden_size,
-            num_classes=self.NUM_CLASSES,
-            dropout=config.dropout,
+        self.classifier_head = ClassificationHead(
+            ClassificationHeadConfig(
+                input_dim=self.encoder.hidden_size,
+                num_classes=self.NUM_CLASSES,
+                dropout=config.dropout,
+                return_features=False,
+            )
         )
 
-        self.classifier_head = ClassificationHead(head_config)
-
         self.regression_head: Optional[RegressionHead] = None
+
         if config.use_regression_head:
             self.regression_head = RegressionHead(
                 RegressionHeadConfig(
@@ -142,7 +90,7 @@ class IdeologyClassifier(BaseModel):
             )
 
         # -------------------------------------------------
-        # Loss Function
+        # Loss
         # -------------------------------------------------
 
         self.loss_fn = LossFactory.create(
@@ -153,7 +101,7 @@ class IdeologyClassifier(BaseModel):
         )
 
         # -------------------------------------------------
-        # Temperature Scaling (probability calibration)
+        # Calibration
         # -------------------------------------------------
 
         self.temperature = nn.Parameter(torch.ones(1))
@@ -165,8 +113,6 @@ class IdeologyClassifier(BaseModel):
         )
 
     # -----------------------------------------------------
-    # Forward Pass
-    # -----------------------------------------------------
 
     def forward(
         self,
@@ -174,21 +120,6 @@ class IdeologyClassifier(BaseModel):
         attention_mask: torch.Tensor,
         labels: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
-        """
-        Forward pass.
-
-        Args:
-                if not ((labels >= 0).all() and (labels < self.NUM_CLASSES).all()):
-                Token ids tensor (batch_size, seq_len)
-            attention_mask:
-                Attention mask tensor (batch_size, seq_len)
-            labels:
-                Optional ground truth labels
-
-        Returns:
-            Dictionary containing logits, probabilities, predictions,
-            confidence scores, embeddings, and optional loss.
-        """
 
         if input_ids is None or attention_mask is None:
             raise ValueError("input_ids and attention_mask must be provided")
@@ -203,49 +134,39 @@ class IdeologyClassifier(BaseModel):
         if not pooled_output.is_contiguous():
             pooled_output = pooled_output.contiguous()
 
-        logits = self.classifier_head(pooled_output)
+        head_output = self.classifier_head(pooled_output)
 
-        # Apply temperature scaling
+        logits = head_output["logits"]
+
         temperature = torch.clamp(self.temperature, 0.5, 5.0)
         logits = logits / temperature
 
-        if not self.training:
-            probabilities = F.softmax(logits, dim=-1)
-            predictions = probabilities.argmax(dim=-1)
-            confidence = probabilities.max(dim=-1).values
-        else:
-            probabilities = None
-            predictions = None
-            confidence = None
+        probs = F.softmax(logits, dim=-1)
+        preds = probs.argmax(dim=-1)
+        confidence = probs.max(dim=-1).values
 
         outputs: Dict[str, Any] = {
             "logits": logits,
-            "probabilities": probabilities,
-            "predictions": predictions,
+            "probabilities": probs,
+            "predictions": preds,
             "confidence": confidence,
+            "entropy": head_output["entropy"],
             "embeddings": pooled_output,
         }
 
         if self.regression_head is not None:
             outputs["regression"] = self.regression_head(pooled_output)
 
-        # -------------------------------------------------
-        # Loss computation (training)
-        # -------------------------------------------------
-
         if labels is not None:
 
             if labels.dim() != 1:
-                raise ValueError("labels must be 1D tensor (batch_size,)")
+                raise ValueError("labels must be 1D tensor")
 
             loss = self.loss_fn(logits, labels.long())
-
             outputs["loss"] = loss
 
         return outputs
 
-    # -----------------------------------------------------
-    # Inference
     # -----------------------------------------------------
 
     @torch.inference_mode()
@@ -254,23 +175,18 @@ class IdeologyClassifier(BaseModel):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
-        """
-        Run inference.
-
-        Returns:
-            predictions, probabilities, confidence
-        """
 
         was_training = self.training
         self.eval()
 
-        outputs = self.forward(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-        )
-
-        if was_training:
-            self.train()
+        try:
+            outputs = self.forward(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            )
+        finally:
+            if was_training:
+                self.train()
 
         return {
             "predictions": outputs["predictions"],
@@ -279,19 +195,15 @@ class IdeologyClassifier(BaseModel):
         }
 
     # -----------------------------------------------------
-    # Label Mapping
-    # -----------------------------------------------------
 
     def get_output_labels(self) -> Dict[int, str]:
-        """
-        Return ideology label mapping.
-        """
-
         return {
             0: "left",
             1: "center",
             2: "right",
         }
+
+    # -----------------------------------------------------
 
     @classmethod
     def from_task_config(
@@ -303,28 +215,7 @@ class IdeologyClassifier(BaseModel):
         device: Optional[str] = None,
         label_smoothing: float = 0.1,
     ) -> "IdeologyClassifier":
-        """
-        Instantiate an ``IdeologyClassifier`` from central config dataclasses.
 
-        Parameters
-        ----------
-        task_config:
-            Task-level descriptor from ``MultiTaskModelConfig.tasks["ideology"]``.
-        head_config:
-            Head-level dimensions/dropout from ``model_config.HeadConfig``.
-        model_name:
-            HuggingFace model identifier.
-        pooling:
-            Encoder pooling strategy (``"cls"`` or ``"mean"``).
-        device:
-            Target device string or ``None`` for auto-detection.
-        label_smoothing:
-            Label smoothing factor for CrossEntropyLoss.
-
-        Returns
-        -------
-        IdeologyClassifier
-        """
         cfg = IdeologyClassifierConfig(
             model_name=model_name,
             pooling=pooling,
@@ -352,21 +243,21 @@ class IdeologyClassifier(BaseModel):
                 else "gelu"
             ),
         )
-        logger.info(
-            "IdeologyClassifier.from_task_config | task=%s num_labels=%d",
-            task_config.name,
-            task_config.num_labels,
-        )
+
         return cls(cfg)
+
+    # -----------------------------------------------------
 
     @classmethod
     def from_model_config(
         cls,
         model_config: MultiTaskModelConfig,
     ) -> "IdeologyClassifier":
+
         task_cfg = model_config.tasks.get("ideology")
+
         if task_cfg is None:
-            raise KeyError("Task 'ideology' not found in MultiTaskModelConfig")
+            raise KeyError("Task 'ideology' not found")
 
         return cls.from_task_config(
             task_config=task_cfg,
@@ -383,23 +274,25 @@ class IdeologyClassifier(BaseModel):
             ),
         )
 
+    # -----------------------------------------------------
+
     def create_trainer(
         self,
         optimizer: torch.optim.Optimizer,
         scheduler: Optional[Any] = None,
         config: Optional[TrainerConfig] = None,
     ) -> Trainer:
-        """
-        Build a TruthLensTrainer for this model.
-        """
+
         from dataclasses import replace as _replace
 
         effective_config = config if config is not None else TrainerConfig()
+
         effective_config = _replace(
             effective_config,
             architecture=type(self).__name__,
             model_name=self.config.model_name,
         )
+
         return Trainer(
             model=self,
             optimizer=optimizer,

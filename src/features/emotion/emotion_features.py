@@ -1,30 +1,4 @@
-"""
-File Name: emotion_features.py
-Module: Feature Engineering - Emotion Features
-Description:
-    Extracts emotion-related features from text using transformer-based
-    emotion classification models or a lexicon-based fallback. These
-    features capture the emotional distribution, polarity, and emotional
-    intensity signals within the text.
-
-    The module integrates with the TruthLens feature system through the
-    BaseFeature abstraction and FeatureRegistry, enabling automatic
-    discovery and execution within feature pipelines.
-
-Dependencies:
-    dataclasses
-    typing
-    logging
-    numpy
-    transformers (optional)
-    torch (optional)
-
-Inputs:
-    FeatureContext containing input text
-
-Outputs:
-    Dict[str, float] representing emotion distribution and summary metrics
-"""
+# src/features/emotion/emotion_features.py
 
 from __future__ import annotations
 
@@ -45,46 +19,57 @@ from src.features.emotion.emotion_schema import (
 
 logger = logging.getLogger(__name__)
 
-
-# -------------------------------------------------------
-# Build Reverse Emotion Lookup
-# -------------------------------------------------------
-
-WORD_TO_EMOTION = {}
-
-for emotion, words in EMOTION_TERMS.items():
-    for word in words:
-        WORD_TO_EMOTION[word] = emotion
+EPS = 1e-8
+MAX_CLIP = 1.0
 
 
 # -------------------------------------------------------
-# Fast Lexicon Emotion Detector
+# Reverse lookup
 # -------------------------------------------------------
 
-def _lexicon_emotions(text: str) -> Dict[str, float]:
-    """
-    Fast lexicon-based emotion detection using reverse lookup.
-    Complexity: O(tokens)
-    """
+WORD_TO_EMOTION = {
+    word: emotion
+    for emotion, words in EMOTION_TERMS.items()
+    for word in words
+}
+
+
+# -------------------------------------------------------
+# Emotion groups (OPTIONAL BUT IMPORTANT)
+# -------------------------------------------------------
+
+POSITIVE_EMOTIONS = {
+    "joy", "trust", "love", "optimism"
+}
+
+NEGATIVE_EMOTIONS = {
+    "anger", "fear", "sadness", "disgust"
+}
+
+
+# -------------------------------------------------------
+# Lexicon detector
+# -------------------------------------------------------
+
+def _lexicon_emotions(text: str):
 
     tokens = re.findall(r"\b\w+\b", text.lower())
 
     counts = {emotion: 0 for emotion in EMOTION_LABELS}
 
     for token in tokens:
+        emo = WORD_TO_EMOTION.get(token)
+        if emo:
+            counts[emo] += 1
 
-        emotion = WORD_TO_EMOTION.get(token)
+    total_hits = sum(counts.values())
+    total_tokens = len(tokens)
 
-        if emotion:
-            counts[emotion] += 1
-
-    total = sum(counts.values()) or 1
-
-    return {emotion: counts[emotion] / total for emotion in EMOTION_LABELS}
+    return counts, total_hits, total_tokens
 
 
 # -------------------------------------------------------
-# Feature Extractor
+# Feature extractor
 # -------------------------------------------------------
 
 @dataclass
@@ -92,38 +77,91 @@ def _lexicon_emotions(text: str) -> Dict[str, float]:
 class EmotionFeatures(BaseFeature):
 
     name: str = "emotion_features"
-    description: str = "20-class emotion distribution and intensity features"
+    group: str = "emotion"
 
     def extract(self, context: FeatureContext) -> Dict[str, float]:
-        if not isinstance(context.text, str):
-            raise TypeError("FeatureContext.text must be a string")
-        if not context.text.strip():
+
+        text = context.text.strip()
+        if not text:
             return {}
 
-        emotion_scores = _lexicon_emotions(context.text)
+        counts, total_hits, total_tokens = _lexicon_emotions(text)
 
-        ordered_values = np.array([emotion_scores[e] for e in EMOTION_LABELS], dtype=np.float32)
-        dominant_idx = int(np.argmax(ordered_values))
+        if total_tokens == 0:
+            return {}
+
+        # -------------------------
+        # DISTRIBUTION (normalized)
+        # -------------------------
+
+        values = np.array([counts[e] for e in EMOTION_LABELS], dtype=np.float32)
+
+        if total_hits == 0:
+            dist = np.zeros_like(values)
+        else:
+            dist = values / (total_hits + EPS)
+
+        # -------------------------
+        # COVERAGE (CRITICAL)
+        # -------------------------
+
+        coverage = total_hits / (total_tokens + EPS)
+
+        # -------------------------
+        # ENTROPY
+        # -------------------------
+
+        if dist.sum() > 0:
+            entropy_raw = -np.sum(dist * np.log(dist + EPS))
+            entropy = entropy_raw / (np.log(len(dist)) + EPS)
+        else:
+            entropy = 0.0
+
+        # -------------------------
+        # INTENSITY (FIXED)
+        # -------------------------
+
+        intensity = float(np.linalg.norm(dist))  # stable
+
+        # -------------------------
+        # POLARITY
+        # -------------------------
+
+        pos = sum(dist[EMOTION_LABELS.index(e)] for e in POSITIVE_EMOTIONS if e in EMOTION_LABELS)
+        neg = sum(dist[EMOTION_LABELS.index(e)] for e in NEGATIVE_EMOTIONS if e in EMOTION_LABELS)
+
+        polarity = pos - neg  # [-1, 1] approx
+
+        # -------------------------
+        # DOMINANT
+        # -------------------------
+
+        dominant_idx = int(np.argmax(dist))
         dominant_emotion = EMOTION_LABELS[dominant_idx]
 
-        intensity = float(np.max(ordered_values) - np.mean(ordered_values))
+        # -------------------------
+        # OUTPUT
+        # -------------------------
 
         features: Dict[str, float] = {}
 
-        # Emotion distribution
-        for emotion, score in emotion_scores.items():
-            features[f"emotion_{emotion}"] = float(score)
+        for i, emotion in enumerate(EMOTION_LABELS):
+            features[f"emotion_{emotion}"] = self._safe(dist[i])
 
-        # Emotion intensity
-        features["emotion_intensity"] = intensity
+        features.update({
+            "emotion_coverage": self._safe(coverage),
+            "emotion_intensity": self._safe(intensity),
+            "emotion_entropy": self._safe(entropy),
+            "emotion_polarity": self._safe((polarity + 1) / 2),  # normalize to [0,1]
+        })
 
-        # Dominant emotion
         features[f"emotion_dominant_{dominant_emotion}"] = 1.0
 
-        logger.debug(
-            "Emotion features extracted | dominant=%s intensity=%.4f",
-            dominant_emotion,
-            intensity,
-        )
-
         return features
+
+    # -----------------------------------------------------
+
+    def _safe(self, v: float) -> float:
+        if not np.isfinite(v):
+            return 0.0
+        return float(np.clip(v, 0.0, MAX_CLIP))

@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import numpy as np
 
 from src.explainability.explanation_consistency import ExplanationConsistency
-from src.explainability.token_alignment import align_tokens
-from src.explainability.utils_validation import validate_tokens_scores
+from src.explainability.common_schema import AggregatedExplanation, TokenImportance
 
 logger = logging.getLogger(__name__)
+EPS = 1e-12
 
+
+# =========================================================
+# WEIGHTS
+# =========================================================
 
 @dataclass
 class AggregationWeights:
@@ -21,157 +25,168 @@ class AggregationWeights:
     lime: float = 0.1
 
 
-@dataclass
-class AggregatedExplanation:
-    tokens: List[str]
-    final_token_importance: List[float]
-    confidence_score: float
-    agreement_score: float
-
+# =========================================================
+# CORE
+# =========================================================
 
 class ExplanationAggregator:
+
     def __init__(
         self,
         weights: Optional[AggregationWeights] = None,
-        tokenizer_type: str = "wordpiece",
     ) -> None:
+
         w = weights or AggregationWeights()
+
         total = w.shap + w.integrated_gradients + w.attention + w.lime
-        if total <= 0:
-            raise ValueError("Aggregation weights must sum to a positive value.")
-        self.weights = AggregationWeights(
-            shap=w.shap / total,
-            integrated_gradients=w.integrated_gradients / total,
-            attention=w.attention / total,
-            lime=w.lime / total,
-        )
-        # tokenizer_type controls subword merging in _align_input
-        # ("wordpiece" for BERT-family, "sentencepiece" for RoBERTa/GPT)
-        self.tokenizer_type = tokenizer_type
+
+        self.weights = {
+            "shap": w.shap / total,
+            "ig": w.integrated_gradients / total,
+            "attn": w.attention / total,
+            "lime": w.lime / total,
+        }
+
         self._consistency = ExplanationConsistency()
 
-    @staticmethod
-    def _normalize(v: np.ndarray) -> np.ndarray:
+    # =====================================================
+    # NORMALIZATION
+    # =====================================================
+
+    def _normalize(self, v):
         v = np.abs(np.asarray(v, dtype=float))
-        s = float(np.sum(v))
-        if s <= 0:
-            return np.zeros_like(v)
-        return v / s
+        return v / (np.sum(v) + EPS)
 
-    @staticmethod
-    def _as_map(items: List[Dict], key: str) -> Dict[str, float]:
-        out: Dict[str, float] = {}
-        for it in items:
-            tok = str(it.get("token"))
-            out[tok] = float(it.get(key, 0.0))
-        return out
-
-    @staticmethod
-    def _lime_map(items: List[Tuple[str, float]]) -> Dict[str, float]:
-        return {str(t): float(s) for t, s in items}
+    # =====================================================
+    # MAIN
+    # =====================================================
 
     def aggregate(
         self,
-        shap_importance: Optional[List[Dict]] = None,
-        integrated_gradients: Optional[List[Dict]] = None,
-        attention_scores: Optional[List[Dict]] = None,
-        lime_importance: Optional[List] = None,
-    ) -> Dict:
-        tokenizer_type = self.tokenizer_type
+        shap: Optional[Dict] = None,
+        integrated_gradients: Optional[Dict] = None,
+        attention: Optional[Dict] = None,
+        lime: Optional[Dict] = None,
+        graph_explanation: Optional[Dict] = None,  # 🔥 NEW
+    ) -> AggregatedExplanation:
 
-        def _align_input(explanations: List[Dict], key: str) -> List[Dict]:
-            tokens = [e["token"] for e in explanations if isinstance(e, dict) and "token" in e and key in e]
-            scores = [e[key] for e in explanations if isinstance(e, dict) and "token" in e and key in e]
+        sources = {}
+        confidences = {}
 
-            if not tokens or len(tokens) != len(scores):
-                return explanations
+        # -------------------------------------------------
+        # EXTRACT
+        # -------------------------------------------------
+        if shap:
+            sources["shap"] = dict(zip(shap.tokens, shap.importance))
+            confidences["shap"] = shap.confidence or 0.5
 
-            validate_tokens_scores(tokens, scores)
-            # Only align subword-based inputs; word-level explainers should keep tokens as-is.
-            if key in {"attention", "integrated_gradients"}:
-                tokens, scores = align_tokens(tokens, scores, tokenizer_type=tokenizer_type)
-
-            return [{"token": t, key: float(s)} for t, s in zip(tokens, scores)]
-
-        def _to_token_map(explanations: List[Dict], key: str) -> Dict[str, float]:
-            return {e["token"]: float(e[key]) for e in explanations}
-
-        def aggregate_sources(
-            sources: List[Tuple[List[Dict], str, float]],
-        ) -> Dict[str, float]:
-            aligned: List[Tuple[Dict[str, float], float]] = []
-            for exp, key, weight in sources:
-                exp = _align_input(exp, key)
-                aligned.append((_to_token_map(exp, key), weight))
-
-            token_sets = [set(m.keys()) for m, _ in aligned]
-            if not token_sets:
-                return {}
-            tokens = sorted(set.union(*token_sets))
-
-            final: Dict[str, float] = {}
-            for t in tokens:
-                score = 0.0
-                total_weight = 0.0
-                for m, w in aligned:
-                    if t in m:
-                        score += w * m[t]
-                        total_weight += w
-                if total_weight > 0:
-                    final[t] = score / total_weight
-
-            return final
-
-        sources: List[Tuple[List[Dict], str, float]] = []
-
-        if shap_importance:
-            sources.append((shap_importance, "importance", self.weights.shap))
         if integrated_gradients:
-            sources.append((integrated_gradients, "importance", self.weights.integrated_gradients))
-        if attention_scores:
-            sources.append((attention_scores, "attention", self.weights.attention))
+            sources["ig"] = dict(zip(integrated_gradients.tokens, integrated_gradients.importance))
+            confidences["ig"] = integrated_gradients.confidence or 0.5
 
-        # BUG-6 fix: include LIME as a proper weighted source instead of
-        # appending-only-if-token-is-missing (which silently assigned it zero
-        # weight for any token already present in the other explainers).
-        if lime_importance:
-            lime_dicts = [{"token": str(t), "lime_score": float(s)} for t, s in lime_importance]
-            sources.append((lime_dicts, "lime_score", self.weights.lime))
+        if attention:
+            sources["attn"] = dict(zip(attention.tokens, attention.importance))
+            confidences["attn"] = attention.confidence or 0.5
 
-        if not sources:
-            raise ValueError("No valid explanation sources provided.")
+        if lime:
+            sources["lime"] = dict(zip(lime.tokens, lime.importance))
+            confidences["lime"] = lime.confidence or 0.5
 
-        final_map = aggregate_sources(sources)
+        # -------------------------------------------------
+        # 🔥 GRAPH EXPLANATION EXTRACTION
+        # -------------------------------------------------
+        graph_node_importance = {}
+        graph_confidence = 0.0
 
-        if not final_map:
-            raise ValueError("No valid explanation sources produced token maps.")
+        if graph_explanation:
+            graph_node_importance = graph_explanation.get("node_importance", {})
+            graph_confidence = float(graph_explanation.get("overall_score", 0.5))
 
-        tokens = sorted(final_map.keys())
-        final_scores = np.array([final_map[t] for t in tokens], dtype=float)
-        final_scores = self._normalize(final_scores)
+        if not sources and not graph_node_importance:
+            raise ValueError("No sources provided")
 
-        validate_tokens_scores(tokens, final_scores.tolist())
+        tokens = sorted(set().union(*[set(s.keys()) for s in sources.values()]))
 
-        confidence = float(np.mean(np.abs(final_scores))) if final_scores.size else 0.0
+        # include graph-only tokens if needed
+        tokens = sorted(set(tokens) | set(graph_node_importance.keys()))
 
-        # BUG-7 fix: compute agreement_score via ExplanationConsistency instead
-        # of hard-coding 0.0.
+        # -------------------------------------------------
+        # AGREEMENT SCORE
+        # -------------------------------------------------
         agreement_score = 0.0
         try:
-            consistency_result = self._consistency.compute(
-                shap_importance=shap_importance,
-                integrated_gradients=integrated_gradients,
-                attention_scores=attention_scores,
-                lime_importance=lime_importance,
+            res = self._consistency.compute(
+                shap_importance=shap.structured if shap else None,
+                integrated_gradients=integrated_gradients.structured if integrated_gradients else None,
+                attention_scores=attention.structured if attention else None,
+                lime_importance=[(e.token, e.importance) for e in lime.structured] if lime else None,
             )
-            if consistency_result:
-                agreement_score = float(np.mean(list(consistency_result.values())))
+            if res:
+                agreement_score = float(np.mean(list(res.values())))
         except Exception:
-            pass  # non-critical; keep 0.0 as fallback
+            pass
+
+        # -------------------------------------------------
+        # 🔥 FUSION (WITH GRAPH)
+        # -------------------------------------------------
+        final_scores = []
+        token_confidence = []
+
+        for t in tokens:
+
+            weighted_vals = []
+            vals = []
+
+            # ---------- standard explainers ----------
+            for name, src in sources.items():
+                if t in src:
+                    val = src[t]
+                    w = self.weights[name]
+                    c = confidences[name]
+
+                    weighted_vals.append(val * w * c)
+                    vals.append(val)
+
+            # ---------- 🔥 graph contribution ----------
+            if t in graph_node_importance:
+                graph_score = float(graph_node_importance[t])
+
+                weighted_vals.append(graph_score * graph_confidence)
+                vals.append(graph_score)
+
+            if not weighted_vals:
+                final_scores.append(0.0)
+                token_confidence.append(0.0)
+                continue
+
+            score = float(np.mean(weighted_vals))
+
+            # confidence = agreement
+            conf = float(1.0 - np.std(vals)) if len(vals) > 1 else 1.0
+
+            final_scores.append(score)
+            token_confidence.append(np.clip(conf, 0.0, 1.0))
+
+        final_scores = self._normalize(final_scores)
+
+        # -------------------------------------------------
+        # OVERALL CONFIDENCE
+        # -------------------------------------------------
+        overall_confidence = float(np.mean(token_confidence)) if token_confidence else 0.0
+
+        # -------------------------------------------------
+        # STRUCTURED OUTPUT
+        # -------------------------------------------------
+        structured = [
+            TokenImportance(token=t, importance=float(s))
+            for t, s in zip(tokens, final_scores)
+        ]
 
         return AggregatedExplanation(
             tokens=tokens,
             final_token_importance=final_scores.tolist(),
-            confidence_score=confidence,
+            structured=structured,
+            method_weights=self.weights,
+            confidence_score=overall_confidence,
             agreement_score=agreement_score,
-        ).__dict__
+        )

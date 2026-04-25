@@ -1,111 +1,214 @@
 """
-File Name: predict_api.py
-Module: src.inference
-
-Singleton-style functional inference API.
-
-This module is the canonical location for the function-based ``predict``,
-``predict_batch``, and ``batch_predict`` entry-points used by the FastAPI
-service and by tests.
-
-It wraps :class:`src.models.inference.predictor.Predictor` (the class-based
-predictor) with lazy, process-wide singleton state so callers do not have to
-manage model loading themselves.
+File: predict_api.py 
 """
 
+from __future__ import annotations
+
 import threading
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Union
 
-import torch
-
-from src.models.inference.predictor import Predictor
-from src.models.registry.model_registry import ModelRegistry
-from src.utils.device_utils import autocast_context, get_device, move_to_device
+from src.inference.inference_engine import InferenceConfig, InferenceEngine
+from src.inference.prediction_service import PredictionService
+from src.inference.inference_logger import InferenceLogger
+from src.inference.inference_cache import InferenceCache, InferenceCacheConfig
+from src.inference.monitoring import InferenceMonitor
+from src.inference.postprocessing import Postprocessor
+from src.inference.result_formatter import ResultFormatter
 from src.utils.input_validation import ensure_non_empty_text
-from src.utils.settings import load_settings
 
-_SETTINGS = load_settings()
+# =========================================================
+# GLOBAL SINGLETON
+# =========================================================
 
-_predictor: Predictor | None = None
-_tokenizer = None
-_device = get_device()
-_load_lock = threading.Lock()
-
-
-def _load_assets():
-    global _predictor, _tokenizer
-
-    # Double-checked locking: fast path when already loaded, serialized
-    # load otherwise to avoid duplicate model initialization under threads.
-    if _predictor is not None and _tokenizer is not None:
-        return _predictor, _tokenizer
-
-    with _load_lock:
-        if _predictor is None or _tokenizer is None:
-            assets = ModelRegistry.load_model()
-
-            model = assets["model"]
-            _tokenizer = assets["tokenizer"]
-
-            model = move_to_device(model, _device)
-
-            _predictor = Predictor(model=model)
-
-    return _predictor, _tokenizer
+_service: PredictionService | None = None
+_lock = threading.Lock()
 
 
-def _prepare_inputs(texts: List[str]):
-    _, tokenizer = _load_assets()
+# =========================================================
+# LOAD SERVICE
+# =========================================================
 
-    inputs = tokenizer(
-        texts,
-        truncation=True,
-        padding=True,
-        max_length=_SETTINGS.model.max_length,
-        return_tensors="pt",
-    )
+def _get_service() -> PredictionService:
+    global _service
 
-    return move_to_device(inputs, _device)
+    if _service is not None:
+        return _service
+
+    with _lock:
+        if _service is None:
+
+            # ---------------- ENGINE ----------------
+            engine = InferenceEngine(
+                InferenceConfig(
+                    model_path="models",
+                    device="auto",
+                )
+            )
+
+            # ---------------- CACHE ----------------
+            cache = InferenceCache(
+                InferenceCacheConfig(
+                    enable_memory_cache=True,
+                    cache_version="v2"
+                )
+            )
+
+            # ---------------- LOGGER ----------------
+            logger = InferenceLogger()
+
+            # ---------------- MONITOR ----------------
+            monitor = InferenceMonitor()
+
+            # ---------------- POSTPROCESSOR ----------------
+            postprocessor = Postprocessor()
+
+            # ---------------- FORMATTER ----------------
+            formatter = ResultFormatter()
+
+            # ---------------- SERVICE ----------------
+            _service = PredictionService(
+                engine=engine,
+                cache=cache,
+                logger_=logger,
+                formatter=formatter,
+            )
+
+            # attach optional components
+            _service.monitor = monitor
+            _service.postprocessor = postprocessor
+
+    return _service
 
 
-def predict(text: str) -> Dict[str, Any]:
-    ensure_non_empty_text(text)
+# =========================================================
+# INPUT VALIDATION
+# =========================================================
 
-    predictor, _ = _load_assets()
-    inputs = _prepare_inputs([text])
+def _ensure_list(texts: Union[str, List[str]]) -> List[str]:
 
-    with torch.no_grad():
-        with autocast_context():
-            outputs = predictor.predict_batch(inputs)
+    if isinstance(texts, str):
+        texts = [texts]
 
-    return predictor.build_fake_real_output(outputs)
-
-
-def predict_batch(texts: List[str]) -> List[List[float]]:
     if not isinstance(texts, list) or not texts:
-        raise ValueError("texts must be a non-empty list of strings")
+        raise ValueError("texts must be non-empty list")
 
     for t in texts:
         ensure_non_empty_text(t)
 
-    predictor, _ = _load_assets()
-    inputs = _prepare_inputs(texts)
-
-    with torch.no_grad():
-        with autocast_context():
-            return predictor.predict_batch_pairs(inputs)
+    return texts
 
 
-def batch_predict(texts: List[str]) -> List[Dict[str, Any]]:
-    probs = predict_batch(texts)
+# =========================================================
+# 🔥 MAIN API (HUMAN FRIENDLY)
+# =========================================================
 
-    results: List[Dict[str, Any]] = []
-    for prob_real, prob_fake in probs:
-        results.append(
-            {
-                "fake_probability": float(prob_fake),
-                "label": "Fake" if prob_fake > 0.5 else "Real",
-            }
-        )
+def predict(text: str) -> Dict[str, Any]:
+
+    service = _get_service()
+    return service.predict(text)
+
+
+# =========================================================
+# 🔥 BATCH API
+# =========================================================
+
+def predict_batch(texts: List[str]) -> List[Dict[str, Any]]:
+
+    texts = _ensure_list(texts)
+    service = _get_service()
+
+    return service.predict_batch(texts)
+
+
+# =========================================================
+# 🔥 FULL PIPELINE (REPORT)
+# =========================================================
+
+def predict_full(text: str) -> Dict[str, Any]:
+
+    service = _get_service()
+    return service.predict_full(text)
+
+
+# =========================================================
+# 🔥 FORMATTED OUTPUT
+# =========================================================
+
+def predict_formatted(
+    text: str,
+    *,
+    mode: str = "api",
+) -> Dict[str, Any]:
+
+    service = _get_service()
+    return service.predict_formatted(text, mode=mode)
+
+
+# =========================================================
+# 🔥 EVALUATION ENTRYPOINT
+# =========================================================
+
+def predict_for_evaluation(texts: List[str]) -> Dict[str, Any]:
+
+    texts = _ensure_list(texts)
+    service = _get_service()
+
+    return service.predict_for_evaluation(texts)
+
+
+# =========================================================
+# 🔥 UNCERTAINTY SUPPORT
+# =========================================================
+
+def predict_with_uncertainty(texts: List[str]) -> Dict[str, Any]:
+
+    texts = _ensure_list(texts)
+    service = _get_service()
+
+    outputs = service.predict_for_evaluation(texts)
+
+    results = {}
+
+    import numpy as np
+
+    for task, out in outputs.items():
+
+        probs = out.get("probabilities")
+
+        if probs is not None:
+            entropy = -np.sum(probs * np.log(probs + 1e-12), axis=1)
+        else:
+            entropy = None
+
+        results[task] = {
+            **out,
+            "entropy": entropy,
+        }
 
     return results
+
+
+# =========================================================
+# 🔥 MONITORING ENDPOINT
+# =========================================================
+
+def get_metrics() -> Dict[str, Any]:
+
+    service = _get_service()
+
+    if hasattr(service, "monitor"):
+        return service.monitor.snapshot()
+
+    return {}
+
+
+# =========================================================
+# 🔥 RESET CACHE (OPTIONAL ADMIN)
+# =========================================================
+
+def clear_cache():
+
+    service = _get_service()
+
+    if service.cache:
+        service.cache.clear()

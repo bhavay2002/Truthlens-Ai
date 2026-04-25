@@ -1,231 +1,223 @@
-"""
-File Name: graph_utils.py
-Module: Graph Analysis - Graph Utilities
-Description:
-    Provides reusable low-level graph operations used across the TruthLens
-    graph subsystem. These utilities normalize adjacency structures,
-    convert graphs to undirected representations, compute degree
-    distributions, remove invalid/self-loop edges, and extract unique
-    edge pairs. Centralizing these utilities prevents duplicated logic
-    across graph builders, analyzers, and pipelines.
-
-Dependencies:
-    logging
-    typing
-    collections
-
-Inputs:
-    Graph adjacency dictionary
-
-Outputs:
-    Normalized graphs, statistics, and edge sets
-"""
-
 from __future__ import annotations
 
 import logging
 from collections import Counter
 from typing import Dict, List, Set, Tuple
 
+import numpy as np
 
 logger = logging.getLogger(__name__)
-
+EPS = 1e-12
 
 Graph = Dict[str, List[str]]
 AdjacencySet = Dict[str, Set[str]]
+WeightedGraph = Dict[str, Dict[str, float]]
 EdgePair = Tuple[str, str]
 
 
-def normalize_adjacency(graph: Graph) -> AdjacencySet:
-    """
-    Normalize adjacency list into a clean dictionary of sets.
+# =========================================================
+# NORMALIZATION
+# =========================================================
 
-    - lowercases nodes
-    - strips whitespace
-    - removes invalid neighbors
-    """
+def normalize_adjacency(graph: Graph) -> AdjacencySet:
 
     if not isinstance(graph, dict):
-        raise ValueError("graph must be a dictionary")
+        raise ValueError("graph must be dict")
 
-    adjacency: AdjacencySet = {}
+    adj: AdjacencySet = {}
 
     for node, neighbors in graph.items():
 
-        if not isinstance(node, str):
-            raise ValueError("graph keys must be strings")
+        node_key = str(node).strip().lower()
 
-        if not isinstance(neighbors, list):
-            raise ValueError("graph values must be lists")
-
-        node_key = node.strip().lower()
-
-        neighbor_set = {
-            str(neighbor).strip().lower()
-            for neighbor in neighbors
-            if isinstance(neighbor, str)
-            and neighbor.strip()
-            and str(neighbor).strip().lower() != node_key
+        adj[node_key] = {
+            str(n).strip().lower()
+            for n in neighbors
+            if isinstance(n, str)
+            and n.strip()
+            and str(n).strip().lower() != node_key
         }
 
-        adjacency[node_key] = neighbor_set
+    return adj
 
-    logger.debug("Adjacency normalized with %d nodes", len(adjacency))
 
-    return adjacency
+# =========================================================
+# WEIGHTED SUPPORT (🔥 NEW)
+# =========================================================
 
+def normalize_weighted_graph(graph: WeightedGraph) -> WeightedGraph:
+
+    out: WeightedGraph = {}
+
+    for node, nbrs in graph.items():
+        nk = node.strip().lower()
+        out[nk] = {}
+
+        for nbr, w in nbrs.items():
+            if isinstance(nbr, str):
+                nk2 = nbr.strip().lower()
+                if nk2 and nk2 != nk:
+                    out[nk][nk2] = float(max(0.0, w))
+
+    return out
+
+
+# =========================================================
+# UNDIRECTED
+# =========================================================
 
 def to_undirected_graph(adjacency: AdjacencySet) -> AdjacencySet:
-    """
-    Convert directed adjacency representation to undirected graph.
-    """
-
-    if not isinstance(adjacency, dict):
-        raise ValueError("adjacency must be a dictionary")
 
     undirected: AdjacencySet = {
         node: set(neighbors) for node, neighbors in adjacency.items()
     }
 
     for node, neighbors in list(undirected.items()):
-
-        for neighbor in neighbors:
-
-            undirected.setdefault(neighbor, set()).add(node)
-
-    logger.debug("Converted graph to undirected representation")
+        for nbr in neighbors:
+            undirected.setdefault(nbr, set()).add(node)
 
     return undirected
 
 
-def degree_distribution(adjacency: AdjacencySet) -> Dict[int, int]:
-    """
-    Compute degree distribution of graph.
+def to_undirected_weighted(graph: WeightedGraph) -> WeightedGraph:
 
-    Returns
-    -------
-    Dict[int, int]
-        degree -> frequency
-    """
+    undirected: WeightedGraph = {}
 
-    if not isinstance(adjacency, dict):
-        raise ValueError("adjacency must be a dictionary")
+    for u, nbrs in graph.items():
+        undirected.setdefault(u, {})
 
-    degrees = [len(neighbors) for neighbors in adjacency.values()]
+        for v, w in nbrs.items():
 
-    distribution = dict(Counter(degrees))
+            undirected.setdefault(v, {})
 
-    logger.debug("Computed degree distribution")
+            undirected[u][v] = undirected[u].get(v, 0.0) + w
+            undirected[v][u] = undirected[v].get(u, 0.0) + w
 
-    return distribution
+    return undirected
 
+
+# =========================================================
+# CLEANUP
+# =========================================================
 
 def remove_self_loops(adjacency: AdjacencySet) -> AdjacencySet:
-    """
-    Remove self-loop edges from graph.
-    """
 
-    if not isinstance(adjacency, dict):
-        raise ValueError("adjacency must be a dictionary")
+    return {
+        node: {nbr for nbr in nbrs if nbr != node}
+        for node, nbrs in adjacency.items()
+    }
 
-    cleaned: AdjacencySet = {}
 
-    for node, neighbors in adjacency.items():
-
-        cleaned[node] = {
-            neighbor
-            for neighbor in neighbors
-            if neighbor != node
-        }
-
-    logger.debug("Self-loops removed")
-
-    return cleaned
-
+# =========================================================
+# EDGE UTILITIES
+# =========================================================
 
 def unique_edge_pairs(adjacency: AdjacencySet) -> Set[EdgePair]:
-    """
-    Extract unique edge pairs from graph.
-
-    Returns
-    -------
-    Set[Tuple[str, str]]
-        Unique directed edges (for undirected semantics, canonicalize/sort pairs)
-    """
-
-    if not isinstance(adjacency, dict):
-        raise ValueError("adjacency must be a dictionary")
 
     edges: Set[EdgePair] = set()
 
-    for source, neighbors in adjacency.items():
-
-        for target in neighbors:
-
-            if source != target:
-
-                edges.add((source, target))
-
-    logger.debug("Extracted %d unique edges", len(edges))
+    for u, nbrs in adjacency.items():
+        for v in nbrs:
+            if u != v:
+                edges.add(tuple(sorted((u, v))))
 
     return edges
 
 
+def edge_count_undirected(adjacency: AdjacencySet) -> int:
+    return len(unique_edge_pairs(adjacency))
+
+
+def edge_count_directed(adjacency: AdjacencySet) -> int:
+    return sum(len(nbrs) for nbrs in adjacency.values())
+
+
+# =========================================================
+# NODE UTILITIES
+# =========================================================
+
 def node_set(adjacency: AdjacencySet) -> Set[str]:
-    """
-    Return set of all nodes present in graph.
-    """
 
-    nodes: Set[str] = set(adjacency.keys())
+    nodes = set(adjacency.keys())
 
-    for neighbors in adjacency.values():
-        nodes.update(neighbors)
+    for nbrs in adjacency.values():
+        nodes.update(nbrs)
 
     return nodes
 
 
-def edge_count_directed(adjacency: AdjacencySet) -> int:
-    """
-    Count edges in adjacency graph (directed semantics).
-    """
-    return sum(len(neighbors) for neighbors in adjacency.values())
+# =========================================================
+# DEGREE
+# =========================================================
+
+def degree_distribution(adjacency: AdjacencySet) -> Dict[int, int]:
+
+    degrees = [len(nbrs) for nbrs in adjacency.values()]
+    return dict(Counter(degrees))
 
 
-# Backward-compatible alias; prefer edge_count_directed or edge_count_undirected.
-edge_count = edge_count_directed
+def degree_vector(adjacency: AdjacencySet) -> np.ndarray:
+
+    return np.array([len(nbrs) for nbrs in adjacency.values()], dtype=float)
 
 
-def edge_count_undirected(adjacency: AdjacencySet) -> int:
-    """
-    Count unique undirected edges in adjacency graph.
-    """
-    if not isinstance(adjacency, dict):
-        raise ValueError("adjacency must be a dictionary")
-    edges: Set[EdgePair] = set()
-    for u, nbrs in adjacency.items():
-        for v in nbrs:
-            if u == v:
-                continue
-            a, b = sorted((u, v))
-            edges.add((a, b))
-    return len(edges)
+# =========================================================
+# ADVANCED METRICS (🔥 NEW)
+# =========================================================
+
+def graph_density(adjacency: AdjacencySet) -> float:
+
+    n = len(node_set(adjacency))
+    e = edge_count_undirected(adjacency)
+
+    if n < 2:
+        return 0.0
+
+    return float((2 * e) / (n * (n - 1) + EPS))
 
 
-def graph_summary(adjacency: AdjacencySet) -> Dict[str, int]:
-    """
-    Produce basic graph summary statistics.
+def graph_entropy(adjacency: AdjacencySet) -> float:
 
-    Returns
-    -------
-    Dict[str, int]
-    """
+    deg = degree_vector(adjacency)
+
+    if deg.size == 0 or np.sum(deg) == 0:
+        return 0.0
+
+    p = deg / (np.sum(deg) + EPS)
+
+    return float(-np.sum(p * np.log(p + EPS)))
+
+
+def graph_centralization(adjacency: AdjacencySet) -> float:
+
+    deg = degree_vector(adjacency)
+
+    if deg.size == 0:
+        return 0.0
+
+    max_d = np.max(deg)
+    mean_d = np.mean(deg)
+
+    n = len(deg)
+
+    if n < 2:
+        return 0.0
+
+    return float((max_d - mean_d) / (n - 1 + EPS))
+
+
+# =========================================================
+# SUMMARY
+# =========================================================
+
+def graph_summary(adjacency: AdjacencySet) -> Dict[str, float]:
 
     nodes = node_set(adjacency)
-    edges = edge_count_directed(adjacency)
 
-    summary = {
-        "nodes": len(nodes),
-        "edges": edges,  # directed-style count; use edge_count_undirected for undirected semantics
+    return {
+        "nodes": float(len(nodes)),
+        "edges": float(edge_count_undirected(adjacency)),
+        "density": graph_density(adjacency),
+        "entropy": graph_entropy(adjacency),
+        "centralization": graph_centralization(adjacency),
     }
-
-    return summary

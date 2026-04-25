@@ -14,70 +14,50 @@ from src.analysis.feature_schema import (
 
 logger = logging.getLogger(__name__)
 
+EPS = 1e-8
+MAX_CLIP = 1.0
 
-# ------------------------------------------------------------
-# Configuration
-# ------------------------------------------------------------
+
+# =========================================================
+# CONFIG
+# =========================================================
 
 @dataclass(slots=True)
 class PropagandaPatternConfig:
 
-    # Fear propaganda
     fear_weight_emotion: float = 0.35
     fear_weight_rhetoric: float = 0.35
     fear_weight_narrative: float = 0.30
 
-    # Scapegoating
     scapegoat_weight_rhetoric: float = 0.55
     scapegoat_weight_argument: float = 0.45
 
-    # Polarization
     polarization_weight_narrative: float = 0.60
     polarization_weight_rhetoric: float = 0.40
 
-    # Emotional amplification
     emotion_amplification_weight: float = 0.6
     rhetoric_amplification_weight: float = 0.4
 
-    # Narrative imbalance
     narrative_claim_weight: float = 0.5
     narrative_evidence_weight: float = 0.5
 
-    # Safety
     clip_outputs: bool = True
     clip_range: tuple[float, float] = (0.0, 1.0)
 
-    # 🔥 NEW: debug + validation
     enable_validation: bool = True
     enable_debug_metadata: bool = False
 
 
-# ------------------------------------------------------------
-# Detector
-# ------------------------------------------------------------
+# =========================================================
+# DETECTOR
+# =========================================================
 
 class PropagandaPatternDetector:
 
     def __init__(self, config: PropagandaPatternConfig | None = None):
         self.config = config or PropagandaPatternConfig()
-        logger.info("PropagandaPatternDetector initialized")
 
-    # ------------------------------------------------------------
-    # Safe feature access
-    # ------------------------------------------------------------
-
-    def _get_feature(self, features: Dict, *keys: str, default: float = 0.0) -> float:
-        for key in keys:
-            value = features.get(key)
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                if np.isnan(value) or np.isinf(value):
-                    return default
-                return float(value)
-        return default
-
-    # ------------------------------------------------------------
-    # Main Analysis
-    # ------------------------------------------------------------
+    # --------------------------------------------------------
 
     def analyze(
         self,
@@ -94,164 +74,170 @@ class PropagandaPatternDetector:
         argument = argument_features or {}
         info = information_features or {}
 
-        debug = {}
-
-        # --------------------------------------------------
-        # Core signals
-        # --------------------------------------------------
-
-        fear = self._fear_propaganda(emotion, narrative, rhetoric)
-        scapegoat = self._scapegoating(rhetoric, argument)
-        polar = self._polarization(narrative, rhetoric)
-        amplification = self._emotional_amplification(emotion, rhetoric)
-        imbalance = self._narrative_imbalance(argument, info)
-
-        features = {
-            "fear_propaganda_score": fear,
-            "scapegoating_score": scapegoat,
-            "polarization_score": polar,
-            "emotional_amplification_score": amplification,
-            "narrative_imbalance_score": imbalance,
+        # -------------------------
+        # CORE SIGNALS
+        # -------------------------
+        raw = {
+            "fear": self._fear(emotion, narrative, rhetoric),
+            "scapegoating": self._scapegoating(rhetoric, argument),
+            "polarization": self._polarization(narrative, rhetoric),
+            "amplification": self._amplification(emotion, rhetoric),
+            "imbalance": self._imbalance(argument, info),
         }
 
-        # --------------------------------------------------
-        # Optional debug metadata
-        # --------------------------------------------------
+        # -------------------------
+        # NORMALIZATION
+        # -------------------------
+        dist = self._normalize(raw)
 
-        if self.config.enable_debug_metadata:
-            debug["components"] = {
-                "fear": fear,
-                "scapegoating": scapegoat,
-                "polarization": polar,
-                "amplification": amplification,
-                "imbalance": imbalance,
-            }
+        # -------------------------
+        # GLOBAL INTENSITY
+        # -------------------------
+        intensity = sum(raw.values()) / (len(raw) + EPS)
 
-        # --------------------------------------------------
-        # Clipping (stability)
-        # --------------------------------------------------
+        # -------------------------
+        # DIVERSITY
+        # -------------------------
+        diversity = self._entropy(dist)
 
+        features = {
+            "fear_propaganda_score": dist["fear"],
+            "scapegoating_score": dist["scapegoating"],
+            "polarization_score": dist["polarization"],
+            "emotional_amplification_score": dist["amplification"],
+            "narrative_imbalance_score": dist["imbalance"],
+            "propaganda_intensity": self._safe(intensity),
+            "propaganda_diversity": self._safe(diversity),
+        }
+
+        # -------------------------
+        # CLIP
+        # -------------------------
         if self.config.clip_outputs:
             features = self._clip(features)
 
-        # --------------------------------------------------
-        # Validation (CRITICAL)
-        # --------------------------------------------------
-
+        # -------------------------
+        # VALIDATION
+        # -------------------------
         if self.config.enable_validation:
-            valid = validate_features(features, PROPAGANDA_PATTERN_KEYS)
-            if not valid:
-                logger.warning("Propaganda features failed validation")
-
-        if self.config.enable_debug_metadata:
-            features["_debug"] = debug
+            validate_features(features, PROPAGANDA_PATTERN_KEYS)
 
         return features
 
-    # ------------------------------------------------------------
-    # Feature Computations
-    # ------------------------------------------------------------
+    # =========================================================
+    # SIGNALS (CONFIG-DRIVEN)
+    # =========================================================
 
-    def _fear_propaganda(self, emotion, narrative, rhetoric) -> float:
+    def _fear(self, emotion, narrative, rhetoric):
 
-        emotion_signal = self._get_feature(
-            emotion, "emotion_fear", "emotion_expression_ratio"
+        e = self._get(emotion, "emotion_expression_ratio")
+        r = self._get(rhetoric, "rhetoric_fear_appeal_score")
+        n = self._get(narrative, "conflict_intensity", "polarization_ratio")
+
+        return (
+            e * self.config.fear_weight_emotion +
+            r * self.config.fear_weight_rhetoric +
+            n * self.config.fear_weight_narrative
         )
 
-        rhetoric_signal = self._get_feature(
-            rhetoric, "rhetoric_fear_appeal_score"
+    def _scapegoating(self, rhetoric, argument):
+
+        r = self._get(rhetoric, "rhetoric_scapegoating_score")
+        a = self._get(argument, "argument_contrast_ratio")
+
+        return (
+            r * self.config.scapegoat_weight_rhetoric +
+            a * self.config.scapegoat_weight_argument
         )
 
-        narrative_signal = self._get_feature(
-            narrative, "conflict_verb_ratio", "polarization_ratio"
+    def _polarization(self, narrative, rhetoric):
+
+        n = self._get(narrative, "polarization_ratio")
+        r = self._get(rhetoric, "rhetoric_loaded_language_score")
+
+        return (
+            n * self.config.polarization_weight_narrative +
+            r * self.config.polarization_weight_rhetoric
         )
 
-        return float(
-            emotion_signal * self.config.fear_weight_emotion
-            + rhetoric_signal * self.config.fear_weight_rhetoric
-            + narrative_signal * self.config.fear_weight_narrative
+    def _amplification(self, emotion, rhetoric):
+
+        vals = [
+            self._get(emotion, "emotion_expression_ratio"),
+            self._get(emotion, "dominant_emotion_strength"),
+        ]
+
+        e = sum(vals) / max(len(vals), 1)
+        r = self._get(rhetoric, "rhetoric_emotional_appeal_score")
+
+        return (
+            e * self.config.emotion_amplification_weight +
+            r * self.config.rhetoric_amplification_weight
         )
 
-    def _scapegoating(self, rhetoric, argument) -> float:
+    def _imbalance(self, argument, info):
 
-        rhetoric_signal = self._get_feature(
-            rhetoric, "rhetoric_scapegoating_score"
-        )
+        claim = self._get(argument, "argument_claim_ratio")
+        evidence = self._get(info, "factual_density")
 
-        contrast_signal = self._get_feature(
-            argument, "argument_contrast_ratio"
-        )
+        # bounded ratio
+        return claim / (claim + evidence + EPS)
 
-        return float(
-            rhetoric_signal * self.config.scapegoat_weight_rhetoric
-            + contrast_signal * self.config.scapegoat_weight_argument
-        )
+    # =========================================================
+    # UTILS
+    # =========================================================
 
-    def _polarization(self, narrative, rhetoric) -> float:
+    def _get(self, features: Dict, *keys: str, default: float = 0.0):
 
-        narrative_signal = self._get_feature(
-            narrative, "polarization_ratio"
-        )
+        for k in keys:
+            v = features.get(k)
+            if isinstance(v, (int, float)) and np.isfinite(v):
+                return float(v)
 
-        rhetoric_signal = self._get_feature(
-            rhetoric, "rhetoric_loaded_language_score"
-        )
+        return default
 
-        return float(
-            narrative_signal * self.config.polarization_weight_narrative
-            + rhetoric_signal * self.config.polarization_weight_rhetoric
-        )
+    def _normalize(self, scores: Dict[str, float]) -> Dict[str, float]:
 
-    def _emotional_amplification(self, emotion, rhetoric) -> float:
+        values = np.array(list(scores.values()), dtype=np.float32)
 
-        anger = self._get_feature(emotion, "emotion_anger")
-        fear = self._get_feature(emotion, "emotion_fear", "emotion_expression_ratio")
+        total = float(values.sum())
 
-        rhetoric_intensity = self._get_feature(
-            rhetoric, "rhetoric_emotional_intensity"
-        )
+        if total < EPS:
+            return {k: 0.0 for k in scores}
 
-        emotion_signal = (anger + fear) / 2
+        norm = values / (total + EPS)
 
-        return float(
-            emotion_signal * self.config.emotion_amplification_weight
-            + rhetoric_intensity * self.config.rhetoric_amplification_weight
-        )
+        return dict(zip(scores.keys(), norm.astype(float)))
 
-    def _narrative_imbalance(self, argument, info) -> float:
+    def _entropy(self, dist: Dict[str, float]) -> float:
 
-        claim_density = self._get_feature(
-            argument, "argument_claim_ratio"
-        )
+        values = np.array(list(dist.values()), dtype=np.float32)
 
-        evidence_density = self._get_feature(
-            info, "factual_density"
-        )
+        if values.sum() < EPS:
+            return 0.0
 
-        score = (
-            claim_density * self.config.narrative_claim_weight
-            - evidence_density * self.config.narrative_evidence_weight
-        )
+        probs = values / (values.sum() + EPS)
 
-        return float(max(score, 0.0))
+        entropy = -np.sum(probs * np.log(probs + EPS))
+        max_entropy = np.log(len(probs))
 
-    # ------------------------------------------------------------
-    # Output Safety
-    # ------------------------------------------------------------
+        return float(entropy / (max_entropy + EPS))
 
     def _clip(self, features: Dict[str, float]) -> Dict[str, float]:
 
         low, high = self.config.clip_range
 
-        return {
-            k: float(np.clip(v, low, high))
-            for k, v in features.items()
-        }
+        return {k: float(np.clip(v, low, high)) for k, v in features.items()}
+
+    def _safe(self, v: float) -> float:
+        if not np.isfinite(v):
+            return 0.0
+        return float(np.clip(v, 0.0, MAX_CLIP))
 
 
-# ------------------------------------------------------------
-# Vector Conversion
-# ------------------------------------------------------------
+# =========================================================
+# VECTOR
+# =========================================================
 
 def propaganda_pattern_vector(features: Dict[str, float]) -> np.ndarray:
     return make_vector(features, PROPAGANDA_PATTERN_KEYS)
