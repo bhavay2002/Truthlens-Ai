@@ -1,38 +1,14 @@
-"""
-File Name: multitask_output.py 
-Module: models.multitask
-Description:
-    Defines structured output objects for the TruthLens multi-task model.
-    The module standardizes how predictions, logits, probabilities, and
-    task-specific losses are returned from the multi-task architecture.
-
-    Structured outputs simplify:
-        • training loop integration
-        • evaluation pipelines
-        • experiment logging
-        • API responses
-        • explainability modules
-
-    The design follows patterns used in modern ML frameworks such as
-    HuggingFace Transformers where model outputs are returned as structured
-    dataclasses rather than loosely defined dictionaries.
-
-Dependencies:
-    dataclasses
-    typing
-    torch
-Inputs:
-    Model logits and probabilities produced by the multi-task model
-Outputs:
-    Structured multi-task model outputs
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Any
 
 import torch
+ 
 
+# =========================================================
+# TASK OUTPUT
+# =========================================================
 
 @dataclass
 class TaskOutput:
@@ -42,15 +18,36 @@ class TaskOutput:
     predictions: Optional[torch.Tensor] = None
     loss: Optional[torch.Tensor] = None
 
+    # -------------------------
+    # UTILITIES
+    # -------------------------
+
     def detach(self) -> "TaskOutput":
-        """Detach tensors from computation graph for logging."""
         return TaskOutput(
             logits=self.logits.detach(),
-            probabilities=self.probabilities.detach() if self.probabilities is not None else None,
-            predictions=self.predictions.detach() if self.predictions is not None else None,
-            loss=self.loss.detach() if self.loss is not None else None,
+            probabilities=self._safe_detach(self.probabilities),
+            predictions=self._safe_detach(self.predictions),
+            loss=self._safe_detach(self.loss),
         )
 
+    def to(self, device: torch.device) -> "TaskOutput":
+        return TaskOutput(
+            logits=self.logits.to(device),
+            probabilities=self._safe_to(self.probabilities, device),
+            predictions=self._safe_to(self.predictions, device),
+            loss=self._safe_to(self.loss, device),
+        )
+
+    def _safe_detach(self, x):
+        return x.detach() if isinstance(x, torch.Tensor) else x
+
+    def _safe_to(self, x, device):
+        return x.to(device) if isinstance(x, torch.Tensor) else x
+
+
+# =========================================================
+# MULTI TASK OUTPUT
+# =========================================================
 
 @dataclass
 class MultiTaskOutput:
@@ -59,82 +56,115 @@ class MultiTaskOutput:
 
     loss: Optional[torch.Tensor] = None
     task_losses: Optional[Dict[str, torch.Tensor]] = None
-    metadata: Optional[Dict[str, Any]] = None
+
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    # =====================================================
+    # FACTORY
+    # =====================================================
 
     @classmethod
     def from_model_outputs(cls, outputs: Dict[str, Any]) -> "MultiTaskOutput":
-
-        if not isinstance(outputs, dict):
-            raise TypeError("outputs must be a dictionary")
 
         if isinstance(outputs.get("multitask_output"), MultiTaskOutput):
             return outputs["multitask_output"]
 
         multitask = cls()
 
-        for task_name, payload in outputs.items():
+        # FAST PATH (preferred)
+        if "task_logits" in outputs:
+            for task, logits in outputs["task_logits"].items():
+                multitask.tasks[task] = TaskOutput(logits=logits)
 
-            if not isinstance(payload, dict):
-                continue
+        # FALLBACK (legacy)
+        else:
+            for task_name, payload in outputs.items():
 
-            logits = payload.get("logits")
+                if not isinstance(payload, dict):
+                    continue
 
-            if not isinstance(logits, torch.Tensor):
-                continue
+                logits = payload.get("logits")
+                if not isinstance(logits, torch.Tensor):
+                    continue
 
-            multitask.add_task_output(
-                task_name=task_name,
-                logits=logits,
-                probabilities=payload.get("probabilities"),
-                predictions=payload.get("predictions"),
-                loss=payload.get("loss"),
-            )
+                multitask.tasks[task_name] = TaskOutput(
+                    logits=logits,
+                    probabilities=payload.get("probabilities"),
+                    predictions=payload.get("predictions"),
+                    loss=payload.get("loss"),
+                )
 
-        if isinstance(outputs.get("loss"), torch.Tensor):
-            multitask.loss = outputs["loss"]
-
-        task_losses = outputs.get("task_losses") or outputs.get("loss_breakdown")
-
-        if isinstance(task_losses, dict):
-            multitask.task_losses = task_losses
+        multitask.loss = outputs.get("loss")
+        multitask.task_losses = outputs.get("task_losses")
 
         return multitask
 
-    def add_task_output(
-        self,
-        task_name: str,
-        logits: torch.Tensor,
-        probabilities: Optional[torch.Tensor] = None,
-        predictions: Optional[torch.Tensor] = None,
-        loss: Optional[torch.Tensor] = None,
-    ) -> None:
+    # =====================================================
+    # LOSS ENGINE INTERFACE ( IMPORTANT)
+    # =====================================================
 
-        if not isinstance(logits, torch.Tensor):
-            raise TypeError("logits must be torch.Tensor")
+    def to_loss_inputs(self) -> Dict[str, Dict[str, torch.Tensor]]:
+        """
+        Convert to LossEngine-compatible format.
 
-        self.tasks[task_name] = TaskOutput(
-            logits=logits,
-            probabilities=probabilities,
-            predictions=predictions,
-            loss=loss,
-        )
+        Returns:
+            {
+                "task_logits": {...}
+            }
+        """
+        return {
+            "task_logits": {
+                task: out.logits for task, out in self.tasks.items()
+            }
+        }
+
+    # =====================================================
+    # ACCESSORS
+    # =====================================================
 
     def get_logits(self, task_name: str) -> torch.Tensor:
         return self.tasks[task_name].logits
 
-    def get_predictions(self, task_name: str) -> Optional[torch.Tensor]:
+    def get_predictions(self, task_name: str):
         return self.tasks[task_name].predictions
 
-    def get_probabilities(self, task_name: str) -> Optional[torch.Tensor]:
+    def get_probabilities(self, task_name: str):
         return self.tasks[task_name].probabilities
 
-    def get_task_loss(self, task_name: str) -> Optional[torch.Tensor]:
+    def get_task_loss(self, task_name: str):
         return self.tasks[task_name].loss
 
-    def to_dict(self, detach: bool = True) -> Dict[str, Any]:
-        """Convert outputs to serializable dictionary."""
+    # =====================================================
+    # DEVICE OPS
+    # =====================================================
 
-        result: Dict[str, Any] = {}
+    def to(self, device: torch.device) -> "MultiTaskOutput":
+        return MultiTaskOutput(
+            tasks={k: v.to(device) for k, v in self.tasks.items()},
+            loss=self.loss.to(device) if isinstance(self.loss, torch.Tensor) else self.loss,
+            task_losses={
+                k: v.to(device) for k, v in (self.task_losses or {}).items()
+            } if self.task_losses else None,
+            metadata=self.metadata,
+        )
+
+    def detach(self) -> "MultiTaskOutput":
+        return MultiTaskOutput(
+            tasks={k: v.detach() for k, v in self.tasks.items()},
+            loss=self.loss.detach() if isinstance(self.loss, torch.Tensor) else self.loss,
+            task_losses={
+                k: v.detach() for k, v in (self.task_losses or {}).items()
+            } if self.task_losses else None,
+            metadata=self.metadata,
+        )
+
+    # =====================================================
+    # SERIALIZATION
+    # =====================================================
+
+    def to_dict(self, detach: bool = True) -> Dict[str, Any]:
+
+        result = {}
 
         for task_name, task_output in self.tasks.items():
 
@@ -148,16 +178,13 @@ class MultiTaskOutput:
                 "loss": task_output.loss,
             }
 
-        result["loss"] = self.loss.detach() if detach and self.loss is not None else self.loss
+        result["loss"] = self.loss.detach() if detach and isinstance(self.loss, torch.Tensor) else self.loss
 
-        if self.task_losses is not None:
-            if detach:
-                result["task_losses"] = {
-                    key: value.detach() if isinstance(value, torch.Tensor) else value
-                    for key, value in self.task_losses.items()
-                }
-            else:
-                result["task_losses"] = self.task_losses
+        if self.task_losses:
+            result["task_losses"] = {
+                k: v.detach() if detach else v
+                for k, v in self.task_losses.items()
+            }
 
         if self.metadata:
             result["metadata"] = self.metadata
@@ -166,7 +193,7 @@ class MultiTaskOutput:
 
     def to_flat_prediction_dict(self) -> Dict[str, Any]:
 
-        flat: Dict[str, Any] = {}
+        flat = {}
 
         for task_name, task_output in self.tasks.items():
 
@@ -181,7 +208,7 @@ class MultiTaskOutput:
         if self.loss is not None:
             flat["loss"] = self.loss
 
-        if self.task_losses is not None:
+        if self.task_losses:
             flat["task_losses"] = self.task_losses
 
         if self.metadata:

@@ -1,251 +1,137 @@
-# ==========================================================
-# MODEL
-# ==========================================================
+# =========================================================
+# GLOBAL
+# =========================================================
 
-model:
+project:
+  name: "TruthLens"
+  seed: 42
 
-  encoder:
-    name: roberta-base
-    tokenizer_name: roberta-base
-    max_length: 512
-    cache_dir: models/cache
-
-    # memory optimization
-    gradient_checkpointing: false
-
-    # execution optimization
-    flash_attention: true
-
-    # compilation
-    torch_compile: true
-    compile_mode: max-autotune
-
-  architecture:
-    type: multitask_transformer
-    shared_encoder: true     # avoid repeated encoder calls
-    dropout: 0.1
-
-    # memory efficiency
-    reduce_intermediate_allocation: true
-
-  path: models/truthlens_model
-
-
-# ==========================================================
+# =========================================================
 # TRAINING
-# ==========================================================
+# =========================================================
 
 training:
-
-  seed: 42
-  device: auto
-
   epochs: 4
+  log_every: 50
+  eval_every: 1
+  checkpoint_every: 500
+  gradient_accumulation_steps: 2
+  early_stopping_patience: 5
 
-  batch_size: 48
+# =========================================================
+# OPTIMIZATION
+# =========================================================
 
-  # throughput scaling
-  gradient_accumulation_steps: 1
-
-  learning_rate: 4e-5
+optimizer:
+  name: "adamw"
+  lr: 3e-5
   weight_decay: 0.01
-  warmup_ratio: 0.1
 
-  scheduler: cosine
-  optimizer: adamw
+scheduler:
+  name: "linear"
+  step_mode: "step"   # step | epoch | metric
+  warmup_steps: 1000
 
-  # mixed precision
-  amp:
-    enabled: true
-    dtype: bf16   # better than fp16 on modern GPUs
+# =========================================================
+# MIXED PRECISION
+# =========================================================
 
-  gradient_clipping: 1.0
+precision:
+  use_amp: true
+  amp_dtype: "bf16"   # bf16 | fp16
+  allow_tf32: true
 
-  # ------------------------------------------------------
-  # DATA PIPELINE OPTIMIZATION
-  # ------------------------------------------------------
+# =========================================================
+# MODEL
+# =========================================================
 
-  dynamic_padding: true
-  group_by_length: true
+model:
+  encoder: "roberta-base"
+  hidden_dim: 768
+  dropout: 0.1
 
-  dataloader:
-    num_workers: 12
-    persistent_workers: true
-    prefetch_factor: 4
-    pin_memory: true   # critical
+# =========================================================
+# TASK CONFIG (CRITICAL)
+# =========================================================
 
-  # ------------------------------------------------------
-  # EXECUTION OPTIMIZATION
-  # ------------------------------------------------------
+tasks:
+  bias: "multiclass"
+  ideology: "multiclass"
+  propaganda: "multiclass"
+  narrative: "multilabel"
+  narrative_frame: "multilabel"
+  emotion: "multilabel"
 
-  torch_compile: true
-  compile_mode: max-autotune
+task_weights:
+  bias: 1.0
+  ideology: 1.0
+  propaganda: 1.0
+  narrative: 1.0
+  narrative_frame: 1.0
+  emotion: 1.0
 
-  fused_attention: true
+# =========================================================
+# LOSS
+# =========================================================
 
-  # ------------------------------------------------------
-  # CHECKPOINT OPTIMIZATION
-  # ------------------------------------------------------
+loss:
+  ignore_index: -100
+  validate_loss: true
 
-  checkpoint:
-    save_steps: 1000
-    save_total_limit: 3
-
-    async_save: true               # non-blocking
-    save_optimizer_every: 3000     # avoid every step
-
-  resume_from_checkpoint: false
-
-  text_column: text
-  title_column: title
-
-  early_stopping:
-    enabled: true
-    patience: 2
-    metric: eval_f1
-
-
-# ==========================================================
-# DATA
-# ==========================================================
+# =========================================================
+# DATALOADER
+# =========================================================
 
 data:
+  batch_size: 16
+  num_workers: 4
+  pin_memory: true
+  shuffle: true
 
-  train_path: data/splits/train.csv
-  validation_path: data/splits/validation.csv
-  test_path: data/splits/test.csv
+# =========================================================
+# DISTRIBUTED (DDP)
+# =========================================================
 
-  raw_dir: data/raw
-  interim_dir: data/interim
-  processed_dir: data/processed
+distributed:
+  use_ddp: true
+  backend: "nccl"
+  find_unused_parameters: false
 
-  augmentation_multiplier: 1.5
+# =========================================================
+# MONITORING
+# =========================================================
 
+monitoring:
+  spike_threshold: 3.0
+  ema_alpha: 0.1
+  health_threshold: 0.3
+  grad_monitor_interval: 200
 
-# ==========================================================
-# FEATURES
-# ==========================================================
+# =========================================================
+# CHECKPOINTING
+# =========================================================
 
-features:
+checkpoint:
+  dir: "checkpoints/"
+  max_checkpoints: 3
+  monitor_metric: "val_loss"
+  mode: "min"
 
-  engineered_text_column: engineered_text
-
-  tfidf:
-    enabled: true
-    max_features: 5000
-    top_terms_per_doc: 4
-
-
-# ==========================================================
-# CROSS VALIDATION
-# ==========================================================
-
-cross_validation:
-
-  enabled: false
-  splits: 5
-  metric: eval_loss
-
-
-# ==========================================================
-# HYPERPARAMETER TUNING
-# ==========================================================
-
-hyperparameter_tuning:
-
-  enabled: false
-
-  trials: 10
-  direction: minimize
-  metric: eval_loss
-
-  search_space:
-
-    learning_rate:
-      min: 1e-6
-      max: 5e-5
-
-    batch_size:
-      - 16
-      - 32
-      - 64
-
-    epochs:
-      - 3
-      - 4
-
-
-# ==========================================================
+# =========================================================
 # EVALUATION
-# ==========================================================
+# =========================================================
 
 evaluation:
+  device: null   # auto
 
-  metrics:
+# =========================================================
+# EXPERIMENT TRACKING
+# =========================================================
 
-    classification:
-      - accuracy
-      - precision
-      - recall
-      - f1
-
-    multi_label:
-      - micro_f1
-      - macro_f1
-      - roc_auc
-
-
-# ==========================================================
-# LOGGING
-# ==========================================================
-
-logging:
-
-  log_level: INFO
-
-  training_log_path: logs/training.log
-
-  eval_steps: 500
-
-
-# ==========================================================
-# PATHS
-# ==========================================================
-
-paths:
-
-  models_dir: models
-  logs_dir: logs
-  reports_dir: reports
-
-  tfidf_vectorizer_path: models/tfidf_vectorizer.joblib
-
-  evaluation_results_path: reports/evaluation_results.json
-  confusion_matrix_path: reports/confusion_matrix.png
-  cleaning_report_path: reports/data_cleaning_report.json
-
-
-# ==========================================================
-# API
-# ==========================================================
-
-api:
-
-  title: TruthLens AI API
-  description: Multi-task NLP system
-  version: 2.0.0
-
-  text_preview_chars: 100
-
-
-# ==========================================================
-# INFERENCE
-# ==========================================================
-
-inference:
-
-  batch_size: 32
-  device: auto
-
-  use_half_precision: true
-  allow_raw_text_fallback: true
+tracking:
+  backend: "wandb"   # none | mlflow | wandb
+  project_name: "truthlens"
+  run_name: null
+  tags:
+    stage: "experiment"
+    version: "v1"

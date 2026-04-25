@@ -406,7 +406,7 @@ def test_issue3_load_data_accepts_sparse_multitask_labels(tmp_path, monkeypatch)
 
 def test_issue3_multitask_loss_ignores_masked_multilabel_targets():
     """Sparse rows encoded with -100 sentinel must not produce NaN loss."""
-    from src.models.multitask.multitask_loss import MultiTaskLoss, TaskLossConfig
+    from src.models.loss.multitask_loss import MultiTaskLoss, TaskLossConfig
 
     criterion = MultiTaskLoss(
         {
@@ -439,7 +439,7 @@ def test_issue3_multitask_loss_ignores_masked_multilabel_targets():
 
 def test_issue3_multitask_loss_skips_fully_masked_multiclass_task():
     """Cross-entropy with only ignore_index targets must be skipped, not NaN."""
-    from src.models.multitask.multitask_loss import MultiTaskLoss, TaskLossConfig
+    from src.models.loss.multitask_loss import MultiTaskLoss, TaskLossConfig
 
     criterion = MultiTaskLoss(
         {

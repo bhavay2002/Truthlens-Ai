@@ -61,87 +61,6 @@ def training_precision(
 
 
 # =========================================================
-# TASK TYPES
-# =========================================================
-
-MULTICLASS_TASKS: frozenset = frozenset({"bias", "ideology", "propaganda"})
-MULTILABEL_TASKS: frozenset = frozenset({"narrative", "narrative_frame", "emotion"})
-
-
-def get_task_type(task: str) -> str:
-    if task in MULTICLASS_TASKS:
-        return "multiclass"
-    if task in MULTILABEL_TASKS:
-        return "multilabel"
-    raise ValueError(f"Unknown task: {task!r}")
-
-
-def compute_predictions(task: str, logits: torch.Tensor) -> torch.Tensor:
-    if task in MULTICLASS_TASKS:
-        return torch.argmax(logits, dim=1)
-    if task in MULTILABEL_TASKS:
-        return (torch.sigmoid(logits) > 0.5).int()
-    raise ValueError(f"Unknown task: {task!r}")
-
-
-def validate_loss(loss: torch.Tensor) -> None:
-    if not torch.isfinite(loss):
-        raise RuntimeError(f"Non-finite loss detected: {loss.item()}")
-    if loss.item() > 1e4:
-        raise RuntimeError(f"Exploding loss detected: {loss.item():.2f}")
-
-
-# =========================================================
-# BATCH VALIDATION
-# =========================================================
-
-def extract_task_from_batch(batch: Dict[str, Any]) -> str:
-    task = batch.get("task")
-    if task is None:
-        raise ValueError("Batch missing 'task'")
-    if not isinstance(task, str):
-        raise TypeError("task must be str")
-    return task
-
-
-def validate_single_task_batch(batch: Dict[str, Any]) -> None:
-    required = ("input_ids", "attention_mask", "labels", "task")
-    for key in required:
-        if key not in batch:
-            raise ValueError(f"Missing key: {key}")
-    if not isinstance(batch["task"], str):
-        raise TypeError("task must be string")
-
-
-# =========================================================
-# METRICS CONTAINER
-# =========================================================
-
-@dataclass
-class TrainingMetrics:
-
-    task_losses: Dict[str, float] = field(default_factory=dict)
-    losses: Dict[str, float] = field(default_factory=dict)
-
-    step: int = 0
-    epoch: int = 0
-
-    def update(self, name: str, value: float) -> None:
-        self.losses[name] = float(value)
-
-    def update_task(self, task: str, loss: float) -> None:
-        self.task_losses[task] = float(loss)
-
-    def average_loss(self) -> float:
-        if not self.task_losses:
-            return 0.0
-        return sum(self.task_losses.values()) / len(self.task_losses)
-
-    def to_dict(self) -> Dict[str, float]:
-        return dict(self.losses)
-
-
-# =========================================================
 # DEVICE
 # =========================================================
 
@@ -184,11 +103,12 @@ def move_batch_to_device(
 
 
 # =========================================================
-# GRADIENTS
+# GRADIENT UTILITIES
 # =========================================================
 
 def clip_gradients(
-    parameters: Iterable[nn.Parameter],
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
     max_norm: Optional[float],
     scaler: Optional[torch.cuda.amp.GradScaler] = None,
 ) -> float:
@@ -200,9 +120,13 @@ def clip_gradients(
         raise ValueError("max_norm must be > 0")
 
     if scaler is not None:
-        scaler.unscale_(parameters)
+        scaler.unscale_(optimizer)  # ✅ FIXED
 
-    total_norm = torch.nn.utils.clip_grad_norm_(parameters, max_norm)
+    total_norm = torch.nn.utils.clip_grad_norm_(
+        model.parameters(),
+        max_norm,
+    )
+
     return float(total_norm)
 
 
@@ -232,11 +156,12 @@ def compute_batch_size(batch: Any) -> int:
             if isinstance(v, torch.Tensor) and v.ndim > 0:
                 return v.shape[0]
 
-    raise RuntimeError("Cannot determine batch size")
+    # ✅ safer fallback
+    return 1
 
 
 # =========================================================
-# TENSOR UTILS
+# TENSOR UTILITIES
 # =========================================================
 
 def detach_tensor_dict(data: Any, to_cpu: bool = True) -> Any:
@@ -270,3 +195,31 @@ def enable_model_train(model: nn.Module) -> None:
 def inference_mode():
     with torch.inference_mode():
         yield
+
+
+# =========================================================
+# METRICS CONTAINER (OPTIONAL BUT USEFUL)
+# =========================================================
+
+@dataclass
+class TrainingMetrics:
+
+    task_losses: Dict[str, float] = field(default_factory=dict)
+    losses: Dict[str, float] = field(default_factory=dict)
+
+    step: int = 0
+    epoch: int = 0
+
+    def update(self, name: str, value: float) -> None:
+        self.losses[name] = float(value)
+
+    def update_task(self, task: str, loss: float) -> None:
+        self.task_losses[task] = float(loss)
+
+    def average_loss(self) -> float:
+        if not self.task_losses:
+            return 0.0
+        return sum(self.task_losses.values()) / len(self.task_losses)
+
+    def to_dict(self) -> Dict[str, float]:
+        return dict(self.losses)

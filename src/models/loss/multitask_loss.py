@@ -1,0 +1,297 @@
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Dict, Optional, Tuple, Iterable
+
+import torch
+import torch.nn as nn
+
+from src.models.loss.task_loss_router import TaskLossRouter
+from src.models.loss.loss_normalizer import EMALossNormalizer
+from src.models.loss.coverage_tracker import EMACoverageTracker
+from src.models.loss.base_balancer import BaseBalancer
+
+logger = logging.getLogger(__name__)
+
+
+# =========================================================
+# CONFIG
+# =========================================================
+
+@dataclass
+class TaskLossConfig:
+    task_type: str
+    weight: float = 1.0
+    ignore_index: int = -100
+    pos_weight: Optional[torch.Tensor] = None
+
+
+# =========================================================
+# MULTI-TASK LOSS (ORCHESTRATOR)
+# =========================================================
+
+class MultiTaskLoss(nn.Module):
+    """
+    Fully modular multi-task loss system.
+
+    Pipeline:
+        logits
+          → TaskLossRouter
+          → EMALossNormalizer
+          → EMACoverageTracker
+          → static weighting
+          → BaseBalancer (GradNorm / Uncertainty)
+          → final normalization
+
+    Designed for:
+    - multi-task imbalance
+    - sparse supervision
+    - research experimentation
+    - production training
+    """
+
+    VALID_NORMALIZATION = {"active", "fixed", "sum"}
+
+    def __init__(
+        self,
+        task_configs: Dict[str, TaskLossConfig],
+        *,
+        normalization: str = "active",
+        use_normalizer: bool = True,
+        use_coverage: bool = True,
+    ) -> None:
+        super().__init__()
+
+        if not task_configs:
+            raise ValueError("task_configs cannot be empty")
+
+        if normalization not in self.VALID_NORMALIZATION:
+            raise ValueError(f"Invalid normalization: {normalization}")
+
+        self.task_configs = task_configs
+        self.task_names = list(task_configs.keys())
+        self.normalization = normalization
+
+        # =====================================================
+        # LOSS FUNCTIONS
+        # =====================================================
+
+        loss_functions = nn.ModuleDict()
+
+        for name, cfg in task_configs.items():
+
+            if cfg.task_type == "multi_class":
+                loss_functions[name] = nn.CrossEntropyLoss(
+                    ignore_index=cfg.ignore_index
+                )
+
+            elif cfg.task_type in {"binary", "multi_label"}:
+                loss_functions[name] = nn.BCEWithLogitsLoss(
+                    reduction="none",
+                    pos_weight=cfg.pos_weight
+                )
+
+            elif cfg.task_type == "regression":
+                loss_functions[name] = nn.MSELoss()
+
+            else:
+                raise ValueError(f"{name}: invalid task_type={cfg.task_type}")
+
+        # =====================================================
+        # MODULES
+        # =====================================================
+
+        self.router = TaskLossRouter(loss_functions, task_configs)
+
+        self.normalizer = EMALossNormalizer() if use_normalizer else None
+        self.coverage = EMACoverageTracker() if use_coverage else None
+
+        self.balancer: Optional[BaseBalancer] = None
+
+        # diagnostics
+        self.last_active_heads: int = 0
+
+        logger.info(
+            "MultiTaskLoss initialized | tasks=%s | norm=%s",
+            self.task_names,
+            self.normalization,
+        )
+
+    # =========================================================
+    # BALANCER
+    # =========================================================
+
+    def attach_task_balancer(self, balancer: BaseBalancer) -> None:
+        if not isinstance(balancer, BaseBalancer):
+            raise TypeError("balancer must inherit BaseBalancer")
+
+        self.balancer = balancer
+        logger.info("Balancer attached: %s", balancer.__class__.__name__)
+
+    # =========================================================
+    # MAIN FORWARD
+    # =========================================================
+
+    def forward(
+        self,
+        logits: Dict[str, torch.Tensor],
+        labels: Dict[str, torch.Tensor],
+        *,
+        shared_parameters: Optional[Iterable[torch.nn.Parameter]] = None,
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+
+        if not isinstance(logits, dict) or not isinstance(labels, dict):
+            raise TypeError("logits and labels must be dict")
+
+        task_losses: Dict[str, torch.Tensor] = {}
+        raw_losses: Dict[str, torch.Tensor] = {}
+
+        total_loss: Optional[torch.Tensor] = None
+        active_heads = 0
+
+        # =====================================================
+        # PER-TASK LOOP
+        # =====================================================
+
+        for task in self.task_names:
+
+            if task not in logits or task not in labels:
+                continue
+
+            cfg = self.task_configs[task]
+
+            # -------------------------
+            # 1. RAW LOSS (IMPORTANT)
+            # -------------------------
+
+            raw_loss = self.router.compute(
+                task,
+                logits[task],
+                labels[task],
+            )
+
+            if not torch.isfinite(raw_loss):
+                raise RuntimeError(f"Non-finite loss in task '{task}'")
+
+            loss = raw_loss
+
+            # -------------------------
+            # 2. COVERAGE UPDATE
+            # -------------------------
+
+            if self.coverage is not None:
+                self.coverage.update(
+                    task,
+                    labels[task],
+                    ignore_index=cfg.ignore_index,
+                    task_type=cfg.task_type,
+                )
+
+            # -------------------------
+            # 3. EMA NORMALIZATION
+            # -------------------------
+
+            if self.normalizer is not None:
+                loss = self.normalizer.normalize(task, loss)
+
+            # -------------------------
+            # 4. COVERAGE WEIGHTING
+            # -------------------------
+
+            if self.coverage is not None:
+                loss = self.coverage.weight(task, loss)
+
+            # -------------------------
+            # 5. STATIC TASK WEIGHT
+            # -------------------------
+
+            weighted_loss = loss * float(cfg.weight)
+
+            task_losses[task] = weighted_loss
+            raw_losses[task] = raw_loss  # CRITICAL: true raw loss
+
+            total_loss = (
+                weighted_loss
+                if total_loss is None
+                else total_loss + weighted_loss
+            )
+
+            active_heads += 1
+
+        # =====================================================
+        # EMPTY BATCH SAFE (AMP SAFE)
+        # =====================================================
+
+        if active_heads == 0:
+            for t in logits.values():
+                if torch.is_tensor(t) and t.requires_grad:
+                    return t.sum() * 0.0, {}
+            return torch.zeros((), requires_grad=False), {}
+
+        # =====================================================
+        # BALANCER HOOK (BEFORE BACKWARD)
+        # =====================================================
+
+        if self.balancer is not None:
+            self.balancer.on_before_backward(
+                raw_losses,
+                shared_parameters=shared_parameters,
+            )
+
+        # =====================================================
+        # BALANCER COMBINATION
+        # =====================================================
+
+        if self.balancer is not None:
+            total_loss = self.balancer(raw_losses)
+
+        # =====================================================
+        # FINAL NORMALIZATION
+        # =====================================================
+
+        if self.normalization == "active":
+            total_loss = total_loss / float(active_heads)
+
+        elif self.normalization == "fixed":
+            total_loss = total_loss / float(len(self.task_names))
+
+        # "sum" → no change
+
+        self.last_active_heads = active_heads
+
+        return total_loss, task_losses
+
+    # =========================================================
+    # TRAINING HOOKS (CALL FROM TRAINER)
+    # =========================================================
+
+    def on_after_backward(self) -> None:
+        if self.balancer is not None:
+            self.balancer.on_after_backward()
+
+    def on_step_end(self) -> None:
+        if self.balancer is not None:
+            self.balancer.on_step_end()
+
+    # =========================================================
+    # DEBUG / MONITORING
+    # =========================================================
+
+    def get_stats(self) -> Dict[str, Dict]:
+
+        stats: Dict[str, Dict] = {}
+
+        if self.normalizer:
+            stats["loss_mean"] = self.normalizer.get_running_means()
+
+        if self.coverage:
+            stats["coverage"] = self.coverage.get_coverage()
+            stats["coverage_weights"] = self.coverage.get_multipliers()
+
+        if self.balancer and hasattr(self.balancer, "get_weights"):
+            stats["balancer_weights"] = self.balancer.get_weights()
+
+        stats["active_heads"] = self.last_active_heads
+
+        return stats
