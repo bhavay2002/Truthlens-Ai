@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.training.train_transformer_model import tokenize_function
+from src.pipelines.baseline_training import tokenize_function
 
 
 class _DummyTokenizer:

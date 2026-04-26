@@ -1,203 +1,258 @@
 from __future__ import annotations
 
-import json
 import logging
+import queue
+import threading
+import time
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
+import joblib
 import torch
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import torch.distributed as dist
 
+# NEW MODULAR SYSTEM
+from src.models.checkpointing.io_utils import atomic_save, ensure_dir
+from src.models.checkpointing.integrity import attach_integrity_metadata
+from src.models.checkpointing.metadata import save_metadata
+from src.models.checkpointing.schema import attach_schema
 from src.models.checkpointing.validator import validate_checkpoint
+
+from src.models.export import (
+    ONNXExportConfig,
+    ONNXExporter,
+    QuantizationConfig,
+    QuantizationEngine,
+    TorchScriptExportConfig,
+    TorchScriptExporter,
+)
+
+from src.models.metadata.model_card import ModelCard
+from src.models.metadata.model_metadata import ModelMetadata
+from src.models.metadata.model_versioning import ModelVersionInfo, ModelVersionRegistry
 
 logger = logging.getLogger(__name__)
 
 
-class ModelLoader:
+# =========================================================
+# ASYNC WRITER (FIXED)
+# =========================================================
 
-    def __init__(
-        self,
-        model_dir: str | Path,
-        device: Optional[str] = None,
-        use_half: bool = True,
-        compile_model: bool = False,
-    ) -> None:
+class AsyncCheckpointWriter:
 
-        self.model_dir = Path(model_dir)
+    def __init__(self, max_queue_size: int = 8) -> None:
+        self._queue: queue.Queue = queue.Queue(maxsize=max_queue_size)
+        self._thread = threading.Thread(target=self._worker, daemon=True)
+        self._closed = False
+        self.last_error: Optional[Exception] = None
+        self._thread.start()
 
-        if not self.model_dir.exists():
-            raise FileNotFoundError(self.model_dir)
+    def _worker(self) -> None:
+        while True:
+            item = self._queue.get()
 
-        self.device = torch.device(
-            device if device else ("cuda" if torch.cuda.is_available() else "cpu")
-        )
+            if item is None:
+                self._queue.task_done()
+                break
 
-        self.use_half = use_half
-        self.compile_model = compile_model
+            path, obj = item
 
-    # =====================================================
-    # PUBLIC
-    # =====================================================
-
-    def load(self) -> Dict[str, Any]:
-
-        logger.info("Loading model: %s", self.model_dir)
-
-        tokenizer = self._load_tokenizer()
-        model = self._load_model()
-
-        model.to(self.device)
-
-        if self.use_half and self.device.type == "cuda":
-            model = model.half()
-
-        if self.compile_model:
             try:
-                model = torch.compile(model, mode="max-autotune")
-            except Exception:
-                logger.warning("compile failed")
+                atomic_save(obj, path)  # 🔥 USE SAFE SAVE
+            except Exception as e:
+                self.last_error = e
+                logger.exception("Async save failed")
+            finally:
+                self._queue.task_done()
 
-        model.eval()
-
-        metadata = self._load_metadata()
-
-        return {
-            "model": model,
-            "tokenizer": tokenizer,
-            "device": self.device,
-            "metadata": metadata,
-        }
-
-    # =====================================================
-    # TOKENIZER
-    # =====================================================
-
-    def _load_tokenizer(self):
-
-        tok_path = self.model_dir / "tokenizer"
+    def save(self, path: Path, obj: Any) -> None:
+        if self._closed:
+            raise RuntimeError("Writer closed")
 
         try:
-            if tok_path.exists():
-                return AutoTokenizer.from_pretrained(tok_path, use_fast=True)
+            self._queue.put_nowait((path, obj))
+        except queue.Full:
+            _ = self._queue.get_nowait()
+            self._queue.task_done()
+            self._queue.put_nowait((path, obj))
 
-            return AutoTokenizer.from_pretrained(self.model_dir, use_fast=True)
+    def flush(self) -> None:
+        self._queue.join()
 
-        except Exception as e:
-            logger.exception("Tokenizer load failed")
-            raise RuntimeError from e
+    def close(self) -> None:
+        if self._closed:
+            return
+        self.flush()
+        self._closed = True
+        self._queue.put(None)
+        self._thread.join()
 
-    # =====================================================
-    # MODEL
-    # =====================================================
 
-    def _load_model(self):
+# =========================================================
+# ARTIFACT MANAGER (V2)
+# =========================================================
 
-        config_file = self.model_dir / "model_config.json"
-        checkpoint_file = self.model_dir / "model.pt"
+class ArtifactManager:
 
-        # -------------------------
-        # HF MODEL
-        # -------------------------
+    def __init__(self, artifact_dir: str | Path) -> None:
+        self.artifact_dir = Path(artifact_dir)
+        ensure_dir(self.artifact_dir)
 
-        if not config_file.exists():
-
-            return AutoModelForSequenceClassification.from_pretrained(
-                self.model_dir,
-                torch_dtype=torch.float16 if self.use_half else None,
-                low_cpu_mem_usage=True,
-            )
-
-        # -------------------------
-        # CUSTOM MODEL
-        # -------------------------
-
-        try:
-            from src.models.registry.model_factory import ModelFactory
-            from src.models.checkpointing.checkpoint_manager import CheckpointManager
-
-            with open(config_file, "r") as f:
-                cfg = json.load(f)
-
-            model_type = cfg["model_type"]
-            params = cfg.get("model_params", {})
-
-            model = ModelFactory.create(model_type, params)
-
-            # -------------------------
-            # DIRECT CHECKPOINT
-            # -------------------------
-
-            if checkpoint_file.exists():
-
-                checkpoint = torch.load(
-                    checkpoint_file,
-                    map_location="cpu",
-                )
-
-                state = (
-                    checkpoint.get("model_state_dict")
-                    if isinstance(checkpoint, dict)
-                    else checkpoint
-                )
-
-                validate_checkpoint(state)
-
-                res = model.load_state_dict(state, strict=False)
-
-                if res.missing_keys:
-                    raise RuntimeError(res.missing_keys)
-                if res.unexpected_keys:
-                    raise RuntimeError(res.unexpected_keys)
-
-                return model
-
-            # -------------------------
-            # BUNDLE
-            # -------------------------
-
-            bundle = self.model_dir / "checkpoint_bundle"
-
-            if bundle.exists():
-
-                manager = CheckpointManager(bundle)
-                latest = manager.latest()
-
-                if latest:
-                    checkpoint = manager.load_checkpoint(latest)
-
-                    state = checkpoint.get("model_state_dict") or checkpoint.get("model")
-
-                    validate_checkpoint(state)
-
-                    res = model.load_state_dict(state, strict=False)
-
-                    if res.missing_keys:
-                        raise RuntimeError(res.missing_keys)
-                    if res.unexpected_keys:
-                        raise RuntimeError(res.unexpected_keys)
-
-            return model
-
-        except Exception as e:
-            logger.exception("Model load failed")
-            raise RuntimeError from e
+        self._writer = AsyncCheckpointWriter()
 
     # =====================================================
-    # METADATA
+    # DISTRIBUTED SAFETY
     # =====================================================
 
-    def _load_metadata(self) -> Dict[str, Any]:
+    @staticmethod
+    def _is_primary() -> bool:
+        return not (dist.is_available() and dist.is_initialized()) or dist.get_rank() == 0
 
-        bundle = self.model_dir / "checkpoint_bundle"
+    # =====================================================
+    # MODEL SAVE
+    # =====================================================
 
-        if not bundle.exists():
-            return {}
+    def save_model(
+        self,
+        model: torch.nn.Module,
+        name: str = "model.pt",
+    ) -> Path:
 
-        try:
-            from src.models.checkpointing.artifact_manager import ArtifactManager
+        path = self.artifact_dir / name
 
-            manager = ArtifactManager(bundle)
-            return manager.load_metadata()
+        if not self._is_primary():
+            return path
 
-        except Exception:
-            return {}
+        state = model.state_dict()
+
+        validate_checkpoint(state, strict=False)
+
+        # -------------------------
+        # SCHEMA
+        # -------------------------
+
+        payload = attach_schema({
+            "model_state_dict": state,
+            "timestamp": time.time(),
+        })
+
+        # -------------------------
+        # SAVE
+        # -------------------------
+
+        self._writer.save(path, payload)
+
+        # -------------------------
+        # METADATA + INTEGRITY
+        # -------------------------
+
+        integrity = attach_integrity_metadata(path)
+
+        save_metadata(self.artifact_dir, {
+            "type": "model",
+            "file": name,
+            **integrity,
+        })
+
+        return path
+
+    # =====================================================
+    # CHECKPOINT SAVE
+    # =====================================================
+
+    def save_checkpoint(
+        self,
+        model: torch.nn.Module,
+        optimizer: Optional[torch.optim.Optimizer] = None,
+        step: Optional[int] = None,
+    ) -> Path:
+
+        name = f"checkpoint_{step}.pt" if step else "checkpoint.pt"
+        path = self.artifact_dir / name
+
+        if not self._is_primary():
+            return path
+
+        payload = attach_schema({
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict() if optimizer else None,
+            "step": step,
+            "timestamp": time.time(),
+        })
+
+        validate_checkpoint(payload["model_state_dict"], strict=False)
+
+        self._writer.save(path, payload)
+
+        integrity = attach_integrity_metadata(path)
+
+        save_metadata(self.artifact_dir, {
+            "type": "checkpoint",
+            "step": step,
+            **integrity,
+        })
+
+        return path
+
+    # =====================================================
+    # EXPORT (UNCHANGED - ALREADY GOOD)
+    # =====================================================
+
+    def export_onnx(self, model, example_input, name="model.onnx", config=None):
+        path = self.artifact_dir / name
+        ONNXExporter(config).export(model, example_input, path)
+        return path
+
+    def export_torchscript(self, model, example_input, name="model.ts.pt", config=None):
+        path = self.artifact_dir / name
+        TorchScriptExporter(config).export(model, example_input, path)
+        return path
+
+    def export_quantized(self, model, name="model.quantized.pt", config=None):
+        config = config or QuantizationConfig(method="dynamic")
+        q_model = QuantizationEngine(config).apply(model)
+        path = self.artifact_dir / name
+        torch.save(q_model, path)
+        return path
+
+    # =====================================================
+    # AUX
+    # =====================================================
+
+    def save_tokenizer(self, tokenizer, name="tokenizer"):
+        path = self.artifact_dir / name
+        path.mkdir(parents=True, exist_ok=True)
+        tokenizer.save_pretrained(path)
+        return path
+
+    def save_vectorizer(self, vectorizer, name="vectorizer.joblib"):
+        path = self.artifact_dir / name
+        joblib.dump(vectorizer, path)
+        return path
+
+    # =====================================================
+    # LOAD
+    # =====================================================
+
+    def load_model(self, name="model.pt") -> Dict[str, Any]:
+
+        path = self.artifact_dir / name
+
+        if not path.exists():
+            raise FileNotFoundError(path)
+
+        checkpoint = torch.load(path)
+
+        validate_checkpoint(checkpoint.get("model_state_dict", {}), strict=False)
+
+        return checkpoint
+
+    # =====================================================
+    # LIFECYCLE
+    # =====================================================
+
+    def flush(self):
+        self._writer.flush()
+
+    def close(self):
+        self._writer.close()

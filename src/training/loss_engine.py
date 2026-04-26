@@ -22,30 +22,16 @@ class LossEngineConfig:
     task_weights: Optional[Dict[str, float]] = None
     ignore_index: int = -100
 
-    # advanced controls
-    normalization: str = "active"   # active | fixed | sum
+    normalization: str = "active"
     use_normalizer: bool = True
     use_coverage: bool = True
 
 
 # =========================================================
-# LOSS ENGINE (ORCHESTRATOR)
+# LOSS ENGINE
 # =========================================================
 
 class LossEngine:
-    """
-    High-level orchestration layer over MultiTaskLoss.
-
-    Responsibilities
-    ----------------
-    - Build TaskLossConfig
-    - Call MultiTaskLoss
-    - Integrate balancers (GradNorm / Uncertainty)
-    - Expose debugging + monitoring hooks
-
-    This class should remain THIN.
-    All heavy logic lives inside MultiTaskLoss + modules.
-    """
 
     def __init__(self, config: LossEngineConfig):
 
@@ -58,7 +44,6 @@ class LossEngine:
         task_configs: Dict[str, TaskLossConfig] = {}
 
         for task, task_type in config.task_types.items():
-
             weight = (config.task_weights or {}).get(task, 1.0)
 
             task_configs[task] = TaskLossConfig(
@@ -68,7 +53,7 @@ class LossEngine:
             )
 
         # -------------------------------------------------
-        # CORE LOSS SYSTEM
+        # CORE LOSS MODULE
         # -------------------------------------------------
 
         self.loss_module = MultiTaskLoss(
@@ -81,29 +66,27 @@ class LossEngine:
         self._balancer: Optional[BaseBalancer] = None
 
         logger.info(
-            "LossEngine initialized | tasks=%s | normalization=%s",
+            "LossEngine initialized | tasks=%s | norm=%s",
             list(task_configs.keys()),
             config.normalization,
         )
 
     # =====================================================
-    # BALANCER INTEGRATION
+    # BALANCER
     # =====================================================
 
     def attach_balancer(self, balancer: BaseBalancer) -> None:
-        """
-        Attach a balancing strategy (GradNorm / Uncertainty).
-        """
+
         if not isinstance(balancer, BaseBalancer):
             raise TypeError("balancer must inherit from BaseBalancer")
 
         self._balancer = balancer
         self.loss_module.attach_task_balancer(balancer)
 
-        logger.info("LossEngine: balancer attached -> %s", balancer.__class__.__name__)
+        logger.info("Balancer attached: %s", balancer.__class__.__name__)
 
     # =====================================================
-    # MAIN COMPUTE
+    # MAIN
     # =====================================================
 
     def compute(
@@ -111,14 +94,14 @@ class LossEngine:
         outputs: Dict[str, Any],
         batch: Dict[str, Any],
         *,
-        shared_parameters=None,   # for GradNorm
+        shared_parameters=None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
 
         if "task_logits" not in outputs:
-            raise RuntimeError("Missing 'task_logits' in outputs")
+            raise RuntimeError("Missing 'task_logits'")
 
         if "labels" not in batch:
-            raise RuntimeError("Missing 'labels' in batch")
+            raise RuntimeError("Missing 'labels'")
 
         logits = outputs["task_logits"]
         labels = batch["labels"]
@@ -130,20 +113,31 @@ class LossEngine:
         total_loss, task_losses = self.loss_module(logits, labels)
 
         # -------------------------------------------------
-        # BALANCER HOOK (PRE-BACKWARD)
+        # NUMERICAL SAFETY
+        # -------------------------------------------------
+
+        if not torch.isfinite(total_loss):
+            raise RuntimeError(f"Non-finite total loss: {total_loss.item()}")
+
+        for task, loss in task_losses.items():
+            if not torch.isfinite(loss):
+                raise RuntimeError(f"Non-finite loss in task '{task}'")
+
+        # -------------------------------------------------
+        # BALANCER PRE-BACKWARD
         # -------------------------------------------------
 
         if self._balancer is not None:
             try:
                 self._balancer.on_before_backward(
-                    task_losses=task_losses,
+                    task_losses={k: v.detach() for k, v in task_losses.items()},
                     shared_parameters=shared_parameters,
                 )
-            except Exception as exc:
-                logger.warning("Balancer pre-backward hook failed: %s", exc)
+            except Exception as e:
+                logger.warning("Balancer pre-backward failed: %s", e)
 
         # -------------------------------------------------
-        # DEBUG ATTACHMENTS
+        # DEBUG ATTACHMENTS (SAFE)
         # -------------------------------------------------
 
         outputs["task_losses"] = {
@@ -152,34 +146,40 @@ class LossEngine:
 
         outputs["total_loss"] = total_loss.detach()
 
+        outputs["loss_stats"] = {
+            "num_tasks": len(task_losses),
+            "mean_loss": float(
+                torch.stack(list(task_losses.values())).mean().item()
+            )
+        }
+
         return total_loss, task_losses
 
     # =====================================================
-    # TRAINING HOOKS (CALL FROM TRAINER)
+    # TRAINING HOOKS
     # =====================================================
 
     def on_after_backward(self) -> None:
+
         if self._balancer is not None:
             try:
                 self._balancer.on_after_backward()
-            except Exception as exc:
-                logger.warning("Balancer post-backward hook failed: %s", exc)
+            except Exception as e:
+                logger.warning("Balancer post-backward failed: %s", e)
 
     def on_step_end(self) -> None:
+
         if self._balancer is not None:
             try:
                 self._balancer.on_step_end()
-            except Exception as exc:
-                logger.warning("Balancer step-end hook failed: %s", exc)
+            except Exception as e:
+                logger.warning("Balancer step-end failed: %s", e)
 
     # =====================================================
-    # MONITORING / STATS
+    # STATS
     # =====================================================
 
     def get_stats(self) -> Dict[str, Any]:
-        """
-        Unified stats from underlying loss system.
-        """
 
         stats = {}
 
@@ -193,14 +193,12 @@ class LossEngine:
         return stats
 
     # =====================================================
-    # RESET (OPTIONAL PER EPOCH)
+    # RESET
     # =====================================================
 
     def reset(self) -> None:
-        """
-        Reset internal statistics (EMA, coverage, etc.)
-        """
+
         if hasattr(self.loss_module, "reset"):
             self.loss_module.reset()
 
-        logger.info("LossEngine state reset")
+        logger.info("LossEngine reset complete")

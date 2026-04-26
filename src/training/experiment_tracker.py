@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
+
+# =========================================================
+# CONFIG
+# =========================================================
 
 @dataclass
 class ExperimentTrackerConfig:
@@ -14,21 +19,29 @@ class ExperimentTrackerConfig:
     run_name: Optional[str] = None
     tracking_uri: Optional[str] = None
     tags: Dict[str, str] = field(default_factory=dict)
+    group: Optional[str] = None   # ✅ NEW (CV / tuning grouping)
 
+
+# =========================================================
+# TRACKER
+# =========================================================
 
 class ExperimentTracker:
 
     def __init__(self, config: Optional[ExperimentTrackerConfig] = None):
+
         self.config = config or ExperimentTrackerConfig()
         self.backend = self.config.backend.lower()
+
         self._step = 0
+        self._start_time = time.time()
 
         self._init_backend()
 
         logger.info("ExperimentTracker initialized | backend=%s", self.backend)
 
     # =====================================================
-    # UTILS
+    # DISTRIBUTED SAFETY
     # =====================================================
 
     def _is_main(self):
@@ -70,7 +83,8 @@ class ExperimentTracker:
                 project=self.config.project_name,
                 name=self.config.run_name,
                 tags=list(self.config.tags.keys()),
-                config={}
+                group=self.config.group,  # ✅ NEW
+                config={},
             )
 
         elif self.backend == "none":
@@ -80,21 +94,63 @@ class ExperimentTracker:
             raise ValueError(f"Unsupported backend: {self.backend}")
 
     # =====================================================
+    # METRIC HELPERS
+    # =====================================================
+
+    def _flatten(self, metrics: Dict[str, Any], prefix: str = "") -> Dict[str, float]:
+        """
+        Flatten nested dict:
+        {"a": {"b": 1}} → {"a/b": 1}
+        """
+        flat = {}
+
+        for k, v in metrics.items():
+            name = f"{prefix}/{k}" if prefix else k
+
+            if isinstance(v, dict):
+                flat.update(self._flatten(v, name))
+            else:
+                try:
+                    flat[name] = float(v)
+                except Exception:
+                    continue
+
+        return flat
+
+    # =====================================================
     # LOGGING
     # =====================================================
 
-    def log_metrics(self, metrics: Dict[str, float], step: Optional[int] = None):
+    def log_metrics(
+        self,
+        metrics: Dict[str, Any],
+        *,
+        step: Optional[int] = None,
+        prefix: Optional[str] = None,
+    ):
 
         if not self._is_main():
             return
 
         step = step if step is not None else self._step
-        self._step += 1
+        self._step = step + 1
+
+        metrics = self._flatten(metrics, prefix)
+
+        # -------------------------
+        # ADD SYSTEM METRICS
+        # -------------------------
+
+        metrics["time/elapsed"] = time.time() - self._start_time
+
+        # -------------------------
+        # BACKENDS
+        # -------------------------
 
         if self.backend == "mlflow":
             import mlflow
             for k, v in metrics.items():
-                self._safe(mlflow.log_metric, k, float(v), step=step)
+                self._safe(mlflow.log_metric, k, v, step=step)
 
         elif self.backend == "wandb":
             import wandb
@@ -113,6 +169,12 @@ class ExperimentTracker:
             import wandb
             self._safe(wandb.config.update, params, allow_val_change=True)
 
+    def log_config(self, config: Dict[str, Any]):
+        """
+        Log full experiment config (important for reproducibility)
+        """
+        self.log_params(config)
+
     def log_artifact(self, path: str):
 
         if not self._is_main():
@@ -127,13 +189,19 @@ class ExperimentTracker:
             self._safe(wandb.save, path)
 
     # =====================================================
-    # EXTRA
+    # ADVANCED
     # =====================================================
 
     def watch_model(self, model):
         if self.backend == "wandb":
             import wandb
             self._safe(wandb.watch, model)
+
+    def log_lr(self, lr: float):
+        self.log_metrics({"lr": lr})
+
+    def log_throughput(self, value: float):
+        self.log_metrics({"throughput": value})
 
     # =====================================================
     # FINALIZE
@@ -153,7 +221,7 @@ class ExperimentTracker:
             self._safe(wandb.finish)
 
     # =====================================================
-    # CONTEXT MANAGER
+    # CONTEXT
     # =====================================================
 
     def __enter__(self):

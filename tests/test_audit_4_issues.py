@@ -507,7 +507,7 @@ def test_issue4_gradient_clipping_and_nan_quarantine(caplog):
       * Gradient norm clipping path executes (max_grad_norm=1.0).
       * Per-task loss breakdown is exposed for logging.
     """
-    from src.models.training.trainer import Trainer, TrainerConfig
+    from src.training.trainer import Trainer, TrainerConfig
 
     class _ToyMT(nn.Module):
         def __init__(self):
@@ -570,7 +570,7 @@ def test_issue4_gradient_clipping_and_nan_quarantine(caplog):
 def test_issue4_grad_norm_clipping_actually_bounds_gradients():
     """Inject an artificially large gradient via a high-loss-scale batch,
     then assert the post-clip grad norm ≤ max_grad_norm (1.0)."""
-    from src.models.training.trainer import Trainer, TrainerConfig
+    from src.training.trainer import Trainer, TrainerConfig
 
     class _Boom(nn.Module):
         def __init__(self):

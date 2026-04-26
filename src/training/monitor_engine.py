@@ -1,7 +1,10 @@
+# src/models/training/monitor_engine.py
+
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+import time
+from dataclasses import dataclass
 from typing import Dict, Any, Optional
 
 import torch
@@ -18,15 +21,21 @@ class MonitoringConfig:
     spike_threshold: float = 3.0
     ema_alpha: float = 0.1
     health_threshold: float = 0.3
-    enable_grad_monitor: bool = False
-    grad_monitor_interval: int = 200
+
+    enable_grad_monitor: bool = True
+    grad_monitor_interval: int = 100
+
+    enable_throughput: bool = True
+    throughput_ema_alpha: float = 0.2  # NEW
+
+    anomaly_on_nan: bool = True
 
 
 # =========================================================
 # HELPERS
 # =========================================================
 
-class LossEMA:
+class EMA:
     def __init__(self, alpha: float):
         self.alpha = alpha
         self.value: Optional[float] = None
@@ -46,8 +55,7 @@ class SpikeDetector:
     def is_spike(self, loss: float, ema: float) -> bool:
         if ema is None or ema == 0:
             return False
-        ratio = loss / (ema + 1e-12)
-        return ratio > self.threshold
+        return (loss / (ema + 1e-12)) > self.threshold
 
 
 class HealthScore:
@@ -64,53 +72,68 @@ class HealthScore:
         stability = 1.0 - min(abs(loss - ema) / (ema + 1e-9), 1.0)
 
         grad_penalty = 0.0
-        if grad_norm is not None:
-            if grad_norm > 10:
-                grad_penalty = min((grad_norm - 10) / 50, 1.0)
+        if grad_norm is not None and grad_norm > 10:
+            grad_penalty = min((grad_norm - 10) / 50, 1.0)
 
         return max(0.0, stability - grad_penalty)
 
 
 # =========================================================
-# MONITORING ENGINE
+# ACTION ENUM
+# =========================================================
+
+class MonitorAction:
+    NONE = "none"
+    REDUCE_LR = "reduce_lr"
+    SPIKE = "spike"
+    NAN = "nan_detected"
+
+
+# =========================================================
+# ENGINE
 # =========================================================
 
 class MonitoringEngine:
-    """
-    Training observability engine.
-
-    Responsibilities:
-    - track loss (EMA)
-    - detect spikes
-    - compute health score
-    - optional gradient monitoring
-    """
 
     def __init__(self, config: Optional[MonitoringConfig] = None):
 
         self.config = config or MonitoringConfig()
 
-        self.loss_ema = LossEMA(self.config.ema_alpha)
+        self.loss_ema = EMA(self.config.ema_alpha)
+        self.throughput_ema = EMA(self.config.throughput_ema_alpha)
+
         self.spike_detector = SpikeDetector(self.config.spike_threshold)
         self.health = HealthScore()
 
         self.step = 0
+        self._last_time = time.time()
 
         logger.info("MonitoringEngine initialized")
 
     # =====================================================
-    # UPDATE
+    # MAIN UPDATE
     # =====================================================
 
     def update(
         self,
         outputs: Dict[str, Any],
+        *,
         model: Optional[torch.nn.Module] = None,
+        batch_size: Optional[int] = None,
     ) -> Dict[str, Any]:
 
         self.step += 1
 
         loss = self._extract_loss(outputs)
+
+        # -------------------------
+        # NAN GUARD
+        # -------------------------
+
+        if self.config.anomaly_on_nan and not torch.isfinite(torch.tensor([loss])):
+            return self._build_metrics(
+                loss, None, None, 0.0, MonitorAction.NAN
+            )
 
         ema = self.loss_ema.update(loss)
 
@@ -127,28 +150,54 @@ class MonitoringEngine:
 
         health_score = self.health.compute(loss, ema, grad_norm)
 
-        # -------------------------
-        # ACTIONABLE RESPONSE
-        # -------------------------
+        throughput = self._compute_throughput(batch_size)
 
-        action = None
-
-        if health_score < self.config.health_threshold:
-            action = "reduce_lr"
+        # -------------------------
+        # ACTION POLICY (IMPROVED)
+        # -------------------------
 
         if spike:
-            action = "spike_detected"
+            action = MonitorAction.SPIKE
+        elif health_score < self.config.health_threshold:
+            action = MonitorAction.REDUCE_LR
+        else:
+            action = MonitorAction.NONE
 
-        metrics = {
-            "loss": loss,
-            "ema_loss": ema,
-            "spike": spike,
-            "grad_norm": grad_norm,
-            "health": health_score,
-            "action": action,
+        return self._build_metrics(
+            loss,
+            ema,
+            grad_norm,
+            health_score,
+            action,
+            spike=spike,
+            throughput=throughput,
+        )
+
+    # =====================================================
+    # BUILD METRICS
+    # =====================================================
+
+    def _build_metrics(
+        self,
+        loss,
+        ema,
+        grad_norm,
+        health,
+        action,
+        *,
+        spike=False,
+        throughput=None,
+    ):
+
+        return {
+            "monitor/loss": loss,
+            "monitor/ema_loss": ema,
+            "monitor/spike": spike,
+            "monitor/grad_norm": grad_norm,
+            "monitor/health": health,
+            "monitor/action": action,
+            "monitor/throughput": throughput,
         }
-
-        return metrics
 
     # =====================================================
     # LOSS
@@ -160,7 +209,7 @@ class MonitoringEngine:
 
         if isinstance(loss, torch.Tensor):
             if not torch.isfinite(loss):
-                raise RuntimeError(f"Non-finite loss detected: {loss.item()}")
+                raise RuntimeError(f"Non-finite loss: {loss.item()}")
             return float(loss.detach().item())
 
         if isinstance(loss, (int, float)):
@@ -169,7 +218,7 @@ class MonitoringEngine:
         raise RuntimeError("Loss not found in outputs")
 
     # =====================================================
-    # GRADIENTS
+    # GRADIENTS (SAFE)
     # =====================================================
 
     def _compute_grad_norm(self, model: torch.nn.Module) -> float:
@@ -178,7 +227,26 @@ class MonitoringEngine:
 
         for p in model.parameters():
             if p.grad is not None:
-                param_norm = p.grad.data.norm(2)
+                param_norm = p.grad.norm(2)
                 total_norm += param_norm.item() ** 2
 
         return total_norm ** 0.5
+
+    # =====================================================
+    # THROUGHPUT (SMOOTHED)
+    # =====================================================
+
+    def _compute_throughput(self, batch_size: Optional[int]) -> Optional[float]:
+
+        if not self.config.enable_throughput or batch_size is None:
+            return None
+
+        now = time.time()
+        duration = now - self._last_time
+        self._last_time = now
+
+        if duration <= 0:
+            return None
+
+        raw_tp = batch_size / duration
+        return self.throughput_ema.update(raw_tp)

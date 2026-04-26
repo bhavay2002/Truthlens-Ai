@@ -12,7 +12,7 @@ from ...config import HeadConfig, TaskConfig, MultiTaskModelConfig
 from ...encoder.encoder_config import EncoderConfig
 from ...encoder.encoder_factory import EncoderFactory
 from ...heads.multilabel_head import MultiLabelHead, MultiLabelHeadConfig
-from ...training.trainer import Trainer, TrainerConfig
+from ....training.trainer import Trainer, TrainerConfig
 from src.features.emotion.emotion_schema import EMOTION_LABELS
 
 logger = logging.getLogger(__name__)

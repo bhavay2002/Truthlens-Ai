@@ -14,6 +14,8 @@ import joblib
 import torch
 import torch.distributed as dist
 
+from .model_loader import validate_checkpoint
+
 from src.models.export import (
     ONNXExportConfig,
     ONNXExporter,
@@ -32,34 +34,40 @@ logger = logging.getLogger(__name__)
 
 
 # =========================================================
-# ASYNC WRITER
+# ASYNC WRITER (ROBUST)
 # =========================================================
 
 class AsyncCheckpointWriter:
 
-    def __init__(self, max_queue_size: int = 4) -> None:
+    def __init__(self, max_queue_size: int = 8) -> None:
         self._queue: queue.Queue = queue.Queue(maxsize=max_queue_size)
         self._thread = threading.Thread(target=self._worker, daemon=True)
         self._closed = False
+        self.last_error: Optional[Exception] = None
         self._thread.start()
 
     def _worker(self) -> None:
         while True:
             item = self._queue.get()
+
+            if item is None:
+                self._queue.task_done()
+                break
+
+            path, payload = item
+            obj, compress = payload
+
             try:
-                if item is None:
-                    return
-                path, payload = item
-                obj, compress = payload
-                self._save_atomic(path, obj, compress)
+                tmp = path.with_suffix(path.suffix + ".tmp")
+                torch.save(obj, tmp, _use_new_zipfile_serialization=compress)
+                tmp.replace(path)
+
+            except Exception as e:
+                self.last_error = e
+                logger.exception("Artifact save failed")
+
             finally:
                 self._queue.task_done()
-
-    @staticmethod
-    def _save_atomic(path: Path, obj: Any, compress: bool = True) -> None:
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        torch.save(obj, tmp, _use_new_zipfile_serialization=compress)
-        tmp.replace(path)
 
     def save(self, path: Path, obj: Any, compress: bool = True) -> None:
         if self._closed:
@@ -68,12 +76,9 @@ class AsyncCheckpointWriter:
         try:
             self._queue.put_nowait((path, (obj, compress)))
         except queue.Full:
-            try:
-                _ = self._queue.get_nowait()
-                self._queue.task_done()
-                self._queue.put_nowait((path, (obj, compress)))
-            except queue.Empty:
-                pass
+            _ = self._queue.get_nowait()
+            self._queue.task_done()
+            self._queue.put_nowait((path, (obj, compress)))
 
     def flush(self) -> None:
         self._queue.join()
@@ -95,11 +100,10 @@ def _quant_backend() -> str:
     supported = list(torch.backends.quantized.supported_engines)
 
     if not supported:
-        raise RuntimeError("No quant backend")
+        raise RuntimeError("No quant backend available")
 
     if "fbgemm" in supported:
         return "fbgemm"
-
     if "qnnpack" in supported:
         return "qnnpack"
 
@@ -107,7 +111,7 @@ def _quant_backend() -> str:
 
 
 # =========================================================
-# MANAGER
+# ARTIFACT MANAGER (PRO LEVEL)
 # =========================================================
 
 class ArtifactManager:
@@ -120,17 +124,7 @@ class ArtifactManager:
         self._hash_cache: Dict[str, str] = {}
 
     # =====================================================
-    # LIFECYCLE
-    # =====================================================
-
-    def close(self) -> None:
-        self._writer.close()
-
-    def flush(self) -> None:
-        self._writer.flush()
-
-    # =====================================================
-    # INTERNAL
+    # DISTRIBUTED SAFETY
     # =====================================================
 
     @staticmethod
@@ -141,6 +135,10 @@ class ArtifactManager:
     def _barrier() -> None:
         if dist.is_available() and dist.is_initialized():
             dist.barrier()
+
+    # =====================================================
+    # INTERNAL HELPERS
+    # =====================================================
 
     @staticmethod
     def _extract_state(model_or_state):
@@ -182,6 +180,8 @@ class ArtifactManager:
 
         state = self._to_cpu(self._extract_state(model))
 
+        validate_checkpoint(state, strict=False)
+
         if deduplicate:
             h = self._hash(state)
             if self._hash_cache.get(name) == h:
@@ -212,6 +212,8 @@ class ArtifactManager:
 
         state = self._to_cpu(self._extract_state(model))
 
+        validate_checkpoint(state, strict=False)
+
         payload = {
             "model": state,
             "optimizer": optimizer,
@@ -238,9 +240,7 @@ class ArtifactManager:
 
         path = self.artifact_dir / name
         exporter = ONNXExporter(config)
-
         exporter.export(model, example_input, path)
-
         return path
 
     def export_torchscript(
@@ -253,9 +253,7 @@ class ArtifactManager:
 
         path = self.artifact_dir / name
         exporter = TorchScriptExporter(config)
-
         exporter.export(model, example_input, path)
-
         return path
 
     def export_quantized(
@@ -276,35 +274,27 @@ class ArtifactManager:
         q_model = engine.apply(model)
 
         torch.save(q_model, path)
-
         return path
 
     # =====================================================
-    # SAVE AUX
+    # AUX SAVE
     # =====================================================
 
     def save_tokenizer(self, tokenizer: Any, name: str = "tokenizer") -> Path:
-
         path = self.artifact_dir / name
         path.mkdir(parents=True, exist_ok=True)
-
         tokenizer.save_pretrained(path)
         return path
 
     def save_vectorizer(self, vectorizer: Any, name: str = "vectorizer.joblib") -> Path:
-
         path = self.artifact_dir / name
         joblib.dump(vectorizer, path)
-
         return path
 
     def save_metadata(self, metadata: Dict[str, Any], name: str = "metadata.json") -> Path:
-
         path = self.artifact_dir / name
-
         with open(path, "w") as f:
             json.dump(metadata, f, indent=2)
-
         return path
 
     # =====================================================
@@ -312,41 +302,21 @@ class ArtifactManager:
     # =====================================================
 
     def load_model(self, name: str = "model.pt") -> Dict[str, Any]:
-
         path = self.artifact_dir / name
-
         if not path.exists():
             raise FileNotFoundError(path)
 
-        return torch.load(path)
+        state = torch.load(path)
+        validate_checkpoint(state, strict=False)
 
-    def load_vectorizer(self, name: str = "vectorizer.joblib") -> Any:
-
-        path = self.artifact_dir / name
-
-        if not path.exists():
-            raise FileNotFoundError(path)
-
-        return joblib.load(path)
-
-    def load_metadata(self, name: str = "metadata.json") -> Dict[str, Any]:
-
-        path = self.artifact_dir / name
-
-        if not path.exists():
-            raise FileNotFoundError(path)
-
-        with open(path) as f:
-            return json.load(f)
+        return state
 
     # =====================================================
-    # DELETE / LIST
+    # MANAGEMENT
     # =====================================================
 
     def delete(self, name: str) -> None:
-
         path = self.artifact_dir / name
-
         if not path.exists():
             raise FileNotFoundError(path)
 
@@ -359,65 +329,29 @@ class ArtifactManager:
         return {p.name: p for p in self.artifact_dir.iterdir()}
 
     # =====================================================
-    # MODEL CARD
+    # MODEL CARD / METADATA / VERSIONING
     # =====================================================
 
-    def save_model_card(
-        self,
-        card: ModelCard,
-        json_name: str = "model_card.json",
-        md_name: str = "model_card.md",
-    ) -> Path:
-
-        json_path = self.artifact_dir / json_name
-        md_path = self.artifact_dir / md_name
-
+    def save_model_card(self, card: ModelCard) -> Path:
+        json_path = self.artifact_dir / "model_card.json"
+        md_path = self.artifact_dir / "model_card.md"
         card.save_json(json_path)
         card.save_markdown(md_path)
-
         return json_path
 
-    def load_model_card(self, name: str = "model_card.json") -> Dict[str, Any]:
+    def save_model_metadata(self, metadata: ModelMetadata) -> Path:
+        return metadata.save_json(self.artifact_dir / "model_metadata.json")
 
-        path = self.artifact_dir / name
-
-        if not path.exists():
-            raise FileNotFoundError(path)
-
-        with open(path) as f:
-            return json.load(f)
-
-    # =====================================================
-    # METADATA
-    # =====================================================
-
-    def save_model_metadata(
-        self,
-        metadata: ModelMetadata,
-        name: str = "model_metadata.json",
-    ) -> Path:
-
-        return metadata.save_json(self.artifact_dir / name)
-
-    def load_model_metadata(
-        self,
-        name: str = "model_metadata.json",
-    ) -> ModelMetadata:
-
-        return ModelMetadata.load_json(self.artifact_dir / name)
-
-    # =====================================================
-    # VERSIONING
-    # =====================================================
-
-    def register_version(
-        self,
-        info: ModelVersionInfo,
-        registry_dir: Optional[str | Path] = None,
-    ) -> Path:
-
-        registry = ModelVersionRegistry(
-            registry_dir or self.artifact_dir
-        )
-
+    def register_version(self, info: ModelVersionInfo) -> Path:
+        registry = ModelVersionRegistry(self.artifact_dir)
         return registry.register_version(info)
+
+    # =====================================================
+    # LIFECYCLE
+    # =====================================================
+
+    def flush(self):
+        self._writer.flush()
+
+    def close(self):
+        self._writer.close()

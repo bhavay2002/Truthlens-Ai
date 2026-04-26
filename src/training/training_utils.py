@@ -1,3 +1,4 @@
+#src\models\training\training_utils.py
 from __future__ import annotations
 
 import logging
@@ -223,3 +224,156 @@ class TrainingMetrics:
 
     def to_dict(self) -> Dict[str, float]:
         return dict(self.losses)
+    
+# (Only showing NEW additions + upgrades — your existing code stays)
+
+# =========================================================
+# SEED / DETERMINISM
+# =========================================================
+
+def set_global_seed(seed: int) -> None:
+    import random
+    import numpy as np
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+# =========================================================
+# GRADIENT MONITORING
+# =========================================================
+
+def compute_grad_norm(model: nn.Module) -> float:
+    total_norm = 0.0
+
+    for p in model.parameters():
+        if p.grad is None:
+            continue
+
+        param_norm = p.grad.data.norm(2)
+        total_norm += param_norm.item() ** 2
+
+    return total_norm ** 0.5
+
+
+# =========================================================
+# LR UTILITIES
+# =========================================================
+
+def get_current_lr(optimizer: torch.optim.Optimizer) -> float:
+    for group in optimizer.param_groups:
+        return float(group["lr"])
+    return 0.0
+
+
+# =========================================================
+# NAN / INF GUARD
+# =========================================================
+
+def check_finite(tensor: torch.Tensor, name: str = "tensor") -> None:
+    if not torch.isfinite(tensor).all():
+        raise RuntimeError(f"Non-finite values detected in {name}")
+
+
+# =========================================================
+# AMP AUTOCAST WRAPPER
+# =========================================================
+
+@contextmanager
+def autocast(enabled: bool = True):
+    if enabled and torch.cuda.is_available():
+        with torch.cuda.amp.autocast():
+            yield
+    else:
+        yield
+
+
+# =========================================================
+# OOM SAFE EXECUTION
+# =========================================================
+
+@contextmanager
+def safe_cuda_execution():
+    try:
+        yield
+    except RuntimeError as e:
+        if "out of memory" in str(e):
+            logger.warning("CUDA OOM detected — clearing cache")
+            torch.cuda.empty_cache()
+        raise
+
+
+# =========================================================
+# THROUGHPUT / TIMING
+# =========================================================
+
+class StepTimer:
+    def __init__(self):
+        self.start_time = None
+
+    def start(self):
+        import time
+        self.start_time = time.time()
+
+    def stop(self) -> float:
+        import time
+        return time.time() - self.start_time if self.start_time else 0.0
+
+
+def compute_throughput(
+    batch_size: int,
+    duration: float,
+) -> float:
+    if duration <= 0:
+        return 0.0
+    return batch_size / duration
+
+
+# =========================================================
+# IMPROVED METRICS CONTAINER
+# =========================================================
+
+@dataclass
+class TrainingMetrics:
+
+    task_losses: Dict[str, float] = field(default_factory=dict)
+    losses: Dict[str, float] = field(default_factory=dict)
+
+    step: int = 0
+    epoch: int = 0
+
+    grad_norm: float = 0.0
+    lr: float = 0.0
+    throughput: float = 0.0
+
+    def update(self, name: str, value: float) -> None:
+        self.losses[name] = float(value)
+
+    def update_task(self, task: str, loss: float) -> None:
+        self.task_losses[task] = float(loss)
+
+    def set_grad_norm(self, value: float) -> None:
+        self.grad_norm = float(value)
+
+    def set_lr(self, value: float) -> None:
+        self.lr = float(value)
+
+    def set_throughput(self, value: float) -> None:
+        self.throughput = float(value)
+
+    def average_loss(self) -> float:
+        if not self.task_losses:
+            return 0.0
+        return sum(self.task_losses.values()) / len(self.task_losses)
+
+    def to_dict(self) -> Dict[str, float]:
+        return {
+            **self.losses,
+            "grad_norm": self.grad_norm,
+            "lr": self.lr,
+            "throughput": self.throughput,
+        }

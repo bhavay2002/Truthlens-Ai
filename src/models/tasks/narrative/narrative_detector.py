@@ -13,7 +13,7 @@ from ...encoder.encoder_config import EncoderConfig
 from ...encoder.encoder_factory import EncoderFactory
 from ...heads.multilabel_head import MultiLabelHead, MultiLabelHeadConfig
 from ...heads.regression_head import RegressionHead, RegressionHeadConfig
-from ...training.trainer import Trainer, TrainerConfig
+from ....training.trainer import Trainer, TrainerConfig
 
 logger = logging.getLogger(__name__)
 

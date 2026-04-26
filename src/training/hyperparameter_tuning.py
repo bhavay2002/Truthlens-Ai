@@ -1,256 +1,302 @@
 from __future__ import annotations
 
 import logging
-import os
-import json
 import time
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, Optional
 
-import numpy as np
+import optuna
 import pandas as pd
-import torch
 
-from src.config.task_config import get_task_type
 from src.training.cross_validation import cross_validate_task
-from src.utils.settings import load_settings
 from src.utils.seed_utils import set_seed
 
 logger = logging.getLogger(__name__)
-SETTINGS = load_settings()
 
 
 # =========================================================
-#  EXPERIMENT TRACKING (MLflow / W&B)
+# TRACKING
 # =========================================================
 
-def _init_tracking(task: str):
-    tracking = {}
+def init_tracking(task: str) -> Dict[str, Any]:
 
+    tracking: Dict[str, Any] = {
+        "mlflow": None,
+        "wandb": None,
+    }
+
+    # MLflow
     try:
         import mlflow
+
         mlflow.set_experiment(f"TruthLens_{task}")
         mlflow.start_run(run_name=f"{task}_{int(time.time())}")
         tracking["mlflow"] = mlflow
-    except Exception:
-        tracking["mlflow"] = None
+    except Exception as e:
+        logger.warning("MLflow init failed: %s", e)
 
+    # W&B
     try:
         import wandb
+
         wandb.init(project="TruthLens", name=task)
         tracking["wandb"] = wandb
-    except Exception:
-        tracking["wandb"] = None
+    except Exception as e:
+        logger.warning("W&B init failed: %s", e)
 
     return tracking
 
 
-def _log_tracking(tracking, params, metrics):
-    if tracking["mlflow"]:
-        for k, v in params.items():
-            tracking["mlflow"].log_param(k, v)
-        for k, v in metrics.items():
-            tracking["mlflow"].log_metric(k, v)
+def finalize_tracking(tracking: Dict[str, Any]):
 
-    if tracking["wandb"]:
-        tracking["wandb"].log({**params, **metrics})
+    if tracking.get("mlflow"):
+        try:
+            tracking["mlflow"].end_run()
+        except Exception:
+            pass
+
+    if tracking.get("wandb"):
+        try:
+            tracking["wandb"].finish()
+        except Exception:
+            pass
+
+
+def log_trial(
+    tracking: Dict[str, Any],
+    trial_id: int,
+    params: Dict[str, Any],
+    metrics: Dict[str, Any],
+) -> None:
+
+    payload = {
+        "trial": trial_id,
+        **params,
+        **metrics,
+    }
+
+    # MLflow
+    if tracking.get("mlflow"):
+        for k, v in payload.items():
+            try:
+                tracking["mlflow"].log_metric(k, float(v))
+            except Exception:
+                continue
+
+    # W&B
+    if tracking.get("wandb"):
+        try:
+            tracking["wandb"].log(payload)
+        except Exception:
+            pass
 
 
 # =========================================================
-#  MULTI-OBJECTIVE SUPPORT
+# OBJECTIVE
 # =========================================================
 
-def _build_objective(
+def build_objective(
     *,
     task: str,
     df: pd.DataFrame,
-    train_function: Callable,
-    checkpoint_root: str | None,
-    multi_objective: bool = False,
+    create_trainer_fn: Callable,
+    multi_objective: bool,
+    tracking: Dict[str, Any],
 ):
 
-    def objective(trial):
+    def objective(trial: optuna.Trial):
 
+        # -------------------------
+        # SEED
+        # -------------------------
+        seed = 42 + trial.number
+        set_seed(seed)
+
+        # -------------------------
+        # SEARCH SPACE
+        # -------------------------
         params = {
-            "learning_rate": trial.suggest_float("lr", 1e-6, 5e-4, log=True),
+            "lr": trial.suggest_float("lr", 1e-6, 5e-4, log=True),
             "batch_size": trial.suggest_categorical("batch_size", [8, 16, 32]),
-            "epochs": trial.suggest_int("epochs", 2, 5),
+            "epochs": trial.suggest_int("epochs", 2, 6),
             "weight_decay": trial.suggest_float("weight_decay", 0.0, 0.1),
         }
 
-        def wrapped_train_fn(**kwargs):
-            return train_function(**kwargs, params=params)
+        start = time.time()
 
-        cv_result = cross_validate_task(
-            task=task,
-            df=df,
-            train_function=wrapped_train_fn,
-            checkpoint_root=checkpoint_root,
+        try:
+            # -------------------------
+            # CROSS VALIDATION
+            # -------------------------
+            cv_result = cross_validate_task(
+                task=task,
+                df=df,
+                create_trainer_fn=create_trainer_fn,
+                params=params,
+            )
+
+            score = cv_result["mean"]
+            std = cv_result["std"]
+
+        except Exception:
+            logger.exception("Trial %d failed", trial.number)
+            raise optuna.TrialPruned()
+
+        duration = time.time() - start
+
+        # -------------------------
+        # REPORT FOR PRUNING
+        # -------------------------
+        trial.report(score, step=0)
+
+        if trial.should_prune():
+            raise optuna.TrialPruned()
+
+        # -------------------------
+        # LOGGING
+        # -------------------------
+        log_trial(
+            tracking,
+            trial.number,
+            params,
+            {
+                "score": score,
+                "std": std,
+                "time": duration,
+            },
         )
 
-        score = cv_result["mean"]
-        std = cv_result["std"]
-
-        # multi-objective: maximize score, minimize variance
-        if multi_objective:
-            return score, -std
-
-        return score
+        return (score, -std) if multi_objective else score
 
     return objective
 
 
 # =========================================================
-#  PARALLEL STUDY (MULTI-GPU SAFE)
+# STUDY
 # =========================================================
 
-def _run_parallel_study(
-    study,
-    objective,
-    n_trials,
-    n_jobs,
+def create_study(
+    *,
+    multi_objective: bool,
+    storage: Optional[str],
 ):
-    study.optimize(
-        objective,
-        n_trials=n_trials,
-        n_jobs=n_jobs,  #  parallel trials
+
+    sampler = optuna.samplers.TPESampler(
+        multivariate=True,
+        group=True,
+    )
+
+    pruner = optuna.pruners.MedianPruner()
+
+    if multi_objective:
+        return optuna.create_study(
+            directions=["minimize", "minimize"],
+            sampler=sampler,
+            storage=storage,
+            load_if_exists=True,
+        )
+
+    return optuna.create_study(
+        direction="minimize",
+        sampler=sampler,
+        pruner=pruner,
+        storage=storage,
+        load_if_exists=True,
     )
 
 
 # =========================================================
-#  SINGLE TASK TUNING
+# MAIN
 # =========================================================
 
-def tune_task_v3(
+def tune_task(
     *,
     task: str,
     df: pd.DataFrame,
-    train_function: Callable,
+    create_trainer_fn: Callable,
     n_trials: int,
-    checkpoint_root: str | None = None,
     multi_objective: bool = False,
     n_jobs: int = 1,
+    storage: Optional[str] = None,
 ):
 
-    import optuna
+    tracking = init_tracking(task)
 
-    set_seed(SETTINGS.training.seed)
+    study = create_study(
+        multi_objective=multi_objective,
+        storage=storage,
+    )
 
-    tracking = _init_tracking(task)
-
-    if multi_objective:
-        study = optuna.create_study(
-            directions=["maximize", "maximize"],
-            sampler=optuna.samplers.TPESampler(),
-        )
-    else:
-        study = optuna.create_study(
-            direction="maximize",
-            sampler=optuna.samplers.TPESampler(),
-            pruner=optuna.pruners.MedianPruner(),
-        )
-
-    objective = _build_objective(
+    objective = build_objective(
         task=task,
         df=df,
-        train_function=train_function,
-        checkpoint_root=checkpoint_root,
+        create_trainer_fn=create_trainer_fn,
         multi_objective=multi_objective,
+        tracking=tracking,
     )
 
-    _run_parallel_study(
-        study,
-        objective,
-        n_trials=n_trials,
-        n_jobs=n_jobs,
+    logger.info(
+        "Starting tuning | task=%s | trials=%d",
+        task,
+        n_trials,
     )
 
-    # -----------------------------
-    # LOG BEST RESULT
-    # -----------------------------
-    if not multi_objective:
-        best_params = study.best_params
-        best_score = study.best_value
-
-        _log_tracking(
-            tracking,
-            best_params,
-            {"best_score": best_score},
+    try:
+        study.optimize(
+            objective,
+            n_trials=n_trials,
+            n_jobs=n_jobs,
         )
+    finally:
+        finalize_tracking(tracking)
 
+    # -------------------------
+    # RESULTS
+    # -------------------------
+
+    if not multi_objective:
         return {
             "task": task,
-            "best_params": best_params,
-            "best_score": float(best_score),
+            "best_params": study.best_params,
+            "best_score": float(study.best_value),
         }
 
-    else:
-        pareto = [
-            {
-                "params": t.params,
-                "values": t.values,
-            }
+    return {
+        "task": task,
+        "pareto_front": [
+            {"params": t.params, "values": t.values}
             for t in study.best_trials
-        ]
-
-        return {
-            "task": task,
-            "pareto_front": pareto,
-        }
-
-
-# =========================================================
-#  DASHBOARD / REPORT
-# =========================================================
-
-def generate_report(results: Dict[str, Any], save_path: str):
-
-    leaderboard = []
-
-    for task, res in results.items():
-        if "best_score" in res:
-            leaderboard.append((task, res["best_score"]))
-
-    leaderboard.sort(key=lambda x: x[1], reverse=True)
-
-    report = {
-        "leaderboard": leaderboard,
-        "tasks": results,
+        ],
     }
 
-    with open(save_path, "w") as f:
-        json.dump(report, f, indent=2)
-
-    return report
-
 
 # =========================================================
-#  MULTI-TASK TUNING
+# MULTI-TASK
 # =========================================================
 
-def tune_all_tasks_v3(
+def tune_all_tasks(
     *,
     datasets: Dict[str, pd.DataFrame],
-    train_function: Callable,
+    create_trainer_fn: Callable,
     n_trials: int,
-    checkpoint_root: str | None = None,
     multi_objective: bool = False,
     n_jobs: int = 1,
+    storage: Optional[str] = None,
 ):
 
-    results = {}
+    results: Dict[str, Any] = {}
 
     for task, df in datasets.items():
 
         logger.info("🚀 Tuning task: %s", task)
 
-        results[task] = tune_task_v3(
+        results[task] = tune_task(
             task=task,
             df=df,
-            train_function=train_function,
+            create_trainer_fn=create_trainer_fn,
             n_trials=n_trials,
-            checkpoint_root=checkpoint_root,
             multi_objective=multi_objective,
             n_jobs=n_jobs,
+            storage=storage,
         )
 
     return results

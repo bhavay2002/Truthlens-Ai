@@ -17,8 +17,8 @@ from ...heads.classification_head import (
     ClassificationHeadConfig,
 )
 from ...heads.regression_head import RegressionHead, RegressionHeadConfig
-from ...training.loss_functions import LossConfig, LossFactory
-from ...training.trainer import Trainer, TrainerConfig
+from ....training.loss_functions import LossConfig, LossFactory
+from ....training.trainer import Trainer, TrainerConfig
 
 logger = logging.getLogger(__name__)
 
