@@ -46,6 +46,7 @@ src/
 |   |-- narrative_temporal_analyzer.py
 |   |-- orchestrator.py
 |   |-- output_models.py
+|   |-- preprocessing.py
 |   |-- propaganda_pattern_detector.py
 |   |-- rhetorical_device_detector.py
 |   |-- source_attribution_analyzer.py
@@ -244,7 +245,14 @@ src/
 |   |   |-- __init__.py
 |   |   |-- artifact_manager.py
 |   |   |-- checkpoint_manager.py
+|   |   |-- integrity.py
+|   |   |-- io_utils.py
+|   |   |-- loader_utils.py
+|   |   |-- metadata.py
 |   |   |-- model_loader.py
+|   |   |-- resolver.py
+|   |   |-- schema.py
+|   |   |-- selection.py
 |   |   `-- validator.py
 |   |-- config
 |   |   |-- __init__.py
@@ -349,20 +357,7 @@ src/
 |   |   |   `-- propaganda_detector.py
 |   |   `-- __init__.py
 |   |-- training
-|   |   |-- __init__.py
-|   |   |-- checkpointengine.py
-|   |   |-- distributedengine.py
-|   |   |-- evaluationengine.py
-|   |   |-- experimenttracker.py
-|   |   |-- loss_functions.py
-|   |   |-- lossengine.py
-|   |   |-- monitorengine.py
-|   |   |-- stepengine.py
-|   |   |-- taskscheduler.py
-|   |   |-- trainer copy.py
-|   |   |-- trainer.py
-|   |   |-- training_step.py
-|   |   `-- training_utils.py
+|   |   `-- __init__.py
 |   |-- uncertainty
 |   |   |-- ensemble_uncertainty.py
 |   |   |-- mc_dropout.py
@@ -375,19 +370,26 @@ src/
 |   `-- __init__.py
 |-- pipelines
 |   |-- __init__.py
-|   |-- feature_pipeline.py
-|   |-- prediction_pipeline.py
-|   |-- preprocessing_pipeline.py
+|   |-- baseline_training.py
 |   `-- truthlens_pipeline.py
 |-- training
 |   |-- __init__.py
-|   |-- checkpointing.py
+|   |-- create_trainer_fn.py
 |   |-- cross_validation.py
+|   |-- distributed_engine.py
+|   |-- evaluation_engine.py
+|   |-- experiment_tracker.py
 |   |-- hyperparameter_tuning.py
 |   |-- instrumentation.py
-|   |-- optimizer_factory.py
-|   |-- scheduler_factory.py
-|   `-- train_transformer_model.py
+|   |-- loss_engine.py
+|   |-- loss_functions.py
+|   |-- lr_scheduler_engine.py
+|   |-- monitor_engine.py
+|   |-- step_engine.py
+|   |-- task_scheduler.py
+|   |-- trainer.py
+|   |-- training_step.py
+|   `-- training_utils.py
 |-- utils
 |   |-- __init__.py
 |   |-- config_loader.py

@@ -132,7 +132,7 @@ def get_task_nlp(task: str) -> Language:
 
 
 # =========================================================
-# 🔥 SHARED DOC CACHE (CRITICAL OPTIMIZATION)
+#  SHARED DOC CACHE (CRITICAL OPTIMIZATION)
 # =========================================================
 
 def get_doc(context: Any, task: str):

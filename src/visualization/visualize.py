@@ -1,35 +1,3 @@
-"""
-File Name: visualize.py
-Module: Visualization - Evaluation and Analysis Plots
-Description:
-    Comprehensive visualization utilities for the TruthLens AI system.
-    This module provides research-grade visualization functions used
-    for model evaluation, training diagnostics, feature analysis, and
-    embedding inspection.
-
-    Implemented visualizations:
-        - Confusion Matrix
-        - ROC Curve
-        - Precision–Recall Curve
-        - Calibration Curve
-        - Training Curves
-        - Feature Importance
-        - Embedding Projection (PCA / t-SNE)
-
-Dependencies:
-    logging
-    typing
-    pathlib
-    numpy
-    matplotlib
-    seaborn
-    sklearn
-Inputs:
-    Model predictions, labels, feature scores, embeddings
-Outputs:
-    Matplotlib figures and axes objects
-"""
-
 from __future__ import annotations
 
 import logging
@@ -39,65 +7,69 @@ from typing import Iterable, List, Tuple, Dict, Optional
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
-from sklearn.metrics import (
-    roc_curve,
-    auc,
-    precision_recall_curve,
-)
+
+from sklearn.metrics import roc_curve, auc, precision_recall_curve
 from sklearn.calibration import calibration_curve
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 
-
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------
-# Utility Functions
-# ---------------------------------------------------------------------
+# =========================================================
+# GLOBAL STYLE (NEW )
+# =========================================================
+
+def set_plot_style():
+    sns.set_theme(style="whitegrid")
+    plt.rcParams.update({
+        "figure.figsize": (6, 4),
+        "axes.titlesize": 12,
+        "axes.labelsize": 10,
+        "legend.fontsize": 9,
+    })
+
+
+# =========================================================
+# UTILS
+# =========================================================
 
 def _ensure_numpy(x: Iterable) -> np.ndarray:
-    """Convert input to numpy array."""
     return np.asarray(x)
 
 
-def _save_figure(fig: plt.Figure, save_path: Optional[str | Path]) -> None:
-    """Save figure if path is provided."""
+def _save_figure(fig: plt.Figure, save_path: Optional[str | Path]):
     if save_path:
         path = Path(save_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(path, dpi=300, bbox_inches="tight")
-        logger.info("Figure saved to %s", path)
+        logger.info("Saved: %s", path)
 
 
-# ---------------------------------------------------------------------
-# Confusion Matrix
-# ---------------------------------------------------------------------
+# =========================================================
+# CONFUSION MATRIX
+# =========================================================
 
 def plot_confusion_matrix(
     cm: np.ndarray,
-    labels: List[str] | None = None,
+    labels: Optional[List[str]] = None,
     normalize: bool = False,
     cmap: str = "Blues",
-    save_path: str | Path | None = None,
-) -> Tuple[plt.Figure, plt.Axes]:
-    """
-    Plot confusion matrix heatmap.
-    """
+    save_path: Optional[str | Path] = None,
+):
+
+    set_plot_style()
 
     cm = _ensure_numpy(cm)
 
-    if cm.ndim != 2 or cm.shape[0] != cm.shape[1]:
-        raise ValueError("Confusion matrix must be square")
-
     if normalize:
-        row_sums = cm.sum(axis=1, keepdims=True).astype(float)
-        cm = np.where(row_sums == 0, 0.0, cm.astype(float) / np.where(row_sums == 0, 1.0, row_sums))
+        row_sums = cm.sum(axis=1, keepdims=True)
+        cm = np.divide(cm, row_sums, where=row_sums != 0)
 
     if labels is None:
         labels = [str(i) for i in range(cm.shape[0])]
 
-    fig, ax = plt.subplots(figsize=(6, 5))
+    fig, ax = plt.subplots()
 
     sns.heatmap(
         cm,
@@ -106,307 +78,210 @@ def plot_confusion_matrix(
         cmap=cmap,
         xticklabels=labels,
         yticklabels=labels,
-        cbar=False,
         ax=ax,
     )
 
+    ax.set_title("Confusion Matrix")
     ax.set_xlabel("Predicted")
     ax.set_ylabel("True")
-    ax.set_title("Confusion Matrix")
-
-    fig.tight_layout()
 
     _save_figure(fig, save_path)
 
     return fig, ax
 
 
-# ---------------------------------------------------------------------
-# ROC Curve
-# ---------------------------------------------------------------------
+# =========================================================
+# ROC CURVE (UPGRADED )
+# =========================================================
 
 def plot_roc_curve(
     y_true: Iterable,
     y_scores: Iterable,
-    save_path: str | Path | None = None,
-) -> Tuple[plt.Figure, plt.Axes]:
-    """
-    Plot ROC curve and AUC score.
-    """
+    save_path: Optional[str | Path] = None,
+):
+
+    set_plot_style()
 
     y_true = _ensure_numpy(y_true)
     y_scores = _ensure_numpy(y_scores)
-
-    if y_true.ndim != 1 or y_scores.ndim != 1:
-        raise ValueError("y_true and y_scores must be 1D arrays")
-
-    if y_true.shape[0] != y_scores.shape[0]:
-        raise ValueError("y_true and y_scores must have same length")
 
     fpr, tpr, _ = roc_curve(y_true, y_scores)
     roc_auc = auc(fpr, tpr)
 
     fig, ax = plt.subplots()
 
-    ax.plot(fpr, tpr, label=f"AUC = {roc_auc:.3f}")
-    ax.plot([0, 1], [0, 1], linestyle="--")
+    ax.plot(fpr, tpr, label=f"AUC = {roc_auc:.4f}")
+    ax.plot([0, 1], [0, 1], "--")
 
-    ax.set_xlabel("False Positive Rate")
-    ax.set_ylabel("True Positive Rate")
     ax.set_title("ROC Curve")
+    ax.set_xlabel("FPR")
+    ax.set_ylabel("TPR")
     ax.legend()
-
-    fig.tight_layout()
 
     _save_figure(fig, save_path)
 
-    return fig, ax
+    return fig, ax, roc_auc   #  NEW RETURN
 
 
-# ---------------------------------------------------------------------
-# Precision Recall Curve
-# ---------------------------------------------------------------------
+# =========================================================
+# PR CURVE
+# =========================================================
 
 def plot_precision_recall_curve(
-    y_true: Iterable,
-    y_scores: Iterable,
-    save_path: str | Path | None = None,
-) -> Tuple[plt.Figure, plt.Axes]:
-    """
-    Plot precision-recall curve.
-    """
+    y_true,
+    y_scores,
+    save_path=None,
+):
+
+    set_plot_style()
 
     y_true = _ensure_numpy(y_true)
     y_scores = _ensure_numpy(y_scores)
-
-    if y_true.ndim != 1 or y_scores.ndim != 1:
-        raise ValueError("y_true and y_scores must be 1D arrays")
-
-    if y_true.shape[0] != y_scores.shape[0]:
-        raise ValueError("y_true and y_scores must have same length")
 
     precision, recall, _ = precision_recall_curve(y_true, y_scores)
 
     fig, ax = plt.subplots()
 
     ax.plot(recall, precision)
-
+    ax.set_title("Precision–Recall Curve")
     ax.set_xlabel("Recall")
     ax.set_ylabel("Precision")
-    ax.set_title("Precision–Recall Curve")
-
-    fig.tight_layout()
 
     _save_figure(fig, save_path)
 
     return fig, ax
 
 
-# ---------------------------------------------------------------------
-# Calibration Curve
-# ---------------------------------------------------------------------
+# =========================================================
+# CALIBRATION
+# =========================================================
 
 def plot_calibration_curve(
-    y_true: Iterable,
-    y_prob: Iterable,
-    n_bins: int = 10,
-    save_path: str | Path | None = None,
-) -> Tuple[plt.Figure, plt.Axes]:
-    """
-    Plot calibration curve for probabilistic classifiers.
-    """
+    y_true,
+    y_prob,
+    n_bins=10,
+    save_path=None,
+):
 
-    y_true = _ensure_numpy(y_true)
-    y_prob = _ensure_numpy(y_prob)
+    set_plot_style()
 
-    if not isinstance(n_bins, int) or n_bins < 2:
-        raise ValueError("n_bins must be an integer >= 2")
-
-    if y_true.ndim != 1 or y_prob.ndim != 1:
-        raise ValueError("y_true and y_prob must be 1D arrays")
-
-    if y_true.shape[0] != y_prob.shape[0]:
-        raise ValueError("y_true and y_prob must have same length")
-
-    prob_true, prob_pred = calibration_curve(
-        y_true,
-        y_prob,
-        n_bins=n_bins,
-    )
+    prob_true, prob_pred = calibration_curve(y_true, y_prob, n_bins=n_bins)
 
     fig, ax = plt.subplots()
 
-    ax.plot(prob_pred, prob_true, marker="o", label="Model")
-    ax.plot([0, 1], [0, 1], linestyle="--", label="Perfect")
+    ax.plot(prob_pred, prob_true, "o-", label="Model")
+    ax.plot([0, 1], [0, 1], "--", label="Perfect")
 
-    ax.set_xlabel("Predicted Probability")
-    ax.set_ylabel("True Probability")
     ax.set_title("Calibration Curve")
     ax.legend()
-
-    fig.tight_layout()
 
     _save_figure(fig, save_path)
 
     return fig, ax
 
 
-# ---------------------------------------------------------------------
-# Training Curves
-# ---------------------------------------------------------------------
+# =========================================================
+# TRAINING CURVES
+# =========================================================
 
-def plot_training_curves(
-    history: Dict[str, List[float]],
-    save_path: str | Path | None = None,
-) -> Tuple[plt.Figure, plt.Axes]:
-    """
-    Plot training and validation curves.
-    """
+def plot_training_curves(history: Dict[str, List[float]], save_path=None):
 
-    if not history:
-        raise ValueError("history dictionary cannot be empty")
+    set_plot_style()
 
     fig, ax = plt.subplots()
 
     for key, values in history.items():
         ax.plot(values, label=key)
 
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("Metric")
     ax.set_title("Training Curves")
     ax.legend()
-
-    fig.tight_layout()
 
     _save_figure(fig, save_path)
 
     return fig, ax
 
 
-# ---------------------------------------------------------------------
-# Feature Importance
-# ---------------------------------------------------------------------
+# =========================================================
+# FEATURE IMPORTANCE
+# =========================================================
 
 def plot_feature_importance(
     features: List[str],
-    scores: Iterable,
-    top_k: int = 20,
-    save_path: str | Path | None = None,
-) -> Tuple[plt.Figure, plt.Axes]:
-    """
-    Plot feature importance ranking.
-    """
+    scores,
+    top_k=20,
+    save_path=None,
+):
+
+    set_plot_style()
 
     scores = _ensure_numpy(scores)
+    idx = np.argsort(scores)[::-1][:top_k]
 
-    if not isinstance(top_k, int) or top_k < 1:
-        raise ValueError("top_k must be >= 1")
-
-    if scores.ndim != 1:
-        raise ValueError("scores must be a 1D array")
-
-    if len(features) != len(scores):
-        raise ValueError("features and scores length mismatch")
-
-    indices = np.argsort(scores)[::-1][:top_k]
-
-    top_features = [features[i] for i in indices]
-    top_scores = scores[indices]
-
-    fig, ax = plt.subplots(figsize=(8, 6))
+    fig, ax = plt.subplots()
 
     sns.barplot(
-        x=top_scores,
-        y=top_features,
-        orient="h",
+        x=scores[idx],
+        y=[features[i] for i in idx],
         ax=ax,
     )
 
     ax.set_title("Feature Importance")
 
-    fig.tight_layout()
-
     _save_figure(fig, save_path)
 
     return fig, ax
 
 
-# ---------------------------------------------------------------------
-# Embedding Projection
-# ---------------------------------------------------------------------
+# =========================================================
+# EMBEDDING PROJECTION (SAFE)
+# =========================================================
 
 def plot_embedding_projection(
     embeddings: np.ndarray,
-    labels: Optional[Iterable] = None,
-    method: str = "pca",
-    save_path: str | Path | None = None,
-) -> Tuple[plt.Figure, plt.Axes]:
-    """
-    Project high-dimensional embeddings to 2D using PCA or t-SNE.
-    """
+    labels=None,
+    method="pca",
+    max_samples: int = 5000,   #  NEW SAFETY
+    save_path=None,
+):
+
+    set_plot_style()
 
     embeddings = _ensure_numpy(embeddings)
 
-    if embeddings.ndim != 2:
-        raise ValueError("embeddings must be a 2D matrix")
+    #  MEMORY SAFETY
+    if embeddings.shape[0] > max_samples:
+        idx = np.random.choice(len(embeddings), max_samples, replace=False)
+        embeddings = embeddings[idx]
+        if labels is not None:
+            labels = np.asarray(labels)[idx]
 
-    if embeddings.shape[0] < 2:
-        raise ValueError("embeddings must contain at least 2 samples for projection")
-
-    if method.lower() == "pca":
+    if method == "pca":
         reducer = PCA(n_components=2)
 
-    elif method.lower() == "tsne":
-        n_samples = embeddings.shape[0]
-        perplexity = min(30.0, float(n_samples - 1))
-        if perplexity < 1.0:
-            raise ValueError("Not enough samples for t-SNE")
+    elif method == "tsne":
         reducer = TSNE(
             n_components=2,
-            perplexity=perplexity,
+            perplexity=min(30, len(embeddings) - 1),
             random_state=42,
-            init="pca",
         )
 
     else:
         raise ValueError("method must be 'pca' or 'tsne'")
 
-    projected = reducer.fit_transform(embeddings)
+    proj = reducer.fit_transform(embeddings)
 
     fig, ax = plt.subplots()
 
     if labels is None:
-
-        ax.scatter(
-            projected[:, 0],
-            projected[:, 1],
-            alpha=0.7,
-        )
-
+        ax.scatter(proj[:, 0], proj[:, 1], alpha=0.7)
     else:
-
-        labels = _ensure_numpy(labels)
-        if labels.shape[0] != embeddings.shape[0]:
-            raise ValueError(
-                "labels length must match number of embeddings"
-            )
-
-        for label in np.unique(labels):
-
-            idx = labels == label
-
-            ax.scatter(
-                projected[idx, 0],
-                projected[idx, 1],
-                label=str(label),
-                alpha=0.7,
-            )
-
+        labels = np.asarray(labels)
+        for l in np.unique(labels):
+            idx = labels == l
+            ax.scatter(proj[idx, 0], proj[idx, 1], label=str(l), alpha=0.7)
         ax.legend()
 
-    ax.set_title(f"Embedding Projection ({method.upper()})")
-
-    fig.tight_layout()
+    ax.set_title(f"Embedding ({method.upper()})")
 
     _save_figure(fig, save_path)
 

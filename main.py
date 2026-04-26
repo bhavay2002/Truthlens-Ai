@@ -35,8 +35,6 @@ from src.models.multitask.multitask_truthlens_model import (
     configure_cuda_kernels,
 )
 from src.training.trainer import Trainer, TrainerConfig
-from src.training.optimizer_factory import create_optimizer
-from src.training.scheduler_factory import create_scheduler
 from src.utils.config_loader import get_config_value, load_config
 from src.utils.helper_functions import create_folder
 from src.utils.json_utils import save_json

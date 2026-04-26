@@ -18,7 +18,7 @@ from src.inference.feature_preparer import (
     FeaturePreparer,
     FeaturePreparationConfig,
 )
-from src.inference.prediction_pipeline import (
+from src.inference.inference_pipeline import (
     PredictionPipeline,
     PredictionPipelineConfig,
 )

@@ -17,7 +17,7 @@ from src.inference.inference_engine import (
 from src.inference.inference_logger import InferenceLogEntry, InferenceLogger
 from src.inference.feature_preparer import FeaturePreparer, FeaturePreparationConfig
 from src.inference.model_loader import ModelArtifacts, ModelLoader
-from src.inference.prediction_pipeline import PredictionPipeline, PredictionPipelineConfig
+from src.inference.inference_pipeline import PredictionPipeline, PredictionPipelineConfig
 from src.inference.report_generator import ReportConfig, ReportGenerator
 from src.inference.result_formatter import ResultFormatter
 

@@ -12,7 +12,7 @@ from src.aggregation.aggregation_pipeline import AggregationPipeline
 from src.inference.postprocessing import Postprocessor
 from src.explainability.orchestrator import ExplainabilityOrchestrator
 
-# 🔥 NEW
+#  NEW
 from src.graph.graph_pipeline import GraphPipeline
 
 logger = logging.getLogger(__name__)
@@ -203,7 +203,7 @@ class PredictionPipeline:
         return result
 
     # =====================================================
-    # 🔥 NEW FULL OUTPUT (SERVICE READY)
+    #  NEW FULL OUTPUT (SERVICE READY)
     # =====================================================
 
     def predict_full(

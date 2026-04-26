@@ -1,285 +1,242 @@
 """
-File Name: truthlens_pipeline.py
-Module: TruthLens Pipeline - Unified Analysis Pipeline
-Description:
-    Implements the central orchestration pipeline for the TruthLens AI system.
-    The pipeline coordinates preprocessing, feature extraction, model prediction,
-    analytical modules, aggregation logic, and report generation.
-
-    Processing Flow:
-        Article
-        ↓
-        Preprocessing
-        ↓
-        Feature Extraction
-        ↓
-        Model Prediction
-        ↓
-        Analysis Modules
-        ↓
-        Aggregation
-        ↓
-        Output Report
-
-    This module serves as the primary entry point for TruthLens article analysis
-    and produces a complete structured report containing intermediate outputs,
-    predictions, and final TruthLens scores.
-
-Author: TruthLens Engineering Team
-Date: 2026-04-03
-Dependencies:
-    logging
-    typing
-    dataclasses
-    time
-
-Inputs:
-    Raw article text
-
-Outputs:
-    Structured TruthLens analysis report
+src/pipelines/truthlens_pipeline.py
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from typing import Any, Dict, Optional
 
+from src.analysis.preprocessing import PreprocessingPipeline
+from src.features.base.base_feature import FeatureContext
+from src.features.pipelines.feature_pipeline import FeaturePipeline
+from src.inference.inference_pipeline import Predictor
+from src.analysis.bias_profile_builder import BiasProfileBuilder
 from src.aggregation.aggregation_pipeline import AggregationPipeline
 from src.aggregation.truthlens_score_calculator import TruthLensScoreCalculator
-from src.analysis.bias_profile_builder import BiasProfileBuilder
-from src.pipelines.prediction_pipeline import Predictor
-from src.pipelines.feature_pipeline import FeaturePipeline
-from src.pipelines.preprocessing_pipeline import PreprocessingPipeline
-from src.features.base.base_feature import FeatureContext
-
+from src.explainability.explainability_pipeline import run_explainability_pipeline
+from src.graph.graph_pipeline import GraphPipeline
+from src.evaluation.evaluation_pipeline import run_evaluation_pipeline
 
 logger = logging.getLogger(__name__)
 
 
-class EmotionPipeline:
-    """
-    Lightweight emotion analysis pipeline used by TruthLensPipeline.
-    """
-
-    def __init__(self) -> None:
-        self._extractors = []
-
-        try:
-            from src.features.emotion.emotion_features import EmotionFeatures
-            from src.features.emotion.emotion_intensity_features import (
-                EmotionIntensityFeatures,
-            )
-            from src.features.emotion.emotion_lexicon_features import (
-                EmotionLexiconFeatures,
-            )
-            from src.features.emotion.emotion_target_features import (
-                EmotionTargetFeatures,
-            )
-            from src.features.emotion.emotion_trajectory_features import (
-                EmotionTrajectoryFeatures,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "Emotion extractors unavailable, using empty emotion output: %s",
-                exc,
-            )
-            return
-
-        self._extractors = [
-            EmotionFeatures(),
-            EmotionIntensityFeatures(),
-            EmotionLexiconFeatures(),
-            EmotionTargetFeatures(),
-            EmotionTrajectoryFeatures(),
-        ]
-
-    def analyze(self, text: str) -> Dict[str, Dict[str, float]]:
-        context = FeatureContext(text=text)
-        output: Dict[str, Dict[str, float]] = {}
-
-        for extractor in self._extractors:
-            output[extractor.name] = extractor.extract(context)
-
-        return output
-
+# =========================================================
+# METADATA
+# =========================================================
 
 @dataclass
 class PipelineMetadata:
-    """
-    Metadata describing pipeline execution details.
-    """
-
-    processing_time: float
-    article_length: int
+    total_time: float
+    text_length: int
     token_count: int
-    model_version: Optional[str] = None
+    model_version: Optional[str]
+    stages: Dict[str, float]
 
+
+# =========================================================
+# PIPELINE
+# =========================================================
 
 class TruthLensPipeline:
-    """
-    Main orchestration pipeline for TruthLens analysis.
-    """
 
     def __init__(
         self,
+        *,
         preprocessor: Optional[PreprocessingPipeline] = None,
         feature_pipeline: Optional[FeaturePipeline] = None,
-        emotion_pipeline: Optional[EmotionPipeline] = None,
         predictor: Optional[Predictor] = None,
         profile_builder: Optional[BiasProfileBuilder] = None,
-        score_calculator: Optional[TruthLensScoreCalculator] = None,
         aggregation_pipeline: Optional[AggregationPipeline] = None,
-    ) -> None:
-        """
-        Initialize pipeline components with dependency injection.
-        """
+        score_calculator: Optional[TruthLensScoreCalculator] = None,
+        graph_pipeline: Optional[GraphPipeline] = None,
+        enable_explainability: bool = False,
+        enable_evaluation: bool = False,
+    ):
 
-        try:
-            self.preprocessor = preprocessor or PreprocessingPipeline()
-            self.feature_pipeline = feature_pipeline or FeaturePipeline()
-            self.emotion_pipeline = emotion_pipeline or EmotionPipeline()
-            self.predictor = predictor or Predictor()
-            self.profile_builder = profile_builder or BiasProfileBuilder()
-            self.score_calculator = score_calculator or TruthLensScoreCalculator()
-            self.aggregation_pipeline = (
-                aggregation_pipeline or AggregationPipeline()
-            )
+        self.preprocessor = preprocessor or PreprocessingPipeline()
+        self.feature_pipeline = feature_pipeline or FeaturePipeline()
+        self.predictor = predictor or Predictor()
+        self.profile_builder = profile_builder or BiasProfileBuilder()
+        self.aggregation_pipeline = aggregation_pipeline or AggregationPipeline()
+        self.score_calculator = score_calculator or TruthLensScoreCalculator()
+        self.graph_pipeline = graph_pipeline or GraphPipeline()
 
-        except Exception as exc:
-            logger.exception("TruthLensPipeline initialization failed")
-            raise RuntimeError("Failed to initialize TruthLensPipeline") from exc
+        self.enable_explainability = enable_explainability
+        self.enable_evaluation = enable_evaluation
 
-        logger.info("TruthLensPipeline initialized")
+        logger.info("TruthLensPipeline initialized (FINAL CLEAN)")
+
+    # =====================================================
+    # MAIN
+    # =====================================================
 
     def analyze(self, text: str) -> Dict[str, Any]:
-        """
-        Run the complete TruthLens analysis pipeline.
-
-        Parameters
-        ----------
-        text : str
-            Raw article text.
-
-        Returns
-        -------
-        Dict[str, Any]
-            Complete analysis report.
-        """
 
         if not isinstance(text, str) or not text.strip():
-            raise ValueError("text must be a non-empty string")
+            raise ValueError("text must be non-empty")
 
-        start_time = time.time()
+        start = time.time()
+        stage_time: Dict[str, float] = {}
+
+        # -------------------------------------------------
+        # 1. PREPROCESSING
+        # -------------------------------------------------
+        t0 = time.time()
+        prep = self.preprocessor.preprocess(text)
+        stage_time["preprocessing"] = time.time() - t0
+
+        # -------------------------------------------------
+        # 2. FEATURE CONTEXT
+        # -------------------------------------------------
+        ctx = FeatureContext(text=prep.normalized_text)
+
+        # -------------------------------------------------
+        # 3. FEATURE EXTRACTION
+        # -------------------------------------------------
+        t0 = time.time()
+        features = self.feature_pipeline.extract(ctx)
+        stage_time["features"] = time.time() - t0
+
+        # -------------------------------------------------
+        # 4. GRAPH PIPELINE (REAL USE)
+        # -------------------------------------------------
+        t0 = time.time()
+        graph_output: Dict[str, Any] = {}
 
         try:
-            preprocessing_output = self.preprocessor.preprocess(text)
+            graph_output = self.graph_pipeline.run(prep.normalized_text)
 
-            normalized_text = preprocessing_output.normalized_text
-            tokens = preprocessing_output.tokens
+            # 🔥 Merge graph into features (critical)
+            if isinstance(graph_output, dict) and "graph_features" in graph_output:
+                features.update(graph_output["graph_features"])
 
-            if not normalized_text.strip():
-                raise RuntimeError(
-                    "Preprocessing output missing valid normalized_text"
-                )
+        except Exception:
+            logger.warning("Graph pipeline failed", exc_info=True)
 
-            feature_bundle = self.feature_pipeline.extract_features(normalized_text)
+        stage_time["graph"] = time.time() - t0
 
-            emotion_outputs = self.emotion_pipeline.analyze(normalized_text)
+        # -------------------------------------------------
+        # 5. PREDICTION
+        # -------------------------------------------------
+        t0 = time.time()
+        predictions = self.predictor.predict(prep.normalized_text)
+        stage_time["prediction"] = time.time() - t0
 
-            model_predictions = self._run_model_predictions(normalized_text)
-
-        except Exception as exc:
-            logger.exception("TruthLens pipeline execution failed")
-            raise RuntimeError("TruthLens pipeline execution failed") from exc
-
-        bias_features = feature_bundle.bias
-        narrative_features = feature_bundle.narrative
-        discourse_features = feature_bundle.discourse
-        linguistic_features = feature_bundle.linguistic
-        graph_features = feature_bundle.graph
-
-        emotion_features: Dict[str, Any] = {}
-
-        for section in emotion_outputs.values():
-            if isinstance(section, dict):
-                emotion_features.update(section)
+        # -------------------------------------------------
+        # 6. PROFILE BUILDING
+        # -------------------------------------------------
+        t0 = time.time()
 
         profile = self.profile_builder.build_profile(
-            bias_features=bias_features,
-            emotion_features=emotion_features,
-            narrative_features=narrative_features,
-            discourse_features=discourse_features,
-            ideology_predictions=model_predictions,
+            bias_features=self._section(features, "bias"),
+            emotion_features=self._section(features, "emotion"),
+            narrative_features=self._section(features, "narrative"),
+            discourse_features=self._section(features, "discourse"),
+            ideology_predictions=predictions,
         )
 
-        profile["graph"] = graph_features
-        profile["linguistic"] = linguistic_features
+        # 🔥 Inject graph into profile (important)
+        if isinstance(graph_output, dict):
+            profile["graph"] = graph_output.get("graph_features", {})
+            profile["graph_explanation"] = graph_output.get("graph_explanation")
 
-        aggregation_output: Dict[str, Any] = {}
+        stage_time["analysis"] = time.time() - t0
+
+        # -------------------------------------------------
+        # 7. AGGREGATION
+        # -------------------------------------------------
+        t0 = time.time()
+
         try:
-            aggregation_output = self.aggregation_pipeline.run(
+            aggregation = self.aggregation_pipeline.run(
                 profile,
-                text=normalized_text,
+                text=prep.normalized_text,
             )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Aggregation integration skipped: %s", exc)
 
-        scores = aggregation_output.get("raw_scores")
-        if not isinstance(scores, dict) or not scores:
+            scores = (
+                aggregation.get("scores")
+                or aggregation.get("raw_scores")
+                or {}
+            )
+
+        except Exception:
+            logger.exception("Aggregation failed")
+            aggregation = {}
             scores = self.score_calculator.compute_scores(profile)
 
-        processing_time = time.time() - start_time
+        stage_time["aggregation"] = time.time() - t0
 
+        # -------------------------------------------------
+        # 8. EXPLAINABILITY
+        # -------------------------------------------------
+        explanation = None
+
+        if self.enable_explainability:
+            try:
+                explanation = run_explainability_pipeline(
+                    text=prep.normalized_text,
+                    predict_fn=self.predictor.predict,
+                ).model_dump()
+            except Exception:
+                logger.warning("Explainability failed", exc_info=True)
+
+        stage_time["explainability"] = stage_time.get("explainability", 0.0)
+
+        # -------------------------------------------------
+        # 9. EVALUATION (OPTIONAL)
+        # -------------------------------------------------
+        evaluation = None
+
+        if self.enable_evaluation:
+            try:
+                evaluation = run_evaluation_pipeline(
+                    model=getattr(self.predictor, "model", None),
+                    tokenizer=getattr(self.predictor, "tokenizer", None),
+                    texts=[prep.normalized_text],
+                    labels=None,  # supply real labels when available
+                )
+            except Exception:
+                logger.warning("Evaluation skipped", exc_info=True)
+
+        stage_time["evaluation"] = stage_time.get("evaluation", 0.0)
+
+        # -------------------------------------------------
+        # METADATA
+        # -------------------------------------------------
         metadata = PipelineMetadata(
-            processing_time=processing_time,
-            article_length=len(text),
-            token_count=len(tokens),
-            model_version=model_predictions.get("model_version"),
+            total_time=time.time() - start,
+            text_length=len(text),
+            token_count=len(prep.tokens),
+            model_version=predictions.get("model_version"),
+            stages=stage_time,
         )
 
-        report: Dict[str, Any] = {
-            "metadata": metadata.__dict__,
-            "preprocessing": preprocessing_output.__dict__,
-            "features": {
-                "bias": bias_features,
-                "narrative": narrative_features,
-                "discourse": discourse_features,
-                "linguistic": linguistic_features,
-                "graph": graph_features,
-            },
-            "emotion_analysis": emotion_outputs,
-            "model_predictions": model_predictions,
+        # -------------------------------------------------
+        # FINAL OUTPUT
+        # -------------------------------------------------
+        return {
+            "metadata": asdict(metadata),
+            "preprocessing": prep.__dict__,
+            "features": features,
+            "graph": graph_output,
+            "predictions": predictions,
             "profile": profile,
             "scores": scores,
-            "aggregation": aggregation_output,
+            "aggregation": aggregation,
+            "explainability": explanation,
+            "evaluation": evaluation,
         }
 
-        return report
+    # =====================================================
+    # HELPERS
+    # =====================================================
 
-    def _run_model_predictions(self, text: str) -> Dict[str, Any]:
-        """
-        Run ML model predictions.
-
-        Parameters
-        ----------
-        text : str
-
-        Returns
-        -------
-        Dict[str, Any]
-        """
-
-        try:
-            prediction_output = self.predictor.predict(text)
-
-            if not isinstance(prediction_output, dict):
-                raise RuntimeError("Predictor returned invalid output")
-
-            return prediction_output
-
-        except Exception as exc:
-            logger.exception("Model prediction stage failed")
-            raise RuntimeError("Prediction stage failed") from exc
+    def _section(self, features: Dict[str, float], prefix: str) -> Dict[str, float]:
+        return {
+            k: v
+            for k, v in features.items()
+            if k.startswith(prefix)
+        }
