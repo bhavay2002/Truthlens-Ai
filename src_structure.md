@@ -40,6 +40,8 @@ src/
 |   |-- information_density_analyzer.py
 |   |-- information_omission_detector.py
 |   |-- integration_runner.py
+|   |-- label_analysis.py
+|   |-- multitask_validator.py
 |   |-- narrative_conflict.py
 |   |-- narrative_propagation.py
 |   |-- narrative_role_extractor.py
@@ -52,20 +54,27 @@ src/
 |   |-- source_attribution_analyzer.py
 |   `-- spacy_loader.py
 |-- config
+|   |-- config_loader.py
+|   |-- settings_loader.py
 |   `-- task_config.py
 |-- data
 |   |-- class_balance.py
-|   |-- clean_data.py
+|   |-- collate.py
 |   |-- data_augmentation.py
+|   |-- data_cache.py
+|   |-- data_cleaning.py
+|   |-- data_contracts.py
+|   |-- data_loader.py
 |   |-- data_pipeline.py
 |   |-- data_profiler.py
-|   |-- data_split.py
-|   |-- eda.py
-|   |-- head_frames.py
-|   |-- load_data.py
-|   |-- merge_datasets.py
-|   |-- unified_label_schema.py
-|   `-- validate_data.py
+|   |-- data_resolver.py
+|   |-- data_validator.py
+|   |-- dataloader_factory.py
+|   |-- dataset.py
+|   |-- dataset_factory.py
+|   |-- file_integrity.py
+|   |-- leakage_checker.py
+|   `-- samplers.py
 |-- evaluation
 |   |-- __init__.py
 |   |-- advanced_analysis.py
@@ -74,9 +83,10 @@ src/
 |   |-- evaluate_model.py
 |   |-- evaluate_saved_model.py
 |   |-- evaluation_dashboard.py
+|   |-- evaluation_engine.py
 |   |-- evaluation_pipeline.py
 |   |-- evaluator.py
-|   |-- metrics.py
+|   |-- metrics_engine.py
 |   |-- mlflow_tracker.py
 |   |-- pdf_report.py
 |   |-- prediction_collector.py
@@ -213,11 +223,11 @@ src/
 |   |-- inference_config.py
 |   |-- inference_engine.py
 |   |-- inference_logger.py
+|   |-- inference_pipeline.py
 |   |-- model_loader.py
 |   |-- monitoring.py
 |   |-- postprocessing.py
 |   |-- predict_api.py
-|   |-- prediction_pipeline.py
 |   |-- prediction_service.py
 |   |-- report_generator.py
 |   |-- result_formatter.py
@@ -356,8 +366,6 @@ src/
 |   |   |   |-- __init__.py
 |   |   |   `-- propaganda_detector.py
 |   |   `-- __init__.py
-|   |-- training
-|   |   `-- __init__.py
 |   |-- uncertainty
 |   |   |-- ensemble_uncertainty.py
 |   |   |-- mc_dropout.py
@@ -388,6 +396,7 @@ src/
 |   |-- step_engine.py
 |   |-- task_scheduler.py
 |   |-- trainer.py
+|   |-- training_setup.py
 |   |-- training_step.py
 |   `-- training_utils.py
 |-- utils
@@ -395,6 +404,7 @@ src/
 |   |-- config_loader.py
 |   |-- device_utils.py
 |   |-- distributed_utils.py
+|   |-- error_handling.py
 |   |-- experiment_utils.py
 |   |-- helper_functions.py
 |   |-- input_validation.py
