@@ -1,5 +1,3 @@
-# src/models/training/trainer.py
-
 from __future__ import annotations
 
 import logging
@@ -10,7 +8,13 @@ import torch
 from torch.utils.data import DataLoader
 
 from src.models.config.model_config import ModelConfigLoader
-from src.training.training_utils import get_device
+
+from src.training.training_setup import (
+    TrainingSetupConfig,
+    setup_runtime,
+    optimize_model,
+    run_sanity_check,
+)
 
 from .training_step import TrainingStep
 from .evaluation_engine import EvaluationEngine
@@ -22,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 # =========================================================
-# TRAINER (FINAL UPGRADE)
+# TRAINER (PRODUCTION-GRADE)
 # =========================================================
 
 class Trainer:
@@ -38,11 +42,13 @@ class Trainer:
         checkpoint: Optional[CheckpointEngine] = None,
         distributed: Optional[DistributedEngine] = None,
         tracker: Optional[ExperimentTracker] = None,
-        monitor_metric: str = "val_loss",     # 🔥 NEW
-        maximize_metric: bool = False,        # 🔥 NEW
+        monitor_metric: str = "val_loss",
+        maximize_metric: bool = False,
     ):
 
+        # -------------------------------------------------
         # CONFIG
+        # -------------------------------------------------
         self.cfg = ModelConfigLoader.load_multitask_config(config_path)
 
         self.model = model
@@ -58,11 +64,19 @@ class Trainer:
         self.monitor_metric = monitor_metric
         self.maximize_metric = maximize_metric
 
-        # DEVICE
-        self.device = get_device(self.cfg.encoder.device)
+        # -------------------------------------------------
+        # TRAINING SETUP (🔥 NEW)
+        # -------------------------------------------------
+        self.setup_cfg = TrainingSetupConfig()
+
+        self.device = setup_runtime(self.setup_cfg)
+
+        self.model = optimize_model(self.model)
         self.model.to(self.device)
 
+        # -------------------------------------------------
         # TRAINING PARAMS
+        # -------------------------------------------------
         self.epochs = self.cfg.training.num_epochs
         self.early_patience = self.cfg.training.early_stopping_patience
 
@@ -70,22 +84,30 @@ class Trainer:
         self.best_metric = None
         self.no_improve_epochs = 0
 
+        # -------------------------------------------------
         # DISTRIBUTED
+        # -------------------------------------------------
         if self.distributed:
             self.distributed.initialize()
             self.model = self.distributed.wrap_model(self.model)
 
+        # -------------------------------------------------
         # LOG CONFIG
+        # -------------------------------------------------
         if self.tracker and self._is_main():
             self.tracker.log_params(asdict(self.cfg))
 
-        logger.info("Trainer initialized (UPGRADED ORCHESTRATOR)")
+        logger.info("Trainer initialized (PRODUCTION-GRADE)")
 
     # =====================================================
-    # TRAIN
+    # TRAIN ENTRY
     # =====================================================
 
     def train(self):
+
+        # 🔥 SANITY CHECK (CRITICAL)
+        if self.setup_cfg.run_sanity_check:
+            self._run_sanity_check()
 
         for epoch in range(self.epochs):
 
@@ -128,7 +150,9 @@ class Trainer:
                         logger.warning("Early stopping triggered")
                     break
 
+        # -------------------------------------------------
         # CLEANUP
+        # -------------------------------------------------
         if self.tracker and self._is_main():
             self.tracker.finish()
 
@@ -181,6 +205,28 @@ class Trainer:
                 )
 
     # =====================================================
+    # SANITY CHECK
+    # =====================================================
+
+    def _run_sanity_check(self):
+
+        if not self.train_loader:
+            return
+
+        logger.info("Running sanity check...")
+
+        batch = next(iter(self.train_loader))
+
+        run_sanity_check(
+            model=self._unwrap_model(),
+            batch=batch,
+            training_step=self.training_step,
+            device=self.device,
+        )
+
+        logger.info("Sanity check passed")
+
+    # =====================================================
     # EARLY STOPPING
     # =====================================================
 
@@ -214,7 +260,6 @@ class Trainer:
             tag="epoch",
         )
 
-        # Save BEST model
         metric_value = metrics.get(self.monitor_metric)
 
         if metric_value is None:
@@ -232,7 +277,7 @@ class Trainer:
             )
 
     # =====================================================
-    # EVALUATE
+    # EVALUATION
     # =====================================================
 
     def evaluate(self) -> Dict[str, Any]:

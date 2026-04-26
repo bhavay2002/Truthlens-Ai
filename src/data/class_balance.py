@@ -1,346 +1,189 @@
-"""
-File: src/data/class_balance.py
-
-Purpose
--------
-Research-grade dataset balancing utilities.
-
-Supports:
-- Single-task and multi-task datasets
-- Class distribution inspection
-- Random oversampling
-- Random undersampling
-- Automatic balancing
-- Multi-label / multi-task balancing
-- Missing label handling
-
-Designed for multi-task NLP systems such as:
-
-Bias
-Ideology
-Propaganda
-Narrative
-Emotion
-
-Dependencies
-------------
-pandas
-sklearn
-logging
-"""
-
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional
+from dataclasses import dataclass
+from typing import Dict, Any, List, Optional
 
+import numpy as np
 import pandas as pd
-from sklearn.utils import resample
 
 logger = logging.getLogger(__name__)
 
 
-# -------------------------------------------------
-# Utility Validation
-# -------------------------------------------------
+# =========================================================
+# CONFIG
+# =========================================================
 
-def _validate_dataframe(df: pd.DataFrame):
-
-    if not isinstance(df, pd.DataFrame):
-        raise TypeError("df must be a pandas DataFrame")
-
-    if len(df) == 0:
-        raise ValueError("Dataset is empty")
+@dataclass
+class ClassBalanceConfig:
+    imbalance_threshold: float = 0.2   # min class ratio
+    compute_weights: bool = True
+    normalize_weights: bool = True
 
 
-# -------------------------------------------------
-# Class Distribution Check
-# -------------------------------------------------
+# =========================================================
+# RESULT
+# =========================================================
 
-def check_class_distribution(
+@dataclass
+class ClassBalanceReport:
+    task: str
+    type: str  # classification | multilabel
+
+    distribution: Dict[str, Any]
+    imbalance_detected: bool
+
+    weights: Optional[Dict[Any, float]] = None
+
+
+# =========================================================
+# CLASSIFICATION
+# =========================================================
+
+def analyze_classification(
     df: pd.DataFrame,
-    label_column: str,
-) -> Dict:
+    label_col: str,
+    *,
+    config: Optional[ClassBalanceConfig] = None,
+) -> ClassBalanceReport:
 
-    """
-    Inspect class distribution for a single task.
-    """
+    config = config or ClassBalanceConfig()
 
-    _validate_dataframe(df)
+    counts = df[label_col].value_counts().sort_index()
+    total = counts.sum()
 
-    if label_column not in df.columns:
-        raise ValueError(f"Column '{label_column}' not found")
+    dist = (counts / total).to_dict()
 
-    counts = df[label_column].value_counts(dropna=True).to_dict()
+    min_ratio = min(dist.values())
+    imbalance = min_ratio < config.imbalance_threshold
+
+    weights = None
+
+    if config.compute_weights:
+        weights = _compute_class_weights(counts, normalize=config.normalize_weights)
 
     logger.info(
-        "Class distribution for '%s': %s",
-        label_column,
-        counts,
+        "Class balance | %s | dist=%s | imbalance=%s",
+        label_col,
+        dist,
+        imbalance,
     )
 
-    return counts
+    return ClassBalanceReport(
+        task=label_col,
+        type="classification",
+        distribution=dist,
+        imbalance_detected=imbalance,
+        weights=weights,
+    )
 
 
-# -------------------------------------------------
-# Multi-Task Distribution Inspection
-# -------------------------------------------------
+# =========================================================
+# MULTILABEL
+# =========================================================
 
-def check_multitask_distribution(
+def analyze_multilabel(
     df: pd.DataFrame,
-    label_columns: List[str],
-) -> Dict[str, Dict]:
+    label_cols: List[str],
+    *,
+    config: Optional[ClassBalanceConfig] = None,
+) -> ClassBalanceReport:
 
-    """
-    Inspect class distribution for multiple tasks.
-    """
+    config = config or ClassBalanceConfig()
 
-    results = {}
+    dist = {}
+    weights = {}
 
-    for col in label_columns:
+    imbalance = False
 
-        if col not in df.columns:
-            logger.warning("Column '%s' missing. Skipping.", col)
-            continue
+    for col in label_cols:
 
-        results[col] = check_class_distribution(df, col)
+        pos = df[col].sum()
+        total = len(df)
 
-    return results
+        ratio = float(pos) / max(total, 1)
 
+        dist[col] = ratio
 
-# -------------------------------------------------
-# Random Oversampling
-# -------------------------------------------------
+        if ratio < config.imbalance_threshold:
+            imbalance = True
 
-def random_oversample(
-    df: pd.DataFrame,
-    label_column: str,
-    random_state: int = 42,
-) -> pd.DataFrame:
-
-    """
-    Balance dataset using random oversampling.
-    """
-
-    _validate_dataframe(df)
-
-    if label_column not in df.columns:
-        raise ValueError(f"Column '{label_column}' not found")
-
-    df = df.dropna(subset=[label_column])
-
-    counts = df[label_column].value_counts()
-
-    if len(counts) < 2:
-        logger.warning(
-            "Only one class present for '%s'. Skipping oversampling.",
-            label_column,
-        )
-        return df.reset_index(drop=True)
-
-    max_count = counts.max()
-
-    balanced_frames = []
-
-    for label in counts.index:
-
-        class_df = df[df[label_column] == label]
-
-        resampled = resample(
-            class_df,
-            replace=True,
-            n_samples=max_count,
-            random_state=random_state,
-        )
-
-        balanced_frames.append(resampled)
-
-    balanced_df = pd.concat(balanced_frames)
-
-    balanced_df = balanced_df.sample(
-        frac=1,
-        random_state=random_state,
-    ).reset_index(drop=True)
+        if config.compute_weights:
+            weights[col] = _compute_binary_weight(pos, total)
 
     logger.info(
-        "Oversampled '%s' distribution: %s",
-        label_column,
-        balanced_df[label_column].value_counts().to_dict(),
+        "Multilabel balance | cols=%d | imbalance=%s",
+        len(label_cols),
+        imbalance,
     )
 
-    return balanced_df
-
-
-# -------------------------------------------------
-# Random Undersampling
-# -------------------------------------------------
-
-def random_undersample(
-    df: pd.DataFrame,
-    label_column: str,
-    random_state: int = 42,
-) -> pd.DataFrame:
-
-    """
-    Balance dataset using random undersampling.
-    """
-
-    _validate_dataframe(df)
-
-    if label_column not in df.columns:
-        raise ValueError(f"Column '{label_column}' not found")
-
-    df = df.dropna(subset=[label_column])
-
-    counts = df[label_column].value_counts()
-
-    if len(counts) < 2:
-        logger.warning(
-            "Only one class present for '%s'. Skipping undersampling.",
-            label_column,
-        )
-        return df.reset_index(drop=True)
-
-    min_count = counts.min()
-
-    balanced_frames = []
-
-    for label in counts.index:
-
-        class_df = df[df[label_column] == label]
-
-        resampled = resample(
-            class_df,
-            replace=False,
-            n_samples=min_count,
-            random_state=random_state,
-        )
-
-        balanced_frames.append(resampled)
-
-    balanced_df = pd.concat(balanced_frames)
-
-    balanced_df = balanced_df.sample(
-        frac=1,
-        random_state=random_state,
-    ).reset_index(drop=True)
-
-    logger.info(
-        "Undersampled '%s' distribution: %s",
-        label_column,
-        balanced_df[label_column].value_counts().to_dict(),
+    return ClassBalanceReport(
+        task="multilabel",
+        type="multilabel",
+        distribution=dist,
+        imbalance_detected=imbalance,
+        weights=weights if config.compute_weights else None,
     )
 
-    return balanced_df
 
+# =========================================================
+# TASK WRAPPER (YOUR SYSTEM)
+# =========================================================
 
-# -------------------------------------------------
-# Automatic Balancing (Single Task)
-# -------------------------------------------------
-
-def balance_dataset(
+def analyze_task_balance(
     df: pd.DataFrame,
-    label_column: str,
-    method: str = "oversample",
-    random_state: int = 42,
-) -> pd.DataFrame:
+    task: str,
+    *,
+    config: Optional[ClassBalanceConfig] = None,
+) -> ClassBalanceReport:
 
-    """
-    Automatically balance a single task dataset.
-    """
+    if task == "bias":
+        return analyze_classification(df, "bias", config=config)
 
-    if method == "oversample":
+    elif task == "ideology":
+        return analyze_classification(df, "ideology", config=config)
 
-        return random_oversample(
+    elif task == "propaganda":
+        return analyze_classification(df, "propaganda", config=config)
+
+    elif task == "frame":
+        return analyze_multilabel(df, ["CO", "EC", "HI", "MO", "RE"], config=config)
+
+    elif task == "narrative":
+        return analyze_multilabel(df, ["hero", "villain", "victim"], config=config)
+
+    elif task == "emotion":
+        return analyze_multilabel(
             df,
-            label_column,
-            random_state=random_state,
-        )
-
-    elif method == "undersample":
-
-        return random_undersample(
-            df,
-            label_column,
-            random_state=random_state,
+            [f"emotion_{i}" for i in range(20)],
+            config=config,
         )
 
     else:
-
-        raise ValueError(
-            "method must be 'oversample' or 'undersample'"
-        )
+        raise ValueError(f"Unknown task: {task}")
 
 
-# -------------------------------------------------
-# Multi-Task Dataset Balancing
-# -------------------------------------------------
+# =========================================================
+# WEIGHT UTILS
+# =========================================================
 
-def balance_multitask_dataset(
-    df: pd.DataFrame,
-    label_columns: List[str],
-    method: str = "oversample",
-    random_state: int = 42,
-) -> pd.DataFrame:
+def _compute_class_weights(counts, normalize=True):
 
-    """
-    Balance each task independently in a multi-task dataset.
+    total = counts.sum()
+    weights = {cls: total / c for cls, c in counts.items()}
 
-    Useful for systems with multiple heads such as:
+    if normalize:
+        s = sum(weights.values())
+        weights = {k: v / s for k, v in weights.items()}
 
-    bias
-    ideology
-    propaganda
-    narrative
-    emotion
-    """
+    return weights
 
-    _validate_dataframe(df)
 
-    balanced_frames: List[pd.DataFrame] = []
+def _compute_binary_weight(pos, total):
 
-    for label in label_columns:
+    neg = total - pos
 
-        if label not in df.columns:
+    if pos == 0:
+        return 1.0
 
-            logger.warning(
-                "Label column '%s' missing. Skipping.",
-                label,
-            )
-            continue
-
-        task_df = df.dropna(subset=[label])
-
-        if len(task_df) == 0:
-
-            logger.warning(
-                "No valid samples for '%s'. Skipping.",
-                label,
-            )
-            continue
-
-        logger.info(
-            "Balancing task '%s' with %d samples",
-            label,
-            len(task_df),
-        )
-
-        balanced = balance_dataset(
-            task_df,
-            label_column=label,
-            method=method,
-            random_state=random_state,
-        )
-
-        balanced_frames.append(balanced)
-
-    if not balanced_frames:
-        raise ValueError("No tasks were balanced")
-
-    combined = pd.concat(balanced_frames)
-
-    combined = combined.drop_duplicates().reset_index(drop=True)
-
-    logger.info("Final balanced dataset size: %d", len(combined))
-
-    return combined
+    return float(neg) / float(pos)

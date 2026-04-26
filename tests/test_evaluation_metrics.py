@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.evaluation.metrics import (
+from src.evaluation.metrics_engine import (
     compute_classification_metrics,
     compute_multilabel_metrics,
 )

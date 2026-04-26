@@ -1,74 +1,82 @@
-# src/analysis/analysis_pipeline.py
-
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Any
+import time
+from typing import Dict, List, Any, Optional
 
 from spacy.tokens import Doc
 
 from src.analysis.spacy_loader import get_shared_nlp
 from src.analysis.feature_context import FeatureContext
-from src.analysis.base_analyzer import BaseAnalyzer
 from src.analysis.feature_merger import FeatureMerger
 from src.analysis.analysis_config import AnalysisConfig, build_default_config
+from src.analysis.analysis_registry import AnalyzerRegistry, AnalyzerExecution
 
 logger = logging.getLogger(__name__)
 
 
 # =========================================================
-# Pipeline
+# PIPELINE (UPGRADED)
 # =========================================================
 
 class AnalysisPipeline:
+    """
+    Production-grade analysis pipeline.
+
+    Features:
+    - registry-driven execution
+    - structured outputs
+    - latency tracking
+    - batch optimization
+    - fail-safe execution
+    """
 
     def __init__(
         self,
-        analyzers: List[BaseAnalyzer],
+        registry: AnalyzerRegistry,
         *,
-        config: AnalysisConfig | None = None,
+        config: Optional[AnalysisConfig] = None,
         nlp_mode: str = "safe",
     ):
-        if not analyzers:
-            raise ValueError("At least one analyzer required")
-
         self.config = config or build_default_config()
-        self.analyzers = analyzers
-        self.nlp = get_shared_nlp(mode=nlp_mode)
+        self.registry = registry
 
+        self.nlp = get_shared_nlp(mode=nlp_mode)
         self.merger = FeatureMerger()
 
         logger.info(
-            "Pipeline initialized | analyzers=%d | mode=%s",
-            len(analyzers),
+            "AnalysisPipeline initialized | analyzers=%d | mode=%s",
+            len(self.registry.list()),
             nlp_mode,
         )
 
     # =====================================================
-    # SINGLE
+    # SINGLE RUN
     # =====================================================
 
     def run(self, text: str) -> Dict[str, Any]:
+
+        start = time.time()
 
         text = self._validate(text)
 
         doc = self.nlp(text)
         ctx = FeatureContext.from_doc(doc)
 
-        sections = self._run_analyzers(ctx)
+        results = self._execute(ctx)
 
-        merged = self.merger.merge(sections)
-        vector, keys = self.merger.to_vector(sections)
+        merged, vector, keys = self._post_process(results)
 
         return {
-            "sections": sections,
+            "sections": {k: v.output for k, v in results.items()},
             "features": merged,
             "vector": vector,
             "feature_keys": keys,
+            "meta": self._build_meta(results, start),
         }
 
     # =====================================================
-    # BATCH
+    # BATCH RUN (OPTIMIZED)
     # =====================================================
 
     def run_batch(self, texts: List[str]) -> List[Dict[str, Any]]:
@@ -76,87 +84,102 @@ class AnalysisPipeline:
         if not texts:
             return []
 
-        docs = list(self.nlp.pipe(
-            texts,
-            batch_size=self.config.pipeline.batch_size,
-        ))
+        start = time.time()
+
+        texts = [self._validate(t) for t in texts]
+
+        docs = list(
+            self.nlp.pipe(
+                texts,
+                batch_size=self.config.pipeline.batch_size,
+                n_process=1,  # keep deterministic; can scale later
+            )
+        )
 
         results = []
 
         for doc in docs:
             ctx = FeatureContext.from_doc(doc)
-            sections = self._run_analyzers(ctx)
 
-            merged = self.merger.merge(sections)
-            vector, keys = self.merger.to_vector(sections)
+            exec_results = self._execute(ctx)
+            merged, vector, keys = self._post_process(exec_results)
 
             results.append({
-                "sections": sections,
+                "sections": {k: v.output for k, v in exec_results.items()},
                 "features": merged,
                 "vector": vector,
                 "feature_keys": keys,
+                "meta": self._build_meta(exec_results, start),
             })
 
         return results
 
     # =====================================================
-    # ANALYZERS
+    # EXECUTION ENGINE (CORE)
     # =====================================================
 
-    def _run_analyzers(
+    def _execute(
         self,
         ctx: FeatureContext,
-    ) -> Dict[str, Dict[str, float]]:
+    ) -> Dict[str, AnalyzerExecution]:
 
-        result: Dict[str, Dict[str, float]] = {}
-
-        for analyzer in self.analyzers:
-
-            name = analyzer.__class__.__name__
-
-            if not self._is_enabled(name):
-                continue
-
-            try:
-                output = analyzer.analyze(ctx)
-
-                if not isinstance(output, dict):
-                    continue
-
-                group = self._get_group(analyzer)
-
-                result.setdefault(group, {}).update(output)
-
-            except Exception:
-                logger.exception("Analyzer failed: %s", name)
-
-                if self.config.global_config.fail_fast:
-                    raise
-
-        return result
-
-    # =====================================================
-    # GROUP RESOLUTION (FIXED)
-    # =====================================================
-
-    def _get_group(self, analyzer: BaseAnalyzer) -> str:
-        """
-        Each analyzer MUST define `group` attribute.
-        """
-
-        if hasattr(analyzer, "group"):
-            return analyzer.group
-
-        raise ValueError(
-            f"{analyzer.__class__.__name__} missing 'group' attribute"
+        return self.registry.run_all(
+            ctx,
+            extra_inputs=self._extra_inputs(ctx),
         )
 
     # =====================================================
-    # CONFIG HELPERS
+    # POST PROCESSING
     # =====================================================
 
-    def _is_enabled(self, name: str) -> bool:
-        return self.config.is_enabled(name.lower())
+    def _post_process(
+        self,
+        results: Dict[str, AnalyzerExecution],
+    ):
+
+        sections = {k: v.output for k, v in results.items()}
+
+        merged = self.merger.merge(sections)
+        vector, keys = self.merger.to_vector(sections)
+
+        return merged, vector, keys
+
+    # =====================================================
+    # META / OBSERVABILITY
+    # =====================================================
+
+    def _build_meta(
+        self,
+        results: Dict[str, AnalyzerExecution],
+        start_time: float,
+    ) -> Dict[str, Any]:
+
+        total_time = time.time() - start_time
+
+        failures = [
+            k for k, v in results.items() if not v.success
+        ]
+
+        latencies = {
+            k: v.latency for k, v in results.items()
+        }
+
+        return {
+            "total_latency": total_time,
+            "analyzer_latency": latencies,
+            "failed_analyzers": failures,
+            "num_analyzers": len(results),
+        }
+
+    # =====================================================
+    # EXTRA INPUTS (EXTENSIBILITY)
+    # =====================================================
+
+    def _extra_inputs(self, ctx: FeatureContext) -> Dict[str, Any]:
+        """
+        Hook for passing extra shared inputs to analyzers.
+        """
+        return {}
 
     # =====================================================
     # VALIDATION

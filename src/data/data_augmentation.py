@@ -1,89 +1,54 @@
 """
-TruthLens Advanced Data Augmentation Module
-Research-grade NLP augmentation designed for:
-
-- bias detection
-- ideology detection
-- propaganda detection
-- narrative framing
-- emotional manipulation
-
-Advanced Features
------------------
-• contextual MLM augmentation
-• back translation augmentation
-• synonym replacement
-• deletion / swap / shuffle
-• ideological framing augmentation
-• propaganda phrase injection
-• narrative reframing
-• emotional amplification
-• bias word injection
-• class-aware augmentation
-• semantic similarity filtering
-• weighted augmentation operations
-• reproducible deterministic randomness
-• multiprocessing support
+TruthLens Task-Aware Data Augmentation (Production + Research Ready)
 """
 
 from __future__ import annotations
 
 import logging
 import random
-from multiprocessing import Pool
-from typing import Callable, List, Tuple
+from dataclasses import dataclass
+from typing import Callable, List, Dict, Optional
 
 import pandas as pd
-import nltk 
+import nltk
 
 from nltk.corpus import wordnet, stopwords
-from transformers import pipeline
-from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
 
-from src.utils.input_validation import (
-    ensure_dataframe,
-    ensure_non_empty_text_column,
-)
-
-from src.data.head_frames import (
-    IDEOLOGY_FRAMES,
-    PROPAGANDA_PHRASES,
-    NARRATIVE_PREFIX,
-    EMOTION_WORDS,
-    BIAS_WORDS,
-)
+# Optional heavy deps
+try:
+    from transformers import pipeline
+    from sentence_transformers import SentenceTransformer
+    from sklearn.metrics.pairwise import cosine_similarity
+except Exception:
+    pipeline = None
+    SentenceTransformer = None
 
 logger = logging.getLogger(__name__)
 
-# ------------------------------------------------
-# Configuration
-# ------------------------------------------------
+# =========================================================
+# CONFIG
+# =========================================================
 
-RANDOM_SEED = 42
-MAX_TOKEN_SAFE = 512
-SIMILARITY_THRESHOLD = 0.75
+@dataclass
+class AugmentationConfig:
+    multiplier: float = 1.5
+    enable_heavy_ops: bool = False   # MLM + embeddings
+    similarity_threshold: float = 0.75
+    random_seed: int = 42
 
-random.seed(RANDOM_SEED)
 
-# ------------------------------------------------
-# NLTK Setup
-# ------------------------------------------------
+# =========================================================
+# INIT
+# =========================================================
+
+random.seed(42)
 
 try:
     nltk.download("wordnet", quiet=True)
     nltk.download("stopwords", quiet=True)
-
     STOPWORDS = set(stopwords.words("english"))
-
-except Exception as e:
-
-    logger.warning("NLTK resources unavailable: %s", e)
+except Exception:
     STOPWORDS = set()
-
-# ------------------------------------------------
-# Models (lazy loaded)
-# ------------------------------------------------
 
 _mlm = None
 _embedder = None
@@ -91,364 +56,216 @@ _embedder = None
 
 def get_mlm():
     global _mlm
-    if _mlm is None:
-        _mlm = pipeline(
-            "fill-mask",
-            model="roberta-base",
-            top_k=5,
-        )
+    if _mlm is None and pipeline:
+        _mlm = pipeline("fill-mask", model="roberta-base", top_k=3)
     return _mlm
 
 
 def get_embedder():
     global _embedder
-    if _embedder is None:
+    if _embedder is None and SentenceTransformer:
         _embedder = SentenceTransformer("all-MiniLM-L6-v2")
     return _embedder
 
 
-# ------------------------------------------------
-# Synonym Lookup
-# ------------------------------------------------
+# =========================================================
+# BASIC OPS
+# =========================================================
 
-
-def get_synonyms(word: str) -> List[str]:
-
+def get_synonyms(word: str):
     synonyms = set()
-
-    try:
-        synsets = wordnet.synsets(word)
-    except LookupError:
-        return []
-
-    for syn in synsets:
+    for syn in wordnet.synsets(word):
         for lemma in syn.lemmas():
-
-            synonym = lemma.name().replace("_", " ").lower()
-
-            if synonym != word:
-                synonyms.add(synonym)
-
+            w = lemma.name().replace("_", " ")
+            if w != word:
+                synonyms.add(w)
     return list(synonyms)
 
 
-# ------------------------------------------------
-# Basic NLP Augmentations
-# ------------------------------------------------
-
-
-def synonym_replacement(text: str, n: int = 2) -> str:
-
+def synonym_replacement(text: str) -> str:
     words = text.split()
-
-    candidates = [w for w in words if w not in STOPWORDS and len(w) > 3]
-
-    random.shuffle(candidates)
-
-    replaced = 0
-
-    for word in candidates:
-
-        synonyms = get_synonyms(word)
-
-        if synonyms:
-
-            synonym = random.choice(synonyms)
-
-            words = [synonym if w == word else w for w in words]
-
-            replaced += 1
-
-        if replaced >= n:
-            break
-
+    for i, w in enumerate(words):
+        if w.lower() not in STOPWORDS and len(w) > 3:
+            syns = get_synonyms(w)
+            if syns:
+                words[i] = random.choice(syns)
+                break
     return " ".join(words)
 
 
-def random_deletion(text: str, p: float = 0.1) -> str:
-
+def random_deletion(text: str, p=0.1):
     words = text.split()
-
-    if len(words) <= 5:
+    if len(words) < 5:
         return text
-
-    new_words = [w for w in words if random.random() > p]
-
-    if not new_words:
-        return random.choice(words)
-
-    return " ".join(new_words)
+    return " ".join([w for w in words if random.random() > p])
 
 
-def random_swap(text: str) -> str:
-
+def random_swap(text: str):
     words = text.split()
-
     if len(words) < 3:
         return text
-
-    i1, i2 = random.sample(range(len(words)), 2)
-
-    words[i1], words[i2] = words[i2], words[i1]
-
+    i, j = random.sample(range(len(words)), 2)
+    words[i], words[j] = words[j], words[i]
     return " ".join(words)
 
 
-def sentence_shuffle(text: str) -> str:
+# =========================================================
+# TASK-SPECIFIC OPS
+# =========================================================
 
-    sentences = text.split(".")
-
-    if len(sentences) < 2:
-        return text
-
-    random.shuffle(sentences)
-
-    return ".".join(sentences)
+def ideology_frame_shift(text: str) -> str:
+    return f"In a broader ideological context, {text}"
 
 
-# ------------------------------------------------
-# Contextual MLM Augmentation
-# ------------------------------------------------
+def propaganda_injection(text: str) -> str:
+    return f"Clearly, {text}"
 
+
+def narrative_reframe(text: str) -> str:
+    return f"From another perspective, {text}"
+
+
+def emotion_amplify(text: str) -> str:
+    return f"{text} This is extremely emotional."
+
+
+def bias_injection(text: str) -> str:
+    return f"{text} Obviously biased."
+
+
+# =========================================================
+# HEAVY OPS (OPTIONAL)
+# =========================================================
 
 def contextual_replacement(text: str) -> str:
-
     mlm = get_mlm()
+    if mlm is None:
+        return text
 
     words = text.split()
-
     if len(words) < 6:
         return text
 
     idx = random.randint(0, len(words) - 1)
-
     words[idx] = "<mask>"
 
-    masked = " ".join(words)
-
     try:
-
-        preds = mlm(masked)
-
-        replacement = preds[0]["token_str"]
-
-        words[idx] = replacement
-
-        return " ".join(words)
-
+        preds = mlm(" ".join(words))
+        words[idx] = preds[0]["token_str"]
     except Exception:
-
         return text
 
-
-# ------------------------------------------------
-# Ideology / Propaganda Augmentations
-# ------------------------------------------------
-
-
-def ideology_frame_shift(text: str) -> str:
-
-    addition = random.choice(IDEOLOGY_FRAMES)
-
-    return f"{text} {addition}"
-
-
-def propaganda_injection(text: str) -> str:
-
-    phrase = random.choice(PROPAGANDA_PHRASES)
-
-    return f"{phrase} {text.lower()}"
-
-
-def narrative_reframe(text: str) -> str:
-
-    prefix = random.choice(NARRATIVE_PREFIX)
-
-    return f"{prefix} {text.lower()}"
-
-
-def emotion_amplify(text: str) -> str:
-
-    words = text.split()
-
-    idx = random.randint(0, len(words) - 1)
-
-    words.insert(idx, random.choice(EMOTION_WORDS))
-
     return " ".join(words)
 
 
-def bias_injection(text: str) -> str:
-
-    words = text.split()
-
-    idx = random.randint(0, len(words) - 1)
-
-    words.insert(idx, random.choice(BIAS_WORDS))
-
-    return " ".join(words)
-
-# ------------------------------------------------
-# Semantic Similarity Filter
-# ------------------------------------------------
-
-
-def semantic_valid(original: str, augmented: str) -> bool:
-
+def semantic_valid(original: str, augmented: str, threshold: float) -> bool:
     embedder = get_embedder()
+    if embedder is None:
+        return True  # skip check
 
     emb = embedder.encode([original, augmented])
-
     score = cosine_similarity([emb[0]], [emb[1]])[0][0]
-
-    return score >= SIMILARITY_THRESHOLD
-
-
-# ------------------------------------------------
-# Augmentation Operations
-# ------------------------------------------------
-
-AUGMENTATION_OPERATIONS: List[Tuple[Callable[[str], str], float]] = [
-
-    (synonym_replacement, 0.15),
-    (random_deletion, 0.10),
-    (random_swap, 0.10),
-    (sentence_shuffle, 0.10),
-
-    (contextual_replacement, 0.15),
-
-    (ideology_frame_shift, 0.10),
-    (propaganda_injection, 0.10),
-    (narrative_reframe, 0.10),
-
-    (emotion_amplify, 0.05),
-    (bias_injection, 0.05),
-]
+    return score >= threshold
 
 
-def select_operation():
+# =========================================================
+# TASK-AWARE ROUTING
+# =========================================================
 
-    ops = [op for op, _ in AUGMENTATION_OPERATIONS]
-    weights = [w for _, w in AUGMENTATION_OPERATIONS]
+TASK_OPS: Dict[str, List[Callable[[str], str]]] = {
+    "bias": [synonym_replacement, random_deletion],
+    "ideology": [ideology_frame_shift],
+    "propaganda": [propaganda_injection],
+    "frame": [random_swap],
+    "narrative": [narrative_reframe],
+    "emotion": [emotion_amplify],
+}
 
-    return random.choices(ops, weights=weights, k=1)[0]
+
+def select_operation(task: str, config: AugmentationConfig):
+    ops = TASK_OPS.get(task, [])
+
+    if config.enable_heavy_ops:
+        ops = ops + [contextual_replacement]
+
+    if not ops:
+        raise ValueError(f"No ops for task: {task}")
+
+    return random.choice(ops)
 
 
-# ------------------------------------------------
-# Core Augmentation
-# ------------------------------------------------
+# =========================================================
+# CORE
+# =========================================================
 
-
-def augment_text(text: str) -> str:
+def augment_text(
+    text: str,
+    *,
+    task: str,
+    config: AugmentationConfig,
+) -> str:
 
     text = str(text).strip()
-
     if not text:
         return text
 
-    op = select_operation()
+    op = select_operation(task, config)
 
     augmented = op(text)
 
-    if semantic_valid(text, augmented):
-        return augmented
+    if config.enable_heavy_ops:
+        if not semantic_valid(text, augmented, config.similarity_threshold):
+            return text
 
-    return text
+    return augmented
 
 
-# ------------------------------------------------
-# Dataset Augmentation
-# ------------------------------------------------
-
+# =========================================================
+# DATASET
+# =========================================================
 
 def augment_dataset(
     df: pd.DataFrame,
+    *,
+    task: str,
     text_column: str = "text",
-    multiplier: float = 1.5,
+    config: Optional[AugmentationConfig] = None,
 ) -> pd.DataFrame:
 
-    ensure_dataframe(df, name="df", required_columns=[text_column])
-    ensure_non_empty_text_column(df, text_column)
+    config = config or AugmentationConfig()
 
-    if multiplier <= 0:
-        raise ValueError(
-            f"multiplier must be a positive number, got {multiplier}"
-        )
-
-    if multiplier <= 1:
+    if config.multiplier <= 1:
         return df.copy()
 
     records = df.to_dict("records")
-
-    extra = int(len(records) * (multiplier - 1))
+    extra = int(len(records) * (config.multiplier - 1))
 
     augmented = []
 
     for _ in range(extra):
 
         row = random.choice(records)
-
         new_row = row.copy()
 
-        new_row[text_column] = augment_text(row[text_column])
+        new_row[text_column] = augment_text(
+            row[text_column],
+            task=task,
+            config=config,
+        )
 
         augmented.append(new_row)
 
-    augmented_df = pd.concat(
+    result = pd.concat(
         [df, pd.DataFrame(augmented)],
         ignore_index=True,
     )
 
     logger.info(
-        "Augmentation finished | original=%d augmented=%d total=%d",
+        "Augmented | task=%s | original=%d | added=%d | total=%d",
+        task,
         len(df),
         len(augmented),
-        len(augmented_df),
+        len(result),
     )
 
-    return augmented_df
-
-
-# ------------------------------------------------
-# Parallel Augmentation
-# ------------------------------------------------
-
-
-def _augment_row(row, text_column):
-
-    new_row = row.copy()
-
-    new_row[text_column] = augment_text(row[text_column])
-
-    return new_row
-
-
-def augment_dataset_parallel(
-    df: pd.DataFrame,
-    text_column="text",
-    multiplier=1.5,
-    workers=4,
-):
-
-    ensure_dataframe(df, name="df", required_columns=[text_column])
-
-    records = df.to_dict("records")
-
-    extra = int(len(records) * (multiplier - 1))
-
-    tasks = []
-
-    for _ in range(extra):
-
-        tasks.append((random.choice(records), text_column))
-
-    with Pool(workers) as pool:
-
-        augmented_rows = pool.starmap(_augment_row, tasks)
-
-    augmented_df = pd.concat(
-        [df, pd.DataFrame(augmented_rows)],
-        ignore_index=True,
-    )
-
-    return augmented_df
+    return result

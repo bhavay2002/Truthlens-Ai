@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from src.evaluation.evaluate_model import evaluate
-from src.evaluation.metrics import compute_classification_metrics
+from src.evaluation.metrics_engine import compute_classification_metrics
 
 
 class TestEvaluateFunction:

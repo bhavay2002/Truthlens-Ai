@@ -28,7 +28,7 @@ class TrainingStepConfig:
 
 
 # =========================================================
-# ACTION ENUM (NEW 🔥)
+# ACTION ENUM (NEW )
 # =========================================================
 
 class TrainAction:
