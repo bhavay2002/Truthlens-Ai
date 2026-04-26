@@ -1,77 +1,49 @@
+"""
+Resolve relative dataset paths against an environment-configurable base
+directory. Splits are configurable (defaults to train/val/test).
+"""
+
 from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Sequence
 
 
-# =========================================================
-# CONFIG KEYS (STANDARDIZED)
-# =========================================================
+DEFAULT_REQUIRED_SPLITS = ("train", "val", "test")
 
-REQUIRED_SPLITS = ("train", "val", "test")
-
-
-# =========================================================
-# CORE RESOLVER
-# =========================================================
 
 def resolve_data_config(
     config: Dict[str, Dict[str, str]],
     *,
     env_var: str = "DATA_DIR",
     strict: bool = True,
+    required_splits: Sequence[str] = DEFAULT_REQUIRED_SPLITS,
 ) -> Dict[str, Dict[str, Path]]:
     """
     Resolve dataset paths for all tasks and splits.
 
     Args:
-        config:
-            {
-                "bias": {
-                    "train": "bias/train.csv",
-                    "val": "bias/val.csv",
-                    "test": "bias/test.csv"
-                },
-                ...
-            }
-
-        env_var:
-            Environment variable for base directory.
-
-        strict:
-            If True, raise error if any file missing.
-
-    Returns:
-        {
-            "bias": {
-                "train": Path(...),
-                "val": Path(...),
-                "test": Path(...)
-            },
-            ...
-        }
+        config: ``{"bias": {"train": "...", "val": "...", "test": "..."}, ...}``
+        env_var: env var holding the base directory (optional)
+        strict: raise if any file is missing
+        required_splits: splits that MUST be present (default train/val/test)
     """
-
     base_dir = os.environ.get(env_var, "")
     base_path = Path(base_dir) if base_dir else None
 
     resolved: Dict[str, Dict[str, Path]] = {}
 
     for task, split_map in config.items():
-
         if not isinstance(split_map, dict):
             raise ValueError(f"{task} config must be dict")
 
         resolved[task] = {}
-
-        for split in REQUIRED_SPLITS:
-
+        for split in required_splits:
             if split not in split_map:
-                raise ValueError(f"{task} missing split: {split}")
+                raise ValueError(f"{task} missing required split: {split}")
 
             raw_path = Path(split_map[split])
-
             path = (
                 (base_path / raw_path).resolve()
                 if base_path
@@ -88,25 +60,16 @@ def resolve_data_config(
     return resolved
 
 
-# =========================================================
-# SINGLE PATH RESOLVER (UTILITY)
-# =========================================================
-
 def resolve_path(
     path: str | Path,
     *,
     env_var: str = "DATA_DIR",
     strict: bool = True,
 ) -> Path:
-    """
-    Resolve a single path with optional environment base.
-    """
-
     base_dir = os.environ.get(env_var, "")
     base_path = Path(base_dir) if base_dir else None
 
     p = Path(path)
-
     resolved = (base_path / p).resolve() if base_path else p.resolve()
 
     if strict and not resolved.exists():
@@ -115,17 +78,9 @@ def resolve_path(
     return resolved
 
 
-# =========================================================
-# DEBUG / LOGGING
-# =========================================================
-
 def pretty_print_config(resolved: Dict[str, Dict[str, Path]]) -> None:
-    """
-    Print resolved dataset structure (for debugging).
-    """
-
-    print("\n📦 DATA CONFIG:")
+    print("\nDATA CONFIG:")
     for task, splits in resolved.items():
-        print(f"\n🔹 {task}")
+        print(f"\n  [{task}]")
         for split, path in splits.items():
-            print(f"   {split}: {path}")
+            print(f"    {split}: {path}")

@@ -1,3 +1,10 @@
+"""
+Unified file loader for CSV / JSON(L) / Parquet.
+
+Encoding fallback is logged loudly so silent corruption does not slip
+through.
+"""
+
 from __future__ import annotations
 
 import logging
@@ -9,11 +16,6 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-
-# =========================================================
-# CONFIG
-# =========================================================
-
 DEFAULT_ENCODING = "utf-8"
 FALLBACK_ENCODING = "latin-1"
 
@@ -23,16 +25,11 @@ FALLBACK_ENCODING = "latin-1"
 # =========================================================
 
 def compute_md5(path: Path) -> str:
-    """
-    Compute MD5 hash for file integrity checks.
-    """
-    hash_md5 = hashlib.md5()
-
+    h = hashlib.md5()
     with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(8192), b""):
-            hash_md5.update(chunk)
-
-    return hash_md5.hexdigest()
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 # =========================================================
@@ -45,28 +42,17 @@ def load_csv(
     usecols: Optional[List[str]] = None,
     dtype: Optional[Dict[str, Any]] = None,
     encoding: str = DEFAULT_ENCODING,
+    na_values: Optional[List[str]] = None,
 ) -> pd.DataFrame:
-    """
-    Robust CSV loader with encoding fallback.
-    """
-
+    common = dict(usecols=usecols, dtype=dtype, na_values=na_values, low_memory=False)
     try:
-        df = pd.read_csv(
-            path,
-            encoding=encoding,
-            usecols=usecols,
-            dtype=dtype,
-        )
+        return pd.read_csv(path, encoding=encoding, **common)
     except UnicodeDecodeError:
-        logger.warning("Encoding fallback for %s", path)
-        df = pd.read_csv(
-            path,
-            encoding=FALLBACK_ENCODING,
-            usecols=usecols,
-            dtype=dtype,
+        logger.warning(
+            "Encoding fallback %s → %s for %s",
+            encoding, FALLBACK_ENCODING, path,
         )
-
-    return df
+        return pd.read_csv(path, encoding=FALLBACK_ENCODING, **common)
 
 
 def load_json(path: Path) -> pd.DataFrame:
@@ -88,41 +74,26 @@ def load_dataframe(
     dtype: Optional[Dict[str, Any]] = None,
     compute_hash: bool = False,
 ) -> pd.DataFrame:
-    """
-    Unified loader for CSV/JSON/Parquet.
-
-    Returns:
-        pd.DataFrame
-    """
-
+    path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
 
     suffix = path.suffix.lower()
-
     logger.info("Loading dataset: %s", path)
 
     if suffix == ".csv":
         df = load_csv(path, usecols=usecols, dtype=dtype)
-
     elif suffix in (".json", ".jsonl"):
         df = load_json(path)
-
     elif suffix == ".parquet":
         df = load_parquet(path)
-
     else:
         raise ValueError(f"Unsupported file format: {suffix}")
 
-    # -------------------------
-    # HASH (optional)
-    # -------------------------
     if compute_hash:
-        file_hash = compute_md5(path)
-        logger.info("MD5(%s) = %s", path.name, file_hash)
+        logger.info("MD5(%s) = %s", path.name, compute_md5(path))
 
-    logger.info("Loaded %d rows, %d columns", len(df), len(df.columns))
-
+    logger.info("Loaded %d rows × %d cols", len(df), len(df.columns))
     return df
 
 
@@ -137,41 +108,20 @@ def load_csv_in_chunks(
     usecols: Optional[List[str]] = None,
     dtype: Optional[Dict[str, Any]] = None,
 ):
-    """
-    Generator for large CSV files.
-    """
-
+    common = dict(chunksize=chunksize, usecols=usecols, dtype=dtype, low_memory=False)
     try:
-        reader = pd.read_csv(
-            path,
-            encoding=DEFAULT_ENCODING,
-            chunksize=chunksize,
-            usecols=usecols,
-            dtype=dtype,
-        )
+        reader = pd.read_csv(path, encoding=DEFAULT_ENCODING, **common)
     except UnicodeDecodeError:
         logger.warning("Encoding fallback for chunked read: %s", path)
-        reader = pd.read_csv(
-            path,
-            encoding=FALLBACK_ENCODING,
-            chunksize=chunksize,
-            usecols=usecols,
-            dtype=dtype,
-        )
-
-    for chunk in reader:
-        yield chunk
+        reader = pd.read_csv(path, encoding=FALLBACK_ENCODING, **common)
+    yield from reader
 
 
 # =========================================================
-# VALIDATION HOOK (OPTIONAL)
+# COLUMN GUARD
 # =========================================================
 
-def enforce_required_columns(
-    df: pd.DataFrame,
-    required_cols: List[str],
-):
+def enforce_required_columns(df: pd.DataFrame, required_cols: List[str]) -> None:
     missing = [c for c in required_cols if c not in df.columns]
-
     if missing:
         raise ValueError(f"Missing required columns: {missing}")

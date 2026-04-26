@@ -1,11 +1,16 @@
+"""
+Class-balance analysis driven by data contracts.
+"""
+
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
 from typing import Dict, Any, List, Optional
 
-import numpy as np
 import pandas as pd
+
+from src.data_processing.data_contracts import get_contract
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ClassBalanceConfig:
-    imbalance_threshold: float = 0.2   # min class ratio
+    imbalance_threshold: float = 0.2
     compute_weights: bool = True
     normalize_weights: bool = True
 
@@ -29,10 +34,8 @@ class ClassBalanceConfig:
 class ClassBalanceReport:
     task: str
     type: str  # classification | multilabel
-
     distribution: Dict[str, Any]
     imbalance_detected: bool
-
     weights: Optional[Dict[Any, float]] = None
 
 
@@ -46,27 +49,24 @@ def analyze_classification(
     *,
     config: Optional[ClassBalanceConfig] = None,
 ) -> ClassBalanceReport:
-
     config = config or ClassBalanceConfig()
 
     counts = df[label_col].value_counts().sort_index()
     total = counts.sum()
+    dist = (counts / total).to_dict() if total > 0 else {}
 
-    dist = (counts / total).to_dict()
-
-    min_ratio = min(dist.values())
+    min_ratio = min(dist.values()) if dist else 0.0
     imbalance = min_ratio < config.imbalance_threshold
 
-    weights = None
-
-    if config.compute_weights:
-        weights = _compute_class_weights(counts, normalize=config.normalize_weights)
+    weights = (
+        _compute_class_weights(counts, normalize=config.normalize_weights)
+        if config.compute_weights
+        else None
+    )
 
     logger.info(
-        "Class balance | %s | dist=%s | imbalance=%s",
-        label_col,
-        dist,
-        imbalance,
+        "Class balance | %s | imbalance=%s | min_ratio=%.3f",
+        label_col, imbalance, min_ratio,
     )
 
     return ClassBalanceReport(
@@ -88,33 +88,25 @@ def analyze_multilabel(
     *,
     config: Optional[ClassBalanceConfig] = None,
 ) -> ClassBalanceReport:
-
     config = config or ClassBalanceConfig()
 
-    dist = {}
-    weights = {}
-
+    dist: Dict[str, float] = {}
+    weights: Dict[str, float] = {}
     imbalance = False
 
+    total = max(len(df), 1)
     for col in label_cols:
-
-        pos = df[col].sum()
-        total = len(df)
-
-        ratio = float(pos) / max(total, 1)
-
+        pos = float(df[col].sum())
+        ratio = pos / total
         dist[col] = ratio
-
         if ratio < config.imbalance_threshold:
             imbalance = True
-
         if config.compute_weights:
             weights[col] = _compute_binary_weight(pos, total)
 
     logger.info(
         "Multilabel balance | cols=%d | imbalance=%s",
-        len(label_cols),
-        imbalance,
+        len(label_cols), imbalance,
     )
 
     return ClassBalanceReport(
@@ -127,7 +119,7 @@ def analyze_multilabel(
 
 
 # =========================================================
-# TASK WRAPPER (YOUR SYSTEM)
+# CONTRACT-DRIVEN WRAPPER
 # =========================================================
 
 def analyze_task_balance(
@@ -136,54 +128,29 @@ def analyze_task_balance(
     *,
     config: Optional[ClassBalanceConfig] = None,
 ) -> ClassBalanceReport:
-
-    if task == "bias":
-        return analyze_classification(df, "bias", config=config)
-
-    elif task == "ideology":
-        return analyze_classification(df, "ideology", config=config)
-
-    elif task == "propaganda":
-        return analyze_classification(df, "propaganda", config=config)
-
-    elif task == "frame":
-        return analyze_multilabel(df, ["CO", "EC", "HI", "MO", "RE"], config=config)
-
-    elif task == "narrative":
-        return analyze_multilabel(df, ["hero", "villain", "victim"], config=config)
-
-    elif task == "emotion":
-        return analyze_multilabel(
-            df,
-            [f"emotion_{i}" for i in range(20)],
-            config=config,
-        )
-
-    else:
-        raise ValueError(f"Unknown task: {task}")
+    contract = get_contract(task)
+    if contract.task_type == "classification":
+        return analyze_classification(df, contract.label_columns[0], config=config)
+    if contract.task_type == "multilabel":
+        return analyze_multilabel(df, list(contract.label_columns), config=config)
+    raise ValueError(f"Unsupported task type: {contract.task_type}")
 
 
 # =========================================================
 # WEIGHT UTILS
 # =========================================================
 
-def _compute_class_weights(counts, normalize=True):
-
+def _compute_class_weights(counts, normalize: bool = True):
     total = counts.sum()
     weights = {cls: total / c for cls, c in counts.items()}
-
     if normalize:
         s = sum(weights.values())
         weights = {k: v / s for k, v in weights.items()}
-
     return weights
 
 
-def _compute_binary_weight(pos, total):
-
+def _compute_binary_weight(pos: float, total: float) -> float:
     neg = total - pos
-
     if pos == 0:
         return 1.0
-
     return float(neg) / float(pos)

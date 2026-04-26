@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from src.models.registry.model_factory import build_model
 from src.models.optimization.optimizer_factory import build_optimizer
 from src.models.optimization.lr_scheduler import build_scheduler
-from src.data.dataloader import build_dataloader
+from src.data_processing.dataloader_factory import build_dataloader
 
 from .training_step import TrainingStep, TrainingStepConfig
 from .monitor_engine import MonitoringEngine
