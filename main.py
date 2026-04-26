@@ -17,7 +17,7 @@ from src.config.config_loader import load_config
 # DATA PIPELINE
 # =========================
 
-from src.data.data_pipeline import run_data_pipeline, DataPipelineConfig
+from src.data_processing.data_pipeline import run_data_pipeline, DataPipelineConfig
 
 # =========================
 # TRAINING

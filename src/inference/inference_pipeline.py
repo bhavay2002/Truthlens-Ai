@@ -11,9 +11,15 @@ import torch
 from src.aggregation.aggregation_pipeline import AggregationPipeline
 from src.inference.postprocessing import Postprocessor
 from src.explainability.orchestrator import ExplainabilityOrchestrator
-
-#  NEW
 from src.graph.graph_pipeline import GraphPipeline
+
+from src.monitoring.feature_logger import (
+    log_request_latency,
+    log_failure,
+    time_block,
+)
+
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -212,43 +218,73 @@ class PredictionPipeline:
         *,
         text: Optional[str] = None,
         predict_fn: Optional[Callable[[str], Dict[str, Any]]] = None,
-    ) -> Dict[str, Any]:
-
-        # ---------------- BASE PREDICTION ----------------
-        prediction = self.predict(features)
-
-        # ---------------- AGGREGATION ----------------
-        profile = self.aggregation_pipeline.build_profile_from_prediction(prediction)
-        aggregation = self.aggregation_pipeline.run(profile, text=text)
-
-        scores = aggregation.get("raw_scores", {})
-
-        # ---------------- GRAPH ----------------
-        graph_output = None
-        if text:
-            try:
-                graph_output = self.graph_pipeline.run(text)
-            except Exception as e:
-                logger.warning("Graph pipeline failed: %s", e)
-
-        # ---------------- EXPLAINABILITY ----------------
-        explanation = {}
-        if self.explainability_layer and text and predict_fn:
-            try:
-                explanation = self.explainability_layer.explain(
-                    text=text,
-                    predict_fn=predict_fn,
-                )
-            except Exception as e:
-                logger.warning("Explainability failed: %s", e)
-
-        # ---------------- FINAL OUTPUT ----------------
-        return {
-            "prediction": prediction,
-            "scores": scores,
-            "analysis_modules": {
-                "graph": graph_output,
-                "graph_explanation": explanation.get("graph_explanation"),
-            },
-            "explanation": explanation,
-        }
+       ) -> Dict[str, Any]:
+    
+        start_total = time.time()
+    
+        try:
+            # ---------------- BASE PREDICTION ----------------
+            with time_block("model_prediction", task="inference"):
+                prediction = self.predict(features)
+    
+            # ---------------- AGGREGATION ----------------
+            with time_block("aggregation", task="inference"):
+                profile = self.aggregation_pipeline.build_profile_from_prediction(prediction)
+                aggregation = self.aggregation_pipeline.run(profile, text=text)
+    
+            scores = aggregation.get("raw_scores", {})
+    
+            # ---------------- GRAPH ----------------
+            graph_output = None
+            if text:
+                try:
+                    with time_block("graph_pipeline", task="inference"):
+                        graph_output = self.graph_pipeline.run(text)
+                except Exception as e:
+                    log_failure(e, context={"stage": "graph_pipeline"})
+                    logger.warning("Graph pipeline failed: %s", e)
+    
+            # ---------------- EXPLAINABILITY ----------------
+            explanation = {}
+            if self.explainability_layer and text and predict_fn:
+                try:
+                    with time_block("explainability", task="inference"):
+                        explanation = self.explainability_layer.explain(
+                            text=text,
+                            predict_fn=predict_fn,
+                        )
+                except Exception as e:
+                    log_failure(e, context={"stage": "explainability"})
+                    logger.warning("Explainability failed: %s", e)
+    
+            # ---------------- TOTAL LATENCY ----------------
+            total_latency = time.time() - start_total
+    
+            log_request_latency(
+                total_latency,
+                task="full_inference",
+            )
+    
+            # ---------------- FINAL OUTPUT ----------------
+            return {
+                "prediction": prediction,
+                "scores": scores,
+                "analysis_modules": {
+                    "graph": graph_output,
+                    "graph_explanation": explanation.get("graph_explanation"),
+                },
+                "explanation": explanation,
+                "meta": {
+                    "total_latency": round(total_latency, 4),
+                },
+            }
+    
+        except Exception as e:
+            log_failure(
+                e,
+                context={
+                    "stage": "predict_full",
+                    "has_text": text is not None,
+                },
+            )
+            raise

@@ -1,5 +1,3 @@
-# src/models/training/training_step.py
-
 from __future__ import annotations
 
 import logging
@@ -11,6 +9,12 @@ import torch
 import torch.nn as nn
 
 from src.training.training_utils import compute_grad_norm, get_current_lr
+
+# ✅ NEW: observability
+from src.monitoring.feature_logger import (
+    log_feature_stats,
+    log_feature_summary,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +32,7 @@ class TrainingStepConfig:
 
 
 # =========================================================
-# ACTION ENUM (NEW )
+# ACTION ENUM
 # =========================================================
 
 class TrainAction:
@@ -74,12 +78,30 @@ class TrainingStep:
         self.model.to(self.device)
 
         self.use_amp = config.use_mixed_precision and self.device.type == "cuda"
-
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
 
         self._last_time = time.time()
 
         logger.info("TrainingStep initialized | AMP=%s", self.use_amp)
+
+    # =====================================================
+    # FEATURE HELPER (NEW)
+    # =====================================================
+
+    def _tensor_to_feature_dict(self, batch: Dict[str, Any], max_items: int = 50):
+        """
+        Convert tensor batch into small numeric feature dict for logging.
+        Prevents huge logs.
+        """
+        feature_dict = {}
+
+        for k, v in batch.items():
+            if isinstance(v, torch.Tensor) and v.dtype in (torch.float32, torch.float64):
+                flat = v.detach().flatten()
+                for i in range(min(len(flat), max_items)):
+                    feature_dict[f"{k}_{i}"] = float(flat[i])
+
+        return feature_dict
 
     # =====================================================
     # RUN STEP
@@ -98,6 +120,30 @@ class TrainingStep:
         if self.task_scheduler:
             task = self.task_scheduler.next_task()
             batch = self._filter_batch(batch, task)
+
+        # -------------------------
+        # 🔍 FEATURE OBSERVABILITY (NEW)
+        # -------------------------
+
+        if step % 50 == 0:  # avoid slowdown
+            try:
+                feature_dict = self._tensor_to_feature_dict(batch)
+
+                if feature_dict:
+                    log_feature_stats(
+                        feature_dict,
+                        task=task or "default",
+                        step=step,
+                    )
+
+                    log_feature_summary(
+                        feature_dict,
+                        task=task or "default",
+                        step=step,
+                    )
+
+            except Exception as e:
+                logger.warning("Feature logging failed: %s", e)
 
         # -------------------------
         # FORWARD + LOSS
@@ -171,19 +217,16 @@ class TrainingStep:
                     self.config.max_grad_norm,
                 )
 
-            # AMP SAFE STEP
             if self.use_amp:
                 prev_scale = self.scaler.get_scale()
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
 
-                # Detect overflow
                 if self.scaler.get_scale() < prev_scale:
                     logger.warning("Gradient overflow detected, step skipped")
             else:
                 self.optimizer.step()
 
-            # Scheduler
             if self.scheduler:
                 try:
                     self.scheduler.step()
@@ -192,7 +235,6 @@ class TrainingStep:
 
             self.optimizer.zero_grad(set_to_none=True)
 
-            # hooks
             self.loss_engine.on_after_backward()
             self.loss_engine.on_step_end()
 
@@ -248,7 +290,6 @@ class TrainingStep:
         elif action == TrainAction.CHECK_DATALOADER:
             logger.warning("Potential dataloader bottleneck detected")
 
-        # fallback monitor
         if monitor_metrics.get("monitor/action") == TrainAction.REDUCE_LR:
             self._reduce_lr()
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import logging
+import logging 
 import time
 from typing import Dict, List, Any, Optional
 
@@ -13,6 +13,13 @@ from src.analysis.analysis_config import AnalysisConfig, build_default_config
 from src.analysis.analysis_registry import AnalyzerRegistry, AnalyzerExecution
 
 logger = logging.getLogger(__name__)
+
+from src.monitoring.feature_logger import (
+    log_feature_stats,
+    log_feature_summary,
+    time_block,
+    log_failure,
+)
 
 
 # =========================================================
@@ -54,31 +61,65 @@ class AnalysisPipeline:
     # SINGLE RUN
     # =====================================================
 
+
+
     def run(self, text: str) -> Dict[str, Any]:
-
+    
         start = time.time()
-
-        text = self._validate(text)
-
-        doc = self.nlp(text)
-        ctx = FeatureContext.from_doc(doc)
-
-        results = self._execute(ctx)
-
-        merged, vector, keys = self._post_process(results)
-
-        return {
-            "sections": {k: v.output for k, v in results.items()},
-            "features": merged,
-            "vector": vector,
-            "feature_keys": keys,
-            "meta": self._build_meta(results, start),
-        }
-
+    
+        try:
+            # -------------------------------
+            # VALIDATION
+            # -------------------------------
+            text = self._validate(text)
+    
+            # -------------------------------
+            # NLP + CONTEXT (TIMED)
+            # -------------------------------
+            with time_block("nlp_processing"):
+                doc = self.nlp(text)
+                ctx = FeatureContext.from_doc(doc)
+    
+            # -------------------------------
+            # ANALYZER EXECUTION (TIMED)
+            # -------------------------------
+            with time_block("analyzer_execution"):
+                results = self._execute(ctx)
+    
+            # -------------------------------
+            # FEATURE MERGING (TIMED)
+            # -------------------------------
+            with time_block("feature_merging"):
+                merged, vector, keys = self._post_process(results)
+    
+            # -------------------------------
+            # 🔍 FEATURE OBSERVABILITY
+            # -------------------------------
+            log_feature_stats(merged, task="analysis")
+            log_feature_summary(merged, task="analysis")
+    
+            return {
+                "sections": {k: v.output for k, v in results.items()},
+                "features": merged,
+                "vector": vector,
+                "feature_keys": keys,
+                "meta": self._build_meta(results, start),
+            }
+    
+        except Exception as e:
+            log_failure(
+                e,
+                context={
+                    "stage": "analysis_pipeline.run",
+                    "input_text": text[:200] if isinstance(text, str) else None,
+                },
+            )
+            raise
+    
     # =====================================================
     # BATCH RUN (OPTIMIZED)
     # =====================================================
-
+    
     def run_batch(self, texts: List[str]) -> List[Dict[str, Any]]:
 
         if not texts:
@@ -190,7 +231,7 @@ class AnalysisPipeline:
         if not isinstance(text, str):
             raise ValueError("Input must be string")
 
-        text = text.strip()
+        text = text.strip() 
 
         if not text:
             raise ValueError("Empty text")
