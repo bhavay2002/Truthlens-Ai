@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict
+from typing import Any, Dict
 
 import numpy as np
 
+from src.analysis.base_analyzer import BaseAnalyzer
+from src.analysis.feature_context import FeatureContext
 from src.analysis.feature_schema import (
     PROPAGANDA_PATTERN_KEYS,
     make_vector,
@@ -52,21 +54,48 @@ class PropagandaPatternConfig:
 # DETECTOR
 # =========================================================
 
-class PropagandaPatternDetector:
+class PropagandaPatternDetector(BaseAnalyzer):
+    """
+    Aggregates upstream analyzer outputs into a small set of propaganda
+    pattern intensity signals. Each per-pattern score is an independent
+    bounded intensity in [0, 1] — they are NOT renormalized into a
+    probability distribution because that would distort their absolute
+    magnitudes (a text strong on every pattern would get the same
+    distribution as one weak on every pattern). A separate
+    `propaganda_diversity` entropy score captures how evenly the
+    patterns are spread.
+
+    Inherits from :class:`BaseAnalyzer` so it picks up validation,
+    fallback, and caching for free, but it does NOT use the standard
+    ``analyze(ctx)`` contract: it consumes upstream feature dicts
+    instead of a FeatureContext. The orchestrator invokes
+    :meth:`analyze` directly with keyword arguments.
+    """
+
+    name = "propaganda_pattern"
+    expected_keys = set(PROPAGANDA_PATTERN_KEYS)
+    use_cache = False  # inputs are upstream features, not the ctx itself
 
     def __init__(self, config: PropagandaPatternConfig | None = None):
         self.config = config or PropagandaPatternConfig()
 
     # --------------------------------------------------------
+    # Detector-specific public API.
+    # --------------------------------------------------------
 
-    def analyze(
+    def analyze(  # type: ignore[override]
         self,
+        ctx: FeatureContext | None = None,
+        *,
         emotion_features: Dict[str, float] | None = None,
         narrative_features: Dict[str, float] | None = None,
         rhetorical_features: Dict[str, float] | None = None,
         argument_features: Dict[str, float] | None = None,
         information_features: Dict[str, float] | None = None,
     ) -> Dict[str, float]:
+        # `ctx` is accepted for interface compatibility with BaseAnalyzer
+        # but is ignored — this detector composes upstream features.
+        del ctx
 
         emotion = emotion_features or {}
         narrative = narrative_features or {}
@@ -75,7 +104,7 @@ class PropagandaPatternDetector:
         info = information_features or {}
 
         # -------------------------
-        # CORE SIGNALS
+        # CORE SIGNALS (independent intensities in [0, 1])
         # -------------------------
         raw = {
             "fear": self._fear(emotion, narrative, rhetoric),
@@ -86,26 +115,21 @@ class PropagandaPatternDetector:
         }
 
         # -------------------------
-        # NORMALIZATION
+        # DERIVED METRICS
         # -------------------------
-        dist = self._normalize(raw)
+        # Intensity: bounded mean of raw signals — preserves the absolute
+        # magnitude of how strong propaganda cues are overall.
+        intensity = sum(raw.values()) / max(len(raw), 1)
 
-        # -------------------------
-        # GLOBAL INTENSITY
-        # -------------------------
-        intensity = sum(raw.values()) / (len(raw) + EPS)
-
-        # -------------------------
-        # DIVERSITY
-        # -------------------------
-        diversity = self._entropy(dist)
+        # Diversity: normalized entropy of the signal distribution.
+        diversity = self._entropy(raw)
 
         features = {
-            "fear_propaganda_score": dist["fear"],
-            "scapegoating_score": dist["scapegoating"],
-            "polarization_score": dist["polarization"],
-            "emotional_amplification_score": dist["amplification"],
-            "narrative_imbalance_score": dist["imbalance"],
+            "fear_propaganda_score": self._safe(raw["fear"]),
+            "scapegoating_score": self._safe(raw["scapegoating"]),
+            "polarization_score": self._safe(raw["polarization"]),
+            "emotional_amplification_score": self._safe(raw["amplification"]),
+            "narrative_imbalance_score": self._safe(raw["imbalance"]),
             "propaganda_intensity": self._safe(intensity),
             "propaganda_diversity": self._safe(diversity),
         }
@@ -128,39 +152,56 @@ class PropagandaPatternDetector:
     # SIGNALS (CONFIG-DRIVEN)
     # =========================================================
 
-    def _fear(self, emotion, narrative, rhetoric):
+    def _fear(
+        self,
+        emotion: Dict[str, float],
+        narrative: Dict[str, float],
+        rhetoric: Dict[str, float],
+    ) -> float:
 
         e = self._get(emotion, "emotion_expression_ratio")
         r = self._get(rhetoric, "rhetoric_fear_appeal_score")
         n = self._get(narrative, "conflict_intensity", "polarization_ratio")
 
         return (
-            e * self.config.fear_weight_emotion +
-            r * self.config.fear_weight_rhetoric +
-            n * self.config.fear_weight_narrative
+            e * self.config.fear_weight_emotion
+            + r * self.config.fear_weight_rhetoric
+            + n * self.config.fear_weight_narrative
         )
 
-    def _scapegoating(self, rhetoric, argument):
+    def _scapegoating(
+        self,
+        rhetoric: Dict[str, float],
+        argument: Dict[str, float],
+    ) -> float:
 
         r = self._get(rhetoric, "rhetoric_scapegoating_score")
         a = self._get(argument, "argument_contrast_ratio")
 
         return (
-            r * self.config.scapegoat_weight_rhetoric +
-            a * self.config.scapegoat_weight_argument
+            r * self.config.scapegoat_weight_rhetoric
+            + a * self.config.scapegoat_weight_argument
         )
 
-    def _polarization(self, narrative, rhetoric):
+    def _polarization(
+        self,
+        narrative: Dict[str, float],
+        rhetoric: Dict[str, float],
+    ) -> float:
 
         n = self._get(narrative, "polarization_ratio")
         r = self._get(rhetoric, "rhetoric_loaded_language_score")
 
         return (
-            n * self.config.polarization_weight_narrative +
-            r * self.config.polarization_weight_rhetoric
+            n * self.config.polarization_weight_narrative
+            + r * self.config.polarization_weight_rhetoric
         )
 
-    def _amplification(self, emotion, rhetoric):
+    def _amplification(
+        self,
+        emotion: Dict[str, float],
+        rhetoric: Dict[str, float],
+    ) -> float:
 
         vals = [
             self._get(emotion, "emotion_expression_ratio"),
@@ -171,23 +212,35 @@ class PropagandaPatternDetector:
         r = self._get(rhetoric, "rhetoric_emotional_appeal_score")
 
         return (
-            e * self.config.emotion_amplification_weight +
-            r * self.config.rhetoric_amplification_weight
+            e * self.config.emotion_amplification_weight
+            + r * self.config.rhetoric_amplification_weight
         )
 
-    def _imbalance(self, argument, info):
+    def _imbalance(
+        self,
+        argument: Dict[str, float],
+        info: Dict[str, float],
+    ) -> float:
 
         claim = self._get(argument, "argument_claim_ratio")
         evidence = self._get(info, "factual_density")
 
-        # bounded ratio
-        return claim / (claim + evidence + EPS)
+        # Bounded ratio in [0, 1]: 1 means all claim and no evidence.
+        denom = claim + evidence
+        if denom <= EPS:
+            return 0.0
+        return claim / (denom + EPS)
 
     # =========================================================
     # UTILS
     # =========================================================
 
-    def _get(self, features: Dict, *keys: str, default: float = 0.0):
+    def _get(
+        self,
+        features: Dict[str, Any],
+        *keys: str,
+        default: float = 0.0,
+    ) -> float:
 
         for k in keys:
             v = features.get(k)
@@ -196,32 +249,27 @@ class PropagandaPatternDetector:
 
         return default
 
-    def _normalize(self, scores: Dict[str, float]) -> Dict[str, float]:
-
-        values = np.array(list(scores.values()), dtype=np.float32)
-
-        total = float(values.sum())
-
-        if total < EPS:
-            return {k: 0.0 for k in scores}
-
-        norm = values / (total + EPS)
-
-        return dict(zip(scores.keys(), norm.astype(float)))
-
     def _entropy(self, dist: Dict[str, float]) -> float:
 
         values = np.array(list(dist.values()), dtype=np.float32)
 
-        if values.sum() < EPS:
+        total = float(values.sum())
+        if total < EPS:
             return 0.0
 
-        probs = values / (values.sum() + EPS)
+        probs = values / (total + EPS)
 
-        entropy = -np.sum(probs * np.log(probs + EPS))
-        max_entropy = np.log(len(probs))
+        n = len(probs)
+        if n <= 1:
+            return 0.0
 
-        return float(entropy / (max_entropy + EPS))
+        entropy = -float(np.sum(probs * np.log(probs + EPS)))
+        max_entropy = float(np.log(n))
+
+        if max_entropy < EPS:
+            return 0.0
+
+        return entropy / max_entropy
 
     def _clip(self, features: Dict[str, float]) -> Dict[str, float]:
 
@@ -230,7 +278,7 @@ class PropagandaPatternDetector:
         return {k: float(np.clip(v, low, high)) for k, v in features.items()}
 
     def _safe(self, v: float) -> float:
-        if not np.isfinite(v):
+        if not isinstance(v, (int, float)) or not np.isfinite(v):
             return 0.0
         return float(np.clip(v, 0.0, MAX_CLIP))
 

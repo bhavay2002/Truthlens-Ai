@@ -83,7 +83,16 @@ class EmotionTargetAnalyzer(BaseAnalyzer):
             for term in terms:
                 if " " in term or "_" in term:
                     text = term.replace("_", " ")
-                    span_doc = doc.vocab.make_doc(text)
+
+                    # Use the shared spaCy pipeline to tokenize the
+                    # phrase. `Vocab` no longer exposes `make_doc` in
+                    # current spaCy releases, so we go through the
+                    # blank tokenizer attached to the running pipeline
+                    # via the loader. This also keeps tokenization
+                    # consistent with how the live `doc` was produced.
+                    from src.analysis.spacy_loader import get_task_nlp
+                    nlp = get_task_nlp("ner")
+                    span_doc = nlp.make_doc(text)
 
                     patterns.append(span_doc)
 

@@ -33,7 +33,6 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import List, Optional
 
-import spacy
 try:
     from langdetect import detect, LangDetectException
 except ImportError:  # pragma: no cover - optional dependency
@@ -44,16 +43,20 @@ except ImportError:  # pragma: no cover - optional dependency
         return "unknown"
 
 
-logger = logging.getLogger(__name__)
+from src.analysis.spacy_loader import get_nlp
 
-_NLP = None
+
+logger = logging.getLogger(__name__)
 
 
 def _get_nlp():
-    global _NLP
-    if _NLP is None:
-        _NLP = spacy.load("en_core_web_sm")
-    return _NLP
+    """
+    Backwards-compatible accessor for the worker-side spaCy model.
+
+    Delegates to the shared loader so that all preprocessing — main
+    process or worker — uses the same cached pipeline configuration.
+    """
+    return get_nlp()
 
 
 @dataclass
@@ -91,7 +94,9 @@ class PreprocessingPipeline:
         """
 
         try:
-            self.nlp = spacy.load(spacy_model)
+            # Use the shared loader so we hit a process-local cache and
+            # honour `analysis_config.SpacyConfig` (model, GPU, etc.).
+            self.nlp = get_nlp(spacy_model)
         except Exception as exc:
             logger.exception("spaCy model loading failed")
             raise RuntimeError("Failed to load spaCy model") from exc

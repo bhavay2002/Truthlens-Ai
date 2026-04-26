@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+from src.analysis.spacy_config import SpacyConfig
+
 
 # =========================================================
 # GLOBAL FLAGS
@@ -126,6 +128,7 @@ class AnalysisConfig:
     pipeline: PipelineConfig = field(default_factory=PipelineConfig)
     features: FeatureControlConfig = field(default_factory=FeatureControlConfig)
     experiment: ExperimentConfig = field(default_factory=ExperimentConfig)
+    spacy: SpacyConfig = field(default_factory=SpacyConfig)
 
     analyzers: Dict[str, AnalyzerConfig] = field(default_factory=dict)
 
@@ -196,3 +199,10 @@ def build_default_config() -> AnalysisConfig:
         )
 
     return config
+
+
+# =========================================================
+# GLOBAL SINGLETON
+# =========================================================
+
+ANALYSIS_CONFIG: AnalysisConfig = build_default_config()

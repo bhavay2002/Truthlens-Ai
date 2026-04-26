@@ -39,7 +39,7 @@ class BaseAnalyzer(ABC):
     # PUBLIC API
     # =========================================================
 
-    def __call__(self, ctx: FeatureContext) -> Dict[str, float]:
+    def __call__(self, ctx: FeatureContext, **kwargs: Any) -> Dict[str, float]:
         """
         Main execution wrapper.
 
@@ -48,6 +48,10 @@ class BaseAnalyzer(ABC):
         - caching
         - safe execution
         - output normalization
+
+        Forwards keyword arguments to ``analyze()`` so subclasses that accept
+        extra inputs (e.g. narrative analyzers expecting hero/villain entity
+        lists) can be invoked through the common ``__call__`` interface.
         """
 
         try:
@@ -56,8 +60,13 @@ class BaseAnalyzer(ABC):
             # -------------------------------------------------
             # CACHE CHECK
             # -------------------------------------------------
+            # Caching is keyed by analyzer name + ctx only. Skip the cache
+            # path when extra kwargs are provided so different argument sets
+            # don't silently return the same cached output.
 
-            if self.use_cache:
+            use_cache = self.use_cache and not kwargs
+
+            if use_cache:
                 cached = self._get_cached(ctx)
                 if cached is not None:
                     return cached
@@ -66,7 +75,7 @@ class BaseAnalyzer(ABC):
             # CORE ANALYSIS
             # -------------------------------------------------
 
-            features = self.analyze(ctx)
+            features = self.analyze(ctx, **kwargs) if kwargs else self.analyze(ctx)
 
             # -------------------------------------------------
             # POSTPROCESS
@@ -84,7 +93,7 @@ class BaseAnalyzer(ABC):
             # STORE CACHE
             # -------------------------------------------------
 
-            if self.use_cache:
+            if use_cache:
                 self._set_cache(ctx, features)
 
             return features

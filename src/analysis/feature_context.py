@@ -77,6 +77,30 @@ class FeatureContext:
         return get_doc(self, task)
 
     # =========================================================
+    # FACTORY: SEED FROM PRECOMPUTED DOC
+    # =========================================================
+
+    @classmethod
+    def from_doc(cls, doc: Doc) -> "FeatureContext":
+        """
+        Build a FeatureContext from an already-processed spaCy Doc.
+
+        Pre-seeds the shared spaCy cache for both `"syntax"` and `"ner"`
+        tasks so analyzers downstream get the same doc back via
+        :func:`get_doc` without triggering a re-parse. The pipeline
+        producing `doc` is expected to be the "safe" (full) pipeline,
+        which contains the components both task profiles need.
+        """
+        if doc is None:
+            raise ValueError("doc must not be None")
+
+        ctx = cls(text=doc.text)
+        seeded = ctx.shared.setdefault("spacy_docs", {})
+        seeded["syntax"] = doc
+        seeded["ner"] = doc
+        return ctx
+
+    # =========================================================
     # TOKEN FEATURES (LAZY)
     # =========================================================
 

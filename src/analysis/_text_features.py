@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import logging
-from collections import Counter
+from collections import Counter, OrderedDict
 from typing import Collection, List, Iterable, Dict, Tuple, Any
 
 from spacy.tokens import Doc
@@ -82,15 +82,20 @@ def term_presence(
 # REGEX CACHE
 # =========================================================
 
-_REGEX_CACHE: Dict[Tuple[str, ...], List[re.Pattern]] = {}
+# LRU cache: most-recently-used keys live at the end. We evict the
+# least-recently-used (first) entry when the cache exceeds capacity.
+_REGEX_CACHE: "OrderedDict[Tuple[str, ...], List[re.Pattern]]" = OrderedDict()
 
 
 def _compile_patterns(phrases: Iterable[str]) -> List[re.Pattern]:
 
     key = tuple(sorted(p.strip().lower() for p in phrases if p))
 
-    if key in _REGEX_CACHE:
-        return _REGEX_CACHE[key]
+    cached = _REGEX_CACHE.get(key)
+    if cached is not None:
+        # mark this entry as most-recently-used
+        _REGEX_CACHE.move_to_end(key)
+        return cached
 
     compiled: List[re.Pattern] = []
 
@@ -105,10 +110,12 @@ def _compile_patterns(phrases: Iterable[str]) -> List[re.Pattern]:
 
         compiled.append(pattern)
 
-    if len(_REGEX_CACHE) >= MAX_REGEX_CACHE:
-        _REGEX_CACHE.pop(next(iter(_REGEX_CACHE)))
-
     _REGEX_CACHE[key] = compiled
+
+    # Evict least-recently-used entries until we're back within budget.
+    while len(_REGEX_CACHE) > MAX_REGEX_CACHE:
+        _REGEX_CACHE.popitem(last=False)
+
     return compiled
 
 

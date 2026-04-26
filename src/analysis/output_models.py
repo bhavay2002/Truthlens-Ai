@@ -201,6 +201,8 @@ class PropagandaFeatures(FeatureModel):
     polarization_score: float = 0.0
     emotional_amplification_score: float = 0.0
     narrative_imbalance_score: float = 0.0
+    propaganda_intensity: float = 0.0
+    propaganda_diversity: float = 0.0
 
     def vector(self):
         return self.to_vector(PROPAGANDA_PATTERN_KEYS)

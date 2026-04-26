@@ -143,15 +143,23 @@ class AnalyzerRegistry:
             start = time.time()
 
             try:
-                # dependency injection
-                kwargs = {
-                    dep: results[dep].output
-                    for dep in spec.requires
-                }
+                # Per-analyzer keyword arguments. We intentionally do NOT
+                # forward the dependency dict as kwargs because each
+                # analyzer's `analyze()` has its own keyword contract
+                # (e.g. narrative analyzers want `hero_entities=` not
+                # the full provider's output dict). Dependencies are
+                # exposed via `extra_inputs` only when explicitly named.
+                kwargs = dict(extra_inputs)
 
-                kwargs.update(extra_inputs)
+                # Invoke through the BaseAnalyzer __call__ wrapper when
+                # available so caching, validation, and fallbacks run.
+                runner = (
+                    spec.analyzer
+                    if callable(spec.analyzer)
+                    else spec.analyzer.analyze
+                )
 
-                output = spec.analyzer.analyze(ctx, **kwargs)
+                output = runner(ctx, **kwargs) if kwargs else runner(ctx)
 
                 if not isinstance(output, dict):
                     raise TypeError("Analyzer output must be dict")
@@ -188,3 +196,69 @@ class AnalyzerRegistry:
 
     def list(self) -> List[str]:
         return list(self._registry.keys())
+
+
+# =========================================================
+# DEFAULT REGISTRY (PRODUCTION SET)
+# =========================================================
+
+def build_default_registry() -> "AnalyzerRegistry":
+    """
+    Construct the default analyzer registry used by
+    :class:`AnalysisPipeline`.
+
+    Imports are local to keep the module lightweight at import time and
+    to avoid cyclic imports between the registry and individual
+    analyzers.
+    """
+    from src.analysis.rhetorical_device_detector import RhetoricalDeviceDetector
+    from src.analysis.argument_mining import ArgumentMiningAnalyzer
+    from src.analysis.context_omission_detector import ContextOmissionDetector
+    from src.analysis.discourse_coherence_analyzer import (
+        DiscourseCoherenceAnalyzer,
+    )
+    from src.analysis.emotion_target_analysis import EmotionTargetAnalyzer
+    from src.analysis.framing_analysis import FramingAnalyzer
+    from src.analysis.information_density_analyzer import (
+        InformationDensityAnalyzer,
+    )
+    from src.analysis.information_omission_detector import (
+        InformationOmissionDetector,
+    )
+    from src.analysis.ideological_language_detector import (
+        IdeologicalLanguageDetector,
+    )
+    from src.analysis.narrative_role_extractor import NarrativeRoleExtractor
+    from src.analysis.narrative_conflict import NarrativeConflictAnalyzer
+    from src.analysis.narrative_propagation import (
+        NarrativePropagationAnalyzer,
+    )
+    from src.analysis.narrative_temporal_analyzer import (
+        NarrativeTemporalAnalyzer,
+    )
+    from src.analysis.source_attribution_analyzer import (
+        SourceAttributionAnalyzer,
+    )
+
+    reg = AnalyzerRegistry()
+
+    reg.register("rhetorical", RhetoricalDeviceDetector(), order=1)
+    reg.register("argument", ArgumentMiningAnalyzer(), order=2)
+    reg.register("context", ContextOmissionDetector(), order=3)
+    reg.register("discourse", DiscourseCoherenceAnalyzer(), order=4)
+    reg.register("emotion", EmotionTargetAnalyzer(), order=5)
+    reg.register("framing", FramingAnalyzer(), order=6)
+    reg.register("information", InformationDensityAnalyzer(), order=7)
+    reg.register(
+        "information_omission", InformationOmissionDetector(), order=8
+    )
+    reg.register("ideology", IdeologicalLanguageDetector(), order=9)
+    reg.register("narrative_role", NarrativeRoleExtractor(), order=10)
+    reg.register("narrative_conflict", NarrativeConflictAnalyzer(), order=11)
+    reg.register(
+        "narrative_propagation", NarrativePropagationAnalyzer(), order=12
+    )
+    reg.register("narrative_temporal", NarrativeTemporalAnalyzer(), order=13)
+    reg.register("source", SourceAttributionAnalyzer(), order=14)
+
+    return reg

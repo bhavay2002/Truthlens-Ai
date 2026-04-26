@@ -5,6 +5,30 @@ from typing import Dict, Tuple, List, Iterable, Any
 
 import numpy as np
 
+# -----------------------------------------------------
+# Re-export feature key tuples from the canonical source.
+# Existing call sites import names like RHETORICAL_DEVICE_KEYS
+# from this module, so we keep the import surface stable.
+# -----------------------------------------------------
+from src.analysis.feature_keys import (
+    RHETORICAL_DEVICE_KEYS,
+    ARGUMENT_MINING_KEYS,
+    CONTEXT_OMISSION_KEYS,
+    DISCOURSE_COHERENCE_KEYS,
+    EMOTION_TARGET_KEYS,
+    FRAMING_KEYS,
+    INFORMATION_DENSITY_KEYS,
+    INFORMATION_OMISSION_KEYS,
+    IDEOLOGICAL_LANGUAGE_KEYS,
+    NARRATIVE_CONFLICT_KEYS,
+    NARRATIVE_PROPAGATION_KEYS,
+    NARRATIVE_ROLE_KEYS,
+    NARRATIVE_TEMPORAL_KEYS,
+    SOURCE_ATTRIBUTION_KEYS,
+    PROPAGANDA_PATTERN_KEYS,
+    ALL_FEATURE_KEYS,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -255,3 +279,32 @@ def get_schema_metadata() -> Dict[str, str]:
         "num_schemas": str(len(SCHEMA_REGISTRY)),
         "locked": str(_SCHEMA_LOCKED),
     }
+
+
+# =========================================================
+# DEFAULT REGISTRATIONS (run once at import)
+# =========================================================
+# Register all known analyzer schemas so callers like
+# `bias_profile_vector` can look them up by name. Use
+# `register_many` to keep the registry stable and ordered.
+
+_DEFAULT_SCHEMAS = {
+    "rhetorical_device": list(RHETORICAL_DEVICE_KEYS),
+    "argument_mining": list(ARGUMENT_MINING_KEYS),
+    "context_omission": list(CONTEXT_OMISSION_KEYS),
+    "discourse_coherence": list(DISCOURSE_COHERENCE_KEYS),
+    "emotion_target": list(EMOTION_TARGET_KEYS),
+    "framing": list(FRAMING_KEYS),
+    "information_density": list(INFORMATION_DENSITY_KEYS),
+    "information_omission": list(INFORMATION_OMISSION_KEYS),
+    "ideology": list(IDEOLOGICAL_LANGUAGE_KEYS),
+    "narrative_conflict": list(NARRATIVE_CONFLICT_KEYS),
+    "narrative_propagation": list(NARRATIVE_PROPAGATION_KEYS),
+    "narrative_role": list(NARRATIVE_ROLE_KEYS),
+    "narrative_temporal": list(NARRATIVE_TEMPORAL_KEYS),
+    "source_attribution": list(SOURCE_ATTRIBUTION_KEYS),
+    "propaganda_pattern": list(PROPAGANDA_PATTERN_KEYS),
+}
+
+if not SCHEMA_REGISTRY:
+    register_many(_DEFAULT_SCHEMAS)

@@ -33,10 +33,67 @@ class NarrativePropagationAnalyzer(BaseAnalyzer):
     name = "narrative_propagation"
     expected_keys = set(NARRATIVE_PROPAGATION_KEYS)
 
-    CONFLICT_VERBS: Dict[str, Set[str]] = {...}
-    OPPOSITION_MARKERS: Set[str] = {...}
-    POLARIZATION_TERMS: Set[str] = {...}
-    CONFLICT_PHRASES: Set[str] = {...}
+    # Conflict verbs grouped by sub-category. The keys here directly
+    # produce the `<key>_ratio` output features (violent_conflict_ratio,
+    # political_conflict_ratio, etc.) so they MUST stay aligned with
+    # NARRATIVE_PROPAGATION_KEYS.
+    CONFLICT_VERBS: Dict[str, Set[str]] = {
+        "violent_conflict": {
+            "attack", "attacked", "attacks", "assault", "assaulted",
+            "kill", "killed", "killing", "wound", "wounded", "shoot",
+            "shot", "bomb", "bombed", "fight", "fought", "strike",
+            "struck", "destroy", "destroyed", "invade", "invaded",
+            "war", "warfare", "violence", "violent", "clash", "clashed",
+        },
+        "political_conflict": {
+            "oppose", "opposed", "opposes", "denounce", "denounced",
+            "condemn", "condemned", "criticize", "criticized", "blame",
+            "blamed", "accuse", "accused", "reject", "rejected",
+            "dispute", "disputed", "challenge", "challenged",
+            "campaign", "rally", "protest", "protested", "lobby",
+        },
+        "discursive_conflict": {
+            "argue", "argued", "argues", "debate", "debated", "claim",
+            "claimed", "assert", "asserted", "deny", "denied",
+            "refute", "refuted", "rebut", "rebutted", "contend",
+            "contended", "dispute", "disputed",
+        },
+        "institutional_conflict": {
+            "sue", "sued", "indict", "indicted", "prosecute",
+            "prosecuted", "investigate", "investigated", "sanction",
+            "sanctioned", "regulate", "regulated", "ban", "banned",
+            "block", "blocked", "veto", "vetoed", "impeach",
+            "impeached", "litigate", "subpoena",
+        },
+        "coercion_conflict": {
+            "force", "forced", "coerce", "coerced", "threaten",
+            "threatened", "pressure", "pressured", "intimidate",
+            "intimidated", "demand", "demanded", "warn", "warned",
+            "punish", "punished", "retaliate", "retaliated",
+        },
+    }
+
+    OPPOSITION_MARKERS: Set[str] = {
+        "but", "however", "yet", "although", "though", "whereas",
+        "while", "despite", "in spite of", "on the contrary",
+        "on the other hand", "in contrast", "nevertheless",
+        "nonetheless", "conversely", "instead", "rather",
+    }
+
+    POLARIZATION_TERMS: Set[str] = {
+        "us", "them", "we", "they", "ours", "theirs",
+        "patriots", "traitors", "elites", "people", "real",
+        "fake", "true", "false", "good", "evil", "right", "wrong",
+        "always", "never", "all", "none", "every", "everyone",
+        "nobody", "extreme", "radical", "extremist",
+    }
+
+    CONFLICT_PHRASES: Set[str] = {
+        "us versus them", "us vs them", "good versus evil",
+        "war on", "war against", "fight against", "stand against",
+        "rise up", "take back", "take over", "shut down",
+        "double down", "lash out", "crack down", "fight back",
+    }
 
     # =========================================================
 
@@ -74,6 +131,10 @@ class NarrativePropagationAnalyzer(BaseAnalyzer):
         # -----------------------------------------------------
         # CONFLICT DISTRIBUTION
         # -----------------------------------------------------
+        # `raw`  — per-category token densities in [0, 1]
+        # `dist` — same densities renormalized to a probability
+        #          distribution; used only for entropy/diversity, not
+        #          surfaced as `_ratio` outputs.
 
         raw = self._conflict_distribution(ctx)
         dist = self._normalize(raw)
@@ -102,7 +163,7 @@ class NarrativePropagationAnalyzer(BaseAnalyzer):
         # -----------------------------------------------------
 
         propagation = (
-            0.4 * sum(dist.values()) +
+            0.4 * sum(raw.values()) +
             0.2 * opposition +
             0.2 * polarization +
             0.2 * phrase
@@ -126,7 +187,7 @@ class NarrativePropagationAnalyzer(BaseAnalyzer):
         # -----------------------------------------------------
 
         return {
-            **{f"{k}_ratio": self._safe(v) for k, v in dist.items()},
+            **{f"{k}_ratio": self._safe(v) for k, v in raw.items()},
             "opposition_marker_ratio": self._safe(opposition),
             "polarization_ratio": self._safe(polarization),
             "conflict_phrase_ratio": self._safe(phrase),

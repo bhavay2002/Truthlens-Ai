@@ -137,29 +137,57 @@ class AnalysisOrchestrator:
     # POST PROCESS
     # =====================================================
 
+    # Sections that AnalysisPipeline reports back from `run_all`.
+    # Used both for safe extraction and for confidence aggregation.
+    _ALL_SECTIONS = (
+        "rhetorical",
+        "argument",
+        "context",
+        "discourse",
+        "emotion",
+        "framing",
+        "information",
+        "information_omission",
+        "ideology",
+        "narrative_role",
+        "narrative_conflict",
+        "narrative_propagation",
+        "narrative_temporal",
+        "source",
+    )
+
+    # Sections aggregated to form the "narrative" view used by the
+    # bias profile and propaganda detector.
+    _NARRATIVE_SECTIONS = (
+        "narrative_role",
+        "narrative_conflict",
+        "narrative_propagation",
+        "narrative_temporal",
+    )
+
     def _post_process(self, raw: Dict[str, Any], text: str) -> Dict[str, Any]:
 
         # -------------------------
         # SAFE EXTRACTION
         # -------------------------
-        sections = {
-            "rhetorical": raw.get("rhetorical", {}),
-            "argument": raw.get("argument", {}),
-            "context": raw.get("context", {}),
-            "discourse": raw.get("discourse", {}),
-            "emotion": raw.get("emotion", {}),
-            "framing": raw.get("framing", {}),
-            "information": raw.get("information", {}),
-            "ideology": raw.get("ideology", {}),
+        sections: Dict[str, Dict[str, float]] = {
+            name: self._safe_section(raw.get(name, {}))
+            for name in self._ALL_SECTIONS
         }
+
+        narrative_section = self._merge_sections(
+            sections, self._NARRATIVE_SECTIONS
+        )
 
         # -------------------------
         # PROFILE
         # -------------------------
+        # `bias` reflects framing signals (the primary bias surface);
+        # `narrative` is the merged narrative view.
         profile = self.builder.build_profile(
             bias=sections["framing"],
             emotion=sections["emotion"],
-            narrative=sections["framing"],
+            narrative=narrative_section,
             discourse=sections["discourse"],
             ideology=sections["ideology"],
         )
@@ -167,9 +195,12 @@ class AnalysisOrchestrator:
         # -------------------------
         # PROPAGANDA
         # -------------------------
+        # The propaganda detector reads narrative-conflict signals
+        # (polarization_ratio, conflict_intensity) — pass the conflict
+        # section, not framing.
         propaganda = self.propaganda.analyze(
             emotion_features=sections["emotion"],
-            narrative_features=sections["framing"],
+            narrative_features=sections["narrative_conflict"],
             rhetorical_features=sections["rhetorical"],
             argument_features=sections["argument"],
             information_features=sections["information"],
@@ -197,23 +228,68 @@ class AnalysisOrchestrator:
         }
 
     # =====================================================
+    # SECTION HELPERS
+    # =====================================================
+
+    @staticmethod
+    def _safe_section(section: Any) -> Dict[str, float]:
+        if not isinstance(section, dict):
+            return {}
+        cleaned: Dict[str, float] = {}
+        for k, v in section.items():
+            if not isinstance(k, str):
+                continue
+            if isinstance(v, (int, float)):
+                cleaned[k] = float(v)
+        return cleaned
+
+    @staticmethod
+    def _merge_sections(
+        sections: Dict[str, Dict[str, float]],
+        names: tuple,
+    ) -> Dict[str, float]:
+        merged: Dict[str, float] = {}
+        for name in names:
+            section = sections.get(name) or {}
+            for k, v in section.items():
+                # If two sub-sections share a key (e.g. `polarization_ratio`),
+                # average rather than silently overwriting.
+                if k in merged:
+                    merged[k] = (merged[k] + float(v)) / 2.0
+                else:
+                    merged[k] = float(v)
+        return merged
+
+    # =====================================================
     # CONFIDENCE
     # =====================================================
 
     def _confidence(self, sections: Dict[str, Dict[str, float]]) -> float:
+        """
+        Confidence is the bounded mean over per-section means of finite,
+        in-range feature values. Aggregating per-section first prevents
+        any single large section (e.g. narrative_propagation with 15
+        keys) from dominating the score.
+        """
 
-        values = []
+        section_means = []
 
         for section in sections.values():
-            values.extend(
-                v for v in section.values() if isinstance(v, (int, float))
-            )
+            vals = [
+                float(v)
+                for v in section.values()
+                if isinstance(v, (int, float))
+                and v == v  # NaN check
+                and v not in (float("inf"), float("-inf"))
+            ]
+            if not vals:
+                continue
+            section_means.append(sum(vals) / len(vals))
 
-        if not values:
+        if not section_means:
             return 0.0
 
-        # robust signal strength
-        mean_val = sum(values) / len(values)
+        mean_val = sum(section_means) / len(section_means)
 
         return float(min(max(mean_val, 0.0), 1.0))
 

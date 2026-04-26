@@ -160,6 +160,27 @@ def get_doc(context: Any, task: str):
 
 
 # =========================================================
+# SHARED PIPELINE (PIPELINE-LEVEL ENTRY POINT)
+# =========================================================
+# `get_shared_nlp(mode)` returns the NLP pipeline that the
+# top-level `AnalysisPipeline` uses to materialize the doc
+# once. Modes:
+#   "safe" — full pipeline (tagger, parser, NER, lemmatizer)
+#   "fast" — minimal tokenizer-only pipeline
+# Anything else falls back to "safe".
+
+_SHARED_MODE_DISABLE: Dict[str, Tuple[str, ...]] = {
+    "safe": (),
+    "fast": ("ner", "tagger", "parser", "attribute_ruler", "lemmatizer"),
+}
+
+
+def get_shared_nlp(mode: str = "safe") -> Language:
+    disable = _SHARED_MODE_DISABLE.get(mode, ())
+    return get_nlp(DEFAULT_MODEL, disable=disable)
+
+
+# =========================================================
 # STREAM PROCESSING (HIGH PERFORMANCE)
 # =========================================================
 

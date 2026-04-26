@@ -163,17 +163,26 @@ class FeatureMerger:
         self,
         sections: Dict[str, Dict[str, float]],
     ) -> float:
+        """
+        Fraction of features that are present and numerically valid.
+        A feature counts as "complete" when its value is a finite
+        numeric, regardless of whether it is exactly zero — a legitimate
+        zero (e.g. no fear-appeal terms found) still represents a
+        complete measurement.
+        """
 
-        total = sum(len(s) for s in sections.values())
+        total = 0
+        complete = 0
 
-        non_zero = sum(
-            1
-            for section in sections.values()
-            for v in section.values()
-            if isinstance(v, (int, float)) and v != 0.0
-        )
+        for section in sections.values():
+            if not isinstance(section, dict):
+                continue
+            for v in section.values():
+                total += 1
+                if isinstance(v, (int, float)) and np.isfinite(v):
+                    complete += 1
 
         if total == 0:
             return 0.0
 
-        return non_zero / total
+        return complete / total

@@ -137,10 +137,34 @@ class AnalysisIntegrationRunner:
         if not text.strip():
             raise ValueError("text must be a non-empty string")
 
+        # Build a single FeatureContext so every analyzer shares the
+        # same spaCy doc cache and lazy-computed token state. Falls
+        # back to passing the raw string if context construction fails
+        # for any reason (keeps legacy callers working).
+        from src.analysis.feature_context import FeatureContext
+        try:
+            ctx = FeatureContext(text=text)
+        except Exception:
+            logger.exception("FeatureContext build failed; falling back to raw text")
+            ctx = None
+
         results: Dict[str, Any] = {}
         for name, analyzer in self._analyzers:
             try:
-                results[name] = analyzer.analyze(text)
+                if ctx is not None and hasattr(analyzer, "analyze"):
+                    # Modern analyzers expect a FeatureContext.
+                    results[name] = analyzer.analyze(ctx)
+                else:
+                    results[name] = analyzer.analyze(text)
+            except TypeError:
+                # Legacy analyzers may still expect raw text.
+                try:
+                    results[name] = analyzer.analyze(text)
+                except Exception as exc:
+                    if self._fail_fast:
+                        raise
+                    logger.exception("Analyzer %s failed", name)
+                    results[name] = {"error": str(exc)}
             except Exception as exc:
                 if self._fail_fast:
                     raise
