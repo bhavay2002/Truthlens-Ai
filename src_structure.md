@@ -20,7 +20,6 @@ src/
 |   `-- weight_manager.py
 |-- analysis
 |   |-- __init__.py
-|   |-- _nlp.py
 |   |-- _text_features.py
 |   |-- analysis_config.py
 |   |-- analysis_pipeline.py
@@ -49,7 +48,8 @@ src/
 |   |-- output_models.py
 |   |-- propaganda_pattern_detector.py
 |   |-- rhetorical_device_detector.py
-|   `-- source_attribution_analyzer.py
+|   |-- source_attribution_analyzer.py
+|   `-- spacy_loader.py
 |-- config
 |   `-- task_config.py
 |-- data
@@ -223,11 +223,18 @@ src/
 |   |-- run_inference.py
 |   `-- schema.py
 |-- models
+|   |-- adapters
+|   |   |-- adapter_config.py
+|   |   |-- adapter_layer.py
+|   |   `-- lora_adapter.py
 |   |-- base
 |   |   |-- __init__.py
 |   |   |-- base_classifier.py
 |   |   |-- base_model.py
 |   |   `-- multitask_base_model.py
+|   |-- benchmarking
+|   |   |-- benchmark_runner.py
+|   |   `-- dataset_benchmarks.py
 |   |-- calibration
 |   |   |-- __init__.py
 |   |   |-- calibration_metrics.py
@@ -242,6 +249,8 @@ src/
 |   |-- config
 |   |   |-- __init__.py
 |   |   `-- model_config.py
+|   |-- distillation
+|   |   `-- knowledge_distillation.py
 |   |-- emotion
 |   |   |-- __init__.py
 |   |   |-- load_emotion_model.py
@@ -276,20 +285,36 @@ src/
 |   |   |-- model_wrapper.py
 |   |   |-- prediction_output.py
 |   |   `-- predictor.py
+|   |-- interpretability
+|   |   |-- attention_extractor.py
+|   |   `-- gradient_hooks.py
+|   |-- loss
+|   |   |-- base_balancer.py
+|   |   |-- coverage_tracker.py
+|   |   |-- gradnorm.py
+|   |   |-- loss_normalizer.py
+|   |   |-- multitask_loss.py
+|   |   |-- task_loss_router.py
+|   |   `-- uncertainty.py
 |   |-- metadata
 |   |   |-- __init__.py
 |   |   |-- model_card.py
 |   |   |-- model_metadata.py
 |   |   `-- model_versioning.py
+|   |-- monitoring
+|   |   |-- embedding_drift.py
+|   |   `-- prediction_drift.py
 |   |-- multitask
 |   |   |-- __init__.py
-|   |   |-- multitask_loss.py
 |   |   |-- multitask_model.py
 |   |   |-- multitask_output.py
 |   |   `-- multitask_truthlens_model.py
 |   |-- narrative
 |   |   |-- __init__.py
 |   |   `-- narrative_detector.py
+|   |-- optimization
+|   |   |-- lr_scheduler.py
+|   |   `-- optimizer_factory.py
 |   |-- propaganda
 |   |   |-- __init__.py
 |   |   `-- propaganda_detector.py
@@ -297,6 +322,15 @@ src/
 |   |   |-- __init__.py
 |   |   |-- model_factory.py
 |   |   `-- model_registry.py
+|   |-- regularization
+|   |   |-- adversarial_training.py
+|   |   |-- label_smoothing.py
+|   |   `-- mixup.py
+|   |-- representation
+|   |   |-- attention_pooling.py
+|   |   |-- cls_pooling.py
+|   |   |-- mean_pooling.py
+|   |   `-- pooling.py
 |   |-- tasks
 |   |   |-- bias
 |   |   |   |-- __init__.py
@@ -316,10 +350,23 @@ src/
 |   |   `-- __init__.py
 |   |-- training
 |   |   |-- __init__.py
+|   |   |-- checkpointengine.py
+|   |   |-- distributedengine.py
+|   |   |-- evaluationengine.py
+|   |   |-- experimenttracker.py
 |   |   |-- loss_functions.py
+|   |   |-- lossengine.py
+|   |   |-- monitorengine.py
+|   |   |-- stepengine.py
+|   |   |-- taskscheduler.py
+|   |   |-- trainer copy.py
 |   |   |-- trainer.py
 |   |   |-- training_step.py
 |   |   `-- training_utils.py
+|   |-- uncertainty
+|   |   |-- ensemble_uncertainty.py
+|   |   |-- mc_dropout.py
+|   |   `-- uncertainty_head.py
 |   |-- utils
 |   |   |-- __init__.py
 |   |   |-- model_utils.py
