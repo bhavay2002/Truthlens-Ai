@@ -42,9 +42,14 @@ class GraphStructure(BaseModel):
     @field_validator("nodes")
     @classmethod
     def validate_nodes(cls, v):
-        if not v:
-            raise ValueError("nodes cannot be empty")
-        return v
+        if v is None:
+            raise ValueError("nodes cannot be None")
+        # G-C2: allow an empty node list so an article with no detected
+        # entities still serialises through the schema (callers wrap an
+        # empty graph in ``Optional[GraphStructure]`` rather than passing
+        # ``None`` so downstream UI can distinguish "no content" from
+        # "graph disabled").
+        return list(v)
 
     @field_validator("edges")
     @classmethod
@@ -177,6 +182,14 @@ class GraphOutput(BaseModel):
     # features
     features: Optional[Dict[str, float]] = None
     temporal_features: Optional[TemporalFeatureModel] = None
+
+    # G-C2 / G-C4: per-graph metric maps. The pipeline computes these
+    # via ``GraphAnalyzer.analyze`` and used to silently drop them
+    # (the consumer read ``entity_graph_metrics`` while the producer
+    # only had ``entity_metrics`` in the local scope and threw on the
+    # ``GraphOutput(...)`` call). Now first-class fields.
+    entity_metrics: Optional[Dict[str, float]] = None
+    narrative_metrics: Optional[Dict[str, float]] = None
 
     # embeddings
     embeddings: Optional[GraphEmbeddingModel] = None

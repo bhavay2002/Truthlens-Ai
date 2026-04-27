@@ -32,7 +32,8 @@ class NarrativeGraphFeatures:
     narrative_graph_flow_strength: float
 
     def to_dict(self) -> Dict[str, float]:
-        return self.__dict__
+        # ``slots=True`` strips ``__dict__``; build via ``__slots__``.
+        return {f: getattr(self, f) for f in self.__slots__}
 
 
 # =========================================================
@@ -109,9 +110,14 @@ class NarrativeGraphBuilder:
             if not keywords:
                 continue
 
-            # ensure nodes
+            # ensure nodes — use ``defaultdict(float)`` so the
+            # ``graph[src][tgt] += 1.0`` accumulator below doesn't
+            # KeyError on the first transition (the previous
+            # ``setdefault(k, {})`` overrode the inner factory with a
+            # plain dict, breaking the augmented-assignment).
             for k in keywords:
-                graph.setdefault(k, {})
+                if k not in graph:
+                    graph[k] = defaultdict(float)
 
             # 🔥 weighted transitions
             if prev_keywords:

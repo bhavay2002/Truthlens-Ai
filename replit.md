@@ -344,3 +344,28 @@ Resolved the critical / perf items from the 13-section audit. App restarts clean
 - Removed the one-hot `features[f"emotion_dominant_{dominant_emotion}"] = 1.0` write. Emotion is multi-label by design — the per-label scalar columns (`emotion_<label>` = normalized hit share) already carry the full distribution, and the one-hot threw away every label except the argmax.
 - Removed the matching `[f"emotion_dominant_{e}" for e in EMOTION_LABELS]` block from `EMOTION_FEATURES` in `src/features/feature_schema.py` (was 20 dead columns) and added a comment explaining why argmax over the per-label columns recovers the dominant label at inference time without info loss.
 - Verified: `EmotionFeatures.extract()` now emits zero `emotion_dominant_*` keys; `EMOTION_FEATURES` shrank from 41 → 21 columns.
+
+## Apr 27 2026 — `src/graph/` audit fixes C1–C5 + P1–P4
+
+**C1 — `EntityGraphBuilder.extract_graph_features` alias added.** `GraphFeatureExtractor.extract_from_graphs` was calling `extract_graph_features` (the name `NarrativeGraphBuilder` exposes), but `EntityGraphBuilder` only defined `extract_features` → `AttributeError` on every entity-graph request. New alias keeps both builders API-compatible.
+
+**C2 — `GraphOutput(...)` no longer raises `ValidationError`.** The pipeline used to pass raw `Dict[str, Dict[str, float]]` adjacency dicts where the schema expects `GraphStructure(nodes, edges)`, plus unknown `entity_metrics=` / `narrative_metrics=` kwargs against `extra="forbid"`. Added `_to_graph_structure(...)` adapter in `graph_pipeline.py`, added `entity_metrics` / `narrative_metrics` fields to `GraphOutput` (`graph_schema.py`), and explanation is now serialised via `.to_dict()` before construction. Whole construction is also wrapped in try/except so a future schema mismatch can't take down a request.
+
+**C3 — `GraphExplainer.explain` now accepts `temporal_features=`.** The pipeline was passing `temporal_features=` but the signature only had `text=`, raising `TypeError` on every call. Signature now takes both; when `temporal_features` is supplied the explainer re-uses it (no second `TemporalGraphAnalyzer.analyze` per request — partial G-R2 fix).
+
+**C4 — Per-graph metrics now reach the model.** Result dict surfaces `entity_graph_metrics` and `narrative_graph_metrics` under exactly the keys `feature_pipeline._merge_graph_features` already reads. Previously the consumer's `.get("entity_graph_metrics", {})` always returned `{}` because the producer only had local variables `entity_metrics` / `narrative_metrics`.
+
+**C5 — Edge weights survive end-to-end.** `EntityGraphBuilder.build_graph` used to call `normalize_graph` then `to_undirected`, both of which downcast to `Dict[str, List[str]]` — silently throwing away every co-occurrence weight just computed. New `canonicalize_weighted` in `graph_analysis.py` is the canonical, **idempotent** symmetric-weighted form (`Dict[str, Dict[str, float]]`); `build_graph` returns it directly. `GraphExplainer._node_importance` now uses weighted-degree, `_edge_importance` uses the actual edge weight. `GraphAnalyzer.compute_graph_metrics` uses weighted-degree distribution for `graph_entropy`. NetworkX construction in `graph_embeddings._to_nx` now sets `weight=` on every edge.
+
+**P1 — Canonicalize once at the top.** `GraphPipeline._run_with_doc` calls `canonicalize_weighted(narrative_graph)` after building (entity-graph builder already returns canonical form). Because canonicalization is idempotent the analyzer / extractor / explainer all do a no-op second pass when invoked, instead of repeating an `O(N+E)` symmetrise / normalise loop ~3× per request.
+
+**P2 — Sparse triangle-counting clustering.** `_average_clustering_sparse` in `graph_analysis.py` builds a CSR adjacency once and computes per-node triangles via `(A² ⊙ A)` row-sums, replacing the `O(N · k²)` Python double-loop in `entity_graph.extract_features` and `compute_graph_metrics`. Measured ~70× speedup on a 200-node graph (4.4 ms vs ~300 ms).
+
+**P3 — `GraphPipeline.run_batch(texts)`.** New batched entry point uses `nlp.pipe(texts, batch_size=cfg.batch_size)` so a batch of N texts shares a single spaCy parser pass instead of N serial calls. `run` and `run_batch` both delegate to a shared `_run_with_doc` helper; entity graph build was factored into `_entity_graph_from_doc(doc)` so the per-text spaCy call is no longer repeated.
+
+**P4 — Sparse Lanczos eigendecomposition.** `spectral_eigen_embedding` now accepts a weighted dict OR an ndarray, builds a `scipy.sparse.csr_matrix` directly, and uses `scipy.sparse.linalg.eigsh(k=spectral_dim, which='LA')` for any graph above ~32 nodes. The dense `nx.to_numpy_array` + `np.linalg.eigvalsh` path is the fallback for tiny graphs (where ARPACK setup outweighs its asymptotic win) and the on-failure backup. Also fixes G-E1: empty graphs now return a fixed-length zero vector matching `_embedding_target_dim(cfg)` instead of `np.zeros(1)`, so the downstream `graph_embedding_*` feature columns have a stable schema.
+
+**Pre-existing bugs uncovered while validating, fixed in the same pass:**
+- `TemporalGraphFeatures.to_dict` and `NarrativeGraphFeatures.to_dict` returned `self.__dict__`, but both classes use `@dataclass(slots=True)` — `__dict__` doesn't exist. Both now build the mapping from `__slots__`.
+- `NarrativeGraphBuilder.build_graph` did `graph.setdefault(k, {})` which clobbered the outer `defaultdict(lambda: defaultdict(float))`'s inner factory, so the next `graph[src][tgt] += 1.0` raised `KeyError`. Replaced with an explicit `if k not in graph: graph[k] = defaultdict(float)`.
+- `EntityGraphBuilder.__init__` blank-spaCy fallback now adds a `sentencizer` pipe so `doc.sents` doesn't raise `E030` when `en_core_web_sm` is unavailable.

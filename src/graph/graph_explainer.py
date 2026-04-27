@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
 import numpy as np
 
-from src.graph.graph_analysis import compute_graph_metrics
+from src.graph.graph_analysis import canonicalize_weighted
 from src.graph.temporal_graph import TemporalGraphAnalyzer
 
 logger = logging.getLogger(__name__)
 EPS = 1e-12
+
+GraphLike = Union[Dict[str, Dict[str, float]], Dict[str, List[str]]]
 
 
 # =========================================================
@@ -42,59 +44,62 @@ class GraphExplanation:
 class GraphExplainer:
 
     def __init__(self):
+        # Kept for the ``explain_from_text`` shortcut path. The main
+        # ``explain(...)`` API now prefers a pre-computed temporal dict
+        # supplied by the pipeline, so this analyzer is rarely invoked
+        # twice per request anymore (G-R2).
         self.temporal = TemporalGraphAnalyzer()
         logger.info("GraphExplainer initialized")
 
     # =====================================================
-    # NODE IMPORTANCE
+    # NODE IMPORTANCE  (G-C5: weight-aware)
     # =====================================================
 
     def _node_importance(
         self,
-        graph: Dict[str, List[str]],
+        graph: Dict[str, Dict[str, float]],
     ) -> Dict[str, float]:
 
-        importance = {}
-
         if not graph:
-            return importance
+            return {}
 
-        total_nodes = len(graph)
+        # Weighted degree — heavy edges contribute more to importance,
+        # which is the entire point of building a weighted graph upstream.
+        weighted_degrees = {n: sum(nbrs.values()) for n, nbrs in graph.items()}
 
-        for node, neighbors in graph.items():
+        total = sum(weighted_degrees.values()) + EPS
 
-            degree = len(neighbors)
+        if total <= EPS:
+            # Fallback to unweighted normalisation when the canonical
+            # form has no weighted edges (e.g. an isolated-nodes graph).
+            n = len(graph)
+            return {k: 1.0 / n for k in graph}
 
-            # normalized degree centrality
-            score = degree / (total_nodes + EPS)
-
-            importance[node] = float(score)
-
-        # normalize
-        total = sum(importance.values()) + EPS
-
-        return {k: v / total for k, v in importance.items()}
+        return {k: float(v / total) for k, v in weighted_degrees.items()}
 
     # =====================================================
-    # EDGE IMPORTANCE
+    # EDGE IMPORTANCE  (G-C5: weight-aware)
     # =====================================================
 
     def _edge_importance(
         self,
-        graph: Dict[str, List[str]],
+        graph: Dict[str, Dict[str, float]],
     ) -> Dict[str, float]:
 
         edge_scores: Dict[Tuple[str, str], float] = {}
 
         for src, nbrs in graph.items():
-            for tgt in nbrs:
+            for tgt, w in nbrs.items():
 
                 if src == tgt:
                     continue
 
                 edge = tuple(sorted((src, tgt)))
 
-                edge_scores[edge] = edge_scores.get(edge, 0.0) + 1.0
+                # Symmetric weighted graph — ``w`` already equals the
+                # value at ``graph[tgt][src]`` (canonicalize_weighted
+                # symmetrises with ``max``); take it once per pair.
+                edge_scores[edge] = max(edge_scores.get(edge, 0.0), float(w))
 
         if not edge_scores:
             return {}
@@ -110,6 +115,30 @@ class GraphExplainer:
     # TEMPORAL IMPORTANCE
     # =====================================================
 
+    def _normalise_temporal(
+        self,
+        features: Mapping[str, Any],
+    ) -> Dict[str, float]:
+
+        # Coerce to a flat ``Dict[str, float]`` ignoring non-numeric values.
+        clean: Dict[str, float] = {}
+        for k, v in features.items():
+            try:
+                clean[str(k)] = float(v)
+            except (TypeError, ValueError):
+                continue
+
+        if not clean:
+            return {}
+
+        vals = np.array(list(clean.values()), dtype=float)
+
+        if np.sum(vals) == 0:
+            return clean
+
+        vals = vals / (np.sum(vals) + EPS)
+        return dict(zip(clean.keys(), vals.tolist()))
+
     def _temporal_importance(
         self,
         text: Optional[str],
@@ -118,17 +147,7 @@ class GraphExplainer:
         if not text:
             return {}
 
-        features = self.temporal.analyze(text).to_dict()
-
-        # normalize temporal features
-        vals = np.array(list(features.values()), dtype=float)
-
-        if np.sum(vals) == 0:
-            return features
-
-        vals = vals / (np.sum(vals) + EPS)
-
-        return dict(zip(features.keys(), vals.tolist()))
+        return self._normalise_temporal(self.temporal.analyze(text).to_dict())
 
     # =====================================================
     # OVERALL SCORE
@@ -141,9 +160,9 @@ class GraphExplainer:
         temporal_imp: Dict[str, float],
     ) -> float:
 
-        node_score = np.mean(list(node_imp.values())) if node_imp else 0.0
-        edge_score = np.mean(list(edge_imp.values())) if edge_imp else 0.0
-        temp_score = np.mean(list(temporal_imp.values())) if temporal_imp else 0.0
+        node_score = float(np.mean(list(node_imp.values()))) if node_imp else 0.0
+        edge_score = float(np.mean(list(edge_imp.values()))) if edge_imp else 0.0
+        temp_score = float(np.mean(list(temporal_imp.values()))) if temporal_imp else 0.0
 
         return float(
             0.4 * node_score +
@@ -158,16 +177,34 @@ class GraphExplainer:
     def explain(
         self,
         *,
-        entity_graph: Optional[Dict[str, List[str]]] = None,
-        narrative_graph: Optional[Dict[str, List[str]]] = None,
+        entity_graph: Optional[GraphLike] = None,
+        narrative_graph: Optional[GraphLike] = None,
         text: Optional[str] = None,
+        temporal_features: Optional[Mapping[str, Any]] = None,
     ) -> GraphExplanation:
+        """Build a graph-level explanation.
 
-        graph = entity_graph or narrative_graph or {}
+        G-C3 fix: previously raised ``TypeError`` when the pipeline
+        passed ``temporal_features=`` (it wasn't in the signature).
+        Now accepted and used directly, avoiding a second
+        ``TemporalGraphAnalyzer.analyze`` call per request (G-R2).
+        ``text=`` remains accepted for the standalone path.
+        """
 
-        node_imp = self._node_importance(graph)
-        edge_imp = self._edge_importance(graph)
-        temporal_imp = self._temporal_importance(text)
+        graph = entity_graph if entity_graph else (narrative_graph or {})
+
+        # G-C5: canonicalize once so the importance functions see a
+        # weighted symmetric dict whether the caller passed weighted,
+        # unweighted, or already-canonical input.
+        canon = canonicalize_weighted(graph) if graph else {}
+
+        node_imp = self._node_importance(canon)
+        edge_imp = self._edge_importance(canon)
+
+        if temporal_features is not None:
+            temporal_imp = self._normalise_temporal(temporal_features)
+        else:
+            temporal_imp = self._temporal_importance(text)
 
         score = self._overall_score(node_imp, edge_imp, temporal_imp)
 

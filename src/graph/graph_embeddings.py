@@ -2,40 +2,17 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 import numpy as np
 import networkx as nx
+import scipy.sparse as sp
 
 logger = logging.getLogger(__name__)
 EPS = 1e-12
 
-Graph = Dict[str, List[str]]
-
-
-# =========================================================
-# SPECTRAL
-# =========================================================
-
-def spectral_eigen_embedding(
-    adjacency_matrix: np.ndarray,
-    dim: int = 8,
-) -> np.ndarray:
-
-    if adjacency_matrix.size == 0:
-        return np.zeros(dim, dtype=np.float32)
-
-    try:
-        eigenvalues = np.linalg.eigvalsh(adjacency_matrix)
-        eigenvalues = np.sort(eigenvalues)[::-1]
-    except np.linalg.LinAlgError:
-        logger.warning("Eigen decomposition failed")
-        return np.zeros(dim, dtype=np.float32)
-
-    if len(eigenvalues) < dim:
-        eigenvalues = np.pad(eigenvalues, (0, dim - len(eigenvalues)))
-
-    return eigenvalues[:dim].astype(np.float32)
+# G-C5: accept either weighted or unweighted dict-of-dict / dict-of-list.
+Graph = Union[Dict[str, Dict[str, float]], Dict[str, List[str]]]
 
 
 # =========================================================
@@ -53,6 +30,136 @@ class GraphEmbeddingConfig:
     walk_length: int = 10
     num_walks: int = 10
     embedding_dim: int = 16
+
+
+# =========================================================
+# DIMENSION CONTRACTS  (G-E1)
+#
+# The downstream feature vector pads to a fixed schema, but the
+# ``extract_from_graphs`` consumer used to enumerate the embedding
+# returned here and emit one feature per element. That made the
+# vector length non-deterministic (1 for empty input, 28 for the
+# default hybrid type) — which silently changed the model input
+# dimension. Pin every embedding type to a known length and always
+# return that many floats so the schema stays stable.
+# =========================================================
+
+def _embedding_target_dim(cfg: GraphEmbeddingConfig) -> int:
+    etype = cfg.embedding_type.lower()
+    if etype == "degree":
+        return 4
+    if etype == "centrality":
+        return 4
+    if etype == "spectral":
+        return cfg.spectral_dim
+    if etype == "node2vec":
+        return cfg.embedding_dim
+    if etype == "hybrid":
+        # 4 degree + 4 centrality + spectral_dim
+        return 4 + 4 + cfg.spectral_dim
+    return cfg.embedding_dim
+
+
+# =========================================================
+# SPECTRAL  (G-P4)
+# =========================================================
+
+def _to_sparse_adjacency(
+    graph_or_adj: Union[np.ndarray, Graph],
+) -> Optional[sp.csr_matrix]:
+    """Build a symmetric sparse weighted adjacency from any input.
+
+    Returns ``None`` for empty inputs so the caller can short-circuit.
+    """
+    if isinstance(graph_or_adj, np.ndarray):
+        if graph_or_adj.size == 0:
+            return None
+        A = sp.csr_matrix(graph_or_adj.astype(np.float64))
+        return A.maximum(A.T)
+
+    if isinstance(graph_or_adj, dict):
+        nodes = sorted(graph_or_adj.keys())
+        n = len(nodes)
+        if n == 0:
+            return None
+
+        idx = {nd: i for i, nd in enumerate(nodes)}
+        rows: List[int] = []
+        cols: List[int] = []
+        data: List[float] = []
+
+        for u, nbrs in graph_or_adj.items():
+            iu = idx[u]
+            items = nbrs.items() if isinstance(nbrs, dict) else ((v, 1.0) for v in nbrs)
+            for v, w in items:
+                if v not in idx:
+                    continue
+                rows.append(iu)
+                cols.append(idx[v])
+                data.append(float(w))
+
+        if not data:
+            return sp.csr_matrix((n, n), dtype=np.float64)
+
+        A = sp.csr_matrix((data, (rows, cols)), shape=(n, n), dtype=np.float64)
+        return A.maximum(A.T)
+
+    return None
+
+
+def spectral_eigen_embedding(
+    graph_or_adj: Union[np.ndarray, Graph],
+    dim: int = 8,
+) -> np.ndarray:
+    """Top-``dim`` eigenvalues of the symmetric adjacency.
+
+    G-P4 fix: previous implementation built an ``O(N^2)`` dense matrix
+    via ``nx.to_numpy_array`` and then ran ``np.linalg.eigvalsh`` —
+    ``O(N^3)`` per request. We now use the sparse Lanczos solver
+    (``scipy.sparse.linalg.eigsh``) for any graph above ~32 nodes,
+    where ARPACK setup overhead becomes worthwhile, and fall back to
+    the dense path on failure.
+    """
+
+    A = _to_sparse_adjacency(graph_or_adj)
+
+    if A is None or A.shape[0] == 0:
+        return np.zeros(dim, dtype=np.float32)
+
+    n = A.shape[0]
+
+    # ARPACK requires ``k < n``. For tiny graphs the dense path is
+    # actually faster and avoids the ``k = n`` corner case entirely.
+    if n <= 32 or dim >= n:
+        try:
+            eigenvalues = np.linalg.eigvalsh(A.toarray())
+            eigenvalues = np.sort(eigenvalues)[::-1]
+        except np.linalg.LinAlgError:
+            logger.warning("Dense eigen decomposition failed (n=%d)", n)
+            return np.zeros(dim, dtype=np.float32)
+    else:
+        try:
+            from scipy.sparse.linalg import eigsh
+            k = min(dim, n - 1)
+            eigenvalues = eigsh(
+                A.astype(np.float64),
+                k=k,
+                which="LA",
+                return_eigenvectors=False,
+            )
+            eigenvalues = np.sort(eigenvalues)[::-1]
+        except Exception as exc:
+            logger.warning("Sparse eigen decomposition failed (n=%d): %s", n, exc)
+            try:
+                eigenvalues = np.linalg.eigvalsh(A.toarray())
+                eigenvalues = np.sort(eigenvalues)[::-1]
+            except np.linalg.LinAlgError:
+                return np.zeros(dim, dtype=np.float32)
+
+    if len(eigenvalues) < dim:
+        eigenvalues = np.pad(eigenvalues, (0, dim - len(eigenvalues)))
+
+    return eigenvalues[:dim].astype(np.float32)
 
 
 # =========================================================
@@ -82,17 +189,32 @@ class GraphEmbeddingGenerator:
             raise TypeError("graph must be dict")
 
     def _to_nx(self, graph: Graph) -> nx.Graph:
+        # G-C5: weighted edges now flow through to NetworkX so future
+        # consumers (centrality variants, weighted PageRank, etc.) can
+        # use them. ``degree_centrality`` itself is unweighted by
+        # design, so this doesn't change current numerical output.
         G = nx.Graph()
 
         for node, neighbors in graph.items():
+            if not isinstance(node, str):
+                continue
             n = node.strip().lower()
+            if not n:
+                continue
             G.add_node(n)
 
-            for nbr in neighbors:
-                if isinstance(nbr, str):
-                    m = nbr.strip().lower()
-                    if m and m != n:
-                        G.add_edge(n, m)
+            items = (
+                neighbors.items()
+                if isinstance(neighbors, dict)
+                else ((v, 1.0) for v in neighbors)
+            )
+
+            for nbr, w in items:
+                if not isinstance(nbr, str):
+                    continue
+                m = nbr.strip().lower()
+                if m and m != n:
+                    G.add_edge(n, m, weight=float(w))
 
         return G
 
@@ -209,10 +331,15 @@ class GraphEmbeddingGenerator:
 
         self._validate(graph)
 
+        target_dim = _embedding_target_dim(self.config)
+
+        # G-E1: empty graph used to return ``np.zeros(1)`` which broke
+        # the schema contract (downstream emitted a single feature
+        # ``graph_embedding_0``). Always return the configured length.
         G = self._to_nx(graph)
 
         if G.number_of_nodes() == 0:
-            return np.zeros(1, dtype=np.float32)
+            return np.zeros(target_dim, dtype=np.float32)
 
         etype = self.config.embedding_type.lower()
 
@@ -226,8 +353,9 @@ class GraphEmbeddingGenerator:
             vec = self._centrality(G)
 
         elif etype == "spectral":
-            A = nx.to_numpy_array(G)
-            vec = spectral_eigen_embedding(A, self.config.spectral_dim)
+            # G-P4: pass the weighted dict directly so we never
+            # materialise an N×N dense adjacency.
+            vec = spectral_eigen_embedding(graph, self.config.spectral_dim)
 
         elif etype == "node2vec":
             vec = self._node2vec(G)
@@ -235,10 +363,7 @@ class GraphEmbeddingGenerator:
         elif etype == "hybrid":
             deg = self._degree(G)
             cen = self._centrality(G)
-            spec = spectral_eigen_embedding(
-                nx.to_numpy_array(G),
-                self.config.spectral_dim,
-            )
+            spec = spectral_eigen_embedding(graph, self.config.spectral_dim)
             vec = np.concatenate([deg, cen, spec])
 
         else:
@@ -250,9 +375,16 @@ class GraphEmbeddingGenerator:
         vec = self._apply_temporal_weight(vec, temporal_features)
 
         # -------------------------
-        # NORMALIZE
+        # NORMALIZE + FIXED LENGTH (G-E1)
         # -------------------------
-        return self._normalize(vec)
+        vec = self._normalize(vec)
+
+        if vec.size < target_dim:
+            vec = np.pad(vec, (0, target_dim - vec.size))
+        elif vec.size > target_dim:
+            vec = vec[:target_dim]
+
+        return vec.astype(np.float32)
 
 
 # =========================================================

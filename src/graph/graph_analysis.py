@@ -2,73 +2,234 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Mapping, Set, Tuple, Union
 
 import numpy as np
+import scipy.sparse as sp
 
 logger = logging.getLogger(__name__)
 EPS = 1e-12
 
+# G-C5: canonical graph type is **weighted** ``Dict[str, Dict[str, float]]``.
+# A plain ``Dict[str, List[str]]`` is still accepted as input (treated as
+# weight=1.0 per edge) so existing callers don't break.
+WeightedGraph = Dict[str, Dict[str, float]]
+GraphLike = Union[Dict[str, Dict[str, float]], Dict[str, List[str]]]
+
 
 # =========================================================
-# NORMALIZATION
+# CANONICALIZATION  (G-C5 + G-P1)
 # =========================================================
 
-def normalize_graph(graph: Dict[str, List[str]]) -> Dict[str, List[str]]:
-    normalized: Dict[str, List[str]] = {}
+def canonicalize_weighted(graph: GraphLike) -> WeightedGraph:
+    """Return a normalized, symmetric, weighted view of ``graph``.
 
-    for node, neighbors in graph.items():
+    The function is **idempotent**: calling it twice on the same input
+    produces the same output (and the second call is a no-op besides
+    a single allocation). This is what lets the pipeline canonicalize
+    once at the top and pass the result to every downstream consumer
+    without worrying about double-symmetrising weights (G-S2 / G-P1).
+
+    Accepted inputs:
+      * ``Dict[str, Dict[str, float]]`` — weighted edges (canonical form)
+      * ``Dict[str, List[str]]``        — unweighted, treated as weight 1.0
+
+    Output guarantees:
+      * keys (and neighbour names) are ``str.strip().lower()``
+      * no self-loops
+      * graph is symmetric: ``out[u][v] == out[v][u]``
+      * isolated nodes from the input are preserved
+      * all weights are positive ``float`` values
+      * if both ``out[u][v]`` and ``out[v][u]`` already existed in the
+        input we take the **max** of the two so re-canonicalising never
+        amplifies a value (the builder writes both directions equally,
+        so max == either value in practice).
+    """
+
+    if not isinstance(graph, dict):
+        raise TypeError("graph must be dict")
+
+    # ----- pass 1: directed weights with normalised string keys -----
+    directed: Dict[str, Dict[str, float]] = {}
+
+    for node, nbrs in graph.items():
+
+        if not isinstance(node, str):
+            continue
+
         nk = node.strip().lower()
-        seen: Set[str] = set()
+        if not nk:
+            continue
 
-        clean = []
-        for nbr in neighbors:
-            if isinstance(nbr, str):
-                n = nbr.strip().lower()
-                if n and n != nk and n not in seen:
-                    seen.add(n)
-                    clean.append(n)
+        directed.setdefault(nk, {})
 
-        normalized[nk] = sorted(clean)
+        if isinstance(nbrs, dict):
+            items = nbrs.items()
+        else:
+            items = ((n, 1.0) for n in nbrs)
 
-    return normalized
+        for nbr, w in items:
+
+            if not isinstance(nbr, str):
+                continue
+
+            nbrk = nbr.strip().lower()
+
+            if not nbrk or nbrk == nk:
+                continue
+
+            try:
+                wv = float(w)
+            except (TypeError, ValueError):
+                continue
+
+            if wv <= 0.0:
+                continue
+
+            # Take max if duplicate keys after normalisation.
+            directed[nk][nbrk] = max(directed[nk].get(nbrk, 0.0), wv)
+
+    # ----- pass 2: symmetrise (max of both directions, idempotent) -----
+    out: WeightedGraph = {n: {} for n in directed}
+
+    for u, nbrs in directed.items():
+        for v, w in nbrs.items():
+
+            sym_w = max(w, directed.get(v, {}).get(u, 0.0))
+
+            out[u][v] = sym_w
+            out.setdefault(v, {})
+            out[v][u] = sym_w
+
+    return out
 
 
-def to_undirected(graph: Dict[str, List[str]]) -> Dict[str, List[str]]:
-    adj: Dict[str, Set[str]] = {n: set(v) for n, v in graph.items()}
+# =========================================================
+# LEGACY HELPERS  (kept for back-compat with old call sites)
+# =========================================================
 
-    for node, neighbors in graph.items():
-        for nbr in neighbors:
-            adj.setdefault(nbr, set()).add(node)
+def normalize_graph(graph: GraphLike) -> Dict[str, List[str]]:
+    """Lossy unweighted view — kept for back-compat callers.
 
-    return {k: sorted(v) for k, v in adj.items()}
+    New code should use :func:`canonicalize_weighted`. This wrapper
+    discards weights but preserves topology, so it remains safe for
+    consumers that don't read weight values.
+    """
+    canon = canonicalize_weighted(graph)
+    return {n: sorted(v.keys()) for n, v in canon.items()}
 
 
-def unique_edges(graph: Dict[str, List[str]]) -> List[Tuple[str, str]]:
-    edges = set()
+def to_undirected(graph: GraphLike) -> Dict[str, List[str]]:
+    """Symmetric unweighted view — kept for back-compat."""
+    return normalize_graph(graph)  # canonicalize_weighted already symmetrises
 
-    for a, nbrs in graph.items():
-        for b in nbrs:
-            edges.add(tuple(sorted((a, b))))
 
+def unique_edges(graph: GraphLike) -> List[Tuple[str, str]]:
+    """List of unique unordered edge pairs."""
+    canon = canonicalize_weighted(graph)
+    edges: Set[Tuple[str, str]] = set()
+    for u, nbrs in canon.items():
+        for v in nbrs:
+            edges.add(tuple(sorted((u, v))))
     return list(edges)
+
+
+# =========================================================
+# CLUSTERING — sparse matrix triangle count (G-P2)
+# =========================================================
+
+def _build_sparse_adjacency(
+    graph: WeightedGraph,
+    nodes: List[str],
+    *,
+    binary: bool = True,
+) -> sp.csr_matrix:
+    """Build a CSR adjacency matrix from a canonical weighted graph.
+
+    ``binary=True`` returns a 0/1 adjacency (used for triangle counting
+    and other topology-only metrics); ``binary=False`` preserves edge
+    weights (used for the spectral embedding).
+    """
+    idx = {n: i for i, n in enumerate(nodes)}
+    rows: List[int] = []
+    cols: List[int] = []
+    data: List[float] = []
+
+    for u, nbrs in graph.items():
+        if u not in idx:
+            continue
+        iu = idx[u]
+        for v, w in nbrs.items():
+            if v not in idx:
+                continue
+            rows.append(iu)
+            cols.append(idx[v])
+            data.append(1.0 if binary else float(w))
+
+    n = len(nodes)
+    if not data:
+        return sp.csr_matrix((n, n), dtype=np.float64)
+
+    A = sp.csr_matrix((data, (rows, cols)), shape=(n, n), dtype=np.float64)
+    # Defensive symmetrise — canonicalize_weighted should already
+    # guarantee this but be robust to malformed direct callers.
+    A = A.maximum(A.T)
+    return A
+
+
+def _average_clustering_sparse(graph: WeightedGraph, nodes: List[str]) -> float:
+    """Average local clustering coefficient via sparse matrix ops.
+
+    Replaces the previous ``O(N · k^2)`` Python loop. For a node ``u``
+    with neighbour set ``N(u)``:
+
+        C(u) = 2 · | { (i, j) in N(u) x N(u) : i < j and (i, j) is an edge } |
+                / ( deg(u) · (deg(u) - 1) )
+
+    Globally we use ``triangles_per_node = diag(A^2 ⊙ A) / 2`` which
+    counts, for each node, the number of edges among its neighbours.
+    """
+    n = len(nodes)
+    if n < 3:
+        return 0.0
+
+    A = _build_sparse_adjacency(graph, nodes, binary=True)
+
+    if A.nnz == 0:
+        return 0.0
+
+    A2 = A @ A
+    # Element-wise product with A then per-row sum -> # of closed
+    # triangles each node participates in (each triangle counted 2x).
+    triangles_per_node = np.asarray((A2.multiply(A)).sum(axis=1)).flatten() / 2.0
+
+    degrees = np.asarray(A.sum(axis=1)).flatten()
+    triplets = degrees * (degrees - 1) / 2.0
+
+    coef = np.zeros(n, dtype=np.float64)
+    nz = triplets > 0
+    coef[nz] = triangles_per_node[nz] / triplets[nz]
+
+    return float(np.mean(coef))
 
 
 # =========================================================
 # CORE METRICS
 # =========================================================
 
-def compute_graph_metrics(graph: Dict[str, List[str]]) -> Dict[str, float]:
+def compute_graph_metrics(graph: GraphLike) -> Dict[str, float]:
 
-    graph = to_undirected(normalize_graph(graph))
+    g = canonicalize_weighted(graph)
 
-    nodes = list(graph.keys())
+    nodes = list(g.keys())
     n = len(nodes)
 
-    edges = unique_edges(graph)
-    e = len(edges)
+    # Edge count — symmetric graph means each undirected edge appears
+    # twice in the adjacency lists; divide by 2.
+    e = sum(len(v) for v in g.values()) // 2
 
-    degrees = np.array([len(graph[n]) for n in nodes], dtype=float)
+    degrees = np.array([len(g[u]) for u in nodes], dtype=float)
+    weighted_degrees = np.array([sum(g[u].values()) for u in nodes], dtype=float)
 
     # -------------------------
     # BASIC
@@ -85,27 +246,9 @@ def compute_graph_metrics(graph: Dict[str, List[str]]) -> Dict[str, float]:
     )
 
     # -------------------------
-    # CLUSTERING
+    # CLUSTERING (G-P2: sparse triangle count, no Python loops)
     # -------------------------
-    adj_sets = {k: set(v) for k, v in graph.items()}
-    triangles = 0
-    triplets = 0
-
-    for node in nodes:
-        nbrs = list(adj_sets[node])
-        k = len(nbrs)
-
-        if k < 2:
-            continue
-
-        triplets += k * (k - 1) / 2
-
-        for i in range(k):
-            for j in range(i + 1, k):
-                if nbrs[j] in adj_sets[nbrs[i]]:
-                    triangles += 1
-
-    clustering = float(triangles / (triplets + EPS))
+    clustering = _average_clustering_sparse(g, nodes)
 
     # -------------------------
     # CENTRALITY (degree-based)
@@ -115,10 +258,12 @@ def compute_graph_metrics(graph: Dict[str, List[str]]) -> Dict[str, float]:
     centrality_var = float(np.var(centrality)) if n > 0 else 0.0
 
     # -------------------------
-    # ENTROPY (🔥 important)
+    # ENTROPY  (G-C5: now uses *weighted* degree distribution so
+    # edge weights actually influence the metric instead of being
+    # silently discarded by the consumer.)
     # -------------------------
-    if np.sum(degrees) > 0:
-        p = degrees / (np.sum(degrees) + EPS)
+    if weighted_degrees.sum() > 0:
+        p = weighted_degrees / (weighted_degrees.sum() + EPS)
         entropy = float(-np.sum(p * np.log(p + EPS)))
     else:
         entropy = 0.0
@@ -171,7 +316,7 @@ class GraphAnalyzer:
     def __init__(self):
         logger.info("GraphAnalyzer initialized")
 
-    def analyze(self, graph: Dict[str, List[str]]) -> GraphMetrics:
+    def analyze(self, graph: GraphLike) -> GraphMetrics:
 
         if not isinstance(graph, dict):
             raise TypeError("graph must be dictionary")
@@ -206,4 +351,3 @@ def graph_to_vector(features: Dict[str, float]) -> np.ndarray:
 
 # Alias maintained for backward compatibility with src.graph.graph_features.
 ordered_graph_metrics_vector = graph_to_vector
-

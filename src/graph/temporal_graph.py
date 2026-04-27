@@ -30,7 +30,9 @@ class TemporalGraphFeatures:
     temporal_consistency: float
 
     def to_dict(self) -> Dict[str, float]:
-        return self.__dict__
+        # ``@dataclass(slots=True)`` strips ``__dict__``; use the
+        # generated ``__slots__`` to build the mapping instead.
+        return {f: getattr(self, f) for f in self.__slots__}
 
 
 # =========================================================
