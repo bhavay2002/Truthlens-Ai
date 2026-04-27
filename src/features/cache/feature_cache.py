@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # CONFIG  (single source of truth — re-exported by cache_manager)
 # =========================================================
 
-CACHE_VERSION = "v2"
+CACHE_VERSION = "v3"
 USE_COMPRESSION = True
 
 # Cap the in-process path -> Path memoization dict so long-running

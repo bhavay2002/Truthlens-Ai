@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
 
@@ -86,6 +87,10 @@ class FeaturePipeline:
 
     _initialized: bool = False
 
+    # Audit fix #1.8 — surface graph-merge failures instead of swallowing
+    # them at debug level. Counter is exposed for metrics scrape.
+    graph_merge_failures: int = 0
+
     # -----------------------------------------------------
 
     def initialize(self):
@@ -170,7 +175,17 @@ class FeaturePipeline:
                     features[f"graph_pipeline_narrative_{k}"] = float(v)
 
         except Exception as e:
-            logger.debug("Graph merge failed: %s", e)
+            # Audit fix #1.8 — broken graph pipeline used to log at
+            # debug level and yield an empty graph-features sub-dict;
+            # downstream model then saw all-zero graph signal and
+            # treated it as legitimate "no signal" instead of a bug.
+            self.graph_merge_failures += 1
+            logger.warning(
+                "Graph merge failed (count=%d): %s",
+                self.graph_merge_failures, e,
+            )
+            if os.getenv("TRUTHLENS_STRICT_FEATURES"):
+                raise
 
     # -----------------------------------------------------
 

@@ -118,14 +118,76 @@ class CacheManager:
             self.feature_set_fingerprint = self._compute_feature_set_fingerprint()
         return self.feature_set_fingerprint
 
+    # -----------------------------------------------------
+    # LEXICON FINGERPRINT
+    #
+    # SHA over the *contents* of every loaded lexicon source file. If
+    # any lexicon (bias, emotion, propaganda, …) changes on disk, the
+    # fingerprint changes and stale cache entries are auto-invalidated
+    # without requiring CACHE_VERSION to be bumped manually.
+    # -----------------------------------------------------
+
+    # Source files holding the in-process lexicons. Resolved once at
+    # class-load time and hashed lazily on first cache key computation.
+    _LEXICON_SOURCES: tuple = (
+        "src/features/bias/bias_lexicon.py",
+        "src/features/bias/bias_lexicon_features.py",
+        "src/features/bias/bias_features.py",
+        "src/features/emotion/emotion_lexicon.py",
+        "src/features/emotion/emotion_lexicon_features.py",
+        "src/features/emotion/emotion_features.py",
+        "src/features/propaganda/propaganda_lexicon_features.py",
+        "src/features/propaganda/propaganda_features.py",
+    )
+
+    lexicon_fingerprint: Optional[str] = field(default=None, init=False)
+
+    @classmethod
+    def _compute_lexicon_fingerprint(cls) -> str:
+        # Resolve relative paths against the project root (two levels up
+        # from this file: src/features/cache/cache_manager.py).
+        project_root = Path(__file__).resolve().parents[3]
+        h = hashlib.sha256()
+        h.update(b"lexicons-v1\n")
+        for rel in cls._LEXICON_SOURCES:
+            p = project_root / rel
+            if not p.is_file():
+                # Missing file is itself a meaningful signal — record
+                # the path so adding/removing a lexicon invalidates.
+                h.update(f"missing:{rel}\n".encode())
+                continue
+            try:
+                h.update(rel.encode())
+                h.update(b"\0")
+                h.update(p.read_bytes())
+                h.update(b"\n")
+            except OSError as exc:
+                logger.warning("Lexicon fingerprint read failed (%s): %s", rel, exc)
+                h.update(f"unreadable:{rel}\n".encode())
+        return h.hexdigest()[:16]
+
+    def _get_lexicon_fingerprint(self) -> str:
+        if self.lexicon_fingerprint is None:
+            self.lexicon_fingerprint = self._compute_lexicon_fingerprint()
+        return self.lexicon_fingerprint
+
     def _context_key(self, context: FeatureContext) -> str:
+
+        # Pull tokenizer_id out of metadata (if any) so switching
+        # roberta-base ↔ xlm-roberta-base or upgrading the tokenizer
+        # auto-invalidates without leaking BPE-aligned features into a
+        # different model head.  Audit fix #1.6.
+        meta = dict(context.metadata or {})
+        tokenizer_id = meta.pop("tokenizer_id", None)
 
         payload = {
             "version": CACHE_VERSION,
             "feature_set": self._get_feature_fingerprint(),
+            "lexicons": self._get_lexicon_fingerprint(),
+            "tokenizer_id": tokenizer_id,
             "text": context.text,
             "tokens": context.tokens,
-            "metadata": context.metadata,
+            "metadata": meta,
         }
 
         raw = json.dumps(payload, sort_keys=True, default=str)
