@@ -129,17 +129,17 @@ class PropagandaFeatures(BaseFeature):
         # -------------------------
         # RHETORIC + CAPS (shared, NER-masked)
         # -------------------------
-        # Audit fix §2.3 + §3.2 — share with bias / manipulation
-        # extractors via ``get_text_signals``; question-mark density
-        # stays local because it is not used elsewhere.
+        # Audit fix §2.3 + §3.2 + §4.3 — share with bias / manipulation
+        # extractors via ``get_text_signals``. ``question_density`` now
+        # also comes from the shared cache (was duplicated across three
+        # propaganda files prior to the §4.3 fix).
 
         signals = get_text_signals(context, n)
         caps_ratio = signals["caps_ratio"]
         # ``rhetoric`` historically aggregated ! and ? — keep that
-        # composite, but the ! component now comes from the shared,
+        # composite, but BOTH components now come from the shared,
         # headline-weighted, NER-aware path.
-        question_density = text.count("?") / (n + EPS)
-        rhetoric = signals["exclamation_density"] + question_density
+        rhetoric = signals["exclamation_density"] + signals["question_density"]
 
         # -------------------------
         # OUTPUT

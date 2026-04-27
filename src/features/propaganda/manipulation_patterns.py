@@ -125,8 +125,9 @@ class ManipulationPatterns(BaseFeature):
 
         signals = get_text_signals(context, n)
         caps_ratio = signals["caps_ratio"]
-        question_density = text.count("?") / (n + EPS)
-        rhetoric = signals["exclamation_density"] + question_density
+        # Audit fix §4.3 — question_density now sourced from the shared
+        # text_signals cache; was a duplicate ``text.count('?') / n`` here.
+        rhetoric = signals["exclamation_density"] + signals["question_density"]
 
         # -------------------------
         # OUTPUT

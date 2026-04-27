@@ -73,6 +73,17 @@ class LexicalFeatures(BaseFeature):
 
         entropy = normalized_entropy(probs)
 
+        # Audit fix §4.2 — publish the canonical token-frequency entropy
+        # to the per-batch shared cache. Any other extractor that wants
+        # a "lexical diversity" signal can read it from
+        # ``ctx.shared["lex_entropy"]`` instead of recomputing the same
+        # Shannon sum on the same token list. Falls back to ctx.cache
+        # for the single-sample inference path.
+        _shared = getattr(context, "shared", None)
+        _bucket = _shared if isinstance(_shared, dict) else getattr(context, "cache", None)
+        if isinstance(_bucket, dict):
+            _bucket["lex_entropy"] = float(entropy)
+
         # -------------------------
         # SIMPSON DIVERSITY
         # -------------------------

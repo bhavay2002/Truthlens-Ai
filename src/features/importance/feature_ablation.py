@@ -1,4 +1,13 @@
-# src/features/feature_ablation.py
+# src/features/importance/feature_ablation.py
+"""Feature ablation utilities — OFFLINE-ONLY.
+
+Audit fix §8 — this module is consumed exclusively by
+``src/evaluation/advanced_analysis.py`` for post-hoc explainability
+runs. It is **not** imported by ``src/inference/``, ``api/app.py``,
+or any model forward path. Do not register it on the live request
+pipeline; running an ablation sweep at request time would multiply
+latency by the number of features.
+"""
 
 from __future__ import annotations
 

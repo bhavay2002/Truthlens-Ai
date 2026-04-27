@@ -152,8 +152,10 @@ class PropagandaLexiconFeatures(BaseFeature):
         from src.features.base.text_signals import get_text_signals
         signals = get_text_signals(context, n)
         caps_ratio = signals["caps_ratio"]
-        question_density = text.count("?") / (n + EPS)
-        rhetoric = signals["exclamation_density"] + question_density
+        # Audit fix §4.3 — question_density also reads from the shared
+        # cache; was previously a duplicate ``text.count('?') / n``
+        # computation in this file.
+        rhetoric = signals["exclamation_density"] + signals["question_density"]
 
         # -------------------------
         # OUTPUT

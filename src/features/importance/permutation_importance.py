@@ -1,4 +1,12 @@
-# src/features/permutation_importance.py
+# src/features/importance/permutation_importance.py
+"""Permutation-importance utilities — OFFLINE-ONLY.
+
+Audit fix §8 — used exclusively by
+``src/evaluation/advanced_analysis.py``. Permutation importance
+requires K full-dataset re-scoring passes per feature, which makes
+it inappropriate for any inference path. Do not import from
+``src/inference/`` or ``api/app.py``.
+"""
 
 from __future__ import annotations
 

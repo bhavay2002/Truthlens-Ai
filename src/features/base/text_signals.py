@@ -132,15 +132,23 @@ def _count_caps_emphasis(words: List[str], deny: set[str]) -> int:
 
 
 def _compute_signals(text: str, n_tokens: int) -> Dict[str, float]:
-    """Compute ``(caps_ratio, exclamation_density)`` once for *text*.
+    """Compute ``(caps_ratio, exclamation_density, question_density)`` once for *text*.
 
     ``n_tokens`` is the canonical word-token count (from
     :func:`ensure_tokens_word`); using it as the denominator keeps the
     signal comparable across extractors regardless of how they happen
     to split words internally.
+
+    Audit fix §4.3 — ``question_density`` joins the cached signals so
+    propaganda + manipulation extractors stop recomputing the same
+    ``text.count('?') / n`` ratio from three different files.
     """
     if not text or n_tokens <= 0:
-        return {"caps_ratio": 0.0, "exclamation_density": 0.0}
+        return {
+            "caps_ratio": 0.0,
+            "exclamation_density": 0.0,
+            "question_density": 0.0,
+        }
 
     deny = _named_entity_uppercase_words(text)
     headline, body = _split_headline_body(text)
@@ -151,21 +159,28 @@ def _compute_signals(text: str, n_tokens: int) -> Dict[str, float]:
     headline_excl = headline.count("!")
     body_excl = body.count("!")
 
+    headline_q = headline.count("?")
+    body_q = body.count("?")
+
     weighted_caps = HEADLINE_WEIGHT * headline_caps + BODY_WEIGHT * body_caps
     weighted_excl = HEADLINE_WEIGHT * headline_excl + BODY_WEIGHT * body_excl
+    weighted_q = HEADLINE_WEIGHT * headline_q + BODY_WEIGHT * body_q
 
     caps_ratio = float(weighted_caps) / (float(n_tokens) + EPS)
     excl_density = float(weighted_excl) / (float(n_tokens) + EPS)
+    q_density = float(weighted_q) / (float(n_tokens) + EPS)
 
-    # Both are bounded ratios; clip defensively in case of pathological
-    # inputs (a 5-word headline of "BREAKING URGENT NEWS NOW NOW" would
-    # otherwise cross 1.0 due to the headline weight).
+    # All three are bounded ratios; clip defensively in case of
+    # pathological inputs (a 5-word headline of "BREAKING URGENT NEWS
+    # NOW NOW" would otherwise cross 1.0 due to the headline weight).
     caps_ratio = min(caps_ratio, 1.0)
     excl_density = min(excl_density, 1.0)
+    q_density = min(q_density, 1.0)
 
     return {
         "caps_ratio": caps_ratio,
         "exclamation_density": excl_density,
+        "question_density": q_density,
     }
 
 

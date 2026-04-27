@@ -1,4 +1,14 @@
-# src/features/shap_importance.py
+# src/features/importance/shap_importance.py
+"""SHAP-based importance utilities — OFFLINE-ONLY.
+
+Audit fix §8 — used exclusively by
+``src/evaluation/advanced_analysis.py`` for explainability reports.
+SHAP value computation is exponential in the number of features
+under exact attribution and several seconds per sample under the
+sampling approximation, so this module must not be wired into any
+inference path. Do not import from ``src/inference/`` or
+``api/app.py``.
+"""
 
 from __future__ import annotations
 
