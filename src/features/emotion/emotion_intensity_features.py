@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass
 from typing import Dict
 
@@ -11,6 +10,8 @@ import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
+from src.features.base.numerics import normalized_entropy
+from src.features.base.tokenization import ensure_tokens_word
 
 from src.features.emotion.emotion_schema import (
     EMOTION_LABELS,
@@ -67,20 +68,10 @@ WORD_TO_EMOTION = {
 
 
 # =========================================================
-# TOKENIZATION
-# =========================================================
-
-def _tokenize(text: str):
-    return re.findall(r"\b\w+\b", text.lower())
-
-
-# =========================================================
 # LEXICON EMOTION DETECTOR
 # =========================================================
 
-def _lexicon_emotions(text: str):
-
-    tokens = _tokenize(text)
+def _lexicon_emotions(tokens):
 
     counts = {emotion: 0 for emotion in EMOTION_LABELS}
 
@@ -137,10 +128,10 @@ class EmotionIntensityFeatures(BaseFeature):
 
     # -----------------------------------------------------
 
-    def _hybrid_emotions(self, text: str):
+    def _hybrid_emotions(self, text: str, tokens):
 
         # -------- Lexicon --------
-        counts, hits, tokens = _lexicon_emotions(text)
+        counts, hits, n_lex_tokens = _lexicon_emotions(tokens)
 
         lex_scores = (
             np.array([counts[e] for e in EMOTION_LABELS], dtype=np.float32)
@@ -166,7 +157,7 @@ class EmotionIntensityFeatures(BaseFeature):
         if total > 0:
             scores = scores / total
 
-        return scores, hits, tokens
+        return scores, hits, n_lex_tokens
 
     # -----------------------------------------------------
 
@@ -176,7 +167,8 @@ class EmotionIntensityFeatures(BaseFeature):
         if not text:
             return {}
 
-        scores, hits, token_count = self._hybrid_emotions(text)
+        tokens = ensure_tokens_word(context, text)
+        scores, hits, token_count = self._hybrid_emotions(text, tokens)
 
         token_count = max(token_count, 1)
 
@@ -202,11 +194,7 @@ class EmotionIntensityFeatures(BaseFeature):
         # Entropy (normalized)
         # -------------------------
 
-        if scores.sum() > 0:
-            entropy_raw = -np.sum(scores * np.log(scores + EPS))
-            entropy = entropy_raw / (np.log(len(scores)) + EPS)
-        else:
-            entropy = 0.0
+        entropy = normalized_entropy(scores)
 
         # -------------------------
         # Output

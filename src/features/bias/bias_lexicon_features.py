@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, List, Set
@@ -17,22 +16,13 @@ from src.features.base.lexicon_matcher import (
     compute_negation_mask,
     to_token_array,
 )
+from src.features.base.numerics import normalized_entropy
+from src.features.base.tokenization import ensure_tokens_word
 
 logger = logging.getLogger(__name__)
 
 EPS = 1e-8
 MAX_CLIP = 1.0
-
-
-# =========================================================
-# TOKENIZATION
-# =========================================================
-
-TOKEN_PATTERN = re.compile(r"[A-Za-z']+")
-
-
-def _tokenize(text: str) -> List[str]:
-    return TOKEN_PATTERN.findall(text.lower())
 
 
 # =========================================================
@@ -97,7 +87,7 @@ class BiasLexiconFeatures(BaseFeature):
             return {}
 
         text_lower = text.lower()
-        tokens = context.tokens or _tokenize(text_lower)
+        tokens = ensure_tokens_word(context, text)
 
         n = len(tokens)
         if n == 0:
@@ -142,11 +132,7 @@ class BiasLexiconFeatures(BaseFeature):
 
         probs = np.array(list(dist.values()), dtype=np.float32)
 
-        if probs.sum() < EPS:
-            entropy = 0.0
-        else:
-            entropy_raw = -np.sum(probs * np.log(probs + EPS))
-            entropy = entropy_raw / (np.log(len(probs)) + EPS)
+        entropy = normalized_entropy(probs)
 
         # -------------------------
         # PHRASES (COUNTED)

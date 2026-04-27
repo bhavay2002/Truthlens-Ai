@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Any
+from typing import Dict, Any
 
 import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
+from src.features.base.numerics import normalized_entropy
+from src.features.base.spacy_loader import get_shared_nlp
+from src.features.base.tokenization import ensure_tokens_word
 from src.features.emotion.emotion_schema import WORD_TO_EMOTION
 
 logger = logging.getLogger(__name__)
@@ -26,14 +28,6 @@ MAX_CLIP = 1.0
 FIRST_PERSON = {"i", "me", "my", "mine", "we", "our", "us"}
 SECOND_PERSON = {"you", "your", "yours"}
 THIRD_PERSON = {"he", "she", "they", "them", "their", "his", "her", "its"}
-
-
-# -----------------------------------------------------
-# Tokenizer
-# -----------------------------------------------------
-
-def _simple_tokenize(text: str) -> List[str]:
-    return re.findall(r"\b\w+\b", text.lower())
 
 
 # -----------------------------------------------------
@@ -56,14 +50,8 @@ class EmotionTargetFeatures(BaseFeature):
     def initialize(self) -> None:
         if self._nlp is not None or self._spacy_available:
             return
-        try:
-            import spacy
-            self._nlp = spacy.load("en_core_web_sm")
-            self._spacy_available = True
-        except Exception as exc:
-            logger.warning("spaCy unavailable; fallback mode: %s", exc)
-            self._nlp = None
-            self._spacy_available = False
+        self._nlp = get_shared_nlp("en_core_web_sm")
+        self._spacy_available = self._nlp is not None
 
     # -------------------------------------------------
     # spaCy-based (IMPROVED)
@@ -134,12 +122,7 @@ class EmotionTargetFeatures(BaseFeature):
         # Entropy (NEW)
         # -------------------------
 
-        if values.sum() > 0:
-            probs = values / (values.sum() + EPS)
-            entropy_raw = -np.sum(probs * np.log(probs + EPS))
-            entropy = entropy_raw / (np.log(len(values)) + EPS)
-        else:
-            entropy = 0.0
+        entropy = normalized_entropy(values)
 
         return {
             "emotion_target_self_ratio": self._safe(ratios["self"]),
@@ -155,9 +138,9 @@ class EmotionTargetFeatures(BaseFeature):
     # Fallback (IMPROVED)
     # -------------------------------------------------
 
-    def _extract_fallback(self, text: str) -> Dict[str, float]:
+    def _extract_fallback(self, context: FeatureContext) -> Dict[str, float]:
 
-        tokens = _simple_tokenize(text)
+        tokens = ensure_tokens_word(context)
 
         if not tokens:
             return self._empty()
@@ -209,7 +192,7 @@ class EmotionTargetFeatures(BaseFeature):
         if self._spacy_available:
             return self._extract_spacy(context.text)
 
-        return self._extract_fallback(context.text)
+        return self._extract_fallback(context)
 
     # -------------------------------------------------
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass
 from typing import Dict
 
@@ -12,6 +11,8 @@ import numpy as np
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
 from src.features.base.lexicon_matcher import LexiconMatcher, to_token_array
+from src.features.base.numerics import normalized_entropy
+from src.features.base.tokenization import ensure_tokens_word
 
 from src.features.emotion.emotion_schema import (
     EMOTION_LABELS,
@@ -62,9 +63,8 @@ _EMOTION_MATCHERS = {
 # Lexicon detector (vectorized)
 # -------------------------------------------------------
 
-def _lexicon_emotions(text: str):
+def _lexicon_emotions(tokens):
 
-    tokens = re.findall(r"\b\w+\b", text.lower())
     tokens_arr = to_token_array(tokens)
 
     counts = {
@@ -95,7 +95,8 @@ class EmotionFeatures(BaseFeature):
         if not text:
             return {}
 
-        counts, total_hits, total_tokens = _lexicon_emotions(text)
+        tokens = ensure_tokens_word(context, text)
+        counts, total_hits, total_tokens = _lexicon_emotions(tokens)
 
         if total_tokens == 0:
             return {}
@@ -121,11 +122,7 @@ class EmotionFeatures(BaseFeature):
         # ENTROPY
         # -------------------------
 
-        if dist.sum() > 0:
-            entropy_raw = -np.sum(dist * np.log(dist + EPS))
-            entropy = entropy_raw / (np.log(len(dist)) + EPS)
-        else:
-            entropy = 0.0
+        entropy = normalized_entropy(dist)
 
         # -------------------------
         # INTENSITY (FIXED)
@@ -140,7 +137,14 @@ class EmotionFeatures(BaseFeature):
         pos = sum(dist[EMOTION_LABELS.index(e)] for e in POSITIVE_EMOTIONS if e in EMOTION_LABELS)
         neg = sum(dist[EMOTION_LABELS.index(e)] for e in NEGATIVE_EMOTIONS if e in EMOTION_LABELS)
 
-        polarity = pos - neg  # [-1, 1] approx
+        # Defensive clamp: ``dist`` is normalised by ``total_hits`` which is
+        # the sum of *all* emotion counts including labels in neither
+        # ``POSITIVE_EMOTIONS`` nor ``NEGATIVE_EMOTIONS`` (e.g. ``surprise``,
+        # ``anticipation``). That keeps ``pos - neg`` in ``[-1, 1]`` in
+        # theory, but float accumulation can push the result a few ULPs
+        # outside that range, which then escapes the ``[0, 1]`` invariant
+        # of the ``(polarity + 1) / 2`` remap below. Clip first.
+        polarity = float(np.clip(pos - neg, -1.0, 1.0))
 
         # -------------------------
         # DOMINANT
@@ -162,7 +166,7 @@ class EmotionFeatures(BaseFeature):
             "emotion_coverage": self._safe(coverage),
             "emotion_intensity": self._safe(intensity),
             "emotion_entropy": self._safe(entropy),
-            "emotion_polarity": self._safe((polarity + 1) / 2),  # normalize to [0,1]
+            "emotion_polarity": self._safe((polarity + 1.0) / 2.0),  # normalize to [0,1]
         })
 
         features[f"emotion_dominant_{dominant_emotion}"] = 1.0

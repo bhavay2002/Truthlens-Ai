@@ -3,28 +3,22 @@
 from __future__ import annotations
 
 import logging
-import re
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Dict, List, Set, Any
+from typing import Dict, Set, Any
 
 import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
+from src.features.base.numerics import normalized_entropy
+from src.features.base.spacy_loader import get_shared_nlp
+from src.features.base.tokenization import ensure_tokens_word
 
 logger = logging.getLogger(__name__)
 
 EPS = 1e-8
 MAX_CLIP = 1.0
-
-
-# ---------------------------------------------------------
-# Tokenization
-# ---------------------------------------------------------
-
-def _tokenize(text: str) -> List[str]:
-    return re.findall(r"\b\w+\b", text.lower())
 
 
 # ---------------------------------------------------------
@@ -57,14 +51,8 @@ class NarrativeRoleFeatures(BaseFeature):
     def initialize(self) -> None:
         if self._nlp is not None or self._spacy_available:
             return
-        try:
-            import spacy
-            self._nlp = spacy.load("en_core_web_sm")
-            self._spacy_available = True
-        except Exception:
-            self._nlp = None
-            self._spacy_available = False
-            logger.warning("spaCy unavailable. Using fallback.")
+        self._nlp = get_shared_nlp("en_core_web_sm")
+        self._spacy_available = self._nlp is not None
 
     # -----------------------------------------------------
 
@@ -85,7 +73,7 @@ class NarrativeRoleFeatures(BaseFeature):
         if not text:
             return {}
 
-        tokens = context.tokens or _tokenize(text)
+        tokens = ensure_tokens_word(context, text)
         n = len(tokens)
 
         if n == 0:
@@ -129,11 +117,7 @@ class NarrativeRoleFeatures(BaseFeature):
         # ENTROPY
         # -------------------------
 
-        if probs.sum() > 0:
-            entropy_raw = -np.sum(probs * np.log(probs + EPS))
-            entropy = entropy_raw / (np.log(len(probs)) + EPS)
-        else:
-            entropy = 0.0
+        entropy = normalized_entropy(probs)
 
         # -------------------------
         # BALANCE (FIXED)

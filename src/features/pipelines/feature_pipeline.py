@@ -12,6 +12,7 @@ from src.features.fusion.feature_fusion import FeatureFusion
 from src.features.feature_schema_validator import FeatureSchemaValidator
 from src.graph.graph_pipeline import GraphPipeline
 from src.features.base.base_feature import FeatureContext
+from src.features.base.tokenization import ensure_tokens_word
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +179,11 @@ class FeaturePipeline:
         if not self._initialized:
             self.initialize()
 
+        # Tokenize ONCE at the top of the pipeline. Every downstream
+        # extractor reads `ctx.tokens_word` instead of re-running the
+        # same regex against the same text.
+        ensure_tokens_word(ctx)
+
         with torch.no_grad():
             if torch.cuda.is_available():
                 with torch.autocast("cuda"):
@@ -207,6 +213,8 @@ class FeaturePipeline:
             if not isinstance(ctx.cache, dict):
                 ctx.cache = {}
             ctx.shared = shared_cache
+            # Tokenize ONCE per context at the top of the pipeline.
+            ensure_tokens_word(ctx)
 
         # Vectorized per-feature dispatch through fusion.extract_batch
         # (lexicon extractors override extract_batch for ~10-50x speedup).

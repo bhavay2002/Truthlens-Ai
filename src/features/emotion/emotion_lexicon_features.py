@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import logging
-import re
-from collections import Counter
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict
 
 import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
 from src.features.base.lexicon_matcher import LexiconMatcher, to_token_array
+from src.features.base.numerics import normalized_entropy
+from src.features.base.tokenization import ensure_tokens_word
 
 from src.features.emotion.emotion_schema import (
     EMOTION_LABELS,
@@ -23,14 +23,6 @@ logger = logging.getLogger(__name__)
 
 EPS = 1e-8
 MAX_CLIP = 1.0
-
-
-# -----------------------------------------------------
-# Tokenizer
-# -----------------------------------------------------
-
-def _tokenize(text: str) -> List[str]:
-    return re.findall(r"\b\w+\b", text.lower())
 
 
 # -----------------------------------------------------
@@ -74,7 +66,7 @@ class EmotionLexiconFeatures(BaseFeature):
         if not text:
             return {}
 
-        tokens = context.tokens or _tokenize(text)
+        tokens = ensure_tokens_word(context, text)
         n_tokens = len(tokens)
 
         if n_tokens == 0:
@@ -127,11 +119,7 @@ class EmotionLexiconFeatures(BaseFeature):
         # Entropy (FIXED)
         # -------------------------
 
-        if dist.sum() > 0:
-            entropy_raw = -np.sum(dist * np.log(dist + EPS))
-            entropy = entropy_raw / (np.log(len(dist)) + EPS)
-        else:
-            entropy = 0.0
+        entropy = normalized_entropy(dist)
 
         # -------------------------
         # Output

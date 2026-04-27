@@ -12,6 +12,9 @@ import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
+from src.features.base.numerics import normalized_entropy
+from src.features.base.spacy_loader import get_shared_nlp
+from src.features.base.tokenization import ensure_tokens_word
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +30,53 @@ def _simple_sentence_split(text: str) -> List[str]:
     return [s.strip() for s in re.split(r"[.!?]+", text) if s.strip()]
 
 
-def _simple_tokenize(text: str) -> List[str]:
-    return re.findall(r"\b\w+\b", text.lower())
+def _memoized_dependency_depths(tokens) -> List[int]:
+    """Return the dep-tree depth of every token in O(N) amortised time.
+
+    The previous implementation walked from each token up to the root
+    independently, paying O(N) per token and O(N^2) per document. For
+    documents on the order of a few thousand tokens (common for long
+    articles processed by the misinformation pipeline) this dominated the
+    syntactic extractor's wall-clock cost.
+
+    Here we cache each token's depth keyed by ``token.i`` and re-use
+    cached ancestors when ascending. Each token is therefore visited at
+    most twice across the whole pass.
+    """
+    depth_cache: Dict[int, int] = {}
+    out: List[int] = []
+
+    for token in tokens:
+        # Build the ascent chain up until the cache hits or we reach the
+        # root (a token whose head is itself, per spaCy's convention).
+        chain: List[Any] = []
+        cur = token
+        seen = set()
+        # Cap defensively: pathological deps + long sentences should not
+        # turn this into an O(depth^2) re-walk.
+        while cur.i not in depth_cache and cur.head != cur and len(chain) < 100:
+            if cur.i in seen:
+                break
+            seen.add(cur.i)
+            chain.append(cur)
+            cur = cur.head
+
+        # ``cur`` is now either a cached node or the root.
+        if cur.i in depth_cache:
+            base = depth_cache[cur.i]
+        else:
+            # Root or the cycle-break sentinel; treat as depth 0.
+            base = 0
+            depth_cache[cur.i] = 0
+
+        # Backfill cache top-down so subsequent ascents short-circuit.
+        for t in reversed(chain):
+            base += 1
+            depth_cache[t.i] = base
+
+        out.append(depth_cache[token.i])
+
+    return out
 
 
 # ---------------------------------------------------------
@@ -51,14 +99,8 @@ class SyntacticFeatures(BaseFeature):
     def initialize(self) -> None:
         if self._nlp is not None or self._spacy_available:
             return
-        try:
-            import spacy
-            self._nlp = spacy.load("en_core_web_sm")
-            self._spacy_available = True
-        except Exception:
-            self._nlp = None
-            self._spacy_available = False
-            logger.warning("spaCy unavailable → fallback mode")
+        self._nlp = get_shared_nlp("en_core_web_sm")
+        self._spacy_available = self._nlp is not None
 
     # -----------------------------------------------------
     # spaCy version
@@ -81,8 +123,7 @@ class SyntacticFeatures(BaseFeature):
         pos_probs = pos_vals / (pos_vals.sum() + EPS)
 
         # entropy
-        entropy_raw = -np.sum(pos_probs * np.log(pos_probs + EPS))
-        pos_entropy = entropy_raw / np.log(len(pos_probs) + EPS)
+        pos_entropy = normalized_entropy(pos_probs)
 
         # -------------------------
         # SENTENCE STRUCTURE
@@ -104,8 +145,7 @@ class SyntacticFeatures(BaseFeature):
         # entropy of sentence lengths
         if lengths.size > 1:
             probs = lengths / (lengths.sum() + EPS)
-            ent_raw = -np.sum(probs * np.log(probs + EPS))
-            sent_entropy = ent_raw / np.log(len(probs) + EPS)
+            sent_entropy = normalized_entropy(probs)
         else:
             sent_entropy = 0.0
 
@@ -113,17 +153,7 @@ class SyntacticFeatures(BaseFeature):
         # SYNTACTIC COMPLEXITY
         # -------------------------
 
-        depths = []
-
-        for token in tokens:
-            depth = 0
-            head = token
-            while head.head != head:
-                depth += 1
-                head = head.head
-                if depth > 20:
-                    break
-            depths.append(depth)
+        depths = _memoized_dependency_depths(tokens)
 
         complexity = float(np.mean(depths)) if depths else 0.0
 
@@ -158,9 +188,10 @@ class SyntacticFeatures(BaseFeature):
     # fallback
     # -----------------------------------------------------
 
-    def _extract_fallback(self, text: str) -> Dict[str, float]:
+    def _extract_fallback(self, context: FeatureContext) -> Dict[str, float]:
 
-        tokens = _simple_tokenize(text)
+        text = context.text
+        tokens = ensure_tokens_word(context)
         sentences = _simple_sentence_split(text)
 
         n = len(tokens) or 1
@@ -191,7 +222,7 @@ class SyntacticFeatures(BaseFeature):
             doc = self._nlp(text)
             return self._extract_spacy_doc(doc)
 
-        return self._extract_fallback(text)
+        return self._extract_fallback(context)
 
     # -----------------------------------------------------
 

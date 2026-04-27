@@ -3,30 +3,21 @@
 from __future__ import annotations
 
 import logging
-import re
 from collections import Counter
 from dataclasses import dataclass
-from typing import Dict, List, Set
+from typing import Dict, Set
 
 import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
+from src.features.base.numerics import normalized_entropy
+from src.features.base.tokenization import ensure_tokens_word
 
 logger = logging.getLogger(__name__)
 
 EPS = 1e-8
 MAX_CLIP = 1.0
-
-
-# ---------------------------------------------------------
-# Tokenization
-# ---------------------------------------------------------
-
-TOKEN_PATTERN = re.compile(r"[A-Za-z']+")
-
-def _tokenize(text: str) -> List[str]:
-    return TOKEN_PATTERN.findall(text.lower())
 
 
 # ---------------------------------------------------------
@@ -72,7 +63,7 @@ class ManipulationPatterns(BaseFeature):
         if not text:
             return {}
 
-        tokens = context.tokens or _tokenize(text)
+        tokens = ensure_tokens_word(context, text)
         n = len(tokens)
 
         if n == 0:
@@ -117,11 +108,7 @@ class ManipulationPatterns(BaseFeature):
         # ENTROPY (CRITICAL)
         # -------------------------
 
-        if probs.sum() > 0:
-            entropy_raw = -np.sum(probs * np.log(probs + EPS))
-            entropy = entropy_raw / (np.log(len(probs)) + EPS)
-        else:
-            entropy = 0.0
+        entropy = normalized_entropy(probs)
 
         # -------------------------
         # DIVERSITY (WEIGHTED)

@@ -8,6 +8,7 @@ from typing import Dict, List, Union
 import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
+from src.features.base.tokenization import ensure_tokens_word
 from src.features.fusion.feature_merger import merge_features
 
 logger = logging.getLogger(__name__)
@@ -82,6 +83,10 @@ class FeatureFusion:
         self._ensure_validated()
         self._ensure_initialized()
 
+        # Tokenize once at the top so each extractor reads
+        # `context.tokens_word` instead of re-running its own regex.
+        ensure_tokens_word(context)
+
         outputs: List[Dict[str, float]] = []
 
         for feature in self.features:
@@ -107,6 +112,10 @@ class FeatureFusion:
 
         if not contexts:
             return []
+
+        # Tokenize each context once before per-feature dispatch.
+        for ctx in contexts:
+            ensure_tokens_word(ctx)
 
         n = len(contexts)
         per_context: List[List[Dict[str, float]]] = [[] for _ in range(n)]

@@ -3,28 +3,21 @@
 from __future__ import annotations
 
 import logging
-import re
 from collections import Counter
 from dataclasses import dataclass
-from typing import Dict, List, Set
+from typing import Dict, Set
 
 import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
+from src.features.base.numerics import normalized_entropy
+from src.features.base.tokenization import ensure_tokens_word
 
 logger = logging.getLogger(__name__)
 
 EPS = 1e-8
 MAX_CLIP = 1.0
-
-
-# ---------------------------------------------------------
-# Tokenization
-# ---------------------------------------------------------
-
-def _tokenize(text: str) -> List[str]:
-    return re.findall(r"\b\w+\b", text.lower())
 
 
 # ---------------------------------------------------------
@@ -62,7 +55,7 @@ class NarrativeFeatures(BaseFeature):
         if not text:
             return {}
 
-        tokens = context.tokens or _tokenize(text)
+        tokens = ensure_tokens_word(context, text)
         n = len(tokens)
 
         if n == 0:
@@ -120,14 +113,8 @@ class NarrativeFeatures(BaseFeature):
         # ENTROPY
         # -------------------------
 
-        def entropy_fn(v):
-            if v.sum() > 0:
-                e = -np.sum(v * np.log(v + EPS))
-                return e / (np.log(len(v)) + EPS)
-            return 0.0
-
-        role_entropy = entropy_fn(role_dist)
-        context_entropy = entropy_fn(ctx_dist)
+        role_entropy = normalized_entropy(role_dist)
+        context_entropy = normalized_entropy(ctx_dist)
 
         # -------------------------
         # PROGRESSION (FIXED)

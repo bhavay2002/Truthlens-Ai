@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
+from src.features.base.numerics import normalized_entropy
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +56,7 @@ class SemanticFeatures(BaseFeature):
         probs = np.abs(emb_norm)
         probs /= (np.sum(probs) + EPS)
 
-        entropy_raw = -np.sum(probs * np.log(probs + EPS))
-        entropy = entropy_raw / np.log(len(probs) + EPS)
+        entropy = normalized_entropy(probs)
 
         # -------------------------
         # ANISOTROPY (IMPORTANT)

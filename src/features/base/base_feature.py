@@ -35,7 +35,22 @@ class FeatureContext:
     # -----------------------------------
     # NLP / Preprocessing
     # -----------------------------------
+    # Legacy field — kept for backward compatibility with callers that
+    # still populate it. New code should use `tokens_word`.
     tokens: Optional[List[str]] = None
+
+    # Canonical lowercased Unicode word tokens, computed once at the top
+    # of the pipeline by `ensure_tokens_word(ctx)` (see
+    # `src/features/base/tokenization.py`). Every text/lexicon/bias/etc.
+    # extractor reads this instead of re-tokenizing the same string.
+    tokens_word: Optional[List[str]] = None
+
+    # Subword (BPE) token IDs, computed once when an HF tokenizer is
+    # configured on the pipeline. Currently unused by the existing
+    # extractors; reserved for future attention/embedding-aligned
+    # features so they don't re-encode the same text.
+    tokens_bpe: Optional[List[int]] = None
+
     embeddings: Optional[Any] = None  # backward compatibility
 
     # -----------------------------------
