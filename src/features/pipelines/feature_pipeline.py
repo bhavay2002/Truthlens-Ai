@@ -223,7 +223,18 @@ class FeaturePipeline:
 
         return features
 
-# Backward-compat constant referenced by src.inference.feature_preparer (left empty by design).
-ALL_BIAS_MODULE_FEATURE_NAMES: list[str] = []
-BIAS_FEATURE_NAMES: list[str] = []
+# =========================================================
+# Backward-compat re-exports (canonical source: feature_schema.py)
+# =========================================================
+from src.features.feature_schema import (
+    BIAS_FEATURES as BIAS_FEATURE_NAMES,
+    FRAMING_FEATURES as FRAMING_FEATURE_NAMES,
+    IDEOLOGICAL_FEATURES as IDEOLOGICAL_FEATURE_NAMES,
+)
+
+# Union of every bias-adjacent feature group, as expected by
+# src.inference.feature_preparer.
+ALL_BIAS_MODULE_FEATURE_NAMES: list[str] = sorted(
+    set(BIAS_FEATURE_NAMES + FRAMING_FEATURE_NAMES + IDEOLOGICAL_FEATURE_NAMES)
+)
 

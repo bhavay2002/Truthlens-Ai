@@ -261,3 +261,33 @@ Refinement-phase fixes (#10–12):
 - **#10 Pooler bypass.** `TransformerEncoder` sets `config.add_pooling_layer = False` before `AutoModel.from_pretrained`, so RoBERTa never instantiates the random-init `pooler.dense` (we use raw CLS / configured pooling and never read `pooler_output`). On startup the encoder logs either `"Encoder pooler bypassed for <model>"` or, if the model class ignored the flag, a warning that the pooler module is still present.
 - **#11 Anomaly-logging rate limit + severity gate.** Spike batch dumps are now gated by *both* a hard cap (`TRUTHLENS_MAX_DEBUG_DUMPS=20`) **and** a "log every Nth spike OR every major spike" rule. A spike is "major" when the raw task loss exceeds its EMA by `TRUTHLENS_MAJOR_SPIKE_RATIO` (default 3.0×); otherwise we only dump every `TRUTHLENS_SPIKE_LOG_EVERY` (default 10) spike. Warning lines still fire on every spike — only the on-disk `.pt` dumps are throttled.
 - **#12 Pre/post-clip gradient visibility.** The trainer used to call `_grad_tracker.update()` *after* `clip_grad_norm_`, so per-parameter norms always read ≈ `max_grad_norm` (the famous "grad_norm always ≈ 1.0" illusion). The order is now: tracker → anomaly classify → clip → log `grad_norm pre=… post=…`. A separate warning fires when `pre_clip > max_grad_norm × TRUTHLENS_HIDDEN_EXPLOSION_RATIO` (default 5.0), surfacing instability that clipping was previously masking.
+
+---
+
+## Apr 27 2026 — `src/features/` audit fixes
+
+Resolved the critical / perf items from the 13-section audit. App restarts cleanly with all 15 analyzers, no import errors.
+
+**Schema (C1, prior commit + this commit):**
+- `src/features/feature_schema.py` is the canonical schema (added FRAMING / IDEOLOGICAL / PROPAGANDA / CONFLICT, fixed `bias_variance` → `bias_diversity`, gave narrative-role features the `_ratio` suffix to disambiguate from the `narrative` label columns in `data_contracts`).
+- `src/features/pipelines/feature_schema.py` is now a thin re-export shim (kills the schema-drift surface).
+- `src/features/pipelines/feature_pipeline.py` no longer ships empty `BIAS_FEATURE_NAMES` / `ALL_BIAS_MODULE_FEATURE_NAMES` stubs — they re-export from the canonical schema, so `src.inference.feature_preparer` finally sees the real list.
+
+**Narrative role rename (C3):** `narrative_role_features.py` now emits `narrative_role_{hero,villain,victim,polarization}_ratio`, matching the canonical schema. Comment marks the deliberate split between FEATURE names (model inputs) and the `hero/villain/victim` LABEL columns from `data_contracts.CONTRACTS["narrative"]`.
+
+**Fusion (C2):** `FeatureFusion.normalize` defaults to `False`. Per-row z-score across mixed-unit features is statistically invalid; population scaling must go through `FeatureScaling` with a train-fitted scaler.
+
+**Caches:**
+- C4: `_graph_cache` in `BatchFeaturePipeline` is now an `OrderedDict` with `_GRAPH_CACHE_MAX = 2048` LRU eviction; keys are sha256 of text, not the raw text.
+- C6: `LRUCache.get` / `set` in `cache_manager.py` deep-copy at the dict level so callers can't mutate cached vectors.
+- C8: `CACHE_VERSION` lives in `feature_cache.py` only; `cache_manager.py` re-imports it (no more split-brain constant).
+- C9: `_context_key` now folds in a sha256-truncated fingerprint of `FeatureRegistry.list_features()`, so toggling the registered feature set auto-invalidates without bumping `CACHE_VERSION`.
+- `FeatureCache._path_cache` is a bounded `OrderedDict` (cap 50_000) so the in-process key→Path memo can't grow forever on long-running services.
+
+**Batch pipeline:**
+- C5: `_process_batch`'s catch-all no longer returns `[{} for _ in batch]`. On batch failure it re-runs each context one-at-a-time; per-sample failures are logged and re-raised so `_dataloader_extract` can surface them instead of silently producing empty rows.
+- C7: `embeddings.detach().to("cpu").contiguous()` before stuffing into `ctx.cache["_shared_cache"]["embedding"]` — fixes the steady VRAM growth from pinned GPU tensors.
+
+**Bias lexicon perf (P12):** `compute_bias_features` previously instantiated `BiasLexiconFeatures` once per call AND once per sentence in the heatmap loop. Now cached as a module-level singleton via `_get_extractor()`.
+
+**Skipped:** P1 (vectorize `bias_features.py::_weighted_ratio`) — the lexicons there are still placeholder ellipsis sets (`{...}`), so the function is dead code; vectorizing it would be premature.

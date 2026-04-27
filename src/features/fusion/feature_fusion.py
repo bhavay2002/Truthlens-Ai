@@ -25,7 +25,11 @@ class FeatureFusion:
     features: List[BaseFeature] = field(default_factory=list)
     enforce_unique_names: bool = True
 
-    normalize: bool = True
+    # Per-sample z-score across feature TYPES is statistically invalid:
+    # it mixes units (ratios, counts, densities, embeddings) within one
+    # row.  Population-level scaling MUST be applied via FeatureScaling
+    # using a scaler fitted on the training set.  Default: OFF.
+    normalize: bool = False
     return_vector: bool = False
 
     _feature_order: List[str] = field(default_factory=list, init=False)

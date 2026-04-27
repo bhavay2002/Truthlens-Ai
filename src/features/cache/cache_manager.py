@@ -13,12 +13,13 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from src.features.base.base_feature import FeatureContext
-from src.features.cache.feature_cache import FeatureCache
+from src.features.cache.feature_cache import FeatureCache, CACHE_VERSION
 
 logger = logging.getLogger(__name__)
 
 FeatureVector = Dict[str, float]
-CACHE_VERSION = "v2"  # 🔥 CRITICAL
+# CACHE_VERSION is re-exported from feature_cache to avoid the previous
+# split-brain (two constants that had to be edited in lock-step).
 
 
 # =========================================================
@@ -34,10 +35,15 @@ class LRUCache:
         if key not in self.store:
             return None
         self.store.move_to_end(key)
-        return self.store[key]
+        # Return a shallow copy so downstream pruning / scaling cannot
+        # corrupt the cached object (FeatureVector values are floats so
+        # a shallow copy is sufficient).
+        return dict(self.store[key])
 
     def set(self, key: str, value: FeatureVector) -> None:
-        self.store[key] = value
+        # Store a copy so subsequent caller mutation does not propagate
+        # back into the cache.
+        self.store[key] = dict(value)
         self.store.move_to_end(key)
 
         if len(self.store) > self.max_items:
@@ -58,6 +64,10 @@ class CacheManager:
     _memory_cache: LRUCache = field(init=False)
 
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
+
+    # Lazily-computed fingerprint of the registered feature set; included
+    # in cache keys so enable/disable of features auto-invalidates.
+    feature_set_fingerprint: Optional[str] = field(default=None, init=False)
 
     # -----------------------------------------------------
 
@@ -85,12 +95,34 @@ class CacheManager:
 
     # -----------------------------------------------------
     # VERSIONED KEY (CRITICAL)
+    #
+    # The key includes a *feature-set fingerprint* derived from the
+    # currently-registered feature names.  This means: enabling /
+    # disabling features automatically invalidates stale cache entries
+    # without requiring CACHE_VERSION to be bumped manually.
     # -----------------------------------------------------
+
+    @staticmethod
+    def _compute_feature_set_fingerprint() -> str:
+        try:
+            from src.features.base.feature_registry import FeatureRegistry
+            names = sorted(FeatureRegistry.list_features())
+        except Exception:
+            names = []
+        if not names:
+            return "no-registry"
+        return hashlib.sha256("|".join(names).encode()).hexdigest()[:16]
+
+    def _get_feature_fingerprint(self) -> str:
+        if self.feature_set_fingerprint is None:
+            self.feature_set_fingerprint = self._compute_feature_set_fingerprint()
+        return self.feature_set_fingerprint
 
     def _context_key(self, context: FeatureContext) -> str:
 
         payload = {
             "version": CACHE_VERSION,
+            "feature_set": self._get_feature_fingerprint(),
             "text": context.text,
             "tokens": context.tokens,
             "metadata": context.metadata,

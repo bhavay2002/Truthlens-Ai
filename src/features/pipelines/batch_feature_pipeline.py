@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
 
@@ -16,6 +18,15 @@ from src.features.pipelines.feature_pipeline import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Bound the per-pipeline graph cache so long-running services do not
+# accumulate one entry per unique input text indefinitely (OOM risk).
+_GRAPH_CACHE_MAX = 2048
+
+
+def _graph_cache_key(text: str) -> str:
+    """Hash long texts to keep the cache key index compact."""
+    return hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
 
 
 # =========================================================
@@ -59,8 +70,11 @@ class BatchFeaturePipeline:
     # 🔥 GLOBAL SHARED CACHE
     _shared_cache: Dict[str, Any] = field(default_factory=dict, init=False)
 
-    # 🔥 GRAPH CACHE (NEW)
-    _graph_cache: Dict[str, Any] = field(default_factory=dict, init=False)
+    # Bounded LRU graph cache.  Key = sha256(text), value = graph
+    # output dict.  Replaces the previously-unbounded plain dict.
+    _graph_cache: "OrderedDict[str, Any]" = field(
+        default_factory=OrderedDict, init=False
+    )
 
     # -----------------------------------------------------
 
@@ -119,9 +133,13 @@ class BatchFeaturePipeline:
 
             embeddings = outputs.last_hidden_state
 
-            # 🔥 store per context
+            # Detach + move to CPU so the cached tensor does not pin
+            # GPU memory for the lifetime of every FeatureContext in
+            # the batch (was a steady VRAM leak).
+            embeddings_cpu = embeddings.detach().to("cpu").contiguous()
+
             for i, ctx in enumerate(batch):
-                ctx.cache["_shared_cache"]["embedding"] = embeddings[i]
+                ctx.cache["_shared_cache"]["embedding"] = embeddings_cpu[i]
 
         except Exception as e:
             logger.warning("Embedding computation failed: %s", e)
@@ -137,16 +155,23 @@ class BatchFeaturePipeline:
 
         for ctx in batch:
 
-            text = ctx.text
+            key = _graph_cache_key(ctx.text)
 
-            if text not in self._graph_cache:
+            cached = self._graph_cache.get(key)
+            if cached is None:
                 try:
-                    self._graph_cache[text] = self.pipeline.graph_pipeline.run(text)
+                    cached = self.pipeline.graph_pipeline.run(ctx.text)
                 except Exception as e:
                     logger.warning("Graph failed: %s", e)
-                    self._graph_cache[text] = {}
+                    cached = {}
+                self._graph_cache[key] = cached
+                # LRU eviction
+                if len(self._graph_cache) > _GRAPH_CACHE_MAX:
+                    self._graph_cache.popitem(last=False)
+            else:
+                self._graph_cache.move_to_end(key)
 
-            ctx.cache["graph_pipeline_output"] = self._graph_cache[text]
+            ctx.cache["graph_pipeline_output"] = cached
 
     # =====================================================
     # CORE EXECUTION
@@ -196,8 +221,24 @@ class BatchFeaturePipeline:
                 return self._run_batch_extract(batch)
 
         except Exception as e:
-            logger.exception("Batch failed: %s", e)
-            return [{} for _ in batch]
+            # Batch-level failure (e.g. AMP / OOM): fall back to per-sample
+            # extraction so a single bad row cannot null out the whole
+            # batch.  Failed samples are logged and re-raised so callers
+            # see them — never silently substitute empty dicts (that
+            # masks real bugs and produces silently-broken training data).
+            logger.warning(
+                "Batch extract failed (%s); falling back to per-sample mode.", e
+            )
+            results: list[dict] = []
+            for i, ctx in enumerate(batch):
+                try:
+                    results.append(self._run_batch_extract([ctx])[0])
+                except Exception as inner:
+                    logger.exception(
+                        "Per-sample extract failed for index %d: %s", i, inner
+                    )
+                    raise
+            return results
 
     # =====================================================
     # DATALOADER

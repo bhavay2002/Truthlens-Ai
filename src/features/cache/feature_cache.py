@@ -7,6 +7,7 @@ import json
 import logging
 import threading
 import tempfile
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -16,11 +17,15 @@ logger = logging.getLogger(__name__)
 
 
 # =========================================================
-# CONFIG
+# CONFIG  (single source of truth — re-exported by cache_manager)
 # =========================================================
 
 CACHE_VERSION = "v2"
 USE_COMPRESSION = True
+
+# Cap the in-process path -> Path memoization dict so long-running
+# services do not accumulate one entry per unique cache key forever.
+_PATH_CACHE_MAX = 50_000
 
 
 # =========================================================
@@ -31,7 +36,9 @@ class FeatureCache:
 
     def __init__(self, cache_dir: str | Path = "cache") -> None:
         self.cache_dir = Path(cache_dir)
-        self._path_cache: Dict[str, Path] = {}
+        # Bounded LRU so the in-process key->Path memo never grows
+        # without limit on long-running services.
+        self._path_cache: "OrderedDict[str, Path]" = OrderedDict()
         self._lock = threading.Lock()
 
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -42,6 +49,7 @@ class FeatureCache:
 
         with self._lock:
             if key in self._path_cache:
+                self._path_cache.move_to_end(key)
                 return self._path_cache[key]
 
             digest = hashlib.sha256(key.encode()).hexdigest()
@@ -49,6 +57,10 @@ class FeatureCache:
 
             path = self.cache_dir / filename
             self._path_cache[key] = path
+
+            if len(self._path_cache) > _PATH_CACHE_MAX:
+                self._path_cache.popitem(last=False)
+
             return path
 
     # -----------------------------------------------------

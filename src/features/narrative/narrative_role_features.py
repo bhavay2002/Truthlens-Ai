@@ -157,12 +157,16 @@ class NarrativeRoleFeatures(BaseFeature):
         # OUTPUT
         # -------------------------
 
+        # Names MUST match src/features/feature_schema.py:NARRATIVE_FEATURES.
+        # These are FEATURE names (model inputs) and are intentionally
+        # distinct from the LABEL columns ("hero", "villain", "victim")
+        # declared in data_contracts.CONTRACTS["narrative"].
         return {
-            "narrative_role_hero": self._safe(dist["hero"]),
-            "narrative_role_villain": self._safe(dist["villain"]),
-            "narrative_role_victim": self._safe(dist["victim"]),
+            "narrative_role_hero_ratio": self._safe(dist["hero"]),
+            "narrative_role_villain_ratio": self._safe(dist["villain"]),
+            "narrative_role_victim_ratio": self._safe(dist["victim"]),
 
-            "narrative_role_polarization": self._safe(polarization),
+            "narrative_role_polarization_ratio": self._safe(polarization),
 
             "narrative_role_intensity": self._safe(intensity),
             "narrative_role_entropy": self._safe(entropy),

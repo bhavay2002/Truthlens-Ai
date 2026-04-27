@@ -34,12 +34,31 @@ _TOKEN_PATTERN = re.compile(r"[A-Za-z']+")
 
 
 # ---------------------------------------------------------
+# Singleton extractor
+#
+# BiasLexiconFeatures previously got constructed on every call to
+# compute_bias_features AND once per sentence in the heatmap loop.
+# For long articles that meant dozens of full re-initializations per
+# request.  Cache a single instance at module scope.
+# ---------------------------------------------------------
+
+_EXTRACTOR: BiasLexiconFeatures | None = None
+
+
+def _get_extractor() -> BiasLexiconFeatures:
+    global _EXTRACTOR
+    if _EXTRACTOR is None:
+        _EXTRACTOR = BiasLexiconFeatures()
+    return _EXTRACTOR
+
+
+# ---------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------
 
 def compute_bias_features(text: str) -> BiasResult:
 
-    extractor = BiasLexiconFeatures()
+    extractor = _get_extractor()
 
     tokens = _TOKEN_PATTERN.findall(text.lower())
 
