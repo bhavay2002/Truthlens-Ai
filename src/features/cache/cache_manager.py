@@ -94,6 +94,57 @@ class CacheManager:
         return self.namespaces[namespace]
 
     # -----------------------------------------------------
+    # PRUNE  (audit fix #1.5)
+    #
+    # Sweep every namespace under base_cache_dir, plus any namespaces
+    # registered in this process, applying the same TTL + byte-budget
+    # eviction.  Safe to invoke at process start: missing dirs and
+    # transient OS errors are logged and skipped, never raised.
+    # -----------------------------------------------------
+
+    def prune_all(
+        self,
+        *,
+        max_bytes_per_namespace: Optional[int] = None,
+        max_age_days: Optional[float] = None,
+    ) -> Dict[str, Dict[str, int]]:
+
+        results: Dict[str, Dict[str, int]] = {}
+        seen: set[Path] = set()
+
+        # In-process namespaces first (they own the live LRU memo we
+        # need to invalidate on file deletion).
+        for ns, cache in list(self.namespaces.items()):
+            try:
+                results[ns] = cache.prune(
+                    max_bytes=max_bytes_per_namespace,
+                    max_age_days=max_age_days,
+                )
+                seen.add(cache.cache_dir.resolve())
+            except Exception as exc:
+                logger.warning("Prune failed for namespace %s: %s", ns, exc)
+
+        # Plus any namespaces persisted on disk from a previous run that
+        # have not yet been registered this process.
+        base = self.base_cache_dir or Path("cache")
+        if base.exists():
+            for child in base.iterdir():
+                if not child.is_dir():
+                    continue
+                if child.resolve() in seen:
+                    continue
+                try:
+                    cache = FeatureCache(child)
+                    results[child.name] = cache.prune(
+                        max_bytes=max_bytes_per_namespace,
+                        max_age_days=max_age_days,
+                    )
+                except Exception as exc:
+                    logger.warning("Prune failed for dir %s: %s", child, exc)
+
+        return results
+
+    # -----------------------------------------------------
     # VERSIONED KEY (CRITICAL)
     #
     # The key includes a *feature-set fingerprint* derived from the

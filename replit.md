@@ -307,3 +307,23 @@ Resolved the critical / perf items from the 13-section audit. App restarts clean
 **Bias lexicon perf (P12):** `compute_bias_features` previously instantiated `BiasLexiconFeatures` once per call AND once per sentence in the heatmap loop. Now cached as a module-level singleton via `_get_extractor()`.
 
 **Skipped:** P1 (vectorize `bias_features.py::_weighted_ratio`) — the lexicons there are still placeholder ellipsis sets (`{...}`), so the function is dead code; vectorizing it would be premature.
+
+## Apr 27 2026 — refined audit tasks 6 / 7 / 8
+
+**Task 6 (audit 1.2 + 1.3 + warning 1.8):**
+- `src/graph/graph_pipeline.py` now exposes `config_fingerprint()` — a 16-char sha256 over every public field of `GraphPipelineConfig`. Embedded in graph cache keys so flipping any toggle (entity / narrative / temporal / vector / explainer / analysis-modules) auto-invalidates the in-memory graph cache.
+- `src/features/pipelines/batch_feature_pipeline.py::_graph_cache_key(text, cfg_fp)` now takes the fingerprint as a second arg and bakes it into a versioned (`GRAPH_CACHE_VERSION = "v2"`) JSON payload before sha256.
+- `_attach_graph_cache` populates `ctx.cache["_graph"]["output"]` (the same slot `_merge_graph_features` reads from), so the per-sample merge step is now a cache-hit reuse rather than a second `graph_pipeline.run(text)` call. Eliminates the double NetworkX/spaCy build per request that the audit flagged.
+- `_merge_graph_features` already promoted to warning + counter + strict-mode raise (1.8, prior turn).
+
+**Task 7 (audit 1.5 pruner + tempfile fix):**
+- `FeatureCache.save` wrapped in try/finally that `unlink(missing_ok=True)`s the tempfile on every code path that does NOT reach `replace()` — orphan tempfiles from killed processes are no longer leaked.
+- `FeatureCache.prune(max_bytes=…, max_age_days=…)` added: TTL eviction first (mtime-based, also catches orphan tempfiles), then byte-budget oldest-first eviction. Returns `{removed_age, removed_size, kept, bytes}`.
+- `CacheManager.prune_all(max_bytes_per_namespace=…, max_age_days=…)` sweeps every registered namespace plus every on-disk namespace under `base_cache_dir`.
+- `api/app.py` registers a `@app.on_event("startup")` hook that runs `CacheManager(base_cache_dir=SETTINGS.paths.cache_dir).prune_all(max_bytes_per_namespace=512MB, max_age_days=14)`. Wrapped in try/except — pruning never blocks server startup.
+
+**Task 8 (merge `feature_pruning.py` ↔ `fusion/feature_selection.py` → `fusion/feature_reduction.py`):**
+- New `src/features/fusion/feature_reduction.py` is the single source of truth for `VarianceThresholdSelector`, `CorrelationSelector`, `TopKSelector`, `CompositeSelector`, `FeatureSelectionPipeline`, `FeaturePruner`, plus a new end-to-end `FeatureReductionPipeline`.
+- `DEFAULT_CORRELATION_THRESHOLD = 0.9` (audit task 8) — more aggressive than the previous 0.95 in both legacy modules.
+- `FeatureReductionPipeline.fit(features)` runs variance-prune then 0.9 correlation-prune on the training matrix; `save(path)` persists `{schema, variance_threshold, correlation_threshold, kept_features, removed_features}` as JSON; `load(path)` restores the kept-name list so inference applies exactly the same projection regardless of input dict order or extra/missing keys.
+- `src/features/feature_pruning.py` and `src/features/fusion/feature_selection.py` are now thin re-export shims (`from src.features.fusion.feature_reduction import …`) so every existing import site continues to work.

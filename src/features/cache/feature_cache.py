@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import threading
+import time
 import tempfile
 from collections import OrderedDict
 from pathlib import Path
@@ -101,6 +102,8 @@ class FeatureCache:
     def save(self, key: str, data: Any) -> Path:
 
         path = self._get_path(key)
+        temp_path: Optional[Path] = None
+        replaced = False
 
         try:
             serialized = self._serialize(data)
@@ -116,12 +119,27 @@ class FeatureCache:
                 temp_path = Path(tmp.name)
 
             temp_path.replace(path)
+            replaced = True
 
             return path
 
         except Exception:
             logger.exception("Cache save failed")
             raise
+
+        finally:
+            # Audit fix #1.5 — if the process is killed (or any exception
+            # is raised) between tmp.flush() and temp_path.replace(path),
+            # the temp file was orphaned forever and the cache dir grew
+            # monotonically.  The try/finally guarantees the temp file is
+            # removed on every code path that does not reach replace().
+            if temp_path is not None and not replaced:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError as exc:
+                    logger.warning(
+                        "Cache temp cleanup failed (%s): %s", temp_path, exc
+                    )
 
     # -----------------------------------------------------
     # LOAD
@@ -163,3 +181,99 @@ class FeatureCache:
 
         self._path_cache.clear()
         logger.info("Cache cleared: %s", self.cache_dir)
+
+    # -----------------------------------------------------
+    # DISK PRUNER  (audit fix #1.5)
+    #
+    # Without an eviction policy the on-disk cache grew unbounded.  This
+    # prune step is invoked from the inference startup hook and provides
+    # both age-based (TTL) and size-based (LRU-ish) eviction in one pass:
+    #
+    #   * max_age_days   — delete any cache file older than this
+    #                      (mtime-based; orphan tempfiles are also caught).
+    #   * max_bytes      — after age eviction, if the total namespace
+    #                      size still exceeds this budget, delete the
+    #                      least-recently-modified files until it fits.
+    # -----------------------------------------------------
+
+    def prune(
+        self,
+        *,
+        max_bytes: Optional[int] = None,
+        max_age_days: Optional[float] = None,
+    ) -> Dict[str, int]:
+
+        stats = {"removed_age": 0, "removed_size": 0, "kept": 0, "bytes": 0}
+
+        if not self.cache_dir.exists():
+            return stats
+
+        now = time.time()
+        ttl_seconds = (
+            float(max_age_days) * 86400.0 if max_age_days is not None else None
+        )
+
+        # Collect file metadata once; ignore directories and unreadable
+        # entries so a single bad file cannot abort the whole sweep.
+        entries: List[tuple[Path, int, float]] = []
+        for entry in self.cache_dir.iterdir():
+            if not entry.is_file():
+                continue
+            try:
+                st = entry.stat()
+            except OSError:
+                continue
+            entries.append((entry, st.st_size, st.st_mtime))
+
+        # ---------- age eviction ----------
+        survivors: List[tuple[Path, int, float]] = []
+        for path, size, mtime in entries:
+            if ttl_seconds is not None and (now - mtime) > ttl_seconds:
+                try:
+                    path.unlink(missing_ok=True)
+                    stats["removed_age"] += 1
+                except OSError as exc:
+                    logger.warning("Cache prune (age) failed: %s", exc)
+                    survivors.append((path, size, mtime))
+                continue
+            survivors.append((path, size, mtime))
+
+        # ---------- size eviction ----------
+        total = sum(s for _, s, _ in survivors)
+        if max_bytes is not None and total > max_bytes:
+            # Oldest first, drop until under budget.
+            survivors.sort(key=lambda t: t[2])
+            kept: List[tuple[Path, int, float]] = []
+            for path, size, mtime in survivors:
+                if total > max_bytes:
+                    try:
+                        path.unlink(missing_ok=True)
+                        stats["removed_size"] += 1
+                        total -= size
+                        continue
+                    except OSError as exc:
+                        logger.warning("Cache prune (size) failed: %s", exc)
+                kept.append((path, size, mtime))
+            survivors = kept
+
+        stats["kept"] = len(survivors)
+        stats["bytes"] = sum(s for _, s, _ in survivors)
+
+        # Drop any in-process path memo that points at a now-deleted file.
+        if stats["removed_age"] or stats["removed_size"]:
+            with self._lock:
+                live = {p for p, _, _ in survivors}
+                for k in list(self._path_cache.keys()):
+                    if self._path_cache[k] not in live:
+                        del self._path_cache[k]
+
+        logger.info(
+            "Cache pruned (%s) | removed_age=%d removed_size=%d kept=%d bytes=%d",
+            self.cache_dir,
+            stats["removed_age"],
+            stats["removed_size"],
+            stats["kept"],
+            stats["bytes"],
+        )
+
+        return stats

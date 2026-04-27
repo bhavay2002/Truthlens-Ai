@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Dict, Any, Optional
 
 import numpy as np
@@ -81,6 +83,36 @@ class GraphPipeline:
         )
 
         logger.info("GraphPipeline initialized")
+
+    # =====================================================
+    # CONFIG FINGERPRINT (audit fix #1.2)
+    #
+    # Stable short hash over every public dataclass field of
+    # GraphPipelineConfig.  Embedded in graph cache keys so flipping
+    # any toggle (entity / narrative / temporal / vector / explainer /
+    # analysis-modules) automatically invalidates stale cache entries
+    # — otherwise switching the entity NER model or narrative lexicon
+    # silently returned yesterday's graph features.
+    # =====================================================
+
+    def config_fingerprint(self) -> str:
+
+        try:
+            payload = asdict(self.config)
+        except TypeError:
+            # Defensive: should not happen because GraphPipelineConfig
+            # is a @dataclass, but an out-of-band override could swap
+            # in a non-dataclass.  Fall back to the public attribute
+            # dict so the fingerprint is still deterministic.
+            payload = {
+                k: getattr(self.config, k)
+                for k in dir(self.config)
+                if not k.startswith("_")
+                and not callable(getattr(self.config, k))
+            }
+
+        raw = json.dumps(payload, sort_keys=True, default=str).encode()
+        return hashlib.sha256(raw).hexdigest()[:16]
 
     # =====================================================
     # VALIDATION

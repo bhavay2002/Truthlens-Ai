@@ -195,6 +195,50 @@ app = FastAPI(
 )
 
 
+# ── Startup hook: prune the on-disk feature cache (audit fix #1.5) ────────────
+#
+# Without an eviction policy the on-disk feature cache grew unbounded and
+# orphan tempfiles from killed processes were never cleaned up.  On every
+# server start we now sweep every namespace under the configured cache
+# root, dropping anything older than `FEATURE_CACHE_MAX_AGE_DAYS` and
+# (after that) trimming each namespace down to `FEATURE_CACHE_MAX_BYTES`
+# by oldest-first eviction.  Both knobs are env-tunable; sensible
+# production defaults below.
+
+FEATURE_CACHE_MAX_AGE_DAYS = float(
+    getattr(SETTINGS, "feature_cache_max_age_days", 0) or 14.0
+)
+FEATURE_CACHE_MAX_BYTES = int(
+    getattr(SETTINGS, "feature_cache_max_bytes", 0) or (512 * 1024 * 1024)
+)
+
+
+@app.on_event("startup")
+def _prune_feature_cache_on_startup() -> None:
+    try:
+        from src.features.cache.cache_manager import CacheManager
+
+        cache_root = getattr(getattr(SETTINGS, "paths", None), "cache_dir", None)
+        manager = CacheManager(base_cache_dir=Path(cache_root) if cache_root else None)
+        results = manager.prune_all(
+            max_bytes_per_namespace=FEATURE_CACHE_MAX_BYTES,
+            max_age_days=FEATURE_CACHE_MAX_AGE_DAYS,
+        )
+        if results:
+            total_removed = sum(
+                int(r.get("removed_age", 0)) + int(r.get("removed_size", 0))
+                for r in results.values()
+            )
+            logger.info(
+                "Feature cache prune complete | namespaces=%d removed=%d",
+                len(results),
+                total_removed,
+            )
+    except Exception as exc:
+        # Pruning must NEVER block the server from starting.
+        logger.warning("Feature cache prune skipped: %s", exc)
+
+
 # ── Request / response models ──────────────────────────────────────────────────
 
 class NewsRequest(BaseModel):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -23,10 +24,29 @@ logger = logging.getLogger(__name__)
 # accumulate one entry per unique input text indefinitely (OOM risk).
 _GRAPH_CACHE_MAX = 2048
 
+# Bumped whenever the in-memory graph cache key payload schema changes
+# (audit fix #1.2 — config fingerprint now part of the key).
+GRAPH_CACHE_VERSION = "v2"
 
-def _graph_cache_key(text: str) -> str:
-    """Hash long texts to keep the cache key index compact."""
-    return hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+
+def _graph_cache_key(text: str, graph_cfg_fingerprint: str = "") -> str:
+    """
+    Hash text + graph-pipeline config fingerprint into a stable cache key.
+
+    Audit fix #1.2: the previous key was sha256(text) only — switching the
+    entity NER model or narrative lexicon silently returned yesterday's
+    graph features.  Embedding the GraphPipeline config fingerprint makes
+    that mutation auto-invalidate.
+    """
+    payload = {
+        "v": GRAPH_CACHE_VERSION,
+        "text": text,
+        "cfg": graph_cfg_fingerprint or "",
+    }
+    raw = json.dumps(payload, sort_keys=True, default=str).encode(
+        "utf-8", errors="ignore"
+    )
+    return hashlib.sha256(raw).hexdigest()
 
 
 # =========================================================
@@ -150,17 +170,25 @@ class BatchFeaturePipeline:
 
     def _attach_graph_cache(self, batch: List[FeatureContext]):
 
-        if not self.pipeline.graph_pipeline:
+        gp = self.pipeline.graph_pipeline
+        if not gp:
             return
+
+        # Audit fix #1.2 — config fingerprint participates in the key so
+        # toggling any GraphPipelineConfig field auto-invalidates.
+        try:
+            cfg_fp = gp.config_fingerprint()
+        except Exception:
+            cfg_fp = ""
 
         for ctx in batch:
 
-            key = _graph_cache_key(ctx.text)
+            key = _graph_cache_key(ctx.text, cfg_fp)
 
             cached = self._graph_cache.get(key)
             if cached is None:
                 try:
-                    cached = self.pipeline.graph_pipeline.run(ctx.text)
+                    cached = gp.run(ctx.text)
                 except Exception as e:
                     logger.warning("Graph failed: %s", e)
                     cached = {}
@@ -171,6 +199,17 @@ class BatchFeaturePipeline:
             else:
                 self._graph_cache.move_to_end(key)
 
+            # Audit fix #1.3 — eliminate double graph extraction.
+            # Populate the same slot _merge_graph_features looks at, so
+            # the per-sample merge step finds the cached output and does
+            # NOT re-run gp.run(text).  Previously the batch path called
+            # gp.run() here AND again in _merge_graph_features → the
+            # heavy NetworkX/spaCy build ran twice per request.
+            graph_slot = ctx.cache.setdefault("_graph", {})
+            graph_slot["output"] = cached
+
+            # Backwards-compatible alias for any consumer still reading
+            # the legacy key.
             ctx.cache["graph_pipeline_output"] = cached
 
     # =====================================================
