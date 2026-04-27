@@ -20,10 +20,22 @@ from src.explainability.explanation_metrics import ExplanationMetrics
 from src.explainability.explanation_monitor import ExplanationMonitor
 
 from src.explainability.lime_explainer import explain_prediction as _lime_explain
+from src.explainability.propaganda_explainer import explain_propaganda as _propaganda_explain
 from src.explainability.shap_explainer import explain_text as _shap_explain
 
-#  NEW
 from src.graph.graph_explainer import GraphExplainer
+
+
+# =========================================================
+# HELPERS
+# =========================================================
+
+def _make_batch_predict_fn(predict_fn: Callable) -> Callable:
+    """Wrap a single-text predict_fn into the batched List[str] → List[Dict] signature
+    expected by ExplanationMetrics."""
+    def _batch(texts: List[str]) -> List[Dict]:
+        return [predict_fn(t) for t in texts]
+    return _batch
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +51,7 @@ class ExplainabilityConfig:
     use_shap: bool = False
     use_attention_rollout: bool = True
     use_bias_emotion: bool = True
+    use_propaganda_explainer: bool = False
     use_aggregation: bool = True
     use_consistency: bool = True
     use_explanation_metrics: bool = True
@@ -163,6 +176,16 @@ class ExplainabilityOrchestrator:
             explanation["lime_explanation"] = lime_out
 
         # =================================================
+        # PROPAGANDA
+        # =================================================
+        propaganda_out = None
+        if self.config.use_propaganda_explainer:
+            propaganda_out, t, ok = self._run("propaganda", lambda: _propaganda_explain(text))
+            metadata["latency_ms"]["propaganda"] = t
+            metadata["modules"]["propaganda"] = ok
+            explanation["propaganda_explanation"] = propaganda_out
+
+        # =================================================
         # BIAS + EMOTION
         # =================================================
         if self.config.use_bias_emotion and model and tokenizer:
@@ -232,12 +255,17 @@ class ExplainabilityOrchestrator:
         # CONSISTENCY
         # =================================================
         if self.consistency:
+            def _to_dict_list(structured):
+                if not structured:
+                    return None
+                return [{"token": e.token, "importance": e.importance} for e in structured]
+
             cons, t, ok = self._run(
                 "consistency",
                 lambda: self.consistency.compute(
-                    shap_importance=shap_out.structured if shap_out else None,
+                    shap_importance=_to_dict_list(shap_out.structured) if shap_out else None,
                     integrated_gradients=None,
-                    attention_scores=attention_out.structured if attention_out else None,
+                    attention_scores=_to_dict_list(attention_out.structured) if attention_out else None,
                     lime_importance=[(e.token, e.importance) for e in lime_out.structured] if lime_out else None,
                 ),
             )
@@ -252,10 +280,12 @@ class ExplainabilityOrchestrator:
             try:
                 agg = explanation["aggregated_explanation"]
 
+                batch_predict_fn = _make_batch_predict_fn(predict_fn)
+
                 metrics = self.metrics.evaluate(
                     agg.tokens,
                     agg.final_token_importance,
-                    predict_fn,
+                    batch_predict_fn,
                 )
 
                 explanation["explanation_metrics"] = metrics

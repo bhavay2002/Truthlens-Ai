@@ -26,10 +26,15 @@ class ExplanationConsistency:
         if not items:
             return None, 0.0
 
-        m = {str(i.get("token")): float(i.get(key, 0.0)) for i in items}
+        def _get(item, attr, default=None):
+            if isinstance(item, dict):
+                return item.get(attr, default)
+            return getattr(item, attr, default)
+
+        m = {str(_get(i, "token")): float(_get(i, key, 0.0) or 0.0) for i in items}
 
         # extract confidence if available (optional)
-        conf = float(items[0].get("confidence", 1.0)) if isinstance(items[0], dict) else 1.0
+        conf = float(_get(items[0], "confidence", 1.0) or 1.0)
 
         return m, np.clip(conf, 0.0, 1.0)
 
@@ -149,7 +154,7 @@ class ExplanationConsistency:
 
         shap_m, shap_c = self._as_map_with_conf(shap_importance, "importance")
         ig_m, ig_c = self._as_map_with_conf(integrated_gradients, "importance")
-        att_m, att_c = self._as_map_with_conf(attention_scores, "attention")
+        att_m, att_c = self._as_map_with_conf(attention_scores, "importance")
         lime_m, lime_c = self._lime_map_with_conf(lime_importance)
 
         sources = {}

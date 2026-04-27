@@ -1,274 +1,198 @@
 from __future__ import annotations
 
 import logging
-import threading
-import hashlib
-from collections import OrderedDict
-from pathlib import Path
-from typing import Any, Callable, Dict, List, Sequence, TYPE_CHECKING
+import re
+from typing import Dict, List, Optional
 
 import numpy as np
 
-from src.explainability.explanation_calibrator import calibrate_explanation
 from src.explainability.common_schema import ExplanationOutput, TokenImportance
-
-if TYPE_CHECKING:
-    from lime.lime_text import LimeTextExplainer
-else:
-    LimeTextExplainer = Any
+from src.explainability.explanation_calibrator import calibrate_explanation
 
 logger = logging.getLogger(__name__)
 
-# =========================================================
-# GLOBALS
-# =========================================================
-
-_LOCK = threading.RLock()
-
-_MAX_CACHE_SIZE = 4
-_EXPLAINER_CACHE: Dict[str, LimeTextExplainer] = OrderedDict()
-
-_EXPLANATION_CACHE: Dict[str, ExplanationOutput] = {}
-
 EPS = 1e-12
 
-
 # =========================================================
-# UTILS
-# =========================================================
-
-def _make_cache_key(text: str, num_features: int, num_samples: int) -> str:
-    raw = f"{text}|{num_features}|{num_samples}"
-    return hashlib.sha256(raw.encode()).hexdigest()
-
-
-def _extract_fake_probability(result: Any) -> float:
-    if not isinstance(result, dict) or "fake_probability" not in result:
-        raise KeyError("predict_fn must return {'fake_probability': float}")
-
-    prob = float(result["fake_probability"])
-
-    if not (0.0 <= prob <= 1.0):
-        raise ValueError("fake_probability must be in [0,1]")
-
-    return prob
-
-
-# =========================================================
-# EXPLAINER CACHE
+# PROPAGANDA TECHNIQUE LEXICON
 # =========================================================
 
-def get_explainer(model_id: str = "default") -> LimeTextExplainer:
+PROPAGANDA_PATTERNS: Dict[str, List[str]] = {
+    "name_calling": [
+        "terrorist", "criminal", "traitor", "monster", "radical", "extremist",
+        "thug", "corrupt", "evil", "disgusting", "deplorable", "scum",
+    ],
+    "glittering_generalities": [
+        "freedom", "democracy", "patriot", "justice", "liberty", "virtue",
+        "honor", "truth", "faith", "glory", "heritage", "values",
+    ],
+    "fear_appeal": [
+        "danger", "threat", "crisis", "catastrophe", "disaster", "collapse",
+        "invasion", "attack", "destroy", "chaos", "panic", "emergency",
+    ],
+    "loaded_language": [
+        "regime", "propaganda", "brainwash", "indoctrinate", "manipulate",
+        "fake", "hoax", "conspiracy", "coverup", "lie", "fraud", "rigged",
+    ],
+    "false_dilemma": [
+        "either", "only", "must", "never", "always", "impossible", "certain",
+        "inevitable", "guaranteed", "no choice", "only option", "no alternative",
+    ],
+    "appeal_to_authority": [
+        "experts say", "scientists confirm", "studies show", "research proves",
+        "authorities claim", "officials state", "government declares",
+    ],
+    "bandwagon": [
+        "everyone", "everybody", "nobody", "majority", "most people",
+        "all Americans", "the public", "society agrees", "people believe",
+    ],
+    "repetition": [],
+}
 
-    if LimeTextExplainer is None:
-        raise ImportError("Install 'lime' to use LIME explainer")
+TECHNIQUE_WEIGHTS: Dict[str, float] = {
+    "name_calling": 1.0,
+    "glittering_generalities": 0.6,
+    "fear_appeal": 0.9,
+    "loaded_language": 1.0,
+    "false_dilemma": 0.7,
+    "appeal_to_authority": 0.5,
+    "bandwagon": 0.6,
+    "repetition": 0.8,
+}
 
-    with _LOCK:
-        if model_id in _EXPLAINER_CACHE:
-            _EXPLAINER_CACHE.move_to_end(model_id)
-            return _EXPLAINER_CACHE[model_id]
-
-        logger.info("Initializing LIME explainer (%s)", model_id)
-
-        explainer = LimeTextExplainer(class_names=["Real", "Fake"])
-
-        _EXPLAINER_CACHE[model_id] = explainer
-        _EXPLAINER_CACHE.move_to_end(model_id)
-
-        if len(_EXPLAINER_CACHE) > _MAX_CACHE_SIZE:
-            _EXPLAINER_CACHE.popitem(last=False)
-
-        return explainer
-
-
-# =========================================================
-# PREDICTION WRAPPER
-# =========================================================
-
-def lime_predict_wrapper(
-    texts: Sequence[str],
-    predict_fn: Callable[[Any], Any],
-) -> np.ndarray:
-
-    text_list = [str(t) for t in texts]
-
-    batch_fn = getattr(predict_fn, "batch_predict", None)
-
-    if callable(batch_fn):
-        try:
-            results = batch_fn(text_list)
-            return np.array(
-                [[1 - _extract_fake_probability(r), _extract_fake_probability(r)]
-                 for r in results],
-                dtype=float,
-            )
-        except Exception:
-            pass
-
-    try:
-        results = predict_fn(text_list)
-        if isinstance(results, list) and len(results) == len(text_list):
-            return np.array(
-                [[1 - _extract_fake_probability(r), _extract_fake_probability(r)]
-                 for r in results],
-                dtype=float,
-            )
-    except Exception:
-        pass
-
-    outputs = []
-    for t in text_list:
-        r = predict_fn(t)
-        p = _extract_fake_probability(r)
-        outputs.append([1 - p, p])
-
-    return np.array(outputs, dtype=float)
-
-
-def _batched_predict(
-    texts: Sequence[str],
-    predict_fn: Callable[[Any], Any],
-    batch_size: int = 32,
-) -> np.ndarray:
-
-    results = []
-
-    for i in range(0, len(texts), batch_size):
-        chunk = texts[i:i + batch_size]
-        results.append(lime_predict_wrapper(chunk, predict_fn))
-
-    return np.vstack(results) if results else np.zeros((0, 2))
-
-
-def _get_lime_predict_fn(predict_fn):
-    return lambda x: _batched_predict(x, predict_fn)
+_TOKEN_RE = re.compile(r"\b[a-z]+\b")
 
 
 # =========================================================
-# MAIN EXPLAIN (FINAL)
+# TOKENIZE
 # =========================================================
 
-def explain_prediction(
-    predict_fn: Callable[[Any], Any],
+def _tokenize(text: str) -> List[str]:
+    return _TOKEN_RE.findall(text.lower())
+
+
+# =========================================================
+# SCORE TOKENS
+# =========================================================
+
+def _score_tokens(tokens: List[str]) -> List[float]:
+    scores = [0.0] * len(tokens)
+
+    for technique, patterns in PROPAGANDA_PATTERNS.items():
+        w = TECHNIQUE_WEIGHTS.get(technique, 0.5)
+        for i, tok in enumerate(tokens):
+            if tok in patterns:
+                scores[i] += w
+
+    # repetition: boost tokens appearing more than twice
+    from collections import Counter
+    counts = Counter(tokens)
+    rep_w = TECHNIQUE_WEIGHTS["repetition"]
+    for i, tok in enumerate(tokens):
+        if counts[tok] > 2:
+            scores[i] += rep_w * min(counts[tok] / 5.0, 1.0)
+
+    return scores
+
+
+# =========================================================
+# PHRASE MATCHING (multi-token patterns)
+# =========================================================
+
+def _apply_phrase_scores(tokens: List[str], scores: List[float]) -> List[float]:
+    text = " ".join(tokens)
+    for technique, patterns in PROPAGANDA_PATTERNS.items():
+        w = TECHNIQUE_WEIGHTS.get(technique, 0.5)
+        for phrase in patterns:
+            if " " not in phrase:
+                continue
+            phrase_tokens = phrase.split()
+            n = len(phrase_tokens)
+            for i in range(len(tokens) - n + 1):
+                if tokens[i:i + n] == phrase_tokens:
+                    for j in range(i, i + n):
+                        scores[j] += w
+    return scores
+
+
+# =========================================================
+# MAIN EXPLAINER
+# =========================================================
+
+def explain_propaganda(
     text: str,
-    num_features: int = 10,
-    num_samples: int = 256,
+    *,
+    top_k: Optional[int] = None,
 ) -> ExplanationOutput:
 
     if not isinstance(text, str) or not text.strip():
         raise ValueError("text cannot be empty")
 
-    key = _make_cache_key(text, num_features, num_samples)
+    tokens = _tokenize(text)
 
-    with _LOCK:
-        if key in _EXPLANATION_CACHE:
-            return _EXPLANATION_CACHE[key]
-
-    explainer = get_explainer()
-    predictor = _get_lime_predict_fn(predict_fn)
-
-    exp = explainer.explain_instance(
-        text,
-        predictor,
-        num_features=num_features,
-        num_samples=num_samples,
-    )
-
-    raw_features = exp.as_list()
-
-    if not raw_features:
+    if not tokens:
         return ExplanationOutput(
-            method="lime",
+            method="propaganda",
             tokens=[],
             importance=[],
             structured=[],
         )
 
-    tokens = [t for t, _ in raw_features]
-    values = [s for _, s in raw_features]
+    raw_scores = _score_tokens(tokens)
+    raw_scores = _apply_phrase_scores(tokens, raw_scores)
 
-    # =====================================================
-    # 🔥 CALIBRATION
-    # =====================================================
-    cal = calibrate_explanation(values, method="lime")
+    arr = np.asarray(raw_scores, dtype=float)
 
+    if np.sum(arr) < EPS:
+        return ExplanationOutput(
+            method="propaganda",
+            tokens=[],
+            importance=[],
+            structured=[],
+        )
+
+    cal = calibrate_explanation(arr.tolist(), method="custom")
     scores = cal["scores"]
     confidence = cal["confidence"]
     entropy = cal["entropy"]
+
+    if top_k is not None and top_k > 0:
+        idx = np.argsort(scores)[-top_k:][::-1]
+        tokens = [tokens[i] for i in idx]
+        scores = scores[idx]
 
     structured = [
         TokenImportance(token=t, importance=float(s))
         for t, s in zip(tokens, scores)
     ]
 
-    result = ExplanationOutput(
-        method="lime",
+    logger.info(
+        "Propaganda explanation generated: %d tokens, confidence=%.3f",
+        len(tokens),
+        confidence,
+    )
+
+    return ExplanationOutput(
+        method="propaganda",
         tokens=tokens,
         importance=scores.tolist(),
         structured=structured,
         confidence=confidence,
         entropy=entropy,
-        raw=raw_features,
     )
 
-    with _LOCK:
-        _EXPLANATION_CACHE[key] = result
-
-    logger.info("LIME explanation generated")
-
-    return result
-
 
 # =========================================================
-# HTML EXPORT
+# TECHNIQUE SUMMARY
 # =========================================================
 
-def save_explanation_html(
-    predict_fn: Callable[[Any], Any],
-    text: str,
-    output_path: str | Path = "reports/lime_explanation.html",
-    num_features: int = 10,
-    num_samples: int = 256,
-) -> Path:
+def detect_techniques(text: str) -> Dict[str, List[str]]:
+    tokens = _tokenize(text)
+    found: Dict[str, List[str]] = {}
 
-    explainer = get_explainer()
-    predictor = _get_lime_predict_fn(predict_fn)
+    for technique, patterns in PROPAGANDA_PATTERNS.items():
+        matches = [t for t in tokens if t in patterns]
+        if matches:
+            found[technique] = list(set(matches))
 
-    exp = explainer.explain_instance(
-        text,
-        predictor,
-        num_features=num_features,
-        num_samples=num_samples,
-    )
-
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    exp.save_to_file(str(output_path))
-
-    logger.info("Saved LIME HTML to %s", output_path)
-
-    return output_path
-
-
-# =========================================================
-# CACHE CONTROL
-# =========================================================
-
-def clear_explainer_cache():
-    with _LOCK:
-        _EXPLAINER_CACHE.clear()
-
-
-def clear_explanation_cache():
-    with _LOCK:
-        _EXPLANATION_CACHE.clear()
-
-
-def cache_info():
-    with _LOCK:
-        return {
-            "explainer_cache_size": len(_EXPLAINER_CACHE),
-            "explanation_cache_size": len(_EXPLANATION_CACHE),
-            "capacity": _MAX_CACHE_SIZE,
-        }
+    return found

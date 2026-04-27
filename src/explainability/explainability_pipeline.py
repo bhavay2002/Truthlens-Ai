@@ -74,6 +74,8 @@ def run_explainability_pipeline(
 
     logger.info("Running explainability pipeline")
 
+    prediction = predict_fn(text)
+
     explanation = orchestrator.explain(
         text=text,
         predict_fn=predict_fn,
@@ -82,8 +84,6 @@ def run_explainability_pipeline(
         tokens=tokens,
         attentions=attentions,
     )
-
-    prediction = predict_fn(text)
 
     # =====================================================
     # 🔥 FINAL WRAP

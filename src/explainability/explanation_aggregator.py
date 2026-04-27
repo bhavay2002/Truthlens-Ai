@@ -19,10 +19,11 @@ EPS = 1e-12
 
 @dataclass
 class AggregationWeights:
-    shap: float = 0.4
-    integrated_gradients: float = 0.3
-    attention: float = 0.2
-    lime: float = 0.1
+    shap: float = 0.35
+    integrated_gradients: float = 0.25
+    attention: float = 0.20
+    lime: float = 0.10
+    graph: float = 0.10
 
 
 # =========================================================
@@ -38,13 +39,14 @@ class ExplanationAggregator:
 
         w = weights or AggregationWeights()
 
-        total = w.shap + w.integrated_gradients + w.attention + w.lime
+        total = w.shap + w.integrated_gradients + w.attention + w.lime + w.graph
 
         self.weights = {
             "shap": w.shap / total,
             "ig": w.integrated_gradients / total,
             "attn": w.attention / total,
             "lime": w.lime / total,
+            "graph": w.graph / total,
         }
 
         self._consistency = ExplanationConsistency()
@@ -115,10 +117,15 @@ class ExplanationAggregator:
         # -------------------------------------------------
         agreement_score = 0.0
         try:
+            def _to_dict_list(structured):
+                if not structured:
+                    return None
+                return [{"token": e.token, "importance": e.importance} for e in structured]
+
             res = self._consistency.compute(
-                shap_importance=shap.structured if shap else None,
-                integrated_gradients=integrated_gradients.structured if integrated_gradients else None,
-                attention_scores=attention.structured if attention else None,
+                shap_importance=_to_dict_list(shap.structured) if shap else None,
+                integrated_gradients=_to_dict_list(integrated_gradients.structured) if integrated_gradients else None,
+                attention_scores=_to_dict_list(attention.structured) if attention else None,
                 lime_importance=[(e.token, e.importance) for e in lime.structured] if lime else None,
             )
             if res:
@@ -127,14 +134,14 @@ class ExplanationAggregator:
             pass
 
         # -------------------------------------------------
-        # 🔥 FUSION (WITH GRAPH)
+        # FUSION (WITH GRAPH)
         # -------------------------------------------------
         final_scores = []
         token_confidence = []
 
         for t in tokens:
 
-            weighted_vals = []
+            weighted_sum = 0.0
             vals = []
 
             # ---------- standard explainers ----------
@@ -144,27 +151,26 @@ class ExplanationAggregator:
                     w = self.weights[name]
                     c = confidences[name]
 
-                    weighted_vals.append(val * w * c)
+                    weighted_sum += val * w * c
                     vals.append(val)
 
-            # ---------- 🔥 graph contribution ----------
+            # ---------- graph contribution (normalized weight) ----------
             if t in graph_node_importance:
                 graph_score = float(graph_node_importance[t])
+                w_graph = self.weights["graph"]
 
-                weighted_vals.append(graph_score * graph_confidence)
+                weighted_sum += graph_score * w_graph * graph_confidence
                 vals.append(graph_score)
 
-            if not weighted_vals:
+            if not vals:
                 final_scores.append(0.0)
                 token_confidence.append(0.0)
                 continue
 
-            score = float(np.mean(weighted_vals))
-
-            # confidence = agreement
+            # confidence = inter-method agreement
             conf = float(1.0 - np.std(vals)) if len(vals) > 1 else 1.0
 
-            final_scores.append(score)
+            final_scores.append(weighted_sum)
             token_confidence.append(np.clip(conf, 0.0, 1.0))
 
         final_scores = self._normalize(final_scores)

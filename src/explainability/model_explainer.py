@@ -45,6 +45,8 @@ def explain_prediction_full(
 
     orchestrator = ExplainabilityOrchestrator(config=config)
 
+    prediction = predict_fn(text)
+
     try:
         result = orchestrator.explain(
             text=text,
@@ -55,8 +57,6 @@ def explain_prediction_full(
     except Exception as e:
         logger.exception("Explainability failed")
         result = {"error": str(e)}
-
-    prediction = predict_fn(text)
 
     latency = (time.time() - start_time) * 1000
 

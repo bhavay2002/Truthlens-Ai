@@ -10,8 +10,8 @@ logger = logging.getLogger(__name__)
 EPS = 1e-12
 
 try:
-   l import plotly.graph_objects as go
-except ImportError:  # optiona
+    import plotly.graph_objects as go
+except ImportError:
     go = None
 
 

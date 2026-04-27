@@ -108,12 +108,12 @@ def compute_attention_rollout(model, tokenizer, text):
     with torch.no_grad():
         outputs = model(**inputs, output_attentions=True)
 
-    rollout = AttentionRollout().compute_rollout(
+    rollout_out = AttentionRollout().compute_rollout(
         attentions=outputs.attentions,
         tokens=tokenizer.convert_ids_to_tokens(inputs["input_ids"][0])
     )
 
-    return np.asarray(rollout["rollout_scores"], dtype=float)
+    return np.asarray(rollout_out.importance, dtype=float)
 
 
 # =========================================================
@@ -155,8 +155,10 @@ def explain_bias(model, tokenizer, text):
     ig_vals = compute_ig(model, tokenizer, text)
     attn_vals = compute_attention_rollout(model, tokenizer, text)
 
-    # alignment
-    base = shap_vals or ig_vals or attn_vals
+    # alignment — use first available array (avoids numpy boolean ambiguity)
+    base = next((v for v in [shap_vals, ig_vals, attn_vals] if v is not None), None)
+    if base is None:
+        raise RuntimeError("All explanation methods failed for bias explainer")
     tokens, base = align_tokens(tokens, base)
 
     shap_vals = shap_vals if shap_vals is not None else np.zeros_like(base)

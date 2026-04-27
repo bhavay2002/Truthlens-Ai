@@ -57,37 +57,11 @@ class ExplanationOutput(BaseModel):
     # VALIDATION
     # -------------------------
 
-    @field_validator("tokens")
-    @classmethod
-    def validate_tokens(cls, v):
-        if not v:
-            raise ValueError("tokens cannot be empty")
-        return v
-
-    @field_validator("importance")
-    @classmethod
-    def validate_importance(cls, v):
-        if not v:
-            raise ValueError("importance cannot be empty")
-        return [float(x) for x in v]
-
-    @field_validator("structured")
-    @classmethod
-    def validate_structured(cls, v, info):
-        tokens = info.data.get("tokens", [])
-        importance = info.data.get("importance", [])
-
-        if len(tokens) != len(importance):
-            raise ValueError("tokens and importance must align")
-
-        if len(v) != len(tokens):
-            raise ValueError("structured must align with tokens")
-
-        return v
-
-    @field_validator("importance")
+    @field_validator("importance", mode="before")
     @classmethod
     def normalize_importance(cls, v):
+        if not v:
+            return v
         arr = np.array(v, dtype=float)
 
         if np.any(~np.isfinite(arr)):
@@ -102,6 +76,20 @@ class ExplanationOutput(BaseModel):
         arr = arr / (total + EPS)
 
         return arr.tolist()
+
+    @field_validator("structured")
+    @classmethod
+    def validate_structured(cls, v, info):
+        tokens = info.data.get("tokens", [])
+        importance = info.data.get("importance", [])
+
+        if len(tokens) != len(importance):
+            raise ValueError("tokens and importance must align")
+
+        if len(v) != len(tokens):
+            raise ValueError("structured must align with tokens")
+
+        return v
 
 
 # =========================================================
