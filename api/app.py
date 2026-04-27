@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field, ConfigDict
 from src.inference.predict_api import predict, predict_batch
 from src.analysis.argument_mining import ArgumentMiningAnalyzer
 from src.analysis.bias_profile_builder import BiasProfileBuilder
-from src.graph.graph_pipeline import GraphPipeline
+from src.graph.graph_pipeline import GraphPipeline, get_default_pipeline
 from src.graph.graph_embeddings import GraphEmbeddingGenerator
 from src.graph.temporal_graph import TemporalGraphAnalyzer
 from src.analysis.context_omission_detector import ContextOmissionDetector
@@ -113,7 +113,7 @@ NARRATIVE_TEMPORAL_ANALYZER = NarrativeTemporalAnalyzer()
 PROPAGANDA_PATTERN_DETECTOR = PropagandaPatternDetector()
 RHETORICAL_DETECTOR = RhetoricalDeviceDetector()
 SOURCE_ATTRIBUTION_ANALYZER = SourceAttributionAnalyzer()
-GRAPH_PIPELINE = GraphPipeline()
+GRAPH_PIPELINE = get_default_pipeline()  # G-R1: process-wide singleton
 GRAPH_EMBEDDING_GENERATOR = GraphEmbeddingGenerator()
 TEMPORAL_GRAPH_ANALYZER = TemporalGraphAnalyzer()
 

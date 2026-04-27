@@ -43,13 +43,42 @@ class GraphExplanation:
 
 class GraphExplainer:
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        node_weight: float = 0.4,
+        edge_weight: float = 0.3,
+        temporal_weight: float = 0.3,
+    ):
         # Kept for the ``explain_from_text`` shortcut path. The main
         # ``explain(...)`` API now prefers a pre-computed temporal dict
         # supplied by the pipeline, so this analyzer is rarely invoked
         # twice per request anymore (G-R2).
         self.temporal = TemporalGraphAnalyzer()
-        logger.info("GraphExplainer initialized")
+
+        # G-CFG2: mixing weights used to be hardcoded ``0.4 / 0.3 / 0.3``
+        # inside ``_overall_score``. They now flow from
+        # ``GraphConfig`` via the pipeline so a single edit in
+        # ``config/config.yaml`` retunes the explainer's score blend
+        # without code changes. Validation lives in ``GraphConfigLoader``
+        # (must sum to 1.0); we add a defensive guard here too in case
+        # a caller bypasses the config layer.
+        weight_sum = node_weight + edge_weight + temporal_weight
+        if not (0.99 <= weight_sum <= 1.01):
+            raise ValueError(
+                "explainer weights must sum to 1.0 "
+                f"(got {weight_sum:.4f})"
+            )
+        self.node_weight = float(node_weight)
+        self.edge_weight = float(edge_weight)
+        self.temporal_weight = float(temporal_weight)
+
+        logger.info(
+            "GraphExplainer initialized (weights node=%.2f edge=%.2f temporal=%.2f)",
+            self.node_weight,
+            self.edge_weight,
+            self.temporal_weight,
+        )
 
     # =====================================================
     # NODE IMPORTANCE  (G-C5: weight-aware)
@@ -165,9 +194,9 @@ class GraphExplainer:
         temp_score = float(np.mean(list(temporal_imp.values()))) if temporal_imp else 0.0
 
         return float(
-            0.4 * node_score +
-            0.3 * edge_score +
-            0.3 * temp_score
+            self.node_weight * node_score
+            + self.edge_weight * edge_score
+            + self.temporal_weight * temp_score
         )
 
     # =====================================================

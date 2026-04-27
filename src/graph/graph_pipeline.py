@@ -16,6 +16,8 @@ from src.graph.graph_features import GraphFeatureExtractor, GraphFeatureExtracto
 from src.graph.temporal_graph import TemporalGraphAnalyzer
 from src.graph.graph_explainer import GraphExplainer
 from src.graph.graph_schema import GraphOutput, GraphStructure
+from src.graph.graph_embeddings import GraphEmbeddingConfig
+from src.graph.graph_config import GraphConfig, load_default_graph_config
 
 from src.analysis.integration_runner import AnalysisIntegrationRunner
 
@@ -40,6 +42,56 @@ class GraphPipelineConfig:
 
     # G-P3: batch size used by ``run_batch`` when calling ``nlp.pipe``.
     batch_size: int = 32
+
+    # G-CFG2: tunables previously baked into ``__init__`` defaults of
+    # the various builders. Surfaced here so a YAML ``graph:`` block
+    # can drive them end-to-end without monkey-patching.
+    min_keyword_length: int = 4
+    max_keywords_per_sentence: int = 4
+    temporal_min_token_length: int = 4
+
+    enable_graph_embeddings: bool = False
+    embedding_type: str = "hybrid"
+    spectral_dim: int = 8
+    embedding_dim: int = 16
+    walk_length: int = 10
+    num_walks: int = 10
+
+    explainer_node_weight: float = 0.4
+    explainer_edge_weight: float = 0.3
+    explainer_temporal_weight: float = 0.3
+
+    # =====================================================
+    # G-CFG1: translate the YAML-aware ``GraphConfig`` into
+    # the runtime config the pipeline actually consumes.
+    # =====================================================
+    @classmethod
+    def from_graph_config(cls, cfg: "GraphConfig") -> "GraphPipelineConfig":
+        return cls(
+            enable_entity_graph=cfg.enable_entity_graph,
+            enable_narrative_graph=cfg.enable_narrative_graph,
+            enable_temporal_graph=cfg.enable_temporal_graph,
+            enable_graph_explainer=cfg.enable_graph_explainer,
+            return_vector=cfg.return_vector,
+            run_analysis_modules=cfg.run_analysis_modules,
+            batch_size=cfg.batch_size,
+            min_keyword_length=cfg.min_keyword_length,
+            max_keywords_per_sentence=cfg.max_keywords_per_sentence,
+            temporal_min_token_length=cfg.temporal_min_token_length,
+            enable_graph_embeddings=cfg.enable_graph_embeddings,
+            embedding_type=cfg.embedding_type,
+            spectral_dim=cfg.spectral_dim,
+            embedding_dim=cfg.embedding_dim,
+            walk_length=cfg.walk_length,
+            num_walks=cfg.num_walks,
+            explainer_node_weight=cfg.explainer_node_weight,
+            explainer_edge_weight=cfg.explainer_edge_weight,
+            explainer_temporal_weight=cfg.explainer_temporal_weight,
+        )
+
+    @classmethod
+    def from_yaml(cls, path: str | None = None) -> "GraphPipelineConfig":
+        return cls.from_graph_config(load_default_graph_config(path))
 
 
 # =========================================================
@@ -85,21 +137,37 @@ class GraphPipeline:
 
     def __init__(self, config: Optional[GraphPipelineConfig] = None):
 
-        self.config = config or GraphPipelineConfig()
+        # G-CFG1: when no explicit config is supplied, hydrate from the
+        # YAML ``graph:`` block so a single edit in ``config/config.yaml``
+        # actually drives runtime behaviour. ``load_default_graph_config``
+        # falls back to dataclass defaults if the YAML is missing.
+        if config is None:
+            config = GraphPipelineConfig.from_yaml()
+
+        self.config = config
 
         # -------------------------
-        # Builders
+        # Builders — G-CFG2: every tunable now flows from self.config.
         # -------------------------
         self.entity_graph_builder = (
             EntityGraphBuilder() if self.config.enable_entity_graph else None
         )
 
         self.narrative_graph_builder = (
-            NarrativeGraphBuilder() if self.config.enable_narrative_graph else None
+            NarrativeGraphBuilder(
+                min_token_length=self.config.min_keyword_length,
+                max_keywords_per_sentence=self.config.max_keywords_per_sentence,
+            )
+            if self.config.enable_narrative_graph
+            else None
         )
 
         self.temporal_analyzer = (
-            TemporalGraphAnalyzer() if self.config.enable_temporal_graph else None
+            TemporalGraphAnalyzer(
+                min_token_length=self.config.temporal_min_token_length,
+            )
+            if self.config.enable_temporal_graph
+            else None
         )
 
         self.graph_analyzer = GraphAnalyzer()
@@ -108,11 +176,25 @@ class GraphPipeline:
             GraphFeatureExtractorConfig(
                 enable_entity_graph=self.config.enable_entity_graph,
                 enable_narrative_graph=self.config.enable_narrative_graph,
+                enable_embeddings=self.config.enable_graph_embeddings,
+                embedding_config=GraphEmbeddingConfig(
+                    embedding_type=self.config.embedding_type,
+                    spectral_dim=self.config.spectral_dim,
+                    embedding_dim=self.config.embedding_dim,
+                    walk_length=self.config.walk_length,
+                    num_walks=self.config.num_walks,
+                ),
             )
         )
 
         self.graph_explainer = (
-            GraphExplainer() if self.config.enable_graph_explainer else None
+            GraphExplainer(
+                node_weight=self.config.explainer_node_weight,
+                edge_weight=self.config.explainer_edge_weight,
+                temporal_weight=self.config.explainer_temporal_weight,
+            )
+            if self.config.enable_graph_explainer
+            else None
         )
 
         self.analysis_runner = (
@@ -313,11 +395,15 @@ class GraphPipeline:
         )
 
         # -------------------------------------------
-        # GRAPH FEATURES
+        # GRAPH FEATURES — G-R2: pass through pre-computed metrics so
+        # ``extract_from_graphs`` does not run ``GraphAnalyzer.analyze``
+        # a second time on the same graph.
         # -------------------------------------------
         features = self.graph_feature_extractor.extract_from_graphs(
             entity_graph=entity_graph,
             narrative_graph=narrative_graph,
+            entity_metrics=entity_metrics,
+            narrative_metrics=narrative_metrics,
         )
 
         # merge temporal features
@@ -424,3 +510,38 @@ class GraphPipeline:
         )
 
         return result
+
+
+# =========================================================
+# SINGLETON  (G-R1)
+# =========================================================
+#
+# ``GraphPipeline`` instantiation pulls in 6 builders + 15 analysis
+# modules (``AnalysisIntegrationRunner``). The audit found 7 callsites
+# across the codebase, each holding its own copy — same parsers, same
+# spaCy reference, same module registry. Switching the default to a
+# singleton collapses that to one per process while still allowing
+# tests / advanced callers to inject their own ``GraphPipeline`` for
+# isolation. Reset via ``reset_default_pipeline()`` between tests.
+
+_DEFAULT_PIPELINE: Optional[GraphPipeline] = None
+
+
+def get_default_pipeline() -> GraphPipeline:
+    """Return the process-wide ``GraphPipeline`` singleton.
+
+    Lazily constructed on first call so import order does not force
+    ``AnalysisIntegrationRunner`` to load before its dependencies are
+    ready. Safe to call from many threads — Python's GIL makes the
+    None-check + assignment effectively atomic for our use here.
+    """
+    global _DEFAULT_PIPELINE
+    if _DEFAULT_PIPELINE is None:
+        _DEFAULT_PIPELINE = GraphPipeline()
+    return _DEFAULT_PIPELINE
+
+
+def reset_default_pipeline() -> None:
+    """Drop the cached singleton — used by tests."""
+    global _DEFAULT_PIPELINE
+    _DEFAULT_PIPELINE = None

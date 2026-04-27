@@ -171,7 +171,20 @@ class TemporalGraphAnalyzer:
         narrative_volatility = float(np.var(shift_arr)) if shift_arr.size else 0.0
 
         # 3. consistency (inverse volatility)
-        temporal_consistency = float(1.0 - narrative_volatility)
+        #
+        # G-E2 fix: variance of a single value is always 0.0, so the
+        # naive ``1 - var`` formula reported a 2-sentence document
+        # (one transition) as "perfectly consistent" — same value as a
+        # 50-sentence document with genuinely zero shift variance.
+        # Meanwhile a 1-sentence document took the early-return path
+        # and reported ``0.0``. Pick the consistent convention: at
+        # least 2 transitions (i.e. ≥3 sentences) are needed before
+        # the metric is meaningful — below that we report ``0.0``
+        # ("insufficient data") to match the 1-sentence branch.
+        if shift_arr.size >= 2:
+            temporal_consistency = float(1.0 - narrative_volatility)
+        else:
+            temporal_consistency = 0.0
 
         return TemporalGraphFeatures(
             entity_recurrence=entity_recurrence,

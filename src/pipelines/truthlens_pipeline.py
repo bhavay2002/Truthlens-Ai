@@ -14,7 +14,7 @@ from src.analysis.orchestrator import AnalysisOrchestrator
 from src.inference.inference_pipeline import Predictor
 from src.aggregation.aggregation_pipeline import AggregationPipeline
 from src.aggregation.truthlens_score_calculator import TruthLensScoreCalculator
-from src.graph.graph_pipeline import GraphPipeline
+from src.graph.graph_pipeline import GraphPipeline, get_default_pipeline
 from src.explainability.explainability_pipeline import run_explainability_pipeline
 from src.evaluation.evaluation_pipeline import run_evaluation_pipeline
 
@@ -56,7 +56,10 @@ class TruthLensPipeline:
         self.predictor = predictor or Predictor()
         self.aggregation_pipeline = aggregation_pipeline or AggregationPipeline()
         self.score_calculator = score_calculator or TruthLensScoreCalculator()
-        self.graph_pipeline = graph_pipeline or GraphPipeline()
+        # G-R1: fall back to the process-wide singleton instead of
+        # building a fresh ``GraphPipeline`` (which spins up 6 builders
+        # + 15 analyzers) per ``TruthLensPipeline`` instance.
+        self.graph_pipeline = graph_pipeline or get_default_pipeline()
 
         self.enable_explainability = enable_explainability
         self.enable_evaluation = enable_evaluation

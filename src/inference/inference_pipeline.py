@@ -11,7 +11,7 @@ import torch
 from src.aggregation.aggregation_pipeline import AggregationPipeline
 from src.inference.postprocessing import Postprocessor
 from src.explainability.orchestrator import ExplainabilityOrchestrator
-from src.graph.graph_pipeline import GraphPipeline
+from src.graph.graph_pipeline import GraphPipeline, get_default_pipeline
 
 from src.monitoring.feature_logger import (
     log_request_latency,
@@ -67,8 +67,8 @@ class PredictionPipeline:
 
         self.postprocessor = Postprocessor()
 
-        # 🔥 NEW
-        self.graph_pipeline = GraphPipeline()
+        # 🔥 NEW — G-R1: share the process-wide singleton.
+        self.graph_pipeline = get_default_pipeline()
 
         for name in ["bias_model", "ideology_model", "propaganda_model", "emotion_model"]:
             model = getattr(self, name)

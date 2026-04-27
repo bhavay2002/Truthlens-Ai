@@ -159,9 +159,22 @@ class GraphFeatureExtractor:
 
     def extract_from_graphs(
         self,
-        entity_graph: Optional[Dict[str, List[str]]] = None,
-        narrative_graph: Optional[Dict[str, List[str]]] = None,
+        entity_graph: Optional[Dict[str, Dict[str, float]]] = None,
+        narrative_graph: Optional[Dict[str, Dict[str, float]]] = None,
+        *,
+        entity_metrics: Optional[Dict[str, float]] = None,
+        narrative_metrics: Optional[Dict[str, float]] = None,
     ) -> Dict[str, float]:
+        """Compose the graph-level feature dict.
+
+        G-R2: ``entity_metrics`` / ``narrative_metrics`` are optional
+        pre-computed dicts. When provided, the internal
+        ``GraphAnalyzer.analyze`` call is skipped — the pipeline already
+        runs it once at the top, so this avoids a second pass over the
+        same graph (Python loop, ~O(N+E) per call). When *not* provided
+        the legacy behaviour is preserved so direct callers
+        (``extract_features(text)`` / tests) keep working.
+        """
 
         blocks: List[Dict[str, float]] = []
 
@@ -174,7 +187,11 @@ class GraphFeatureExtractor:
                 self.entity_builder.extract_graph_features(entity_graph).to_dict()
             )
 
-            metrics = self.analyzer.analyze(entity_graph).to_dict()
+            metrics = (
+                entity_metrics
+                if entity_metrics is not None
+                else self.analyzer.analyze(entity_graph).to_dict()
+            )
 
             blocks.append(entity_features)
             blocks.append(metrics)
@@ -198,6 +215,12 @@ class GraphFeatureExtractor:
             )
 
             blocks.append(narrative_features)
+
+            # G-R2: surface narrative metrics too when supplied —
+            # downstream models that key on them (per G-C4) will then
+            # see them without paying for a duplicate ``analyze`` pass.
+            if narrative_metrics:
+                blocks.append(narrative_metrics)
 
         if not blocks:
             return {}

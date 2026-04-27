@@ -13,7 +13,7 @@ from src.features.pipelines.feature_pipeline import FeaturePipeline
 from src.graph.entity_graph import EntityGraphBuilder
 from src.graph.graph_analysis import GraphAnalyzer
 from src.graph.narrative_graph_builder import NarrativeGraphBuilder
-from src.graph.graph_pipeline import GraphPipeline
+from src.graph.graph_pipeline import GraphPipeline, get_default_pipeline
 
 from src.analysis.bias_profile_builder import BiasProfileBuilder
 from src.analysis.integration_runner import AnalysisIntegrationRunner
@@ -80,7 +80,9 @@ class ArticleAnalyzer:
         self.feature_pipeline.initialize()
 
         self.narrative_graph_builder = self.narrative_graph_builder or NarrativeGraphBuilder()
-        self.graph_pipeline = self.graph_pipeline or GraphPipeline()
+        # G-R1: callers can still inject their own ``GraphPipeline``;
+        # the default falls through to the process-wide singleton.
+        self.graph_pipeline = self.graph_pipeline or get_default_pipeline()
         self.analysis_runner = self.analysis_runner or AnalysisIntegrationRunner()
         self.aggregation_pipeline = self.aggregation_pipeline or AggregationPipeline()
 

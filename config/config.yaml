@@ -158,6 +158,56 @@ features:
     max_memory_bytes: 536870912   # 512 MiB
 
 # =========================================================
+# GRAPH LAYER  (audit §8 — single source of truth)
+# =========================================================
+# Every knob the graph pipeline reads. Defaults below match what the
+# old hardcoded ``__init__`` calls used, so removing this block does
+# not change behaviour. ``GraphConfigLoader`` validates each field at
+# load time and ``GraphPipeline`` translates them via
+# ``GraphPipelineConfig.from_graph_config``.
+
+graph:
+  # toggles
+  enable_entity_graph: true
+  enable_narrative_graph: true
+  enable_temporal_graph: true
+  enable_graph_explainer: true
+
+  # runtime behaviour (G-CFG3)
+  return_vector: true
+  run_analysis_modules: true
+  batch_size: 32
+
+  # extraction (G-CFG2)
+  min_keyword_length: 4
+  max_keywords_per_sentence: 4
+  temporal_min_token_length: 4
+
+  # graph behavior
+  use_weighted_edges: true
+  normalize_graph: true
+
+  # thresholds
+  min_edge_weight: 0.0
+  max_edge_weight: 10.0
+
+  # scaling
+  feature_scale: 1.0
+
+  # embeddings (G-CFG2)
+  enable_graph_embeddings: false
+  embedding_type: "hybrid"   # degree | centrality | spectral | hybrid | node2vec
+  spectral_dim: 8
+  embedding_dim: 16
+  walk_length: 10
+  num_walks: 10
+
+  # explainer mixing weights (G-CFG2) — must sum to 1.0
+  explainer_node_weight: 0.4
+  explainer_edge_weight: 0.3
+  explainer_temporal_weight: 0.3
+
+# =========================================================
 # EXPERIMENT TRACKING
 # =========================================================
 

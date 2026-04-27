@@ -10,7 +10,7 @@ import atexit
 import numpy as np
 import torch
 
-from src.graph.graph_pipeline import GraphPipeline
+from src.graph.graph_pipeline import GraphPipeline, get_default_pipeline
 from src.features.base.base_feature import FeatureContext
 from src.features.bias.bias_features import BiasFeatures
 from src.features.bias.framing_features import FramingFeatures
@@ -103,7 +103,9 @@ class FeaturePreparer:
             allow_extra=True,
         )
 
-        self.graph_pipeline = GraphPipeline() if config.derive_graph_features else None
+        # G-R1: reuse the process-wide singleton when graph features
+        # are enabled — avoids duplicating spaCy + 15 analyzers.
+        self.graph_pipeline = get_default_pipeline() if config.derive_graph_features else None
         self._pool: Optional[Pool] = None
 
         atexit.register(self.close_pool)

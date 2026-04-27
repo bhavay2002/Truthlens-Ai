@@ -11,7 +11,7 @@ from src.features.base.feature_registry import FeatureRegistry
 from src.features.feature_bootstrap import bootstrap_feature_registry
 from src.features.fusion.feature_fusion import FeatureFusion
 from src.features.feature_schema_validator import FeatureSchemaValidator
-from src.graph.graph_pipeline import GraphPipeline
+from src.graph.graph_pipeline import GraphPipeline, get_default_pipeline
 from src.features.base.base_feature import FeatureContext
 from src.features.base.tokenization import ensure_tokens_word
 
@@ -118,7 +118,9 @@ class FeaturePipeline:
         self.fusion = FeatureFusion(self.features)
 
         try:
-            self.graph_pipeline = GraphPipeline()
+            # G-R1: shared singleton — first instantiation pays the
+            # full setup cost, subsequent ``FeaturePipeline``s reuse it.
+            self.graph_pipeline = get_default_pipeline()
         except Exception as e:
             logger.warning("GraphPipeline unavailable: %s", e)
             self.graph_pipeline = None

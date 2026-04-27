@@ -25,7 +25,7 @@ from src.inference.inference_pipeline import (
 from src.inference.report_generator import ReportGenerator
 from src.inference.result_formatter import ResultFormatter
 from src.analysis.integration_runner import AnalysisIntegrationRunner
-from src.graph.graph_pipeline import GraphPipeline
+from src.graph.graph_pipeline import GraphPipeline, get_default_pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +98,7 @@ class BatchInferenceEngine:
         self.report_generator = ReportGenerator()
         self.formatter = ResultFormatter()
         self.analysis_runner = AnalysisIntegrationRunner()
-        self.graph_pipeline = GraphPipeline()
+        self.graph_pipeline = get_default_pipeline()  # G-R1: shared singleton
 
     # =====================================================
     # DATA
