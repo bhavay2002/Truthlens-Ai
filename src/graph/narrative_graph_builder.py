@@ -4,9 +4,11 @@ import logging
 import re
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Set
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import numpy as np
+
+from src.features.base.spacy_loader import get_shared_nlp
 
 logger = logging.getLogger(__name__)
 EPS = 1e-12
@@ -45,23 +47,35 @@ def _split_sentences(text: str) -> List[str]:
     return [s.strip() for s in sentences if s.strip()]
 
 
-def _extract_keywords(sentence: str, min_len: int) -> List[str]:
+def _regex_keyword_spans(
+    sentence: str,
+    sentence_offset: int,
+    min_len: int,
+    top_k: int,
+) -> List[Tuple[str, int, int]]:
+    """Regex fallback (used only when spaCy is unavailable).
 
-    tokens = re.findall(r"\b[a-zA-Z]+\b", sentence.lower())
+    Returns ``(token, start_char, end_char)`` triples — char offsets are
+    absolute (relative to the original ``text``), not relative to the
+    sentence, so callers can use them directly for span recovery.
+    """
+    counts: Counter = Counter()
+    positions: Dict[str, Tuple[int, int]] = {}
 
-    filtered = [t for t in tokens if len(t) >= min_len]
+    for m in re.finditer(r"\b[a-zA-Z]+\b", sentence):
+        tok = m.group(0).lower()
+        if len(tok) < min_len:
+            continue
+        counts[tok] += 1
+        if tok not in positions:
+            positions[tok] = (sentence_offset + m.start(), sentence_offset + m.end())
 
-    if not filtered:
-        return []
-
-    counts = Counter(filtered)
-
-    ranked = sorted(
-        counts.items(),
-        key=lambda x: (-x[1], x[0]),
-    )
-
-    return [t for t, _ in ranked]
+    ranked = sorted(counts.items(), key=lambda x: (-x[1], x[0]))
+    out: List[Tuple[str, int, int]] = []
+    for tok, _ in ranked[:top_k]:
+        s, e = positions[tok]
+        out.append((tok, s, e))
+    return out
 
 
 # =========================================================
@@ -69,11 +83,48 @@ def _extract_keywords(sentence: str, min_len: int) -> List[str]:
 # =========================================================
 
 class NarrativeGraphBuilder:
+    """Build a sentence-level narrative co-occurrence graph.
+
+    G-S1 / G-T2 fix
+    ----------------
+    The previous implementation used a hand-rolled regex tokenizer
+    (``\b[a-zA-Z]+\b``) that disagreed with the spaCy tokenizer used by
+    every other layer of the project. That meant a "node" in the
+    narrative graph could not be reliably mapped back to either a spaCy
+    token or to a model subword — and nothing tied the chosen keywords
+    to a real linguistic unit.
+
+    We now drive keyword extraction off the **shared spaCy pipeline**
+    (the same one used by ``EntityGraphBuilder`` and the rest of
+    ``src/analysis/``):
+
+      * **Nodes** are noun-chunks and named entities — real linguistic
+        units, with stable spans into the source text.
+      * **Edges** are added on two principles:
+          1. *Shared sentence membership* — every pair of keywords that
+             co-occur in the same sentence is linked (real
+             co-occurrence, not a top-k×top-k bigram chain).
+          2. *Temporal succession* — every keyword in sentence ``i`` is
+             also linked to every keyword in sentence ``i+1`` (preserves
+             the chain semantics of the previous implementation, but on
+             real linguistic units instead of regex tokens).
+
+    The regex tokenizer is kept solely as a fallback for environments
+    where ``en_core_web_sm`` is missing — ``get_shared_nlp`` returns
+    ``None`` in that case and the builder transparently falls back.
+
+    The public API (``build_graph(text) -> Dict[str, Dict[str, float]]``
+    and ``extract_graph_features(graph) -> NarrativeGraphFeatures``) is
+    unchanged. A new ``build_graph_with_spans(text)`` returns both the
+    graph **and** the per-keyword character offsets so the API /
+    explainer layer can highlight nodes back into the source text.
+    """
 
     def __init__(
         self,
         min_token_length: int = 4,
         max_keywords_per_sentence: int = 4,
+        model: str = "en_core_web_sm",
     ):
 
         if min_token_length < 1:
@@ -85,50 +136,221 @@ class NarrativeGraphBuilder:
         self.min_token_length = min_token_length
         self.max_keywords_per_sentence = max_keywords_per_sentence
 
-        logger.info("NarrativeGraphBuilder initialized")
+        # G-T2: share the *same* spaCy instance every other layer uses
+        # so node IDs in this graph match entity IDs in the entity
+        # graph and tokens used by the analysis layer.
+        self.nlp = get_shared_nlp(model)
+
+        # ``doc.sents`` requires either a parser, a senter, or a
+        # sentencizer. The shared loader may return a blank pipeline
+        # when ``en_core_web_sm`` is missing — add the cheap
+        # rule-based sentencizer in that case so iteration doesn't
+        # raise ``E030``.
+        if self.nlp is not None and not (
+            self.nlp.has_pipe("parser")
+            or self.nlp.has_pipe("senter")
+            or self.nlp.has_pipe("sentencizer")
+        ):
+            try:
+                self.nlp.add_pipe("sentencizer")
+            except Exception:  # pragma: no cover — defensive only
+                logger.warning("Could not add sentencizer to spaCy pipeline")
+
+        logger.info(
+            "NarrativeGraphBuilder initialized (spacy=%s)",
+            "yes" if self.nlp is not None else "no/regex-fallback",
+        )
 
     # =====================================================
-    # 🔥 BUILD GRAPH (WEIGHTED)
+    # KEYWORD EXTRACTION  (G-S1 / G-T2)
     # =====================================================
 
-    def build_graph(self, text: str) -> Dict[str, Dict[str, float]]:
+    def _sentence_keywords_spacy(
+        self,
+        sent,
+    ) -> List[Tuple[str, int, int]]:
+        """Extract ``(keyword, start_char, end_char)`` from a spaCy sentence.
+
+        Uses noun-chunks (preferred — multi-word phrases are real
+        narrative units) plus named entities. Falls back to lemmatised
+        content tokens if neither is available (blank pipeline).
+        """
+        items: List[Tuple[str, int, int]] = []
+        seen: Set[str] = set()
+
+        # ---- noun chunks (real linguistic units) ----
+        try:
+            for nc in sent.noun_chunks:
+                key = nc.text.lower().strip()
+                if (
+                    len(key) >= self.min_token_length
+                    and key not in seen
+                ):
+                    items.append((key, nc.start_char, nc.end_char))
+                    seen.add(key)
+        except (NotImplementedError, ValueError):
+            # blank pipelines have no parser → no noun_chunks
+            pass
+
+        # ---- named entities ----
+        for ent in sent.ents:
+            key = ent.text.lower().strip()
+            if (
+                len(key) >= self.min_token_length
+                and key not in seen
+            ):
+                items.append((key, ent.start_char, ent.end_char))
+                seen.add(key)
+
+        # ---- fallback: content tokens (blank pipeline path) ----
+        if not items:
+            for tok in sent:
+                if not tok.is_alpha:
+                    continue
+                if getattr(tok, "is_stop", False):
+                    continue
+                key = (
+                    (tok.lemma_ or tok.text).lower().strip()
+                )
+                if (
+                    len(key) >= self.min_token_length
+                    and key not in seen
+                ):
+                    items.append((key, tok.idx, tok.idx + len(tok.text)))
+                    seen.add(key)
+
+        return items[: self.max_keywords_per_sentence]
+
+    # =====================================================
+    # 🔥 BUILD GRAPH (WEIGHTED + SPAN-AWARE)
+    # =====================================================
+
+    def build_graph_with_spans(
+        self,
+        text: str,
+    ) -> Dict[str, Any]:
+        """Build the narrative graph **and** return per-keyword char offsets.
+
+        Returns a dict::
+
+            {
+                "graph":  Dict[str, Dict[str, float]],
+                "spans":  List[
+                    {"keyword": str, "start_char": int,
+                     "end_char": int, "sentence_index": int}
+                ],
+                "tokenizer": "spacy" | "regex",
+            }
+
+        The ``spans`` list lets the explainer / API layer map a node
+        like ``"obama"`` back to a highlightable region of the source
+        text — addresses G-T1 / G-T2.
+        """
 
         if not isinstance(text, str) or not text.strip():
             raise ValueError("Invalid text")
 
-        sentences = _split_sentences(text)
-
         graph: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+        spans: List[Dict[str, Any]] = []
 
+        # -------- collect per-sentence keyword lists --------
+        sentence_keywords: List[List[str]] = []
+
+        if self.nlp is not None:
+            doc = self.nlp(text)
+
+            for s_idx, sent in enumerate(doc.sents):
+                kws = self._sentence_keywords_spacy(sent)
+                sentence_keywords.append([k for k, _, _ in kws])
+
+                for k, s, e in kws:
+                    spans.append(
+                        {
+                            "keyword": k,
+                            "start_char": int(s),
+                            "end_char": int(e),
+                            "sentence_index": s_idx,
+                        }
+                    )
+
+            tokenizer_used = "spacy"
+
+        else:
+            # ---- regex fallback (no spaCy available) ----
+            offset = 0
+            for s_idx, sentence in enumerate(_split_sentences(text)):
+                pos = text.find(sentence, offset)
+                if pos < 0:
+                    pos = offset
+                offset = pos + len(sentence)
+
+                triples = _regex_keyword_spans(
+                    sentence,
+                    sentence_offset=pos,
+                    min_len=self.min_token_length,
+                    top_k=self.max_keywords_per_sentence,
+                )
+                sentence_keywords.append([k for k, _, _ in triples])
+
+                for k, s, e in triples:
+                    spans.append(
+                        {
+                            "keyword": k,
+                            "start_char": int(s),
+                            "end_char": int(e),
+                            "sentence_index": s_idx,
+                        }
+                    )
+
+            tokenizer_used = "regex"
+
+        # -------- build edges: (1) intra-sentence + (2) succession --------
         prev_keywords: List[str] = []
 
-        for idx, sentence in enumerate(sentences):
+        for kws in sentence_keywords:
 
-            ranked = _extract_keywords(sentence, self.min_token_length)
-            keywords = ranked[: self.max_keywords_per_sentence]
-
-            if not keywords:
+            if not kws:
+                # empty sentence — keep prev_keywords so that succession
+                # can still bridge across sentences with no salient nodes
                 continue
 
-            # ensure nodes — use ``defaultdict(float)`` so the
-            # ``graph[src][tgt] += 1.0`` accumulator below doesn't
-            # KeyError on the first transition (the previous
-            # ``setdefault(k, {})`` overrode the inner factory with a
-            # plain dict, breaking the augmented-assignment).
-            for k in keywords:
+            # ensure node entries exist (defaultdict factory survives the
+            # later ``dict(v)`` conversion below)
+            for k in kws:
                 if k not in graph:
                     graph[k] = defaultdict(float)
 
-            # 🔥 weighted transitions
+            # (1) intra-sentence co-occurrence — real shared-membership edges
+            for i, u in enumerate(kws):
+                for v in kws[i + 1:]:
+                    if u != v:
+                        graph[u][v] += 1.0
+
+            # (2) temporal succession — preserves the prior chain semantics,
+            # but on real linguistic units instead of regex tokens
             if prev_keywords:
                 for src in prev_keywords:
-                    for tgt in keywords:
+                    for tgt in kws:
                         if src != tgt:
                             graph[src][tgt] += 1.0
 
-            prev_keywords = keywords
+            prev_keywords = kws
 
-        return {k: dict(v) for k, v in graph.items()}
+        return {
+            "graph": {k: dict(v) for k, v in graph.items()},
+            "spans": spans,
+            "tokenizer": tokenizer_used,
+        }
+
+    def build_graph(self, text: str) -> Dict[str, Dict[str, float]]:
+        """Backward-compatible entrypoint — returns just the graph dict.
+
+        Existing callers (``GraphPipeline``, ``GraphFeatureExtractor``,
+        ``analyze_article``, ``interaction_graph_features``) keep
+        working unchanged. New callers that need span alignment should
+        call :meth:`build_graph_with_spans`.
+        """
+        return self.build_graph_with_spans(text)["graph"]
 
     # =====================================================
     # FEATURES

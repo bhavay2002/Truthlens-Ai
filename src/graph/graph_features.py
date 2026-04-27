@@ -16,6 +16,68 @@ EPS = 1e-12
 
 
 # =========================================================
+# DEVICE TRANSFER HELPER  (G-G1)
+# =========================================================
+#
+# The graph layer is intentionally CPU-only (good — spaCy parsing is
+# the bottleneck, not the linear algebra) but the resulting feature
+# vectors used to be returned as plain ``np.float32`` arrays. The
+# downstream consumer (``HybridTruthLensModel.forward``) then did one
+# host→device copy *per sample* inside the forward pass, which on
+# batched inference is N independent CUDA syncs.
+#
+# ``to_pinned_tensor`` lets the batch-inference / feature-preparer
+# layer:
+#   1. accumulate per-sample numpy vectors on the CPU,
+#   2. ``np.stack`` them once,
+#   3. wrap the stacked array in a pinned-memory tensor here,
+#   4. do a single ``.to(device, non_blocking=True)`` at the model
+#      boundary.
+#
+# This collapses N syncs into 1 and overlaps the copy with kernel
+# launches when the model is GPU-resident. Pinning is a no-op on
+# CPU-only deployments, so this is safe to call unconditionally.
+# ``torch`` import is deferred so ``src.graph`` keeps loading on
+# torch-less environments (e.g. data-only utility scripts).
+
+
+def to_pinned_tensor(vec):
+    """Wrap a numpy array (or list of arrays) in a pinned CPU tensor.
+
+    Accepts a single ``np.ndarray`` or a list/tuple of equally shaped
+    arrays — in the second case the arrays are stacked along axis 0
+    so the caller gets a single ``(N, D)`` tensor ready for one
+    ``.to(device, non_blocking=True)`` copy at the model edge.
+
+    Returns the tensor unchanged on platforms without CUDA support
+    (``pin_memory`` raises on those — we swallow it and return a
+    plain CPU tensor instead).
+    """
+    import torch  # local import keeps ``src.graph`` torch-optional
+    import numpy as _np
+
+    if isinstance(vec, (list, tuple)):
+        if not vec:
+            return torch.empty(0, dtype=torch.float32)
+        arr = _np.stack([_np.asarray(v, dtype=_np.float32) for v in vec], axis=0)
+    else:
+        arr = _np.asarray(vec, dtype=_np.float32)
+
+    t = torch.from_numpy(arr)
+
+    # ``pin_memory`` requires CUDA *or* a CPU-pinned allocator; on
+    # pure-CPU builds it raises ``RuntimeError``. Treat that as a
+    # no-op so callers can use this helper unconditionally.
+    if torch.cuda.is_available():
+        try:
+            t = t.pin_memory()
+        except RuntimeError:
+            pass
+
+    return t
+
+
+# =========================================================
 # CONFIG
 # =========================================================
 

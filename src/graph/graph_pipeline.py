@@ -5,7 +5,7 @@ import json
 import logging
 from collections import defaultdict
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -158,29 +158,51 @@ class GraphPipeline:
     # ENTITY GRAPH (factored so run / run_batch share code)
     # =====================================================
 
-    def _entity_graph_from_doc(self, doc) -> Dict[str, Dict[str, float]]:
+    def _entity_graph_from_doc(
+        self,
+        doc,
+    ) -> Tuple[Dict[str, Dict[str, float]], List[Dict[str, Any]]]:
         """Build the weighted entity graph from a pre-parsed spaCy ``Doc``.
 
-        Mirrors :meth:`EntityGraphBuilder.build_graph` but skips the
-        ``self.nlp(text)`` call so a batch of documents parsed once via
-        ``nlp.pipe`` can share a single parser pass (G-P3).
+        Mirrors :meth:`EntityGraphBuilder.build_graph_with_spans` but
+        skips the ``self.nlp(text)`` call so a batch of documents
+        parsed once via ``nlp.pipe`` can share a single parser pass
+        (G-P3). Also returns per-mention character spans (G-T1).
         """
 
         graph: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+        spans: List[Dict[str, Any]] = []
 
-        for sent in doc.sents:
-            ents = [
-                ent.text.lower().strip()
-                for ent in sent.ents
-                if ent.text.strip()
-            ]
-            ents = list(dict.fromkeys(ents))
+        for s_idx, sent in enumerate(doc.sents):
+
+            seen: set = set()
+            ents: List[str] = []
+
+            for ent in sent.ents:
+                key = ent.text.lower().strip()
+                if not key:
+                    continue
+
+                spans.append(
+                    {
+                        "entity": key,
+                        "raw_text": ent.text,
+                        "start_char": int(ent.start_char),
+                        "end_char": int(ent.end_char),
+                        "sentence_index": s_idx,
+                        "label": getattr(ent, "label_", "") or "",
+                    }
+                )
+
+                if key not in seen:
+                    ents.append(key)
+                    seen.add(key)
 
             for i, a in enumerate(ents):
                 for b in ents[i + 1:]:
                     graph[a][b] += 1.0
 
-        return canonicalize_weighted(graph)
+        return canonicalize_weighted(graph), spans
 
     # =====================================================
     # MAIN
@@ -239,17 +261,30 @@ class GraphPipeline:
         narrative_graph: Optional[Dict[str, Dict[str, float]]] = None
         temporal_features: Optional[Dict[str, float]] = None
 
-        # -------------------------------------------
-        # ENTITY GRAPH  (already parsed)
-        # -------------------------------------------
-        if self.entity_graph_builder is not None and doc is not None:
-            entity_graph = self._entity_graph_from_doc(doc)
+        # G-T1 / G-T2: per-mention character spans for entity & narrative
+        # nodes, surfaced through the result dict so the API / explainer
+        # layer can map node IDs back to highlightable text regions.
+        entity_spans: List[Dict[str, Any]] = []
+        narrative_spans: List[Dict[str, Any]] = []
+        narrative_tokenizer: Optional[str] = None
 
         # -------------------------------------------
-        # NARRATIVE GRAPH
+        # ENTITY GRAPH  (already parsed) — G-T1: spans surfaced
+        # -------------------------------------------
+        if self.entity_graph_builder is not None and doc is not None:
+            entity_graph, entity_spans = self._entity_graph_from_doc(doc)
+
+        # -------------------------------------------
+        # NARRATIVE GRAPH — G-S1 / G-T2: spaCy-aligned, span-aware
         # -------------------------------------------
         if self.narrative_graph_builder is not None:
-            narrative_graph = self.narrative_graph_builder.build_graph(text)
+            narrative_payload = (
+                self.narrative_graph_builder.build_graph_with_spans(text)
+            )
+            narrative_graph = narrative_payload["graph"]
+            narrative_spans = narrative_payload.get("spans", [])
+            narrative_tokenizer = narrative_payload.get("tokenizer")
+
             # G-P1: canonicalize once at the top so every downstream
             # consumer (analyzer, embedding, explainer) skips repeating
             # the symmetrise / normalise pass.
@@ -367,6 +402,11 @@ class GraphPipeline:
             # consumer already expects.
             "entity_graph_metrics": entity_metrics,
             "narrative_graph_metrics": narrative_metrics,
+            # G-T1 / G-T2: per-mention character spans so the API /
+            # explainer can highlight node IDs back into the source text.
+            "entity_spans": entity_spans,
+            "narrative_spans": narrative_spans,
+            "narrative_tokenizer": narrative_tokenizer,
         }
 
         if vector is not None:

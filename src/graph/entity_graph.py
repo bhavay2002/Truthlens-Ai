@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict, Counter
 from dataclasses import dataclass
-from typing import Dict, List, Set, Tuple
+from typing import Any, Dict, List, Set, Tuple
 
 import numpy as np
 from spacy.tokens import Doc
@@ -116,10 +116,43 @@ class EntityGraphBuilder:
         self.nlp = nlp
 
     # =====================================================
-    # GRAPH BUILD (🔥 WEIGHTED)
+    # GRAPH BUILD (🔥 WEIGHTED + SPAN-AWARE)
     # =====================================================
 
-    def build_graph(self, text: str) -> Dict[str, Dict[str, float]]:
+    def build_graph_with_spans(self, text: str) -> Dict[str, Any]:
+        """Build the entity graph **and** return per-mention char spans.
+
+        G-T1 fix: previously the builder discarded ``ent.start_char`` /
+        ``ent.end_char`` and only kept ``ent.text.lower().strip()`` as
+        the node id, so a downstream explainer holding
+        ``node_importance: {"obama": 0.4}`` had no way to map ``"obama"``
+        back to a highlightable region of the source text. We now carry
+        the alignment alongside the graph.
+
+        Returns::
+
+            {
+                "graph":  Dict[str, Dict[str, float]],
+                "spans":  List[
+                    {"entity": str,             # node id (lower-cased)
+                     "raw_text": str,           # surface form as it appears
+                     "start_char": int,
+                     "end_char": int,
+                     "sentence_index": int,
+                     "label": str},             # spaCy NER label (e.g. PERSON)
+                ],
+            }
+
+        The graph itself is the canonical weighted form so existing
+        consumers keep working. ``spans`` is opt-in — only the new
+        ``GraphPipeline`` surface and explainer read it.
+
+        Note on G-S2: edges are written **once** here
+        (``graph[a][b] += 1.0``); symmetrisation is delegated to
+        ``canonicalize_weighted``, which is idempotent (it takes the
+        ``max`` of the two directions). This is what prevents the old
+        4×-amplification bug — see the comment on ``canonicalize_weighted``.
+        """
 
         if not isinstance(text, str) or not text.strip():
             raise ValueError("Invalid text")
@@ -127,16 +160,35 @@ class EntityGraphBuilder:
         doc: Doc = self.nlp(text)
 
         graph: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+        spans: List[Dict[str, Any]] = []
 
-        for sent in doc.sents:
+        for s_idx, sent in enumerate(doc.sents):
 
-            ents = [
-                ent.text.lower().strip()
-                for ent in sent.ents
-                if ent.text.strip()
-            ]
+            seen: Set[str] = set()
+            ents: List[str] = []
 
-            ents = list(dict.fromkeys(ents))  # unique
+            for ent in sent.ents:
+                key = ent.text.lower().strip()
+                if not key:
+                    continue
+
+                # G-T1: record every mention (not just the first per
+                # sentence) so an explainer can highlight all spans
+                # collapsed under the same node id.
+                spans.append(
+                    {
+                        "entity": key,
+                        "raw_text": ent.text,
+                        "start_char": int(ent.start_char),
+                        "end_char": int(ent.end_char),
+                        "sentence_index": s_idx,
+                        "label": getattr(ent, "label_", "") or "",
+                    }
+                )
+
+                if key not in seen:
+                    ents.append(key)
+                    seen.add(key)
 
             for i, a in enumerate(ents):
                 for b in ents[i + 1:]:
@@ -148,10 +200,25 @@ class EntityGraphBuilder:
         # G-C5 / G-S2: previously called ``normalize_graph`` then
         # ``to_undirected`` which both downcast to ``Dict[str, List[str]]``,
         # silently throwing away every co-occurrence weight just computed
-        # above. Now we return the canonical weighted form so downstream
-        # analyzers / explainers actually see the weights.
+        # above (and ``to_undirected`` itself summed the two directions
+        # for an inflated 4× weight per co-occurrence). The canonical
+        # form symmetrises via ``max(...)`` so re-canonicalising never
+        # amplifies a value — invariant: ``out[u][v] == out[v][u]`` and
+        # equals the original single-direction count.
         from src.graph.graph_analysis import canonicalize_weighted
-        return canonicalize_weighted(graph)
+
+        return {
+            "graph": canonicalize_weighted(graph),
+            "spans": spans,
+        }
+
+    def build_graph(self, text: str) -> Dict[str, Dict[str, float]]:
+        """Backward-compatible entrypoint — returns just the graph dict.
+
+        Existing callers stay unchanged. New callers that need span
+        alignment should call :meth:`build_graph_with_spans`.
+        """
+        return self.build_graph_with_spans(text)["graph"]
 
     # =====================================================
     # FEATURES
