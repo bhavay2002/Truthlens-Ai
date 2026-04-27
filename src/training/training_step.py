@@ -91,15 +91,23 @@ class TrainingStep:
     def _tensor_to_feature_dict(self, batch: Dict[str, Any], max_items: int = 50):
         """
         Convert tensor batch into small numeric feature dict for logging.
-        Prevents huge logs.
+
+        PERF-5: Original implementation called ``float(flat[i])`` inside a
+        Python loop, which forces *one host-device sync per element* (up to
+        ``max_items × num_keys`` syncs per logging step). The new
+        implementation slices on-device first and then performs **a single**
+        ``.cpu().tolist()`` per tensor — at most one sync per key.
         """
-        feature_dict = {}
+        feature_dict: Dict[str, float] = {}
 
         for k, v in batch.items():
-            if isinstance(v, torch.Tensor) and v.dtype in (torch.float32, torch.float64):
-                flat = v.detach().flatten()
-                for i in range(min(len(flat), max_items)):
-                    feature_dict[f"{k}_{i}"] = float(flat[i])
+            if not isinstance(v, torch.Tensor):
+                continue
+            if not v.dtype.is_floating_point:
+                continue
+
+            flat = v.detach().flatten()[:max_items].cpu().tolist()
+            feature_dict.update({f"{k}_{i}": float(x) for i, x in enumerate(flat)})
 
         return feature_dict
 
@@ -115,11 +123,19 @@ class TrainingStep:
         # -------------------------
         # TASK SCHEDULING
         # -------------------------
+        #
+        # LOSS-2: We DELIBERATELY do not call ``_filter_batch`` here.
+        # The original code filtered the labels dict to a single task per
+        # step, which (a) wasted the joint-encoder forward pass — the model
+        # is multi-task and produces logits for every head regardless — and
+        # (b) starved the adaptive task scheduler of all but one task's
+        # loss signal, collapsing it to round-robin behaviour in disguise.
+        # MultiTaskLoss already masks per-task via its label dict, so the
+        # full batch can flow through unchanged.
 
         task = None
         if self.task_scheduler:
             task = self.task_scheduler.next_task()
-            batch = self._filter_batch(batch, task)
 
         # -------------------------
         # 🔍 FEATURE OBSERVABILITY (NEW)
@@ -288,16 +304,27 @@ class TrainingStep:
 
         action = debug_info.get("debug/action", TrainAction.NONE)
 
+        # LOSS-1: Both the instrumentation engine and the monitor engine can
+        # raise REDUCE_LR in the same step. The original code fired
+        # ``_reduce_lr`` once per source, halving the LR TWICE on a spike
+        # that both detectors caught (a 4× drop instead of the configured
+        # 2×). De-duplicate per step.
+        lr_reduced_this_step = False
+
         if action == TrainAction.STOP:
             raise RuntimeError("Training stopped by AutoDebugEngine")
 
         elif action == TrainAction.REDUCE_LR:
             self._reduce_lr()
+            lr_reduced_this_step = True
 
         elif action == TrainAction.CHECK_DATALOADER:
             logger.warning("Potential dataloader bottleneck detected")
 
-        if monitor_metrics.get("monitor/action") == TrainAction.REDUCE_LR:
+        if (
+            not lr_reduced_this_step
+            and monitor_metrics.get("monitor/action") == TrainAction.REDUCE_LR
+        ):
             self._reduce_lr()
 
         # -------------------------

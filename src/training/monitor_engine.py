@@ -9,6 +9,14 @@ from typing import Dict, Any, Optional
 
 import torch
 
+# LOSS-1: Single source of truth for spike detection. The codebase previously
+# shipped TWO ``SpikeDetector`` classes — one here (pure ratio) and one in
+# ``instrumentation`` (bias-corrected EMA + ratio + z-score). Both wired to
+# REDUCE_LR actions and could fire in the same step on conflicting policies.
+# Re-export the stricter, bias-corrected version and let MonitoringEngine
+# delegate to it, so there is one detector and one policy across the layer.
+from src.training.instrumentation import SpikeDetector  # noqa: F401  (re-exported)
+
 logger = logging.getLogger(__name__)
 
 
@@ -46,16 +54,6 @@ class EMA:
         else:
             self.value = self.alpha * x + (1 - self.alpha) * self.value
         return self.value
-
-
-class SpikeDetector:
-    def __init__(self, threshold: float):
-        self.threshold = threshold
-
-    def is_spike(self, loss: float, ema: float) -> bool:
-        if ema is None or ema == 0:
-            return False
-        return (loss / (ema + 1e-12)) > self.threshold
 
 
 class HealthScore:
@@ -102,7 +100,7 @@ class MonitoringEngine:
         self.loss_ema = EMA(self.config.ema_alpha)
         self.throughput_ema = EMA(self.config.throughput_ema_alpha)
 
-        self.spike_detector = SpikeDetector(self.config.spike_threshold)
+        self.spike_detector = SpikeDetector(threshold=self.config.spike_threshold)
         self.health = HealthScore()
 
         self.step = 0
@@ -137,7 +135,10 @@ class MonitoringEngine:
 
         ema = self.loss_ema.update(loss)
 
-        spike = self.spike_detector.is_spike(loss, ema)
+        # LOSS-1: unified detector exposes ``detect(loss, ema, var=None)``.
+        # With var=None it falls back to pure-ratio behaviour, matching the
+        # previous local detector exactly while sharing one implementation.
+        spike = self.spike_detector.detect(loss, ema)
 
         grad_norm = None
 

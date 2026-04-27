@@ -24,66 +24,127 @@ class EvaluationConfig:
 
 
 # =========================================================
-# STREAMING METRICS
+# STREAMING METRICS  (PERF-1: keep accumulators on-device)
 # =========================================================
+#
+# Original implementation called ``.sum().item()`` on every batch which
+# forces a host-device sync per metric per batch (3-6× val-loop slowdown
+# on GPU). The new metrics:
+#   * lazily allocate accumulator tensors on the FIRST batch's device
+#   * never sync inside ``update`` — only on ``compute``
+#   * expose ``sync_distributed`` so DDP can SUM-reduce raw counters
+#     (PERF-2: correct DDP merging requires (sum, count) reductions, not
+#     pre-divided averages)
+# =========================================================
+
+
+def _all_reduce_sum(*tensors: torch.Tensor) -> None:
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        for t in tensors:
+            torch.distributed.all_reduce(t, op=torch.distributed.ReduceOp.SUM)
+
 
 class StreamingAccuracy:
     def __init__(self):
-        self.correct = 0
-        self.total = 0
+        self.correct: Optional[torch.Tensor] = None  # device tensor, lazy
+        self.total: int = 0                          # host int (numel is metadata, no sync)
 
     def update(self, preds, labels):
-        self.correct += (preds == labels).sum().item()
-        self.total += labels.numel()
+        if self.correct is None:
+            self.correct = torch.zeros((), device=preds.device, dtype=torch.float64)
+        self.correct = self.correct + (preds == labels).sum().to(self.correct.dtype)
+        self.total += int(labels.numel())
+
+    def sync_distributed(self):
+        if self.correct is None:
+            return
+        total_t = torch.tensor(
+            float(self.total),
+            device=self.correct.device,
+            dtype=self.correct.dtype,
+        )
+        _all_reduce_sum(self.correct, total_t)
+        self.total = int(total_t.item())
 
     def compute(self):
-        return self.correct / (self.total + 1e-12)
+        if self.correct is None:
+            return 0.0
+        return float(self.correct.item()) / max(self.total, 1)
 
     def reset(self):
-        self.correct = 0
+        self.correct = None
         self.total = 0
 
 
 class StreamingF1:
     def __init__(self):
-        self.tp = 0
-        self.fp = 0
-        self.fn = 0
+        self.tp: Optional[torch.Tensor] = None
+        self.fp: Optional[torch.Tensor] = None
+        self.fn: Optional[torch.Tensor] = None
+
+    def _ensure(self, device):
+        if self.tp is None:
+            self.tp = torch.zeros((), device=device, dtype=torch.float64)
+            self.fp = torch.zeros((), device=device, dtype=torch.float64)
+            self.fn = torch.zeros((), device=device, dtype=torch.float64)
 
     def update(self, preds, labels):
-        preds = preds.view(-1).int()
-        labels = labels.view(-1).int()
+        self._ensure(preds.device)
+        preds = preds.view(-1).to(torch.int64)
+        labels = labels.view(-1).to(torch.int64)
+        self.tp += torch.logical_and(preds == 1, labels == 1).sum().to(self.tp.dtype)
+        self.fp += torch.logical_and(preds == 1, labels == 0).sum().to(self.fp.dtype)
+        self.fn += torch.logical_and(preds == 0, labels == 1).sum().to(self.fn.dtype)
 
-        self.tp += torch.logical_and(preds == 1, labels == 1).sum().item()
-        self.fp += torch.logical_and(preds == 1, labels == 0).sum().item()
-        self.fn += torch.logical_and(preds == 0, labels == 1).sum().item()
+    def sync_distributed(self):
+        if self.tp is None:
+            return
+        _all_reduce_sum(self.tp, self.fp, self.fn)
 
     def compute(self):
-        precision = self.tp / (self.tp + self.fp + 1e-12)
-        recall = self.tp / (self.tp + self.fn + 1e-12)
+        if self.tp is None:
+            return 0.0
+        tp = float(self.tp.item())
+        fp = float(self.fp.item())
+        fn = float(self.fn.item())
+        precision = tp / (tp + fp + 1e-12)
+        recall = tp / (tp + fn + 1e-12)
         return 2 * precision * recall / (precision + recall + 1e-12)
 
     def reset(self):
-        self.tp = 0
-        self.fp = 0
-        self.fn = 0
+        self.tp = self.fp = self.fn = None
 
 
 class StreamingMSE:
     def __init__(self):
-        self.sum_sq = 0.0
-        self.count = 0
+        self.sum_sq: Optional[torch.Tensor] = None
+        self.count: int = 0
 
     def update(self, preds, targets):
-        diff = preds - targets
-        self.sum_sq += (diff ** 2).sum().item()
-        self.count += targets.numel()
+        if self.sum_sq is None:
+            self.sum_sq = torch.zeros((), device=preds.device, dtype=torch.float64)
+        diff = preds.float() - targets.float()
+        self.sum_sq = self.sum_sq + (diff ** 2).sum().to(self.sum_sq.dtype)
+        self.count += int(targets.numel())
+
+    def sync_distributed(self):
+        if self.sum_sq is None:
+            return
+        count_t = torch.tensor(
+            float(self.count),
+            device=self.sum_sq.device,
+            dtype=self.sum_sq.dtype,
+        )
+        _all_reduce_sum(self.sum_sq, count_t)
+        self.count = int(count_t.item())
 
     def compute(self):
-        return self.sum_sq / (self.count + 1e-12)
+        if self.sum_sq is None:
+            return 0.0
+        return float(self.sum_sq.item()) / max(self.count, 1)
 
     def reset(self):
-        self.sum_sq = 0.0
+        self.sum_sq = None
         self.count = 0
 
 
@@ -190,10 +251,9 @@ class EvaluationEngine:
             else:
                 continue
 
-            preds = preds.detach().cpu()
-            labels = labels.detach().cpu()
-
-            metrics[task].update(preds, labels)
+            # PERF-1: keep tensors on device — Streaming* metrics now hold
+            # accumulators on the GPU and only sync at compute() time.
+            metrics[task].update(preds.detach(), labels.detach())
 
     # =====================================================
     # COMPUTE
@@ -205,28 +265,17 @@ class EvaluationEngine:
 
         for task, metric in metrics.items():
 
-            value = metric.compute()
+            # PERF-2: Reduce raw (numerator, denominator) accumulators across
+            # ranks BEFORE dividing — averaging post-divided rank-local scores
+            # is mathematically wrong when shards have different sample
+            # counts (drop_last=False). Each Streaming* metric implements
+            # `sync_distributed` which all_reduces only its raw counters.
+            if hasattr(metric, "sync_distributed"):
+                metric.sync_distributed()
 
-            # DDP sync
-            value = self._sync_scalar(value)
-
-            results[f"{task}_score"] = value
+            results[f"{task}_score"] = metric.compute()
 
         return results
-
-    # =====================================================
-    # DDP SYNC
-    # =====================================================
-
-    def _sync_scalar(self, value: float) -> float:
-
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            tensor = torch.tensor(value, device=self.device)
-            torch.distributed.all_reduce(tensor)
-            tensor /= torch.distributed.get_world_size()
-            return tensor.item()
-
-        return value
 
     # =====================================================
     # DEVICE

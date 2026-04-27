@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict
+from typing import Dict, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
 
-from src.models.loss.multitask_loss import TaskLossConfig
+# CIRCULAR-IMPORT FIX: ``multitask_loss`` imports ``TaskLossRouter`` from this
+# module at module-load time. Importing ``TaskLossConfig`` from ``multitask_loss``
+# at module level here creates a cycle that fails on the second module's load
+# ("cannot import name 'TaskLossConfig' from partially initialized module ...").
+# ``TaskLossConfig`` is only used as a *type annotation* in this file, so we
+# import it under ``TYPE_CHECKING``. Combined with ``from __future__ import
+# annotations`` at the top of the file, every annotation is already a string
+# and never resolved at runtime — zero behavioural change, no runtime cost.
+if TYPE_CHECKING:
+    from src.models.loss.multitask_loss import TaskLossConfig
 
 logger = logging.getLogger(__name__)
 

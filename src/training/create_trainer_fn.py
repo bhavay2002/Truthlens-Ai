@@ -123,6 +123,36 @@ def create_trainer_fn(
         tokenizer=tokenizer,
     )
 
+    # PERF-2: Under DDP every rank evaluated the FULL validation set and
+    # then ``_sync_scalar`` averaged identical values across ranks — paying
+    # an N× wall-time cost for an N-rank pool with zero accuracy gain.
+    # Shard validation across ranks with a non-shuffling DistributedSampler
+    # (``drop_last=False`` so the tail isn't silently truncated). The
+    # streaming metrics now expose ``sync_distributed`` which SUM-reduces
+    # raw (numerator, denominator) accumulators — the correct DDP merge for
+    # variable-size shards.
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        from torch.utils.data.distributed import DistributedSampler
+
+        val_sampler = DistributedSampler(
+            val_dataset,
+            shuffle=False,
+            drop_last=False,
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=val_loader.batch_size,
+            sampler=val_sampler,
+            collate_fn=val_loader.collate_fn,
+            num_workers=val_loader.num_workers,
+            pin_memory=val_loader.pin_memory,
+            drop_last=False,
+        )
+        logger.info(
+            "Sharded validation loader: world_size=%d (PERF-2)",
+            torch.distributed.get_world_size(),
+        )
+
     # =====================================================
     # OPTIMIZER + SCHEDULER  (BUG-7: pass real num_training_steps
     # so the LambdaLR doesn't decay to 0 at the default 1000.)
@@ -166,6 +196,9 @@ def create_trainer_fn(
     loss_engine = LossEngine(
         LossEngineConfig(
             task_types={task: task_type},
+            # LOSS-3: pre-scale static weights by grad_accum so the
+            # downstream loss/grad_accum division doesn't shrink them.
+            gradient_accumulation_steps=grad_accum,
         )
     )
 

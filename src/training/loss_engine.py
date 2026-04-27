@@ -26,6 +26,15 @@ class LossEngineConfig:
     use_normalizer: bool = True
     use_coverage: bool = True
 
+    # LOSS-3: TrainingStep divides the loss by ``gradient_accumulation_steps``
+    # so the gradient magnitude matches a single big batch. MultiTaskLoss
+    # ALSO divides by ``active_heads``. The two are correct in isolation but
+    # compose multiplicatively, so the effective per-task weight is
+    # ``cfg.weight / (active_heads × grad_accum)``. To preserve the configured
+    # static task weights when grad_accum > 1, pre-scale ``cfg.weight`` by
+    # ``gradient_accumulation_steps`` here.
+    gradient_accumulation_steps: int = 1
+
 
 # =========================================================
 # LOSS ENGINE
@@ -43,12 +52,17 @@ class LossEngine:
 
         task_configs: Dict[str, TaskLossConfig] = {}
 
+        # LOSS-3: pre-scale static task weights by grad_accum so the
+        # downstream loss/grad_accum division in TrainingStep doesn't
+        # silently shrink the configured per-task weight.
+        ga = max(1, int(getattr(config, "gradient_accumulation_steps", 1)))
+
         for task, task_type in config.task_types.items():
             weight = (config.task_weights or {}).get(task, 1.0)
 
             task_configs[task] = TaskLossConfig(
                 task_type=task_type,
-                weight=float(weight),
+                weight=float(weight) * float(ga),
                 ignore_index=config.ignore_index,
             )
 
@@ -122,15 +136,15 @@ class LossEngine:
         )
 
         # -------------------------------------------------
-        # NUMERICAL SAFETY
+        # NUMERICAL SAFETY  (LOSS-5: per-task non-finite checks were
+        # duplicated here AND inside ``MultiTaskLoss.forward``. The inner
+        # raise fires first and produces a clearer stack trace; the outer
+        # loop just added N+1 host-device syncs and a redundant exception
+        # path. Keep ONLY the cheap aggregate check on ``total_loss``.)
         # -------------------------------------------------
 
         if not torch.isfinite(total_loss):
             raise RuntimeError(f"Non-finite total loss: {total_loss.item()}")
-
-        for task, loss in task_losses.items():
-            if not torch.isfinite(loss):
-                raise RuntimeError(f"Non-finite loss in task '{task}'")
 
         # -------------------------------------------------
         # DEBUG ATTACHMENTS (SAFE)

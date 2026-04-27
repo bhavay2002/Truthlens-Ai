@@ -205,12 +205,19 @@ def optimize_model(model: torch.nn.Module) -> torch.nn.Module:
     Apply optional performance optimizations.
     """
 
-    # torch.compile (PyTorch 2.x)
-    try:
-        model = torch.compile(model)
-        logger.info("Model compiled with torch.compile")
-    except Exception:
-        logger.debug("torch.compile not available")
+    # PERF-3: ``torch.compile`` adds Dynamo tracing overhead with no payoff
+    # on CPU (and on the Replit dev container in particular it slows training
+    # by ~1.2-2×). The original ``except Exception`` also silently swallowed
+    # legitimate compile errors, hiding regressions. Gate on CUDA and surface
+    # failures at WARNING level so problems are visible.
+    if torch.cuda.is_available():
+        try:
+            model = torch.compile(model, mode="reduce-overhead")
+            logger.info("Model compiled with torch.compile (mode=reduce-overhead)")
+        except Exception as e:
+            logger.warning("torch.compile failed: %s", e)
+    else:
+        logger.info("Skipping torch.compile (CPU device)")
 
     # gradient checkpointing
     try:
