@@ -11,6 +11,7 @@ import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
+from src.features.base.lexicon_matcher import LexiconMatcher, to_token_array
 
 from src.features.emotion.emotion_schema import (
     EMOTION_LABELS,
@@ -48,19 +49,28 @@ NEGATIVE_EMOTIONS = {
 
 
 # -------------------------------------------------------
-# Lexicon detector
+# Vectorized matchers (one per emotion label, built once)
+# -------------------------------------------------------
+
+_EMOTION_MATCHERS = {
+    emotion: LexiconMatcher(EMOTION_TERMS.get(emotion, ()), name=emotion)
+    for emotion in EMOTION_LABELS
+}
+
+
+# -------------------------------------------------------
+# Lexicon detector (vectorized)
 # -------------------------------------------------------
 
 def _lexicon_emotions(text: str):
 
     tokens = re.findall(r"\b\w+\b", text.lower())
+    tokens_arr = to_token_array(tokens)
 
-    counts = {emotion: 0 for emotion in EMOTION_LABELS}
-
-    for token in tokens:
-        emo = WORD_TO_EMOTION.get(token)
-        if emo:
-            counts[emo] += 1
+    counts = {
+        emotion: _EMOTION_MATCHERS[emotion].count_in_tokens(tokens_arr)
+        for emotion in EMOTION_LABELS
+    }
 
     total_hits = sum(counts.values())
     total_tokens = len(tokens)
@@ -165,3 +175,8 @@ class EmotionFeatures(BaseFeature):
         if not np.isfinite(v):
             return 0.0
         return float(np.clip(v, 0.0, MAX_CLIP))
+
+    # -----------------------------------------------------
+
+    def extract_batch(self, contexts):
+        return [self.extract(ctx) for ctx in contexts]

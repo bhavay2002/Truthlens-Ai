@@ -3,16 +3,14 @@ from __future__ import annotations
 import logging
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, List, Union
 
 import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
-from src.features.fusion.feature_merger import merge_features  # 🔥 NEW
+from src.features.fusion.feature_merger import merge_features
 
 logger = logging.getLogger(__name__)
-
-EPS = 1e-8
 
 
 # =========================================================
@@ -21,15 +19,18 @@ EPS = 1e-8
 
 @dataclass
 class FeatureFusion:
+    """
+    Aggregates outputs from every registered extractor.
+
+    Scaling is intentionally NOT done here. Per-row, per-extractor numeric
+    scaling is statistically invalid (mixes incompatible units within a
+    single row). All scaling lives in `FeatureScalingPipeline`, which is
+    fitted on the training set and applied as a separate stage in
+    `FeatureEngineeringPipeline`.
+    """
 
     features: List[BaseFeature] = field(default_factory=list)
     enforce_unique_names: bool = True
-
-    # Per-sample z-score across feature TYPES is statistically invalid:
-    # it mixes units (ratios, counts, densities, embeddings) within one
-    # row.  Population-level scaling MUST be applied via FeatureScaling
-    # using a scaler fitted on the training set.  Default: OFF.
-    normalize: bool = False
     return_vector: bool = False
 
     _feature_order: List[str] = field(default_factory=list, init=False)
@@ -60,43 +61,30 @@ class FeatureFusion:
             self._validated = True
 
     # -----------------------------------------------------
-    # NORMALIZATION
-    # -----------------------------------------------------
 
-    def _normalize(self, features: Dict[str, float]) -> Dict[str, float]:
+    def _finalize(self, fused: Dict[str, float]):
+        if not self._feature_order:
+            self._feature_order = sorted(fused.keys())
 
-        if not features:
-            return features
+        if self.return_vector:
+            return np.array(
+                [fused.get(k, 0.0) for k in self._feature_order],
+                dtype=np.float32,
+            )
+        return fused
 
-        values = np.array(list(features.values()), dtype=np.float32)
-
-        mean = values.mean()
-        std = values.std()
-
-        if std < EPS:
-            return features
-
-        norm_values = (values - mean) / (std + EPS)
-
-        return dict(zip(features.keys(), norm_values.astype(float)))
-
-    # -----------------------------------------------------
-    # CORE EXTRACTION
-    # -----------------------------------------------------
+    # =====================================================
+    # SINGLE
+    # =====================================================
 
     def extract(self, context: FeatureContext):
 
         self._ensure_validated()
         self._ensure_initialized()
 
-        # -------------------------------------------------
-        #  COLLECT ALL FEATURE OUTPUTS
-        # -------------------------------------------------
-
         outputs: List[Dict[str, float]] = []
 
         for feature in self.features:
-
             try:
                 output = feature.safe_extract(context)
             except Exception:
@@ -106,45 +94,46 @@ class FeatureFusion:
             if isinstance(output, dict) and output:
                 outputs.append(output)
 
-        # -------------------------------------------------
-        #  MERGE USING CENTRAL LOGIC
-        # -------------------------------------------------
+        return self._finalize(merge_features(outputs))
 
-        fused: Dict[str, float] = merge_features(outputs)
-
-        # -------------------------------------------------
-        # NORMALIZATION
-        # -------------------------------------------------
-
-        if self.normalize:
-            fused = self._normalize(fused)
-
-        # -------------------------------------------------
-        # FREEZE ORDER (CRITICAL)
-        # -------------------------------------------------
-
-        if not self._feature_order:
-            self._feature_order = sorted(fused.keys())
-
-        # -------------------------------------------------
-        # VECTOR OUTPUT
-        # -------------------------------------------------
-
-        if self.return_vector:
-            vector = np.array(
-                [fused.get(k, 0.0) for k in self._feature_order],
-                dtype=np.float32,
-            )
-            return vector
-
-        return fused
-
-    # -----------------------------------------------------
-    # BATCH
-    # -----------------------------------------------------
+    # =====================================================
+    # BATCH (dispatches through each feature's extract_batch)
+    # =====================================================
 
     def extract_batch(self, contexts: List[FeatureContext]):
-        return [self.extract(c) for c in contexts]
+
+        self._ensure_validated()
+        self._ensure_initialized()
+
+        if not contexts:
+            return []
+
+        n = len(contexts)
+        per_context: List[List[Dict[str, float]]] = [[] for _ in range(n)]
+
+        for feature in self.features:
+            try:
+                batch_outputs = feature.safe_extract_batch(contexts)
+            except Exception:
+                logger.exception("Feature batch failed: %s", feature.name)
+                batch_outputs = [{} for _ in range(n)]
+
+            # Pad / truncate defensively
+            if len(batch_outputs) != n:
+                logger.warning(
+                    "Feature '%s' returned %d outputs for %d inputs; padding",
+                    feature.name, len(batch_outputs), n,
+                )
+                batch_outputs = list(batch_outputs[:n]) + [{}] * max(0, n - len(batch_outputs))
+
+            for i, output in enumerate(batch_outputs):
+                if isinstance(output, dict) and output:
+                    per_context[i].append(output)
+
+        results = []
+        for outputs in per_context:
+            results.append(self._finalize(merge_features(outputs)))
+        return results
 
     # -----------------------------------------------------
 

@@ -119,8 +119,10 @@ class LexicalFeatures(BaseFeature):
 
             "lex_yule_k": self._safe(yule_k),
 
-            "lex_avg_word_length": self._safe(avg_len / 20.0),  # normalized
-            "lex_std_word_length": self._safe(std_len / 10.0),
+            # Raw word-length stats. Population scaling is applied later by
+            # FeatureScalingPipeline; per-extractor magic constants are gone.
+            "lex_avg_word_length": self._safe_unbounded(avg_len),
+            "lex_std_word_length": self._safe_unbounded(std_len),
         }
 
     # -----------------------------------------------------
@@ -142,3 +144,8 @@ class LexicalFeatures(BaseFeature):
         if not np.isfinite(v):
             return 0.0
         return float(np.clip(v, 0.0, MAX_CLIP))
+
+    def _safe_unbounded(self, v: float) -> float:
+        if not np.isfinite(v):
+            return 0.0
+        return float(v)

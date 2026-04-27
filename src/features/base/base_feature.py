@@ -124,7 +124,9 @@ class BaseFeature:
         contexts: List[FeatureContext],
     ) -> List[Dict[str, Any]]:
         """
-        Default batch implementation (can be overridden).
+        Default batch implementation. Lexicon and other CPU-bound extractors
+        should override this to amortize per-batch setup (precompiled
+        regexes, shared lookup tables, etc.).
         """
         return [self.extract(ctx) for ctx in contexts]
 
@@ -171,6 +173,72 @@ class BaseFeature:
                 return self._fallback()
 
             raise RuntimeError(f"Feature failed: {self.name}") from e
+
+    # -----------------------------------------------------
+
+    def safe_extract_batch(
+        self,
+        contexts: List[FeatureContext],
+    ) -> List[Dict[str, Any]]:
+        """
+        Batch counterpart of `safe_extract`.
+
+        Calls the extractor's `extract_batch` (which subclasses may override
+        for vectorized work), then validates each output and applies the
+        same `fail_silent` policy on a per-sample basis.
+        """
+
+        n = len(contexts)
+
+        if not self.enabled or n == 0:
+            return [{} for _ in range(n)]
+
+        for ctx in contexts:
+            if not isinstance(ctx.text, str):
+                raise TypeError("context.text must be string")
+
+        if not self._initialized:
+            self.initialize()
+            self._initialized = True
+
+        start = time.time()
+
+        try:
+            results = self.extract_batch(contexts)
+        except Exception as e:
+            logger.exception("Feature batch failed: %s", self.name)
+            if self.fail_silent:
+                return [self._fallback() for _ in range(n)]
+            raise RuntimeError(f"Feature batch failed: {self.name}") from e
+
+        # Per-sample validation; on failure, fall back rather than killing the batch.
+        validated: List[Dict[str, Any]] = []
+        for idx, features in enumerate(results):
+            try:
+                if not isinstance(features, dict):
+                    raise ValueError(f"{self.name} batch[{idx}] must return dict")
+                self._validate_output(features)
+                validated.append(features)
+            except Exception:
+                logger.exception(
+                    "Feature batch validation failed: %s [idx=%d]", self.name, idx
+                )
+                if self.fail_silent:
+                    validated.append(self._fallback())
+                else:
+                    raise
+
+        # Length contract — fusion relies on alignment with `contexts`.
+        if len(validated) < n:
+            validated.extend(self._fallback() for _ in range(n - len(validated)))
+        elif len(validated) > n:
+            validated = validated[:n]
+
+        logger.debug(
+            "Feature '%s' batch=%d in %.4fs",
+            self.name, n, time.time() - start,
+        )
+        return validated
 
     # =====================================================
     # VALIDATION

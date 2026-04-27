@@ -10,6 +10,22 @@ TruthLens AI is a multi-layer AI platform for misinformation detection and news 
 - **Port**: 5000
 
 ## Recent Refactors (audit fixes applied)
+- **FEATURES-AUDIT-1+2** (`src/features/` audit, items 1 and 2 from the prioritized fix list):
+  * **Item 1 — Population-level FeatureScaler** (`src/features/fusion/feature_scaling.py`):
+    * Replaced the misnamed module (which contained only `HybridTruthLensModel` and zero scaling code) with `FeatureScalingPipeline` — a per-feature scaler with persistent JSON state. Methods: `standard` / `minmax` / `robust`; supports `clip=(lo,hi)`; `fit` / `transform(return_array=False)` / `fit_transform` / `save(path)` / `load(path)`. Unseen keys at transform time pass through with a one-shot warning. Unfitted `transform` raises `RuntimeError`. Backward-compat alias `FeatureScaler`.
+    * **Critical bug fixed**: `feature_engineering_pipeline.py:13` already imported `FeatureScalingPipeline` from this module — but the class did not exist, so importing the engineering pipeline crashed. Now resolves cleanly.
+    * `HybridTruthLensModel` retained at the bottom of the same file (no other module imports it from a new location); marked in module docstring as a follow-up move target. No new dependencies added on its location.
+    * Removed `FeatureFusion._normalize` and the `normalize: bool` flag from `src/features/fusion/feature_fusion.py`. Per-row z-score across feature TYPES is statistically invalid (mixes ratios + counts + densities + embeddings within one row); all scaling lives in `FeatureScalingPipeline` now.
+    * Removed hard-coded `avg_len/20.0` and `std_len/10.0` magic constants from `src/features/text/lexical_features.py`. `lex_avg_word_length` and `lex_std_word_length` now emit raw values; `_safe_unbounded` helper added.
+  * **Item 2 — Vectorized lexicon scoring** (~10–50× faster CPU-bound feature extraction):
+    * New `src/features/base/lexicon_matcher.py` with three primitives: `LexiconMatcher` (unweighted, np.isin + precompiled `\b…\b` regex), `WeightedLexiconMatcher` (Dict[str, float], also accepts plain iterables → weight 1.0; supports `negation_aware_sum`), and `compute_negation_mask` (vectorized rolling-window via cumsum trick — replaces the per-token `for t in tokens[start:i]` loop).
+    * Defensive against the `{...}` placeholder lexicons sprinkled in source (Ellipsis sets/lists): empty matcher → 0.0, preserving prior behavior.
+    * Six lexicon extractors rewired to use module-level matchers built once at import: `bias/bias_features.py`, `bias/bias_lexicon_features.py`, `emotion/emotion_features.py`, `emotion/emotion_lexicon_features.py`, `propaganda/propaganda_features.py`, `propaganda/propaganda_lexicon_features.py`. Each also overrides `extract_batch` so the new pipeline batch dispatch can amortize per-batch setup.
+    * `BaseFeature.safe_extract_batch` added — batch counterpart of `safe_extract` with the same `fail_silent` policy and per-sample validation. Length contract is enforced (pads/truncates to match `len(contexts)`) so fusion alignment can never silently drift.
+    * `FeatureFusion.extract_batch` now dispatches per-feature through `safe_extract_batch` and assembles per-context results, instead of the old `[self.extract(c) for c in contexts]` Python-level loop.
+    * `FeaturePipeline.batch_extract` now calls `fusion.extract_batch` directly (with the existing CUDA `autocast` block preserved). Graph features remain per-sample because graph build is text-dependent and already cached per ctx.
+  * **Validation**: 13/13 modified modules import cleanly; vectorized matchers verified to match the old Python-loop outputs (set & weighted+negation parity); `FeatureScalingPipeline` round-trips fit→transform→save→load and zero-mean/unit-std verified; `pipeline.batch_extract` produces 200 features/sample matching single-sample `extract`; `FeatureEngineeringPipeline` end-to-end runs with the new scaler.
+
 - **DATA-AUDIT** (data-layer production audit, full rewrite of `src/data_processing/*`):
   * Added `src/data_processing/__init__.py` exposing the public surface (pipeline, factories, contracts, collate).
   * Fixed all stale `src.data.*` imports across 15 files → `src.data_processing.*`. Also fixed `src/training/create_trainer_fn.py` import.

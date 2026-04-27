@@ -12,6 +12,11 @@ import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
+from src.features.base.lexicon_matcher import (
+    WeightedLexiconMatcher,
+    compute_negation_mask,
+    to_token_array,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +68,18 @@ COMPILED_BIAS_PHRASES = [...]
 
 
 # =========================================================
+# VECTORIZED MATCHERS (built once at import)
+# =========================================================
+
+_BIAS_LEX_MATCHERS: Dict[str, WeightedLexiconMatcher] = {
+    "eval":   WeightedLexiconMatcher(EVALUATIVE_WORDS, "eval"),
+    "assert": WeightedLexiconMatcher(ASSERTIVE_WORDS,  "assert"),
+    "hedge":  WeightedLexiconMatcher(HEDGING_WORDS,    "hedge"),
+    "intens": WeightedLexiconMatcher(INTENSIFIERS,     "intens"),
+}
+
+
+# =========================================================
 # FEATURE
 # =========================================================
 
@@ -87,14 +104,15 @@ class BiasLexiconFeatures(BaseFeature):
             return {}
 
         # -------------------------
-        # RAW COUNTS
+        # RAW COUNTS (vectorized)
         # -------------------------
 
+        tokens_arr = to_token_array(tokens)
+        neg_mask = compute_negation_mask(tokens_arr, NEGATIONS, window=3)
+
         raw = {
-            "eval": _weighted_count(tokens, EVALUATIVE_WORDS),
-            "assert": _weighted_count(tokens, ASSERTIVE_WORDS),
-            "hedge": _weighted_count(tokens, HEDGING_WORDS),
-            "intens": _weighted_count(tokens, INTENSIFIERS),
+            key: matcher.negation_aware_sum(tokens_arr, neg_mask)
+            for key, matcher in _BIAS_LEX_MATCHERS.items()
         }
 
         total_bias = sum(raw.values())
@@ -195,3 +213,8 @@ class BiasLexiconFeatures(BaseFeature):
         if not np.isfinite(v):
             return 0.0
         return float(np.clip(v, 0.0, MAX_CLIP))
+
+    # -----------------------------------------------------
+
+    def extract_batch(self, contexts):
+        return [self.extract(ctx) for ctx in contexts]

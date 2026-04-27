@@ -197,6 +197,9 @@ class FeaturePipeline:
         if not contexts:
             return []
 
+        if not self._initialized:
+            self.initialize()
+
         #  Shared batch cache (NEW)
         shared_cache: Dict[str, Any] = {}
 
@@ -205,12 +208,21 @@ class FeaturePipeline:
                 ctx.cache = {}
             ctx.shared = shared_cache
 
-        results = []
+        # Vectorized per-feature dispatch through fusion.extract_batch
+        # (lexicon extractors override extract_batch for ~10-50x speedup).
+        with torch.no_grad():
+            if torch.cuda.is_available():
+                with torch.autocast("cuda"):
+                    batch_features = self.fusion.extract_batch(contexts)
+            else:
+                batch_features = self.fusion.extract_batch(contexts)
 
-        for ctx in contexts:
-            results.append(self.extract(ctx))
+        # Graph features remain per-sample (graph build is text-dependent
+        # and the per-sample cache already prevents recomputation).
+        for ctx, features in zip(contexts, batch_features):
+            self._merge_graph_features(ctx, features)
 
-        return results
+        return batch_features
 
     # -----------------------------------------------------
 

@@ -12,6 +12,7 @@ import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
+from src.features.base.lexicon_matcher import LexiconMatcher, to_token_array
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,22 @@ INTENSIFIERS = {...}
 
 
 # ---------------------------------------------------------
-# Helper
+# Vectorized matchers (built once at import)
+# ---------------------------------------------------------
+
+_PROP_MATCHERS: Dict[str, LexiconMatcher] = {
+    "name_calling": LexiconMatcher(NAME_CALLING,             "name_calling"),
+    "fear":         LexiconMatcher(FEAR_APPEAL,              "fear"),
+    "exaggeration": LexiconMatcher(EXAGGERATION,             "exaggeration"),
+    "glitter":      LexiconMatcher(GLITTERING_GENERALITIES,  "glitter"),
+    "us_vs_them":   LexiconMatcher(US_VS_THEM,               "us_vs_them"),
+    "authority":    LexiconMatcher(AUTHORITY_APPEAL,         "authority"),
+    "intensifier":  LexiconMatcher(INTENSIFIERS,             "intensifier"),
+}
+
+
+# ---------------------------------------------------------
+# Helper (legacy — retained for any external callers)
 # ---------------------------------------------------------
 
 def _ratio(counter: Counter, lexicon: Set[str], total: int) -> float:
@@ -76,16 +92,13 @@ class PropagandaFeatures(BaseFeature):
         if n == 0:
             return {}
 
-        counter = Counter(tokens)
-
+        # Vectorized count per category — single np.isin per category,
+        # no Python token loop, no Counter materialization.
+        tokens_arr = to_token_array(tokens)
+        denom = n + EPS
         raw = {
-            "name_calling": _ratio(counter, NAME_CALLING, n),
-            "fear": _ratio(counter, FEAR_APPEAL, n),
-            "exaggeration": _ratio(counter, EXAGGERATION, n),
-            "glitter": _ratio(counter, GLITTERING_GENERALITIES, n),
-            "us_vs_them": _ratio(counter, US_VS_THEM, n),
-            "authority": _ratio(counter, AUTHORITY_APPEAL, n),
-            "intensifier": _ratio(counter, INTENSIFIERS, n),
+            key: matcher.count_in_tokens(tokens_arr) / denom
+            for key, matcher in _PROP_MATCHERS.items()
         }
 
         # -------------------------
@@ -167,3 +180,8 @@ class PropagandaFeatures(BaseFeature):
         if not np.isfinite(v):
             return 0.0
         return float(np.clip(v, 0.0, MAX_CLIP))
+
+    # -----------------------------------------------------
+
+    def extract_batch(self, contexts):
+        return [self.extract(ctx) for ctx in contexts]

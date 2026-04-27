@@ -12,6 +12,7 @@ import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
+from src.features.base.lexicon_matcher import LexiconMatcher, to_token_array
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,20 @@ SLOGAN_PHRASES = [...]
 
 
 # ---------------------------------------------------------
-# Helpers
+# Vectorized matchers (built once at import)
+# ---------------------------------------------------------
+
+_PROP_LEX_MATCHERS: Dict[str, LexiconMatcher] = {
+    "name_calling": LexiconMatcher(NAME_CALLING, "name_calling"),
+    "fear":         LexiconMatcher(FEAR_APPEAL,  "fear"),
+    "exaggeration": LexiconMatcher(EXAGGERATION, "exaggeration"),
+    "bandwagon":    LexiconMatcher(BANDWAGON,    "bandwagon"),
+    "slogan":       LexiconMatcher(SLOGANS,      "slogan"),
+}
+
+
+# ---------------------------------------------------------
+# Helpers (legacy — retained for any external callers)
 # ---------------------------------------------------------
 
 def _count(counter: Counter, lexicon: Set[str]) -> int:
@@ -85,14 +99,12 @@ class PropagandaLexiconFeatures(BaseFeature):
         if n == 0:
             return {}
 
-        counter = Counter(tokens)
-
+        # Vectorized counts via shared matchers.
+        tokens_arr = to_token_array(tokens)
+        denom = n + EPS
         raw = {
-            "name_calling": _ratio(counter, NAME_CALLING, n),
-            "fear": _ratio(counter, FEAR_APPEAL, n),
-            "exaggeration": _ratio(counter, EXAGGERATION, n),
-            "bandwagon": _ratio(counter, BANDWAGON, n),
-            "slogan": _ratio(counter, SLOGANS, n),
+            key: matcher.count_in_tokens(tokens_arr) / denom
+            for key, matcher in _PROP_LEX_MATCHERS.items()
         }
 
         # -------------------------
@@ -185,3 +197,8 @@ class PropagandaLexiconFeatures(BaseFeature):
         if not np.isfinite(v):
             return 0.0
         return float(np.clip(v, 0.0, MAX_CLIP))
+
+    # -----------------------------------------------------
+
+    def extract_batch(self, contexts):
+        return [self.extract(ctx) for ctx in contexts]
