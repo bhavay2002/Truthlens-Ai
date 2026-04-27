@@ -9,6 +9,7 @@ import pandas as pd
 
 from src.training.cross_validation import cross_validate_task
 from src.utils.seed_utils import set_seed
+from src.config.task_config import get_task_type
 
 logger = logging.getLogger(__name__)
 
@@ -174,10 +175,26 @@ def build_objective(
 # STUDY
 # =========================================================
 
+def _resolve_direction(task: str) -> str:
+    # BUG-8: cross_validate_task returns the model's primary metric
+    # (accuracy / micro-F1 for classification, MSE for regression).
+    # Classification metrics must be MAXIMISED — Optuna's previous
+    # default of "minimize" silently selected the worst trials.
+    try:
+        ttype = str(get_task_type(task)).replace("_", "").lower()
+    except Exception:
+        ttype = ""
+
+    if ttype in {"multiclass", "multilabel", "binary"}:
+        return "maximize"
+    return "minimize"  # regression / loss-style metrics
+
+
 def create_study(
     *,
     multi_objective: bool,
     storage: Optional[str],
+    task: str,
 ):
 
     sampler = optuna.samplers.TPESampler(
@@ -187,16 +204,20 @@ def create_study(
 
     pruner = optuna.pruners.MedianPruner()
 
+    score_direction = _resolve_direction(task)
+
     if multi_objective:
+        # objective returns (score, -std) — both should be MAXIMISED
+        # when score is a classification metric, otherwise both MINIMISED.
         return optuna.create_study(
-            directions=["minimize", "minimize"],
+            directions=[score_direction, score_direction],
             sampler=sampler,
             storage=storage,
             load_if_exists=True,
         )
 
     return optuna.create_study(
-        direction="minimize",
+        direction=score_direction,
         sampler=sampler,
         pruner=pruner,
         storage=storage,
@@ -224,6 +245,7 @@ def tune_task(
     study = create_study(
         multi_objective=multi_objective,
         storage=storage,
+        task=task,
     )
 
     objective = build_objective(

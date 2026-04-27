@@ -9,14 +9,15 @@ from torch.utils.data import DataLoader
 from src.models.registry.model_factory import build_model
 from src.models.optimization.optimizer_factory import build_optimizer
 from src.models.optimization.lr_scheduler import build_scheduler
-from src.data_processing.dataloader_factory import build_dataloader
+from src.data_processing.dataloader_factory import build_dataloader, DataLoaderConfig
+from src.data_processing.dataset_factory import build_dataset
 
 from .training_step import TrainingStep, TrainingStepConfig
 from .monitor_engine import MonitoringEngine
 from .experiment_tracker import ExperimentTracker
 from .task_scheduler import TaskScheduler
 from .loss_engine import LossEngine, LossEngineConfig
-from .evaluation_engine import EvaluationEngine
+from .evaluation_engine import EvaluationEngine, EvaluationConfig
 from .trainer import Trainer
 
 from src.config.task_config import get_task_type
@@ -31,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 def _validate_params(params: Dict[str, Any]):
 
-    required = ["lr", "batch_size"]
+    required = ["lr", "batch_size", "tokenizer"]
 
     for k in required:
         if k not in params:
@@ -77,25 +78,54 @@ def create_trainer_fn(
     )
 
     # =====================================================
-    # DATALOADERS
+    # DATALOADERS  (BUG-1: build_dataloader requires
+    # dataset/split/config, not batch_size/shuffle directly)
     # =====================================================
+
+    tokenizer = params["tokenizer"]
+    max_length = int(params.get("max_length", 512))
+
+    train_dataset = build_dataset(
+        task=task,
+        df=train_df,
+        tokenizer=tokenizer,
+        max_length=max_length,
+    )
+    val_dataset = build_dataset(
+        task=task,
+        df=val_df,
+        tokenizer=tokenizer,
+        max_length=max_length,
+    )
+
+    loader_cfg = DataLoaderConfig(
+        batch_size=int(params["batch_size"]),
+        num_workers=int(params.get("num_workers", -1)),
+        pin_memory=bool(params.get("pin_memory", True)),
+        use_sampler=bool(params.get("use_sampler", True)),
+        drop_last=bool(params.get("drop_last", False)),
+    )
 
     train_loader: DataLoader = build_dataloader(
+        task=task,
+        dataset=train_dataset,
         df=train_df,
-        task=task,
-        batch_size=params["batch_size"],
-        shuffle=True,
+        split="train",
+        config=loader_cfg,
+        tokenizer=tokenizer,
     )
-
     val_loader: DataLoader = build_dataloader(
-        df=val_df,
         task=task,
-        batch_size=params["batch_size"],
-        shuffle=False,
+        dataset=val_dataset,
+        df=val_df,
+        split="val",
+        config=loader_cfg,
+        tokenizer=tokenizer,
     )
 
     # =====================================================
-    # OPTIMIZER + SCHEDULER
+    # OPTIMIZER + SCHEDULER  (BUG-7: pass real num_training_steps
+    # so the LambdaLR doesn't decay to 0 at the default 1000.)
     # =====================================================
 
     optimizer = build_optimizer(
@@ -104,9 +134,27 @@ def create_trainer_fn(
         weight_decay=params.get("weight_decay", 0.0),
     )
 
+    grad_accum = int(params.get("grad_accum", 1))
+    epochs = int(params.get("epochs", params.get("num_epochs", 1)))
+    steps_per_epoch = max(1, len(train_loader) // max(1, grad_accum))
+    num_training_steps = int(
+        params.get("num_training_steps", steps_per_epoch * epochs)
+    )
+    num_warmup_steps = int(
+        params.get(
+            "num_warmup_steps",
+            max(1, int(0.1 * num_training_steps)),
+        )
+    )
+
+    scheduler_cfg = {
+        **params,
+        "num_training_steps": num_training_steps,
+        "num_warmup_steps": num_warmup_steps,
+    }
     scheduler = build_scheduler(
         optimizer=optimizer,
-        config=params,
+        config=scheduler_cfg,
     )
 
     # =====================================================
@@ -168,10 +216,15 @@ def create_trainer_fn(
     )
 
     # =====================================================
-    # EVALUATION
+    # EVALUATION  (BUG-3: EvaluationEngine requires a config)
     # =====================================================
 
-    evaluator = EvaluationEngine()
+    evaluator = EvaluationEngine(
+        EvaluationConfig(
+            task_types={task: task_type},
+            device=device,
+        )
+    )
 
     # =====================================================
     # OPTIONAL COMPONENTS
@@ -196,6 +249,7 @@ def create_trainer_fn(
         tracker=tracker,
         monitor_metric=params.get("monitor_metric", "val_loss"),
         maximize_metric=params.get("maximize_metric", False),
+        params_override=params,  # BUG-9: thread Optuna-suggested epochs through
     )
 
     logger.info(

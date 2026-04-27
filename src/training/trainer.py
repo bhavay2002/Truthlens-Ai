@@ -44,6 +44,7 @@ class Trainer:
         tracker: Optional[ExperimentTracker] = None,
         monitor_metric: str = "val_loss",
         maximize_metric: bool = False,
+        params_override: Optional[Dict[str, Any]] = None,
     ):
 
         # -------------------------------------------------
@@ -75,12 +76,23 @@ class Trainer:
         self.model.to(self.device)
 
         # -------------------------------------------------
-        # TRAINING PARAMS
+        # TRAINING PARAMS  (BUG-9: honour params["epochs"] from
+        # Optuna / hyperparameter tuning if supplied; fall back to
+        # the YAML config otherwise.)
         # -------------------------------------------------
-        self.epochs = self.cfg.training.num_epochs
-        self.early_patience = self.cfg.training.early_stopping_patience
+        params_override = params_override or {}
+        self.epochs = int(
+            params_override.get("epochs", self.cfg.training.num_epochs)
+        )
+        self.early_patience = int(
+            params_override.get(
+                "early_stopping_patience",
+                self.cfg.training.early_stopping_patience,
+            )
+        )
 
         self.global_step = 0
+        self._epoch = 0
         self.best_metric = None
         self.no_improve_epochs = 0
 
@@ -110,6 +122,8 @@ class Trainer:
             self._run_sanity_check()
 
         for epoch in range(self.epochs):
+
+            self._epoch = epoch
 
             if self._is_main():
                 logger.info("Epoch %d/%d", epoch + 1, self.epochs)
@@ -192,7 +206,9 @@ class Trainer:
                     self.tracker.log_metrics(log_data, step=self.global_step)
 
             # -------------------------
-            # CHECKPOINT
+            # CHECKPOINT  (BUG-4: persist optimizer/scheduler/scaler
+            # state so resume restores momentum, LR-step counter and
+            # AMP loss-scale.)
             # -------------------------
             if (
                 self.checkpoint
@@ -201,7 +217,11 @@ class Trainer:
             ):
                 self.checkpoint.save(
                     step=self.global_step,
+                    epoch=self._epoch,
                     model=self._unwrap_model(),
+                    optimizer=getattr(self.training_step, "optimizer", None),
+                    scheduler=getattr(self.training_step, "scheduler", None),
+                    scaler=getattr(self.training_step, "scaler", None),
                 )
 
     # =====================================================
@@ -253,11 +273,21 @@ class Trainer:
 
     def _save_checkpoint(self, metrics: Dict[str, Any]):
 
+        # BUG-4: persist optimizer / scheduler / scaler state so resume
+        # restores momentum, LR-step counter, and AMP loss-scale.
+        common_kwargs = dict(
+            model=self._unwrap_model(),
+            optimizer=getattr(self.training_step, "optimizer", None),
+            scheduler=getattr(self.training_step, "scheduler", None),
+            scaler=getattr(self.training_step, "scaler", None),
+            epoch=self._epoch,
+            metrics=metrics,
+        )
+
+        # epoch checkpoint
         self.checkpoint.save(
             step=self.global_step,
-            model=self._unwrap_model(),
-            metrics=metrics,
-            tag="epoch",
+            **common_kwargs,
         )
 
         metric_value = metrics.get(self.monitor_metric)
@@ -265,15 +295,17 @@ class Trainer:
         if metric_value is None:
             return
 
+        # best checkpoint — uses CheckpointEngine's save_best mechanism
         if (
             self.best_metric is not None
             and metric_value == self.best_metric
         ):
             self.checkpoint.save(
                 step=self.global_step,
-                model=self._unwrap_model(),
-                metrics=metrics,
-                tag="best",
+                save_best=True,
+                metric_name=self.monitor_metric,
+                mode="max" if self.maximize_metric else "min",
+                **common_kwargs,
             )
 
     # =====================================================

@@ -107,10 +107,19 @@ class LossEngine:
         labels = batch["labels"]
 
         # -------------------------------------------------
-        # CORE LOSS
+        # CORE LOSS  (BUG-10: forward shared_parameters into the
+        # loss module so GradNorm-style balancers can compute task
+        # gradients. The balancer's on_before_backward hook is
+        # already fired inside MultiTaskLoss.forward — we MUST NOT
+        # invoke it again here, otherwise stateful balancers double-
+        # advance their internal step counters every iteration.)
         # -------------------------------------------------
 
-        total_loss, task_losses = self.loss_module(logits, labels)
+        total_loss, task_losses = self.loss_module(
+            logits,
+            labels,
+            shared_parameters=shared_parameters,
+        )
 
         # -------------------------------------------------
         # NUMERICAL SAFETY
@@ -122,19 +131,6 @@ class LossEngine:
         for task, loss in task_losses.items():
             if not torch.isfinite(loss):
                 raise RuntimeError(f"Non-finite loss in task '{task}'")
-
-        # -------------------------------------------------
-        # BALANCER PRE-BACKWARD
-        # -------------------------------------------------
-
-        if self._balancer is not None:
-            try:
-                self._balancer.on_before_backward(
-                    task_losses={k: v.detach() for k, v in task_losses.items()},
-                    shared_parameters=shared_parameters,
-                )
-            except Exception as e:
-                logger.warning("Balancer pre-backward failed: %s", e)
 
         # -------------------------------------------------
         # DEBUG ATTACHMENTS (SAFE)

@@ -26,6 +26,16 @@ class TaskLossConfig:
     ignore_index: int = -100
     pos_weight: Optional[torch.Tensor] = None
 
+    def __post_init__(self) -> None:
+        # Canonical form: drop underscores, lowercase.
+        # Accepts "multi_class"/"multiclass", "multi_label"/"multilabel",
+        # "binary", "regression" — written as a single source of truth so
+        # the rest of the loss layer can branch on a stable enum.
+        canonical = str(self.task_type).replace("_", "").lower()
+        if canonical not in {"multiclass", "multilabel", "binary", "regression"}:
+            raise ValueError(f"invalid task_type={self.task_type!r}")
+        object.__setattr__(self, "task_type", canonical)
+
 
 # =========================================================
 # MULTI-TASK LOSS (ORCHESTRATOR)
@@ -81,12 +91,12 @@ class MultiTaskLoss(nn.Module):
 
         for name, cfg in task_configs.items():
 
-            if cfg.task_type == "multi_class":
+            if cfg.task_type == "multiclass":
                 loss_functions[name] = nn.CrossEntropyLoss(
                     ignore_index=cfg.ignore_index
                 )
 
-            elif cfg.task_type in {"binary", "multi_label"}:
+            elif cfg.task_type in {"binary", "multilabel"}:
                 loss_functions[name] = nn.BCEWithLogitsLoss(
                     reduction="none",
                     pos_weight=cfg.pos_weight

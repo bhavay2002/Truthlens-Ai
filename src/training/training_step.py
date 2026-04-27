@@ -193,23 +193,26 @@ class TrainingStep:
             loss.backward()
 
         # -------------------------
-        # GRAD NORM
-        # -------------------------
-
-        grad_norm = compute_grad_norm(self.model)
-
-        # -------------------------
-        # OPTIMIZER STEP
+        # OPTIMIZER STEP  (BUG-5: unscale BEFORE measuring grad_norm,
+        # otherwise the AMP loss-scale (~6.5e4) is baked into every
+        # logged grad_norm and instrumentation flags every step as
+        # 'exploding gradients'. Also gated on the accumulation
+        # boundary so partial micro-batches don't unscale prematurely.)
         # -------------------------
 
         should_step = (
             (step + 1) % self.config.gradient_accumulation_steps == 0
         )
 
+        grad_norm: Optional[float] = None
+        scaler_stepped_ok = True  # tracks whether the scaler actually stepped
+
         if should_step:
 
             if self.use_amp:
                 self.scaler.unscale_(self.optimizer)
+
+            grad_norm = compute_grad_norm(self.model)
 
             if self.config.max_grad_norm:
                 torch.nn.utils.clip_grad_norm_(
@@ -223,11 +226,15 @@ class TrainingStep:
                 self.scaler.update()
 
                 if self.scaler.get_scale() < prev_scale:
+                    scaler_stepped_ok = False
                     logger.warning("Gradient overflow detected, step skipped")
             else:
                 self.optimizer.step()
 
-            if self.scheduler:
+            # BUG-6 (partial fix): only advance the scheduler when the
+            # optimizer actually stepped, so AMP overflow doesn't drift
+            # the LR schedule.
+            if self.scheduler and scaler_stepped_ok:
                 try:
                     self.scheduler.step()
                 except TypeError:
@@ -356,7 +363,21 @@ class TrainingStep:
 
         return batch
 
-    def _reduce_lr(self):
+    def _reduce_lr(self, factor: float = 0.5):
+        # BUG-6: a LambdaLR (and most functional schedulers) compute
+        # ``g["lr"] = base_lr * lambda(step)`` on every ``scheduler.step()``.
+        # Mutating only ``g["lr"]`` is therefore overwritten on the very
+        # next scheduler step and the spike-recovery action becomes a
+        # no-op. We must reduce the scheduler's ``base_lrs`` so the new
+        # rate persists across subsequent scheduler steps.
         for g in self.optimizer.param_groups:
-            g["lr"] *= 0.5
-        logger.warning("LR reduced due to instability")
+            g["lr"] *= factor
+
+        if self.scheduler is not None and hasattr(self.scheduler, "base_lrs"):
+            self.scheduler.base_lrs = [
+                b * factor for b in self.scheduler.base_lrs
+            ]
+
+        logger.warning(
+            "LR reduced (factor=%.3f) due to instability", float(factor),
+        )

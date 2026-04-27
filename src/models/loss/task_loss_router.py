@@ -85,14 +85,14 @@ class TaskLossRouter:
         # AMP safety
         logits = logits.float()
 
-        # route
-        if cfg.task_type == "multi_class":
+        # route (TaskLossConfig normalises to canonical form: no underscores)
+        if cfg.task_type == "multiclass":
             return self._multiclass_loss(task_name, logits, labels, cfg, loss_fn)
 
         elif cfg.task_type == "binary":
             return self._binary_loss(task_name, logits, labels, cfg, loss_fn)
 
-        elif cfg.task_type == "multi_label":
+        elif cfg.task_type == "multilabel":
             return self._multilabel_loss(task_name, logits, labels, cfg, loss_fn)
 
         elif cfg.task_type == "regression":
