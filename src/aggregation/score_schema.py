@@ -67,9 +67,7 @@ class TruthLensScoreModel(BaseModel):
     @field_validator("tasks")
     @classmethod
     def validate_tasks(cls, v):
-        if not v:
-            raise ValueError("tasks cannot be empty")
-        return v
+        return v if v else {}
 
 
 # =========================================================
@@ -113,7 +111,7 @@ class ExplanationSection(BaseModel):
 class ExplanationModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    sections: Dict[str, ExplanationSection]
+    sections: Dict[str, ExplanationSection] = {}
 
 
 # =========================================================

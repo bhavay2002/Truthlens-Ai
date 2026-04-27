@@ -9,6 +9,8 @@ logger = logging.getLogger(__name__)
 
 EPS = 1e-12
 
+_LOGIT_CLIP = 88.0
+
 
 # =========================================================
 # DEFAULT FEATURE MAP
@@ -57,15 +59,25 @@ def _safe_numeric(value: Any, strict: bool) -> Optional[float]:
 
 
 def _compute_entropy(probs: np.ndarray) -> float:
-    probs = np.asarray(probs)
-    return float(-np.sum(probs * np.log(probs + EPS)))
+    probs = np.asarray(probs, dtype=np.float64)
+    probs = np.clip(probs, EPS, 1.0)
+    return float(-np.sum(probs * np.log(probs)))
 
 
-def _normalize_array(arr: np.ndarray) -> np.ndarray:
-    if arr.size == 0:
-        return arr
-    max_val = np.max(arr) + EPS
-    return arr / max_val
+def _normalize_probs(arr: np.ndarray) -> np.ndarray:
+    total = np.sum(arr) + EPS
+    return arr / total
+
+
+def _logits_to_prob(logits: np.ndarray) -> float:
+    logits = np.asarray(logits, dtype=np.float64).ravel()
+    clipped = np.clip(logits, -_LOGIT_CLIP, _LOGIT_CLIP)
+    if logits.size == 1:
+        prob = 1.0 / (1.0 + np.exp(-clipped[0]))
+    else:
+        e = np.exp(clipped - np.max(clipped))
+        prob = float(np.max(e / (np.sum(e) + EPS)))
+    return float(np.clip(prob, 0.0, 1.0))
 
 
 # =========================================================
@@ -116,9 +128,7 @@ class FeatureMapper:
                 if val is None:
                     continue
 
-                # 🔥 FIX 1: CLIP BEFORE USE
                 val = float(np.clip(val, 0.0, 1.0))
-
                 section_data[feature_name] = val
 
             if section_data:
@@ -130,7 +140,7 @@ class FeatureMapper:
         return profile
 
     # =====================================================
-    # MULTI-TASK SUPPORT (FIXED)
+    # MULTI-TASK SUPPORT
     # =====================================================
 
     def map_from_model_outputs(
@@ -138,7 +148,7 @@ class FeatureMapper:
         model_outputs: Dict[str, Dict[str, Any]],
     ) -> Dict[str, Dict[str, float]]:
 
-        flat = {}
+        flat: Dict[str, float] = {}
 
         for task, outputs in model_outputs.items():
 
@@ -149,32 +159,35 @@ class FeatureMapper:
             logits = outputs.get("logits")
 
             # -------------------------
-            # PROBABILITIES
+            # PROBABILITIES (primary signal)
             # -------------------------
             if probs is not None:
 
-                probs = np.asarray(probs)
+                probs_arr = np.nan_to_num(
+                    np.asarray(probs, dtype=np.float64),
+                    nan=0.0, posinf=1.0, neginf=0.0,
+                )
 
-                # 🔥 FIX 2: PER-TASK NORMALIZATION
-                if probs.ndim > 1:
-                    probs = _normalize_array(probs[0])
-                else:
-                    probs = _normalize_array(probs)
+                if probs_arr.ndim > 1:
+                    probs_arr = probs_arr[0]
 
-                conf = float(np.max(probs))
+                probs_arr = np.clip(probs_arr, 0.0, 1.0)
+                probs_arr = _normalize_probs(probs_arr)
+
+                conf = float(np.max(probs_arr))
+                entropy = _compute_entropy(probs_arr)
 
                 flat[f"{task}_probability"] = float(np.clip(conf, 0.0, 1.0))
                 flat[f"{task}_confidence"] = float(np.clip(conf, 0.0, 1.0))
-
-                entropy = _compute_entropy(probs)
-                flat[f"{task}_entropy"] = float(np.clip(entropy, 0.0, 1.0))
+                flat[f"{task}_entropy"] = float(np.clip(entropy / np.log(max(probs_arr.size, 2)), 0.0, 1.0))
 
             # -------------------------
-            # LOGITS
+            # LOGITS — convert via sigmoid/softmax, not raw clip
             # -------------------------
-            if logits is not None:
-                val = float(np.mean(logits))
-                flat[f"{task}_logit"] = float(np.clip(val, 0.0, 1.0))
+            elif logits is not None:
+                logit_arr = np.asarray(logits, dtype=np.float64).ravel()
+                prob = _logits_to_prob(logit_arr)
+                flat[f"{task}_logit"] = prob
 
         return self.map_features(flat)
 
@@ -187,31 +200,39 @@ class FeatureMapper:
         model_outputs: Dict[str, Dict[str, Any]],
     ) -> Dict[str, float]:
 
-        confidence = {}
+        confidence: Dict[str, float] = {}
 
         for task, outputs in model_outputs.items():
+
+            if not isinstance(outputs, dict):
+                continue
 
             probs = outputs.get("probabilities")
 
             if probs is None:
                 continue
 
-            probs = np.asarray(probs)
+            probs_arr = np.nan_to_num(
+                np.asarray(probs, dtype=np.float64),
+                nan=0.0, posinf=1.0, neginf=0.0,
+            )
 
-            if probs.ndim > 1:
-                probs = probs[0]
+            if probs_arr.ndim > 1:
+                probs_arr = probs_arr[0]
 
-            conf = float(np.max(probs))
-
+            probs_arr = np.clip(probs_arr, 0.0, 1.0)
+            conf = float(np.max(probs_arr)) if probs_arr.size > 0 else 0.0
+            if not np.isfinite(conf):
+                conf = 0.0
             confidence[task] = float(np.clip(conf, 0.0, 1.0))
 
         return confidence
 
     # =====================================================
-    # NORMALIZATION
+    # NORMALIZATION (per-section max-norm, preserves [0,1])
     # =====================================================
 
-    def _normalize(self, profile):
+    def _normalize(self, profile: Dict[str, Dict[str, float]]) -> Dict[str, Dict[str, float]]:
 
         for section in profile:
 
@@ -230,7 +251,7 @@ class FeatureMapper:
         return profile
 
     # =====================================================
-    # BATCH
+    # BATCH (vectorized per-task)
     # =====================================================
 
     def map_batch(
