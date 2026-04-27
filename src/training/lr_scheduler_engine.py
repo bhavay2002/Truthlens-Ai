@@ -1,4 +1,4 @@
-s#rc\training\lr_scheduler_engine.py
+# src/training/lr_scheduler_engine.py
 
 from __future__ import annotations
 

@@ -176,3 +176,20 @@ class MultiOptimizer:
             name: opt.param_groups[0]["lr"]
             for name, opt in self.optimizers.items()
         }
+
+
+def build_optimizer(
+    model: torch.nn.Module,
+    lr: float = 2e-5,
+    weight_decay: float = 0.01,
+    optimizer_type: OptimizerType = "adamw",
+    **kwargs: Any,
+) -> Optimizer:
+
+    return create_optimizer(
+        model=model,
+        optimizer_type=optimizer_type,
+        learning_rate=lr,
+        weight_decay=weight_decay,
+        **kwargs,
+    )

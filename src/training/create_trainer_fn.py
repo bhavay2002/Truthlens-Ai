@@ -20,7 +20,7 @@ from .evaluation_engine import EvaluationEngine
 from .trainer import Trainer
 
 from src.config.task_config import get_task_type
-from src.training.training_utils import set_seed
+from src.utils.seed_utils import set_seed
 
 logger = logging.getLogger(__name__)
 

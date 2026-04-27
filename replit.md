@@ -381,3 +381,25 @@ Resolved the critical / perf items from the 13-section audit. App restarts clean
 - `TemporalGraphFeatures.to_dict` and `NarrativeGraphFeatures.to_dict` returned `self.__dict__`, but both classes use `@dataclass(slots=True)` — `__dict__` doesn't exist. Both now build the mapping from `__slots__`.
 - `NarrativeGraphBuilder.build_graph` did `graph.setdefault(k, {})` which clobbered the outer `defaultdict(lambda: defaultdict(float))`'s inner factory, so the next `graph[src][tgt] += 1.0` raised `KeyError`. Replaced with an explicit `if k not in graph: graph[k] = defaultdict(float)`.
 - `EntityGraphBuilder.__init__` blank-spaCy fallback now adds a `sentencizer` pipe so `doc.sents` doesn't raise `E030` when `en_core_web_sm` is unavailable.
+
+## Apr 27 2026 — `src/training/` audit fixes CRIT-1..CRIT-4 (+ adjacent factory aliases)
+
+**CRIT-1 — `lr_scheduler_engine.py` SyntaxError.** Line 1 was `s#rc\training\lr_scheduler_engine.py` (mangled comment, Python parsed `s` as a Name expression, which made the line-3 `from __future__ import annotations` illegal — `__future__` imports must precede any non-comment code). Replaced with a proper `# src/training/lr_scheduler_engine.py` comment. Module now imports cleanly; `LRSchedulerEngine` (warmup + plateau + adaptive LR control) is reachable.
+
+**CRIT-2 — `step_engine.py` byte-identical duplicate of `loss_engine.py`.** Confirmed by `cmp` (zero diff, both 6263 bytes); verified zero importers via `rg`. Deleted outright. The misnamed file pretended to be a per-step orchestrator but actually contained `LossEngine` — a stale copy that would silently drift from the canonical one on future edits.
+
+**CRIT-3 — Broken `set_seed` import in `create_trainer_fn.py` and `cross_validation.py`.** Both did `from src.training.training_utils import set_seed`, but `training_utils.py` only defines `set_global_seed`. Changed both to `from src.utils.seed_utils import set_seed` (the canonical location used by `main.py`, `hyperparameter_tuning.py`, and tests). The training package's CV + factory pipelines now import without `ImportError`.
+
+**CRIT-4 — Missing `build_model` in `model_factory.py`.** `create_trainer_fn.py:9` did `from src.models.registry.model_factory import build_model`, but only `ModelFactory.create(model_type, config)` existed. Added a module-level `build_model(task, config)` wrapper with a `_TASK_TO_MODEL_TYPE` map (covers both short names like `"bias"` and the canonical `"bias_classifier"` form) that resolves to `ModelFactory.create`. This preserves the existing factory contract while giving the training layer a stable entry point.
+
+**Adjacent factory aliases discovered while validating CRIT-3/4 (same missing-helper pattern, same file).** `create_trainer_fn` also imports `build_optimizer` and `build_scheduler`, neither of which existed:
+- Added `build_optimizer(model, lr, weight_decay, optimizer_type='adamw', **kwargs)` to `src/models/optimization/optimizer_factory.py` as a thin wrapper over the existing `create_optimizer(model, learning_rate=..., weight_decay=...)`.
+- Added `build_scheduler(optimizer, config: dict)` to `src/models/optimization/lr_scheduler.py` as a thin wrapper over `get_scheduler(...)`, reading `scheduler_type` / `num_training_steps` / `num_warmup_steps` / `num_cycles` / `power` from the config dict.
+
+**Verification.** Direct import tests:
+- `from src.training import lr_scheduler_engine` → OK
+- `from src.training import cross_validation` → OK
+- `from src.training import create_trainer_fn` → gets past all training-layer imports; only fails downstream on a pre-existing circular import in `src/models/loss/multitask_loss.py` (out of scope of CRIT-1..4, captured for the next audit pass).
+- `Start application` workflow restarts and serves cleanly with no new errors.
+
+**Remaining (not yet fixed) audit findings.** CRIT-5 (DDP wrap after `TrainingStep` capture → silent gradient-sync bypass), CRIT-6 (no `Trainer.load_checkpoint`; AMP scaler / optimizer / scheduler / global_step not persisted), CRIT-7 (scheduler advances on AMP overflow), CRIT-8 (NaN-skip zeros mid-accumulation grads), CRIT-9 (`val_loss` never produced → default early-stopping is dead), CRIT-10 (early-stop returns last-epoch model instead of best), plus the `🟠 PERF-*`, `🟡 LOSS-*`, `🧠 MT-*`, `🚀 GPU-*`, `🔄 REC-*`, `🧹` dead-code, `⚙️ CFG-*`, `🧪 EDGE-*` items from the v12 training audit.

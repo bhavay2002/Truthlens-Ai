@@ -252,3 +252,39 @@ class ModelFactory:
             raise RuntimeError("Invalid checkpoint model")
 
         return model
+
+
+_TASK_TO_MODEL_TYPE = {
+    "bias": "bias_classifier",
+    "ideology": "ideology_classifier",
+    "propaganda": "propaganda_detector",
+    "narrative": "narrative_detector",
+    "emotion": "emotion_classifier",
+    "multitask": "multitask_truthlens",
+    "multitask_truthlens": "multitask_truthlens",
+    "bias_classifier": "bias_classifier",
+    "ideology_classifier": "ideology_classifier",
+    "propaganda_detector": "propaganda_detector",
+    "narrative_detector": "narrative_detector",
+    "emotion_classifier": "emotion_classifier",
+}
+
+
+def build_model(task: str, config: Dict[str, Any]) -> nn.Module:
+
+    if not isinstance(task, str) or not task.strip():
+        raise ValueError("task must be a non-empty string")
+
+    if not isinstance(config, dict):
+        raise TypeError("config must be a dict")
+
+    key = task.lower().strip()
+    model_type = _TASK_TO_MODEL_TYPE.get(key)
+
+    if model_type is None:
+        raise ValueError(
+            f"Unknown task '{task}'. "
+            f"Supported: {sorted(_TASK_TO_MODEL_TYPE.keys())}"
+        )
+
+    return ModelFactory.create(model_type=model_type, config=config)

@@ -197,3 +197,27 @@ class SchedulerWrapper:
         if self.scheduler:
             return self.scheduler.get_last_lr()
         return None
+
+
+def build_scheduler(
+    optimizer: Optimizer,
+    config: dict,
+) -> LambdaLR:
+
+    if not isinstance(config, dict):
+        raise TypeError("config must be a dict")
+
+    scheduler_type = config.get("scheduler_type", "linear")
+    num_training_steps = int(config.get("num_training_steps", 1000))
+    num_warmup_steps = int(config.get("num_warmup_steps", 0))
+    num_cycles = float(config.get("num_cycles", 0.5))
+    power = float(config.get("power", 1.0))
+
+    return get_scheduler(
+        optimizer=optimizer,
+        scheduler_type=scheduler_type,
+        num_training_steps=num_training_steps,
+        num_warmup_steps=num_warmup_steps,
+        num_cycles=num_cycles,
+        power=power,
+    )
