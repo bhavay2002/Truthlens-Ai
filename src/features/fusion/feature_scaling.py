@@ -3,33 +3,29 @@ from __future__ import annotations
 """
 Feature scaling.
 
-Two unrelated artefacts live here for backward-compat reasons:
+Defines :class:`FeatureScalingPipeline` (alias :data:`FeatureScaler`), the
+per-feature numeric scaler used by the feature-engineering pipeline
+(training + inference). Replaces the per-extractor hard-coded
+``value / 20.0`` style normalizations and the in-extractor sum-to-one
+passes that previously polluted the layer.
 
-  - `FeatureScalingPipeline` : the per-feature numeric scaler used by the
-                               feature-engineering pipeline (training + inference).
-                               Replaces all hard-coded `value / 20.0` style
-                               normalizations and the in-extractor sum-to-one
-                               passes that previously polluted the layer.
-
-  - `HybridTruthLensModel`   : the multi-head transformer + engineered-feature
-                               fusion model. Kept here only because no other
-                               module imports it from a new location yet.
-                               Will be moved to `src/models/architectures/`
-                               in a follow-up; do not add new dependencies on
-                               its location.
+The previous version of this file also contained ``HybridTruthLensModel``
+— the multi-head transformer + engineered-feature fusion model. That class
+has been moved to :mod:`src.models.architectures.hybrid_truthlens_model`
+where it belongs. A deprecation re-export is preserved at the bottom of
+this module so any straggling imports of
+``src.features.fusion.feature_scaling.HybridTruthLensModel`` keep working
+with a one-shot warning.
 """
 
 import json
 import logging
-import math
 import os
+import warnings
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
-import torch
-import torch.nn as nn
-from transformers import AutoModel
 
 logger = logging.getLogger(__name__)
 
@@ -279,80 +275,28 @@ FeatureScaler = FeatureScalingPipeline
 
 
 # =========================================================
-# HYBRID MODEL  (legacy location — see module docstring)
+# DEPRECATION SHIM  —  HybridTruthLensModel moved to
+#   src.models.architectures.hybrid_truthlens_model
 # =========================================================
 
-class HybridTruthLensModel(nn.Module):
+def __getattr__(name: str) -> Any:
+    """PEP 562 module-level ``__getattr__`` so that
+
+        from src.features.fusion.feature_scaling import HybridTruthLensModel
+
+    keeps working with a one-shot ``DeprecationWarning``. New code MUST
+    import from :mod:`src.models.architectures` instead.
     """
-    Hybrid Transformer + Engineered Feature Model.
-
-    NOTE: This class lives here for historical reasons. Do not add new imports
-    of `HybridTruthLensModel` from `src.features.fusion.feature_scaling` —
-    a future change will move it to `src.models.architectures`.
-    """
-
-    def __init__(
-        self,
-        model_name: str,
-        feature_dim: int,
-        hidden_dim: int = 256,
-        dropout: float = 0.2,
-    ):
-        super().__init__()
-
-        # -----------------------------
-        # Transformer Encoder
-        # -----------------------------
-        self.encoder = AutoModel.from_pretrained(model_name)
-        encoder_dim = self.encoder.config.hidden_size
-
-        # -----------------------------
-        # Feature Projection
-        # -----------------------------
-        self.feature_proj = nn.Sequential(
-            nn.Linear(feature_dim, hidden_dim),
-            nn.ReLU(),
-            nn.LayerNorm(hidden_dim),
+    if name == "HybridTruthLensModel":
+        warnings.warn(
+            "HybridTruthLensModel has moved to "
+            "src.models.architectures.hybrid_truthlens_model; importing it "
+            "from src.features.fusion.feature_scaling is deprecated.",
+            DeprecationWarning,
+            stacklevel=2,
         )
-
-        # -----------------------------
-        # Fusion Layer
-        # -----------------------------
-        self.fusion = nn.Sequential(
-            nn.Linear(encoder_dim + hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
+        from src.models.architectures.hybrid_truthlens_model import (
+            HybridTruthLensModel as _Hybrid,
         )
-
-        # -----------------------------
-        # Task Heads
-        # -----------------------------
-        self.bias_head = nn.Linear(hidden_dim, 1)
-        self.propaganda_head = nn.Linear(hidden_dim, 1)
-        self.ideology_head = nn.Linear(hidden_dim, 3)
-        self.frame_head = nn.Linear(hidden_dim, 5)
-        self.narrative_head = nn.Linear(hidden_dim, 3)
-        self.emotion_head = nn.Linear(hidden_dim, 20)
-
-    # -----------------------------------------------------
-
-    def forward(self, input_ids, attention_mask, features):
-        outputs = self.encoder(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-        )
-        cls = outputs.last_hidden_state[:, 0]
-
-        feat = self.feature_proj(features)
-
-        fused = torch.cat([cls, feat], dim=1)
-        fused = self.fusion(fused)
-
-        return {
-            "bias": self.bias_head(fused),
-            "propaganda": self.propaganda_head(fused),
-            "ideology": self.ideology_head(fused),
-            "frame": self.frame_head(fused),
-            "narrative": self.narrative_head(fused),
-            "emotion": self.emotion_head(fused),
-        }
+        return _Hybrid
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

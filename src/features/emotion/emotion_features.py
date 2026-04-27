@@ -147,15 +147,14 @@ class EmotionFeatures(BaseFeature):
         polarity = float(np.clip(pos - neg, -1.0, 1.0))
 
         # -------------------------
-        # DOMINANT
-        # -------------------------
-
-        dominant_idx = int(np.argmax(dist))
-        dominant_emotion = EMOTION_LABELS[dominant_idx]
-
-        # -------------------------
         # OUTPUT
         # -------------------------
+        # Emotion is multi-label by design: each `emotion_<label>` is a
+        # per-label scalar (the share of total emotion-token hits that
+        # match that label). The previous one-hot
+        # ``emotion_dominant_<label>`` column was removed (audit task 3):
+        # it discarded all but one label per article and was redundant
+        # with argmax over the per-label columns at inference time.
 
         features: Dict[str, float] = {}
 
@@ -168,8 +167,6 @@ class EmotionFeatures(BaseFeature):
             "emotion_entropy": self._safe(entropy),
             "emotion_polarity": self._safe((polarity + 1.0) / 2.0),  # normalize to [0,1]
         })
-
-        features[f"emotion_dominant_{dominant_emotion}"] = 1.0
 
         return features
 

@@ -327,3 +327,20 @@ Resolved the critical / perf items from the 13-section audit. App restarts clean
 - `DEFAULT_CORRELATION_THRESHOLD = 0.9` (audit task 8) — more aggressive than the previous 0.95 in both legacy modules.
 - `FeatureReductionPipeline.fit(features)` runs variance-prune then 0.9 correlation-prune on the training matrix; `save(path)` persists `{schema, variance_threshold, correlation_threshold, kept_features, removed_features}` as JSON; `load(path)` restores the kept-name list so inference applies exactly the same projection regardless of input dict order or extra/missing keys.
 - `src/features/feature_pruning.py` and `src/features/fusion/feature_selection.py` are now thin re-export shims (`from src.features.fusion.feature_reduction import …`) so every existing import site continues to work.
+
+## Apr 27 2026 — refined audit tasks 1 / 2 / 3
+
+**Task 1 (layer hygiene):**
+- New `src/models/architectures/hybrid_truthlens_model.py` is the canonical home of `HybridTruthLensModel` (the multi-head Transformer + engineered-feature fusion model). Re-exported from `src.models.architectures`.
+- `src/features/fusion/feature_scaling.py` no longer defines the model — only `FeatureScalingPipeline` (alias `FeatureScaler`) lives there now, which is what the file's name promises. Top docstring rewritten to match. A PEP-562 module-level `__getattr__` keeps `from src.features.fusion.feature_scaling import HybridTruthLensModel` working with a one-shot `DeprecationWarning`, so no caller breaks even via dynamic import.
+- `src/features/utills/` → `src/features/utils/` (typo rename). Verified: zero call sites used the misspelled package name, so the rename is a clean `git mv`.
+
+**Task 2 (wire `discourse_features` + `argument_structure_features` into `BiasProfileBuilder`):**
+- New `argument` section in `BiasProfileBuilder`: added to `PROFILE_SECTIONS`, `BiasProfileConfig.argument_weight = 0.6`, and `_compute_bias_score`'s weight map. `build_profile` now accepts `argument: dict | None = None` (kwarg-default-None preserves backward-compat with all existing call sites).
+- New `BiasProfileBuilder.build_from_feature_dict(features, ideology=None)` is the missing bridge between the feature-engineering layer and the bias profile. It routes prefixed keys via `_FEATURE_PREFIX_TO_SECTION` (`disc_*` → discourse, `arg_*` → argument, `emotion_*` → emotion, `bias_*`/`framing_*` → bias, `narrative_*` → narrative, `ideology_*` → ideology). Unprefixed keys are deliberately dropped so the routing surface stays explicit.
+- `AnalysisOrchestrator._post_process` now passes `argument=sections.get("argument", {})` so the analysis-side path also populates the new section using the existing `ArgumentAnalyzer` output.
+
+**Task 3 (multi-label fix in `emotion_features.py`):**
+- Removed the one-hot `features[f"emotion_dominant_{dominant_emotion}"] = 1.0` write. Emotion is multi-label by design — the per-label scalar columns (`emotion_<label>` = normalized hit share) already carry the full distribution, and the one-hot threw away every label except the argmax.
+- Removed the matching `[f"emotion_dominant_{e}" for e in EMOTION_LABELS]` block from `EMOTION_FEATURES` in `src/features/feature_schema.py` (was 20 dead columns) and added a comment explaining why argmax over the per-label columns recovers the dominant label at inference time without info loss.
+- Verified: `EmotionFeatures.extract()` now emits zero `emotion_dominant_*` keys; `EMOTION_FEATURES` shrank from 41 → 21 columns.

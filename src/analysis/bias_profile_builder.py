@@ -31,6 +31,7 @@ class BiasProfileConfig:
     emotion_weight: float = 1.0
     narrative_weight: float = 1.0
     discourse_weight: float = 1.0
+    argument_weight: float = 0.6
     ideology_weight: float = 0.6
 
     # Normalization
@@ -59,12 +60,73 @@ class BiasProfileBuilder:
         "emotion",
         "narrative",
         "discourse",
+        "argument",
         "ideology",
     )
+
+    # Feature-pipeline key prefixes routed by `build_from_feature_dict`.
+    # Keep these in sync with the emit prefixes used by the extractors in
+    # `src/features/<group>/`.
+    _FEATURE_PREFIX_TO_SECTION = {
+        "disc_": "discourse",
+        "arg_": "argument",
+        "emotion_": "emotion",
+        "bias_": "bias",
+        "narrative_": "narrative",
+        "framing_": "bias",
+        "ideology_": "ideology",
+    }
 
     def __init__(self, config: BiasProfileConfig | None = None):
         self.config = config or BiasProfileConfig()
         logger.info("BiasProfileBuilder initialized")
+
+    # =====================================================
+    # FEATURE-PIPELINE ENTRY (audit task 2)
+    # =====================================================
+
+    def build_from_feature_dict(
+        self,
+        features: Dict[str, float],
+        ideology: Dict[str, float] | None = None,
+    ) -> Dict[str, Any]:
+        """Build a profile from a flat feature dict (FeaturePipeline output).
+
+        Routes prefixed keys to their section using
+        :attr:`_FEATURE_PREFIX_TO_SECTION`. Unprefixed keys are dropped.
+        Provides the missing wiring between the feature-engineering layer
+        (``src/features/<group>/*``) — including ``DiscourseFeatures``
+        (``disc_*``) and ``ArgumentStructureFeatures`` (``arg_*``) — and
+        the bias profile.
+
+        Parameters
+        ----------
+        features : dict
+            Flat ``{feature_name: float}`` map (typically the output of
+            ``FeaturePipeline.extract(ctx)`` or one row of
+            ``BatchFeaturePipeline``).
+        ideology : dict, optional
+            Ideology distribution (already a probability vector). Passed
+            through unchanged because it is produced by an analysis-side
+            classifier rather than by a prefixed feature extractor.
+        """
+        sections: Dict[str, Dict[str, float]] = {
+            s: {} for s in self.PROFILE_SECTIONS
+        }
+        for k, v in (features or {}).items():
+            for prefix, section in self._FEATURE_PREFIX_TO_SECTION.items():
+                if k.startswith(prefix):
+                    sections[section][k] = v
+                    break
+
+        return self.build_profile(
+            bias=sections["bias"],
+            emotion=sections["emotion"],
+            narrative=sections["narrative"],
+            discourse=sections["discourse"],
+            argument=sections["argument"],
+            ideology=ideology if ideology is not None else sections["ideology"],
+        )
 
     # =====================================================
     # MAIN ENTRY
@@ -78,6 +140,7 @@ class BiasProfileBuilder:
         narrative: Dict[str, float],
         discourse: Dict[str, float],
         ideology: Dict[str, float],
+        argument: Dict[str, float] | None = None,
     ) -> Dict[str, Any]:
 
         profile = {
@@ -88,11 +151,14 @@ class BiasProfileBuilder:
         }
 
         # ---- Process each section ----
+        # `argument` is keyword-default-None for backward-compat with callers
+        # that predate the discourse/argument feature wiring (audit task 2).
         for section_name, data in {
             "bias": bias,
             "emotion": emotion,
             "narrative": narrative,
             "discourse": discourse,
+            "argument": argument or {},
             "ideology": ideology,
         }.items():
             profile[section_name] = self._process_section(data)
@@ -282,6 +348,7 @@ class BiasProfileBuilder:
             "emotion": self.config.emotion_weight,
             "narrative": self.config.narrative_weight,
             "discourse": self.config.discourse_weight,
+            "argument": self.config.argument_weight,
             "ideology": self.config.ideology_weight,
         }
 

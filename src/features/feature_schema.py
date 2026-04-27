@@ -117,8 +117,12 @@ EMOTION_LABELS = [
 EMOTION_FEATURES = (
     [f"emotion_{e}" for e in EMOTION_LABELS]
     + ["emotion_intensity"]
-    + [f"emotion_dominant_{e}" for e in EMOTION_LABELS]
 )
+# NOTE: per-label one-hot ``emotion_dominant_<label>`` columns were
+# removed (audit task 3, multi-label fix). The per-label scalars above
+# (`emotion_<label>` = normalized hit share) carry the same signal in a
+# distributional form; argmax recovers the dominant label at inference
+# time without throwing away the rest of the distribution.
 
 
 # =========================================================

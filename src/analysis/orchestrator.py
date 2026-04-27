@@ -189,6 +189,7 @@ class AnalysisOrchestrator:
             emotion=sections["emotion"],
             narrative=narrative_section,
             discourse=sections["discourse"],
+            argument=sections.get("argument", {}),
             ideology=sections["ideology"],
         )
 
