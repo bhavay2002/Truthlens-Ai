@@ -11,15 +11,36 @@ logger = logging.getLogger(__name__)
 # =========================================================
 # CONFIG
 # =========================================================
+#
+# A valid TruthLens checkpoint must contain (a) an `encoder.*` submodule
+# and (b) at least one task-head submodule. Heads may be exposed either
+# as a single `task_heads.*` `nn.ModuleDict` (the canonical
+# `MultiTaskTruthLensModel` / `MultiTaskBaseModel` layout) or as
+# individually-named top-level modules ending in `_head` (the legacy
+# `HybridTruthLensModel` layout). Custom callers may still pass an
+# explicit `required_prefixes` to override these defaults.
 
-REQUIRED_PREFIXES = [
-    "encoder",
-    "bias_head",
-    "ideology_head",
-    "propaganda_head",
-    "narrative_head",
-    "emotion_head",
-]
+REQUIRED_PREFIXES = ["encoder", "task_heads"]
+
+
+def _state_has_any_head(state_dict_keys: Iterable[str]) -> bool:
+    """Return True if any key looks like a head submodule.
+
+    Accepts both the canonical `task_heads.*` ModuleDict layout and the
+    legacy `<task>_head.*` per-head layout.
+    """
+
+    for key in state_dict_keys:
+        if key.startswith("task_heads.") or ".task_heads." in key:
+            return True
+
+        # Top-level head submodule, e.g. "bias_head.weight" or
+        # "narrative_frame_head.bias".
+        first_segment = key.split(".", 1)[0]
+        if first_segment.endswith("_head"):
+            return True
+
+    return False
 
 
 # =========================================================
@@ -66,6 +87,7 @@ def validate_checkpoint(
     if not isinstance(state_dict, dict) or not state_dict:
         raise ValueError("Invalid or empty state_dict")
 
+    user_supplied_prefixes = required_prefixes is not None
     prefixes = list(required_prefixes or REQUIRED_PREFIXES)
 
     # -----------------------------------------------------
@@ -85,10 +107,22 @@ def validate_checkpoint(
     # STRUCTURE CHECK
     # -----------------------------------------------------
 
-    missing = [
-        p for p in prefixes
-        if not any(k.startswith(p) for k in state_dict.keys())
-    ]
+    keys = list(state_dict.keys())
+    missing = []
+
+    if user_supplied_prefixes:
+        missing = [
+            p for p in prefixes
+            if not any(k.startswith(p) for k in keys)
+        ]
+    else:
+        # Default contract: require an encoder and at least one head
+        # (either `task_heads.*` ModuleDict or a `<task>_head.*` module).
+        if not any(k.startswith("encoder") or ".encoder." in k for k in keys):
+            missing.append("encoder")
+
+        if not _state_has_any_head(keys):
+            missing.append("task_heads | <task>_head")
 
     if missing:
         msg = f"Missing required components: {missing}"

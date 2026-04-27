@@ -1,12 +1,25 @@
+"""Isotonic-regression post-hoc calibration.
+
+This module owns ``IsotonicCalibrator`` and ``IsotonicCalibrationConfig``.
+The classes used to live inside ``temperature_scaling.py`` because of an
+historical file-name swap; they have been moved here so each file in
+``src.models.calibration`` once again contains exactly what its name
+says. ``CalibrationMetrics`` lives in ``calibration_metrics.py`` —
+nothing in this module re-exports it any more.
+
+Public API:
+  • :class:`IsotonicCalibrator`
+  • :class:`IsotonicCalibrationConfig`
+"""
+
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, Any
+from typing import List, Optional
 
 import numpy as np
-import torch
-import torch.nn.functional as F
+from sklearn.isotonic import IsotonicRegression
 
 logger = logging.getLogger(__name__)
 
@@ -16,206 +29,128 @@ logger = logging.getLogger(__name__)
 # =========================================================
 
 @dataclass
-class CalibrationMetricConfig:
-    n_bins: int = 15
-
-    def __post_init__(self):
-        if self.n_bins <= 1:
-            raise ValueError("n_bins must be > 1")
+class IsotonicCalibrationConfig:
+    out_of_bounds: str = "clip"
+    increasing: bool = True
+    normalize: bool = True
 
 
 # =========================================================
-# METRICS
+# CALIBRATOR
 # =========================================================
 
-class CalibrationMetrics:
+class IsotonicCalibrator:
 
-    def __init__(self, config: CalibrationMetricConfig | None = None):
-        self.config = config or CalibrationMetricConfig()
+    def __init__(
+        self,
+        config: Optional[IsotonicCalibrationConfig] = None,
+    ) -> None:
+        self.config = config or IsotonicCalibrationConfig()
 
-    # -----------------------------------------------------
+        self._calibrators: List[IsotonicRegression] = []
+        self._num_classes: int = 0
+        self._is_fitted: bool = False
 
-    @staticmethod
-    def _validate(probs: torch.Tensor, labels: torch.Tensor):
+    # =====================================================
+    # INTERNAL
+    # =====================================================
+
+    def _prepare(self, probs: np.ndarray) -> np.ndarray:
+
+        probs = np.asarray(probs, dtype=np.float64)
+
+        # binary vector -> convert to 2-class
+        if probs.ndim == 1:
+            probs = np.stack([1.0 - probs, probs], axis=1)
+
         if probs.ndim != 2:
-            raise ValueError("probs must be [N, C]")
-        if labels.ndim != 1:
-            raise ValueError("labels must be [N]")
+            raise ValueError("probs must be (N, C)")
+
+        if np.any((probs < 0) | (probs > 1)):
+            raise ValueError("probs must be in [0,1]")
+
+        return probs
+
+    # =====================================================
+    # FIT
+    # =====================================================
+
+    def fit(
+        self,
+        probabilities: np.ndarray,
+        labels: np.ndarray,
+    ) -> "IsotonicCalibrator":
+
+        probs = self._prepare(probabilities)
+        labels = np.asarray(labels, dtype=np.int64)
+
         if probs.shape[0] != labels.shape[0]:
             raise ValueError("size mismatch")
 
-    # -----------------------------------------------------
+        n_classes = probs.shape[1]
 
-    @staticmethod
-    def _to_probs(x: torch.Tensor) -> torch.Tensor:
-        if x.max() > 1 or x.min() < 0:
-            return torch.softmax(x, dim=1)
-        return x
+        if labels.min() < 0 or labels.max() >= n_classes:
+            raise ValueError("invalid labels")
+
+        self._num_classes = n_classes
+        self._calibrators = []
+
+        for c in range(n_classes):
+            y = (labels == c).astype(np.float64)
+            x = probs[:, c]
+
+            model = IsotonicRegression(
+                out_of_bounds=self.config.out_of_bounds,
+                increasing=self.config.increasing,
+            )
+            model.fit(x, y)
+
+            self._calibrators.append(model)
+
+        self._is_fitted = True
+
+        logger.info("Isotonic fitted | classes=%d", n_classes)
+
+        return self
 
     # =====================================================
-    # ECE
+    # PREDICT
     # =====================================================
 
-    def expected_calibration_error(
+    def predict_proba(self, probabilities: np.ndarray) -> np.ndarray:
+
+        if not self._is_fitted:
+            raise RuntimeError("Calibrator not fitted")
+
+        probs = self._prepare(probabilities)
+
+        if probs.shape[1] != self._num_classes:
+            raise ValueError("class mismatch")
+
+        calibrated = np.zeros_like(probs)
+
+        for i, model in enumerate(self._calibrators):
+            calibrated[:, i] = model.predict(probs[:, i])
+
+        if self.config.normalize:
+            sums = calibrated.sum(axis=1, keepdims=True)
+            sums[sums == 0] = 1.0
+            calibrated = calibrated / sums
+
+        return calibrated
+
+    # =====================================================
+    # FIT + TRANSFORM
+    # =====================================================
+
+    def calibrate(
         self,
-        logits_or_probs: torch.Tensor,
-        labels: torch.Tensor,
-    ) -> float:
+        probabilities: np.ndarray,
+        labels: np.ndarray,
+    ) -> np.ndarray:
 
-        probs = self._to_probs(logits_or_probs)
-        self._validate(probs, labels)
+        self.fit(probabilities, labels)
+        return self.predict_proba(probabilities)
 
-        conf, preds = torch.max(probs, dim=1)
-        acc = preds.eq(labels)
 
-        bins = torch.linspace(0, 1, self.config.n_bins + 1)
-        ece = torch.zeros(1, device=probs.device)
-
-        for i in range(self.config.n_bins):
-            mask = (conf > bins[i]) & (conf <= bins[i + 1])
-
-            if mask.sum() > 0:
-                bin_acc = acc[mask].float().mean()
-                bin_conf = conf[mask].mean()
-                weight = mask.float().mean()
-                ece += torch.abs(bin_conf - bin_acc) * weight
-
-        return float(ece.item())
-
-    # =====================================================
-    # MCE
-    # =====================================================
-
-    def maximum_calibration_error(
-        self,
-        logits_or_probs: torch.Tensor,
-        labels: torch.Tensor,
-    ) -> float:
-
-        probs = self._to_probs(logits_or_probs)
-        self._validate(probs, labels)
-
-        conf, preds = torch.max(probs, dim=1)
-        acc = preds.eq(labels)
-
-        bins = torch.linspace(0, 1, self.config.n_bins + 1)
-        mce = torch.zeros(1, device=probs.device)
-
-        for i in range(self.config.n_bins):
-            mask = (conf > bins[i]) & (conf <= bins[i + 1])
-
-            if mask.sum() > 0:
-                error = torch.abs(
-                    conf[mask].mean() - acc[mask].float().mean()
-                )
-                mce = torch.maximum(mce, error)
-
-        return float(mce.item())
-
-    # =====================================================
-    # BRIER
-    # =====================================================
-
-    def brier_score(
-        self,
-        logits_or_probs: torch.Tensor,
-        labels: torch.Tensor,
-    ) -> float:
-
-        probs = self._to_probs(logits_or_probs)
-        self._validate(probs, labels)
-
-        one_hot = F.one_hot(labels, num_classes=probs.shape[1]).float()
-        score = torch.mean(torch.sum((probs - one_hot) ** 2, dim=1))
-
-        return float(score.item())
-
-    # =====================================================
-    # NLL
-    # =====================================================
-
-    def negative_log_likelihood(
-        self,
-        logits_or_probs: torch.Tensor,
-        labels: torch.Tensor,
-    ) -> float:
-
-        if logits_or_probs.max() <= 1 and logits_or_probs.min() >= 0:
-            probs = logits_or_probs
-            loss = F.nll_loss(torch.log(probs + 1e-12), labels)
-        else:
-            loss = F.cross_entropy(logits_or_probs, labels)
-
-        return float(loss.item())
-
-    # =====================================================
-    # RELIABILITY
-    # =====================================================
-
-    def reliability_statistics(
-        self,
-        logits_or_probs: torch.Tensor,
-        labels: torch.Tensor,
-    ) -> Dict[str, np.ndarray]:
-
-        probs = self._to_probs(logits_or_probs)
-        self._validate(probs, labels)
-
-        conf, preds = torch.max(probs, dim=1)
-        acc = preds.eq(labels).float()
-
-        conf_np = conf.cpu().numpy()
-        acc_np = acc.cpu().numpy()
-
-        bins = np.linspace(0.0, 1.0, self.config.n_bins + 1)
-
-        bin_acc = np.zeros(self.config.n_bins)
-        bin_conf = np.zeros(self.config.n_bins)
-        bin_counts = np.zeros(self.config.n_bins)
-
-        for i in range(self.config.n_bins):
-            mask = (conf_np > bins[i]) & (conf_np <= bins[i + 1])
-
-            if mask.sum() > 0:
-                bin_acc[i] = acc_np[mask].mean()
-                bin_conf[i] = conf_np[mask].mean()
-                bin_counts[i] = mask.sum()
-
-        return {
-            "bin_accuracy": bin_acc,
-            "bin_confidence": bin_conf,
-            "bin_counts": bin_counts,
-            "bin_boundaries": bins,
-        }
-
-    # =====================================================
-    # ALL
-    # =====================================================
-
-    def compute_all_metrics(
-        self,
-        logits_or_probs: torch.Tensor,
-        labels: torch.Tensor,
-    ) -> Dict[str, float]:
-
-        metrics = {
-            "ece": self.expected_calibration_error(logits_or_probs, labels),
-            "mce": self.maximum_calibration_error(logits_or_probs, labels),
-            "brier_score": self.brier_score(logits_or_probs, labels),
-            "nll": self.negative_log_likelihood(logits_or_probs, labels),
-        }
-
-        logger.info("Calibration metrics: %s", metrics)
-
-        return metrics
-
-# =========================================================
-# COMPAT: re-export IsotonicCalibrator/IsotonicCalibrationConfig
-# from src.models.calibration.temperature_scaling (where they
-# physically live in this snapshot of the repo).
-# =========================================================
-
-from src.models.calibration.temperature_scaling import (  # noqa: F401
-    IsotonicCalibrationConfig,
-    IsotonicCalibrator,
-)
+__all__ = ["IsotonicCalibrator", "IsotonicCalibrationConfig"]

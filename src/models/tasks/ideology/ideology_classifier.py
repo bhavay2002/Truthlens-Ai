@@ -136,17 +136,23 @@ class IdeologyClassifier(BaseModel):
 
         head_output = self.classifier_head(pooled_output)
 
-        logits = head_output["logits"]
+        raw_logits = head_output["logits"]
 
-        temperature = torch.clamp(self.temperature, 0.5, 5.0)
-        logits = logits / temperature
+        # Temperature scaling is a post-hoc calibration step. Apply it
+        # only at inference; compute the loss on raw logits so gradients
+        # cannot reduce loss by inflating T.
+        if self.training:
+            scaled_logits = raw_logits
+        else:
+            temperature = torch.clamp(self.temperature, 0.5, 5.0)
+            scaled_logits = raw_logits / temperature
 
-        probs = F.softmax(logits, dim=-1)
+        probs = F.softmax(scaled_logits, dim=-1)
         preds = probs.argmax(dim=-1)
         confidence = probs.max(dim=-1).values
 
         outputs: Dict[str, Any] = {
-            "logits": logits,
+            "logits": scaled_logits,
             "probabilities": probs,
             "predictions": preds,
             "confidence": confidence,
@@ -162,7 +168,7 @@ class IdeologyClassifier(BaseModel):
             if labels.dim() != 1:
                 raise ValueError("labels must be 1D tensor")
 
-            loss = self.loss_fn(logits, labels.long())
+            loss = self.loss_fn(raw_logits, labels.long())
             outputs["loss"] = loss
 
         return outputs

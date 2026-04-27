@@ -137,18 +137,25 @@ class BiasClassifier(BaseModel):
 
         head_output = self.classifier_head(pooled_output)
 
-        logits = head_output["logits"]
+        raw_logits = head_output["logits"]
 
-        # temperature scaling
-        temperature = torch.clamp(self.temperature, 0.5, 5.0)
-        logits = logits / temperature
+        # Temperature is a *post-hoc* calibration parameter; it must NOT
+        # appear in the training-loss path (otherwise gradients teach the
+        # network to drive T → ∞ and squash the loss instead of learning
+        # the task). We therefore divide by T only at inference time and
+        # always compute loss against raw logits.
+        if self.training:
+            scaled_logits = raw_logits
+        else:
+            temperature = torch.clamp(self.temperature, 0.5, 5.0)
+            scaled_logits = raw_logits / temperature
 
-        probs = F.softmax(logits, dim=-1)
+        probs = F.softmax(scaled_logits, dim=-1)
         preds = probs.argmax(dim=-1)
         confidence = probs.max(dim=-1).values
 
         outputs: Dict[str, Any] = {
-            "logits": logits,
+            "logits": scaled_logits,
             "probabilities": probs,
             "predictions": preds,
             "confidence": confidence,
@@ -164,7 +171,7 @@ class BiasClassifier(BaseModel):
             if labels.dim() != 1:
                 raise ValueError("labels must be 1D tensor")
 
-            loss = self.loss_fn(logits, labels.long())
+            loss = self.loss_fn(raw_logits, labels.long())
             outputs["loss"] = loss
 
         return outputs
@@ -178,12 +185,17 @@ class BiasClassifier(BaseModel):
         attention_mask: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
 
+        was_training = self.training
         self.eval()
 
-        outputs = self.forward(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-        )
+        try:
+            outputs = self.forward(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            )
+        finally:
+            if was_training:
+                self.train()
 
         return {
             "predictions": outputs["predictions"],

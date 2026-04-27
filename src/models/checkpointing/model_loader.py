@@ -241,7 +241,13 @@ class ArtifactManager:
         if not path.exists():
             raise FileNotFoundError(path)
 
-        checkpoint = torch.load(path)
+        # PyTorch ≥2.6 changed the default of `weights_only` from False to
+        # True and now warns loudly on the implicit-default code path. Pin
+        # CPU mapping (we only need the state dict) and request the safer
+        # `weights_only=True` deserializer explicitly so we neither emit
+        # the warning nor fall victim to a future default flip back to
+        # arbitrary-pickle execution.
+        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
 
         validate_checkpoint(checkpoint.get("model_state_dict", {}), strict=False)
 

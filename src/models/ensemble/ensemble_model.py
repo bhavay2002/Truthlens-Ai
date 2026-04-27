@@ -82,18 +82,29 @@ class EnsembleModel(nn.Module):
         stacked = torch.stack(logits_list, dim=0)
 
         if self.config.strategy == "majority_vote":
-            logits = self._majority_vote(stacked)
+            # `_majority_vote` returns per-class vote *counts*. These are
+            # not real-valued logits, so feeding them into softmax (the
+            # general-strategy code path below) would smear the
+            # probability mass across all classes — exactly the bug the
+            # audit flagged. Convert counts directly to a normalized
+            # probability distribution and recover a logit-shaped tensor
+            # by taking the log of those probabilities.
+            vote_counts = self._majority_vote(stacked)
+            denom = vote_counts.sum(dim=-1, keepdim=True).clamp(min=1.0)
+            probs = vote_counts / denom
+            logits = torch.log(probs.clamp(min=1e-12))
 
         elif self.config.strategy == "weighted" and self._weights is not None:
             weights = self._weights.to(stacked.device).view(
                 -1, *([1] * (stacked.dim() - 1))
             )
             logits = (stacked * weights).sum(dim=0) / weights.sum()
+            probs = F.softmax(logits, dim=-1)
 
         else:
             logits = stacked.mean(dim=0)
+            probs = F.softmax(logits, dim=-1)
 
-        probs = F.softmax(logits, dim=-1)
         preds = probs.argmax(dim=-1)
         confidence = probs.max(dim=-1).values
         entropy = -torch.sum(probs * torch.log(probs + 1e-12), dim=-1)
@@ -111,18 +122,24 @@ class EnsembleModel(nn.Module):
     # =====================================================
 
     def _majority_vote(self, stacked: torch.Tensor) -> torch.Tensor:
+        """Return per-class vote *counts* (not probabilities or logits).
+
+        ``stacked`` is shape ``[num_models, ..., num_classes]``. For each
+        model we take its ``argmax`` over the class dimension and add a
+        one-hot vote into the accumulator. The caller is responsible for
+        turning these counts into a probability distribution.
+        """
 
         predictions = stacked.argmax(dim=-1)
-        num_classes = stacked.size(-1)
 
-        vote_logits = torch.zeros_like(stacked[0])
+        vote_counts = torch.zeros_like(stacked[0])
 
         for pred in predictions:
-            one_hot = torch.zeros_like(vote_logits)
+            one_hot = torch.zeros_like(vote_counts)
             one_hot.scatter_(-1, pred.unsqueeze(-1), 1.0)
-            vote_logits += one_hot
+            vote_counts += one_hot
 
-        return vote_logits
+        return vote_counts
 
     # =====================================================
     # UTILS

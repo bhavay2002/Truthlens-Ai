@@ -7,9 +7,32 @@ belong in the features layer.
 
 from __future__ import annotations
 
+from typing import Any, Dict, Mapping, Optional
+
 import torch
 import torch.nn as nn
 from transformers import AutoModel
+
+
+# =========================================================
+# DEFAULT TASK HEAD SIZES
+# =========================================================
+#
+# These defaults are *aligned with the standalone task classifiers*
+# (BiasClassifier.NUM_CLASSES, IdeologyClassifier.NUM_CLASSES, ...) so
+# the hybrid model and the per-task models agree on what each head
+# means. Callers that need different shapes (different label
+# vocabularies, frame schemas, etc.) should pass `task_num_labels=...`
+# or build the hybrid via :meth:`HybridTruthLensModel.from_model_config`.
+
+DEFAULT_TASK_NUM_LABELS: Dict[str, int] = {
+    "bias": 2,            # matches BiasClassifier.NUM_CLASSES
+    "propaganda": 2,      # matches PropagandaDetector.NUM_CLASSES
+    "ideology": 3,        # matches IdeologyClassifier.NUM_CLASSES
+    "narrative": 3,       # hero / villain / victim role aggregation
+    "narrative_frame": 5, # RE / HI / CO / MO / EC
+    "emotion": 20,        # matches EmotionClassifier.NUM_CLASSES
+}
 
 
 class HybridTruthLensModel(nn.Module):
@@ -20,12 +43,18 @@ class HybridTruthLensModel(nn.Module):
       * feature_proj : projection of the engineered feature vector into
                        ``hidden_dim``
       * fusion       : concat(cls, projected_features) → hidden_dim
-      * task heads   : bias / propaganda / ideology / frame / narrative /
-                       emotion
+      * task heads   : one ``nn.Linear(hidden_dim, num_labels)`` per
+                       configured task
 
     The engineered feature vector must be pre-scaled by
     :class:`src.features.fusion.feature_scaling.FeatureScalingPipeline`
     using a scaler fitted on the training set.
+
+    Per-task head widths are taken from ``task_num_labels`` (or
+    :data:`DEFAULT_TASK_NUM_LABELS` when omitted). The defaults match
+    the canonical per-task classifier modules so a model trained with
+    the hybrid architecture is interchangeable with the standalone
+    classifier suite.
     """
 
     def __init__(
@@ -34,6 +63,7 @@ class HybridTruthLensModel(nn.Module):
         feature_dim: int,
         hidden_dim: int = 256,
         dropout: float = 0.2,
+        task_num_labels: Optional[Mapping[str, int]] = None,
     ):
         super().__init__()
 
@@ -52,14 +82,31 @@ class HybridTruthLensModel(nn.Module):
             nn.Dropout(dropout),
         )
 
-        self.bias_head = nn.Linear(hidden_dim, 1)
-        self.propaganda_head = nn.Linear(hidden_dim, 1)
-        self.ideology_head = nn.Linear(hidden_dim, 3)
-        self.frame_head = nn.Linear(hidden_dim, 5)
-        self.narrative_head = nn.Linear(hidden_dim, 3)
-        self.emotion_head = nn.Linear(hidden_dim, 20)
+        # -------------------------------------------------
+        # Resolve per-task head sizes (parameterised, no more
+        # hardcoded mismatches with the standalone classifiers).
+        # -------------------------------------------------
+        resolved = dict(DEFAULT_TASK_NUM_LABELS)
+        if task_num_labels:
+            for name, n in task_num_labels.items():
+                if int(n) <= 0:
+                    raise ValueError(
+                        f"task_num_labels[{name!r}] must be positive "
+                        f"(got {n})"
+                    )
+                resolved[name] = int(n)
 
-    def forward(self, input_ids, attention_mask, features):
+        self.task_num_labels: Dict[str, int] = resolved
+
+        self.task_heads = nn.ModuleDict(
+            {name: nn.Linear(hidden_dim, n) for name, n in resolved.items()}
+        )
+
+    # =====================================================
+    # FORWARD
+    # =====================================================
+
+    def forward(self, input_ids, attention_mask, features) -> Dict[str, Any]:
         outputs = self.encoder(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -71,11 +118,49 @@ class HybridTruthLensModel(nn.Module):
         fused = torch.cat([cls, feat], dim=1)
         fused = self.fusion(fused)
 
-        return {
-            "bias": self.bias_head(fused),
-            "propaganda": self.propaganda_head(fused),
-            "ideology": self.ideology_head(fused),
-            "frame": self.frame_head(fused),
-            "narrative": self.narrative_head(fused),
-            "emotion": self.emotion_head(fused),
+        return {name: head(fused) for name, head in self.task_heads.items()}
+
+    # =====================================================
+    # CONFIG-DRIVEN FACTORY
+    # =====================================================
+
+    @classmethod
+    def from_model_config(
+        cls,
+        model_config: Any,
+        feature_dim: int,
+        hidden_dim: int = 256,
+        dropout: Optional[float] = None,
+    ) -> "HybridTruthLensModel":
+        """Build a hybrid model from a :class:`MultiTaskModelConfig`.
+
+        Head widths are taken from ``model_config.tasks[name].num_labels``
+        so the hybrid head sizes can never silently disagree with the
+        rest of the pipeline.
+        """
+
+        from src.models.config import MultiTaskModelConfig
+
+        if not isinstance(model_config, MultiTaskModelConfig):
+            raise TypeError(
+                "model_config must be a MultiTaskModelConfig "
+                f"(got {type(model_config).__name__})"
+            )
+
+        if not model_config.tasks:
+            raise ValueError("model_config.tasks must be non-empty")
+
+        task_num_labels = {
+            name: int(task_cfg.num_labels)
+            for name, task_cfg in model_config.tasks.items()
         }
+
+        return cls(
+            model_name=model_config.encoder.model_name,
+            feature_dim=feature_dim,
+            hidden_dim=hidden_dim,
+            dropout=(
+                dropout if dropout is not None else float(model_config.dropout)
+            ),
+            task_num_labels=task_num_labels,
+        )
