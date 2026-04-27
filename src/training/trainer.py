@@ -45,6 +45,9 @@ class Trainer:
         monitor_metric: str = "val_loss",
         maximize_metric: bool = False,
         params_override: Optional[Dict[str, Any]] = None,
+        setup_config: Optional[TrainingSetupConfig] = None,
+        log_every_steps: Optional[int] = None,
+        checkpoint_every_steps: Optional[int] = None,
     ):
 
         # -------------------------------------------------
@@ -66,9 +69,16 @@ class Trainer:
         self.maximize_metric = maximize_metric
 
         # -------------------------------------------------
-        # TRAINING SETUP (🔥 NEW)
+        # TRAINING SETUP
+        #
+        # CFG-4: ``TrainingSetupConfig`` is ``frozen=True`` (immutability is
+        # the right default — callers can't accidentally mutate runtime
+        # precision flags mid-training). Previously the Trainer always
+        # constructed a default instance, so callers could not disable e.g.
+        # ``run_sanity_check`` for fast Optuna trials. Accept an explicit
+        # override here as the documented escape hatch.
         # -------------------------------------------------
-        self.setup_cfg = TrainingSetupConfig()
+        self.setup_cfg = setup_config or TrainingSetupConfig()
 
         self.device = setup_runtime(self.setup_cfg)
 
@@ -119,6 +129,36 @@ class Trainer:
         self._epoch = 0
         self.best_metric = None
         self.no_improve_epochs = 0
+
+        # -------------------------------------------------
+        # LOGGING / CHECKPOINT CADENCE
+        #
+        # CFG-3: The previous implementation hardcoded 50 (log) and 500
+        # (checkpoint) inside ``_train_epoch``. Both are now driven by
+        # ctor args (with the same defaults) so:
+        #   * Optuna / fast smoke tests can log every step
+        #     (``log_every_steps=1``), and
+        #   * long production runs can dial checkpoint cadence up
+        #     (e.g. every 5000 steps) without code edits.
+        # ``params_override`` also accepts the same keys so a YAML /
+        # tuning config can drive both without touching the Trainer call
+        # site.
+        # -------------------------------------------------
+        self.log_every_steps = int(
+            log_every_steps
+            if log_every_steps is not None
+            else params_override.get("log_every_steps", 50)
+        )
+        self.checkpoint_every_steps = int(
+            checkpoint_every_steps
+            if checkpoint_every_steps is not None
+            else params_override.get("checkpoint_every_steps", 500)
+        )
+
+        if self.log_every_steps <= 0:
+            raise ValueError("log_every_steps must be > 0")
+        if self.checkpoint_every_steps <= 0:
+            raise ValueError("checkpoint_every_steps must be > 0")
 
         # -------------------------------------------------
         # DISTRIBUTED
@@ -216,7 +256,7 @@ class Trainer:
             # -------------------------
             # LOGGING
             # -------------------------
-            if self.global_step % 50 == 0 and self._is_main():
+            if self.global_step % self.log_every_steps == 0 and self._is_main():
 
                 log_data = {
                     "train/loss": float(outputs.get("raw_loss", 0.0)),
@@ -236,7 +276,7 @@ class Trainer:
             # -------------------------
             if (
                 self.checkpoint
-                and self.global_step % 500 == 0
+                and self.global_step % self.checkpoint_every_steps == 0
                 and self._is_main()
             ):
                 self.checkpoint.save(
@@ -374,4 +414,12 @@ class TrainerConfig:
     config_path: str = ""
     monitor_metric: str = "val_loss"
     maximize_metric: bool = False
+
+    # CFG-3: explicit cadence knobs (mirror the Trainer.__init__ kwargs).
+    log_every_steps: int = 50
+    checkpoint_every_steps: int = 500
+
+    # CFG-4: explicit setup-config override (mirror Trainer.__init__).
+    setup_config: _Optional["TrainingSetupConfig"] = None
+
     extras: _Dict[str, _Any] = _field(default_factory=dict)

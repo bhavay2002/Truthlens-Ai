@@ -34,6 +34,13 @@ class TrainingStepConfig:
     use_mixed_precision: bool = True
     skip_nan_loss: bool = True
 
+    # CFG-2: factor used by ``_reduce_lr`` when the spike / health detectors
+    # (instrumentation engine OR monitor engine) raise ``REDUCE_LR``. Was
+    # previously hardcoded as ``0.5`` in two separate sites; centralising
+    # here makes it tunable from the config layer (and matches
+    # ``LRSchedulerConfig.spike_lr_scale`` semantics).
+    spike_lr_scale: float = 0.5
+
 
 # =========================================================
 # ACTION ENUM
@@ -171,6 +178,21 @@ class TrainingStep:
         AND reproducibility-preserving.
         """
 
+        # EDGE-CASE (section 9): the rest of the run loop unpacks ``batch``
+        # via ``model(**batch)`` and indexes ``batch["labels"]`` inside
+        # ``LossEngine.compute``. A list/tuple batch (e.g. a default
+        # ``DataLoader`` collate that doesn't return a dict) would crash
+        # at ``model(**batch)`` with a ``TypeError`` whose message points
+        # at the model — masking the real cause (a custom dataset that
+        # forgot to return a dict). Surface a clear error here at the
+        # contract boundary so the dataset author sees the real issue.
+        if not isinstance(batch, dict):
+            raise TypeError(
+                "TrainingStep expects ``batch`` to be a dict (got "
+                f"{type(batch).__name__}). Datasets must return dicts; "
+                "fix the dataset / collate_fn rather than reshaping here."
+            )
+
         self.model.train()
         batch = self._move_batch(batch)
 
@@ -224,15 +246,35 @@ class TrainingStep:
         # FORWARD + LOSS
         # -------------------------
 
-        with torch.cuda.amp.autocast(enabled=self.use_amp):
+        # EDGE-CASE (section 9, NaN labels): ``LossEngine.compute`` /
+        # ``MultiTaskLoss.forward`` raise ``RuntimeError`` on non-finite
+        # aggregates. The previous implementation only honoured
+        # ``skip_nan_loss`` for the FINAL ``torch.isfinite(total_loss)``
+        # check below — meaning NaN labels (which propagate through
+        # cross-entropy / BCE before the aggregate is built) escaped the
+        # quarantine path and crashed the run despite ``skip_nan_loss=True``.
+        # Wrap the whole forward+loss block so the same skip semantics
+        # apply uniformly.
+        try:
+            with torch.cuda.amp.autocast(enabled=self.use_amp):
 
-            outputs = self.model(**batch)
+                outputs = self.model(**batch)
 
-            total_loss, task_losses = self.loss_engine.compute(
-                outputs,
-                batch,
-                shared_parameters=self.model.parameters(),
-            )
+                total_loss, task_losses = self.loss_engine.compute(
+                    outputs,
+                    batch,
+                    shared_parameters=self.model.parameters(),
+                )
+        except RuntimeError as e:
+            if self.config.skip_nan_loss:
+                logger.warning(
+                    "Skipping step due to RuntimeError in forward/loss "
+                    "(likely NaN labels or non-finite logits): %s",
+                    e,
+                )
+                self.optimizer.zero_grad(set_to_none=True)
+                return {"loss": None, "skipped": True}
+            raise
 
         # -------------------------
         # LOSS VALIDATION
@@ -485,7 +527,13 @@ class TrainingStep:
     # MultiTaskLoss orchestrator masks per-task via the labels dict, so
     # there is no value in pre-filtering the batch.
 
-    def _reduce_lr(self, factor: float = 0.5):
+    def _reduce_lr(self, factor: Optional[float] = None):
+        # CFG-2: factor is sourced from ``TrainingStepConfig.spike_lr_scale``
+        # by default rather than the previous hardcoded ``0.5``. Callers may
+        # still pass an explicit override.
+        if factor is None:
+            factor = float(self.config.spike_lr_scale)
+
         # BUG-6: a LambdaLR (and most functional schedulers) compute
         # ``g["lr"] = base_lr * lambda(step)`` on every ``scheduler.step()``.
         # Mutating only ``g["lr"]`` is therefore overwritten on the very

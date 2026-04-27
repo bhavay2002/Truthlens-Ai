@@ -42,6 +42,23 @@ class TaskScheduler:
         self.tasks = list(tasks)
         self.config = config or TaskSchedulerConfig()
 
+        # CFG-6: with a single task every strategy collapses to "always
+        # return that task". Warn loudly when the caller has wired a
+        # non-trivial strategy (round_robin is the harmless default), so
+        # they don't silently believe e.g. ``adaptive`` is doing something.
+        # Cache the trivial answer and short-circuit ``next_task`` so we
+        # skip the rng / softmax work on every step.
+        self._single_task: Optional[str] = (
+            self.tasks[0] if len(self.tasks) == 1 else None
+        )
+        if self._single_task is not None and self.config.strategy != "round_robin":
+            logger.warning(
+                "TaskScheduler received a single task (%r) with strategy=%r; "
+                "this strategy is a no-op for one task and the scheduler will "
+                "always return %r.",
+                self._single_task, self.config.strategy, self._single_task,
+            )
+
         self.rng = random.Random(self.config.seed)
 
         self._rr_index = 0
@@ -64,6 +81,10 @@ class TaskScheduler:
     # =====================================================
 
     def next_task(self) -> str:
+
+        # CFG-6: single-task fast path (skip rng / softmax / strategy dispatch).
+        if self._single_task is not None:
+            return self._single_task
 
         strategy = self.config.strategy
 

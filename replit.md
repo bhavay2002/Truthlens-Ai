@@ -402,4 +402,28 @@ Resolved the critical / perf items from the 13-section audit. App restarts clean
 - `from src.training import create_trainer_fn` → gets past all training-layer imports; only fails downstream on a pre-existing circular import in `src/models/loss/multitask_loss.py` (out of scope of CRIT-1..4, captured for the next audit pass).
 - `Start application` workflow restarts and serves cleanly with no new errors.
 
-**Remaining (not yet fixed) audit findings.** CRIT-5 (DDP wrap after `TrainingStep` capture → silent gradient-sync bypass), CRIT-6 (no `Trainer.load_checkpoint`; AMP scaler / optimizer / scheduler / global_step not persisted), CRIT-7 (scheduler advances on AMP overflow), CRIT-8 (NaN-skip zeros mid-accumulation grads), CRIT-9 (`val_loss` never produced → default early-stopping is dead), CRIT-10 (early-stop returns last-epoch model instead of best), plus the `🟠 PERF-*`, `🟡 LOSS-*`, `🧠 MT-*`, `🚀 GPU-*`, `🔄 REC-*`, `🧹` dead-code, `⚙️ CFG-*`, `🧪 EDGE-*` items from the v12 training audit.
+**Remaining (not yet fixed) audit findings.** CRIT-5 (DDP wrap after `TrainingStep` capture → silent gradient-sync bypass), CRIT-6 (no `Trainer.load_checkpoint`; AMP scaler / optimizer / scheduler / global_step not persisted), CRIT-7 (scheduler advances on AMP overflow), CRIT-8 (NaN-skip zeros mid-accumulation grads), CRIT-9 (`val_loss` never produced → default early-stopping is dead), CRIT-10 (early-stop returns last-epoch model instead of best), plus the `🟠 PERF-*`, `🟡 LOSS-*`, `🧠 MT-*`, `🚀 GPU-*`, `🔄 REC-*` items from the v12 training audit.
+
+## Apr 27 2026 — Training-layer audit v12: CFG-*, EDGE-*, dead-code pass
+
+**Config-surface fixes (`⚙️ CFG-1..CFG-6`).**
+- `CFG-1` — already fixed in earlier pass: `Trainer.__init__` honours `params_override["epochs"]`.
+- `CFG-2` — `TrainingStepConfig.spike_lr_scale: float = 0.5` is now the single source of truth for the LR-reduction factor; `TrainingStep._reduce_lr` reads it instead of the hardcoded `0.5`.
+- `CFG-3` — `Trainer.__init__` exposes `log_every_steps` (default 50) and `checkpoint_every_steps` (default 500) as both ctor kwargs and `params_override` keys; `_train_epoch` uses them in place of the hardcoded modulos. `TrainerConfig` dataclass mirrors the same fields.
+- `CFG-4` — `Trainer.__init__` now accepts an optional `setup_config: TrainingSetupConfig`. Frozen-default behaviour preserved; this is the documented escape hatch for callers (e.g. fast Optuna trials) who need to disable `run_sanity_check` etc.
+- `CFG-5` — `LossEngineConfig.normalization` carries an explicit docstring covering the `active`/`sum`/`mean` semantics and the auto single-task override.
+- `CFG-6` — `TaskScheduler.__init__` caches a single-task fast path, and `next_task()` short-circuits to that cached value (skips the rng / softmax dispatch). A WARNING is emitted when a non-`round_robin` strategy is wired with one task.
+
+**Edge-case fixes (`🧪 EDGE-*`, section 9 of v12 report).**
+- NaN labels — `TrainingStep.run` wraps the autocast forward + `loss_engine.compute(...)` block in `try/except RuntimeError` so non-finite logits / labels respect `skip_nan_loss=True` (the previous `torch.isfinite(total_loss)` check only fired AFTER the loss aggregate was built and never trapped exceptions raised inside `MultiTaskLoss`).
+- Non-dict batches — `TrainingStep.run` now asserts `isinstance(batch, dict)` at the contract boundary; previously a tuple/list batch crashed deep inside `model(**batch)` with a misleading `TypeError`.
+- Imbalanced binary — `binary_loss(...)` accepts an optional `pos_weight: torch.Tensor`, threaded straight to `binary_cross_entropy_with_logits`. Callers no longer need to re-implement the loss to balance a 99/1 class split.
+
+**Dead-code purge (`🧹` section 7 — confirmed zero external usages via ripgrep).**
+- Deleted entire file `src/training/lr_scheduler_engine.py` (`LRSchedulerEngine`).
+- Deleted `MultiOptimizer` from `src/models/optimization/optimizer_factory.py`.
+- Deleted `SchedulerWrapper` from `src/models/optimization/lr_scheduler.py`.
+- From `src/training/training_utils.py`: deleted `inference_mode()`, `set_global_seed()`, `safe_cuda_execution()`, and the **first** duplicate `TrainingMetrics` class at L205 (the "improved" one at L341 is the authoritative version and is retained).
+- From `src/training/loss_functions.py`: deleted `LossConfig` and `LossFactory` (no callers — `MultiTaskLoss`/`TaskLossConfig`/`TaskLossRouter` is the real router).
+
+**Verification.** `Start application` workflow restarts cleanly; FastAPI startup completes; `GET /` returns 200; no `ImportError` / `NameError` from the deletions. CRIT-* / PERF-* / LOSS-* / MT-* / GPU-* / REC-* items from the v12 audit remain outstanding.

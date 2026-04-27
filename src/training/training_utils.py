@@ -192,57 +192,6 @@ def enable_model_train(model: nn.Module) -> None:
     model.train()
 
 
-@contextmanager
-def inference_mode():
-    with torch.inference_mode():
-        yield
-
-
-# =========================================================
-# METRICS CONTAINER (OPTIONAL BUT USEFUL)
-# =========================================================
-
-@dataclass
-class TrainingMetrics:
-
-    task_losses: Dict[str, float] = field(default_factory=dict)
-    losses: Dict[str, float] = field(default_factory=dict)
-
-    step: int = 0
-    epoch: int = 0
-
-    def update(self, name: str, value: float) -> None:
-        self.losses[name] = float(value)
-
-    def update_task(self, task: str, loss: float) -> None:
-        self.task_losses[task] = float(loss)
-
-    def average_loss(self) -> float:
-        if not self.task_losses:
-            return 0.0
-        return sum(self.task_losses.values()) / len(self.task_losses)
-
-    def to_dict(self) -> Dict[str, float]:
-        return dict(self.losses)
-    
-# (Only showing NEW additions + upgrades — your existing code stays)
-
-# =========================================================
-# SEED / DETERMINISM
-# =========================================================
-
-def set_global_seed(seed: int) -> None:
-    import random
-    import numpy as np
-
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-
 # =========================================================
 # GRADIENT MONITORING
 # =========================================================
@@ -290,21 +239,6 @@ def autocast(enabled: bool = True):
             yield
     else:
         yield
-
-
-# =========================================================
-# OOM SAFE EXECUTION
-# =========================================================
-
-@contextmanager
-def safe_cuda_execution():
-    try:
-        yield
-    except RuntimeError as e:
-        if "out of memory" in str(e):
-            logger.warning("CUDA OOM detected — clearing cache")
-            torch.cuda.empty_cache()
-        raise
 
 
 # =========================================================

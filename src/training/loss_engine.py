@@ -22,6 +22,22 @@ class LossEngineConfig:
     task_weights: Optional[Dict[str, float]] = None
     ignore_index: int = -100
 
+    # CFG-5: ``normalization`` selects the reduction strategy used when
+    # combining per-task losses inside ``MultiTaskLoss``:
+    #
+    #   * ``"active"`` (default, recommended for multi-task training) —
+    #     divide the summed weighted losses by the number of tasks that
+    #     produced a non-zero loss this step. Keeps the aggregate scale
+    #     stable when some heads receive no labels in a given batch.
+    #   * ``"sum"`` — keep the raw weighted sum. **Required** for true
+    #     single-task runs (one entry in ``task_types``); otherwise the
+    #     "/ 1" division is a no-op and exporting "sum" makes the metric
+    #     comparable to the loss reported in single-head literature.
+    #     ``LossEngine.__init__`` auto-overrides ``"active"`` -> ``"sum"``
+    #     for single-task configs and emits a warning.
+    #   * ``"mean"`` — same as ``"active"`` but divides by ``len(task_types)``
+    #     regardless of which heads contributed; appropriate when every
+    #     task is expected to be active in every batch.
     normalization: str = "active"
     use_normalizer: bool = True
     use_coverage: bool = True

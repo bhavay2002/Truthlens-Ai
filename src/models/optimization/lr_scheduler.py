@@ -168,37 +168,6 @@ def get_scheduler(
     return LambdaLR(optimizer, lr_lambda)
 
 
-# =========================================================
-# STEP WRAPPER
-# =========================================================
-
-class SchedulerWrapper:
-    """
-    Wrapper for handling scheduler stepping consistently.
-    """
-
-    def __init__(
-        self,
-        scheduler: Optional[LambdaLR],
-        step_per_batch: bool = True,
-    ) -> None:
-        self.scheduler = scheduler
-        self.step_per_batch = step_per_batch
-
-    def step_batch(self):
-        if self.scheduler and self.step_per_batch:
-            self.scheduler.step()
-
-    def step_epoch(self):
-        if self.scheduler and not self.step_per_batch:
-            self.scheduler.step()
-
-    def get_lr(self):
-        if self.scheduler:
-            return self.scheduler.get_last_lr()
-        return None
-
-
 def build_scheduler(
     optimizer: Optimizer,
     config: dict,

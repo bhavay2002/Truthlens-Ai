@@ -1,6 +1,8 @@
 #src\models\training\loss_functions.py
 from __future__ import annotations
 
+from typing import Optional
+
 import torch
 import torch.nn.functional as F
 
@@ -9,7 +11,22 @@ import torch.nn.functional as F
 # PURE LOSS FUNCTIONS (NO TASK LOGIC)
 # =========================================================
 
-def binary_loss(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+def binary_loss(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    pos_weight: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Binary cross-entropy with optional positive-class re-weighting.
+
+    EDGE-CASE (section 9, imbalanced binary): on heavily imbalanced data
+    (e.g. ``99% / 1%`` like minority-class hate-speech detection), plain
+    BCE collapses to "always predict the majority class" because the
+    gradient from the rare positives is dwarfed by the negatives. The
+    standard remedy is ``pos_weight`` — a per-class scalar (or tensor of
+    shape ``[num_classes]``) that scales the positive term so the
+    effective gradient is balanced. Exposing it here keeps callers from
+    re-implementing the loss just to pass that single argument.
+    """
     targets = targets.float()
 
     if targets.dim() == 1:
@@ -18,7 +35,11 @@ def binary_loss(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     if logits.shape != targets.shape:
         raise RuntimeError("Shape mismatch in binary_loss")
 
-    return F.binary_cross_entropy_with_logits(logits.float(), targets)
+    return F.binary_cross_entropy_with_logits(
+        logits.float(),
+        targets,
+        pos_weight=pos_weight,
+    )
 
 
 def multiclass_loss(
@@ -102,36 +123,3 @@ def regression_loss(
 
     return F.mse_loss(preds.float(), targets.float())
 
-# =========================================================
-# COMPAT: minimal Loss config + factory stubs
-# =========================================================
-
-from dataclasses import dataclass as _dataclass
-
-
-@_dataclass
-class LossConfig:
-    """Lightweight loss-config used by classifier modules."""
-    task_type: str = "multiclass"
-    label_smoothing: float = 0.0
-    pos_weight: float | None = None
-
-
-class LossFactory:
-    """Tiny dispatcher used by classifier modules.
-
-    Returns one of the loss functions defined above based on ``config.task_type``.
-    """
-
-    @staticmethod
-    def create(config: "LossConfig"):
-        t = (config.task_type or "").lower()
-        if t == "binary":
-            return binary_loss
-        if t == "multiclass":
-            return multiclass_loss
-        if t == "multilabel":
-            return multilabel_loss
-        if t == "regression":
-            return regression_loss
-        raise ValueError(f"Unknown task_type: {config.task_type}")

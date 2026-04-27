@@ -143,41 +143,6 @@ def create_optimizer(
         raise ValueError(f"Unsupported optimizer type: {optimizer_type}")
 
 
-# =========================================================
-# MULTI-OPTIMIZER (ADVANCED)
-# =========================================================
-
-class MultiOptimizer:
-    """
-    Supports multiple optimizers for different parts of the model.
-    """
-
-    def __init__(self, optimizers: Dict[str, Optimizer]) -> None:
-        self.optimizers = optimizers
-
-    def zero_grad(self) -> None:
-        for opt in self.optimizers.values():
-            opt.zero_grad()
-
-    def step(self) -> None:
-        for opt in self.optimizers.values():
-            opt.step()
-
-    def state_dict(self) -> Dict[str, Any]:
-        return {k: v.state_dict() for k, v in self.optimizers.items()}
-
-    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-        for k, v in state_dict.items():
-            if k in self.optimizers:
-                self.optimizers[k].load_state_dict(v)
-
-    def get_lrs(self) -> Dict[str, float]:
-        return {
-            name: opt.param_groups[0]["lr"]
-            for name, opt in self.optimizers.items()
-        }
-
-
 def build_optimizer(
     model: torch.nn.Module,
     lr: float = 2e-5,
