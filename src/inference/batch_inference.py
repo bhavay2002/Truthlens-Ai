@@ -118,55 +118,50 @@ class BatchInferenceEngine:
 
         features = [{"text": t, "text_length": len(t)} for t in texts]
         prepared = self.feature_preparer.prepare_batch(features)
-        prepared = torch.tensor(prepared, dtype=torch.float32)
+        if not torch.is_tensor(prepared):
+            prepared = torch.tensor(prepared, dtype=torch.float32)
 
-        with torch.inference_mode(), torch.autocast(
-            device_type="cuda",
-            enabled=torch.cuda.is_available(),
-        ):
-            output = self.prediction_pipeline.predict(prepared)
+        device_type = str(self.prediction_pipeline.device.type)
+        amp_enabled = device_type == "cuda"
+
+        with torch.inference_mode():
+            if amp_enabled:
+                with torch.autocast(device_type=device_type):
+                    output = self.prediction_pipeline.predict(prepared)
+            else:
+                output = self.prediction_pipeline.predict(prepared)
+
+        # output keys: "bias" (list), "ideology" (list),
+        # "propaganda_probability" (list), "emotion" (list)
 
         results = []
 
         for i, text in enumerate(texts):
 
-            # ---------------- EXTRACT PER SAMPLE ----------------
-            logits = {
-                k: _to_numpy(v[i]) if v is not None else None
-                for k, v in output.get("logits", {}).items()
-            }
-
-            probs = {
-                k: _to_numpy(v[i]) if v is not None else None
-                for k, v in output.get("probabilities", {}).items()
-            }
+            bias_val = output.get("bias", [None] * (i + 1))[i]
+            ideology_val = output.get("ideology", [None] * (i + 1))[i]
+            prop_val = output.get("propaganda_probability", [None] * (i + 1))[i]
+            emotion_val = output.get("emotion", [None] * (i + 1))[i]
 
             preds = {
-                k: _to_numpy(v[i]) if v is not None else None
-                for k, v in output.get("predictions", {}).items()
+                "bias": bias_val,
+                "ideology": ideology_val,
+                "propaganda_probability": prop_val,
+                "emotion": emotion_val,
             }
 
-            # ---------------- REPORT ----------------
             report = self.report_generator.generate_report(
                 article_text=text,
-                bias_analysis={"bias": preds.get("bias")},
-                emotion_analysis={"emotion": preds.get("emotion")},
-                credibility_score=preds.get("credibility_score"),
+                bias_analysis={"bias": bias_val},
+                emotion_analysis={"emotion": emotion_val},
+                credibility_score=None,
             )
 
-            results.append(
-                {
-                    "text": text,
-
-                    # 🔥 EVALUATION READY
-                    "predictions": preds,
-                    "probabilities": probs,
-                    "logits": logits,
-
-                    # 🔥 EXISTING OUTPUT
-                    "report": report,
-                }
-            )
+            results.append({
+                "text": text,
+                "predictions": preds,
+                "report": report,
+            })
 
         return results
 

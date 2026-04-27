@@ -87,9 +87,25 @@ class ArticleAnalyzer:
         self.report_generator = self.report_generator or ReportGenerator()
         self.explanation_report_generator = self.explanation_report_generator or ExplanationReportGenerator()
 
-        # 🔥 NEW: full inference system
+        # 🔥 NEW: full inference system — only build if engine is available.
+        # PredictionService requires an InferenceEngine; skip silently when
+        # no model is present so the rest of the analysis still works.
         if self.prediction_service is None:
-            self.prediction_service = PredictionService()
+            try:
+                from src.inference.inference_engine import InferenceEngine, InferenceConfig
+                from src.utils.settings import load_settings
+                _settings = load_settings()
+                self.prediction_service = PredictionService(
+                    engine=InferenceEngine(
+                        InferenceConfig(
+                            model_path=str(_settings.model.path),
+                            device="auto",
+                            enable_full_pipeline=False,
+                        )
+                    )
+                )
+            except Exception:
+                self.prediction_service = None
 
     # =====================================================
     # FEATURE SPLIT

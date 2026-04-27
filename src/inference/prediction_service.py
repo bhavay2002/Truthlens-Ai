@@ -97,28 +97,21 @@ class PredictionService:
 
         outputs = self.engine.predict_for_evaluation(texts)
 
+        probs_arr = outputs.get("calibrated_probabilities") or outputs.get("probabilities")
+        preds_arr = outputs.get("predictions")
+
         results = []
 
         for i, text in enumerate(texts):
 
-            item = {}
+            conf = float(np.max(probs_arr[i])) if probs_arr is not None else None
+            fake_prob = float(probs_arr[i][1]) if (probs_arr is not None and probs_arr.shape[1] > 1) else None
 
-            for task, out in outputs.items():
-
-                probs = out["probabilities"]
-                preds = out["predictions"]
-
-                if probs is not None:
-                    conf = float(np.max(probs[i]))
-                else:
-                    conf = None
-
-                item[task] = {
-                    "label": int(preds[i]),
-                    "confidence": conf,
-                }
-
-            results.append(item)
+            results.append({
+                "label": int(preds_arr[i]) if preds_arr is not None else None,
+                "confidence": conf,
+                "fake_probability": fake_prob,
+            })
 
         return results
 
@@ -187,24 +180,17 @@ class PredictionService:
 
     def _postprocess(self, outputs):
 
-        result = {}
+        probs_arr = outputs.get("calibrated_probabilities") or outputs.get("probabilities")
+        preds_arr = outputs.get("predictions")
 
-        for task, out in outputs.items():
+        conf = float(np.max(probs_arr[0])) if probs_arr is not None else None
+        fake_prob = float(probs_arr[0][1]) if (probs_arr is not None and probs_arr.shape[1] > 1) else None
 
-            probs = out["probabilities"]
-            preds = out["predictions"]
-
-            if probs is not None:
-                conf = float(np.max(probs[0]))
-            else:
-                conf = None
-
-            result[task] = {
-                "label": int(preds[0]),
-                "confidence": conf,
-            }
-
-        return result
+        return {
+            "label": int(preds_arr[0]) if preds_arr is not None else None,
+            "confidence": conf,
+            "fake_probability": fake_prob,
+        }
 
     # =====================================================
     # UNCERTAINTY

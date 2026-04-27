@@ -21,6 +21,21 @@ from src.features.pipelines.feature_pipeline import ALL_BIAS_MODULE_FEATURE_NAME
 
 logger = logging.getLogger(__name__)
 
+# Module-level singleton extractors — instantiated once at import, reused on
+# every call to prepare_from_text instead of being rebuilt per request.
+_BIAS_EXTRACTOR: Optional["BiasFeatures"] = None
+_FRAMING_EXTRACTOR: Optional["FramingFeatures"] = None
+_IDEOLOGICAL_EXTRACTOR: Optional["IdeologicalFeatures"] = None
+
+
+def _get_text_extractors():
+    global _BIAS_EXTRACTOR, _FRAMING_EXTRACTOR, _IDEOLOGICAL_EXTRACTOR
+    if _BIAS_EXTRACTOR is None:
+        _BIAS_EXTRACTOR = BiasFeatures()
+        _FRAMING_EXTRACTOR = FramingFeatures()
+        _IDEOLOGICAL_EXTRACTOR = IdeologicalFeatures()
+    return _BIAS_EXTRACTOR, _FRAMING_EXTRACTOR, _IDEOLOGICAL_EXTRACTOR
+
 
 # =========================================================
 # FAST WORKER
@@ -214,11 +229,12 @@ class FeaturePreparer:
 
         ctx = FeatureContext(text=text)
 
-        features = {"text": text}
+        bias_ext, framing_ext, ideological_ext = _get_text_extractors()
 
-        features.update(BiasFeatures().extract(ctx))
-        features.update(FramingFeatures().extract(ctx))
-        features.update(IdeologicalFeatures().extract(ctx))
+        features = {"text": text}
+        features.update(bias_ext.extract(ctx))
+        features.update(framing_ext.extract(ctx))
+        features.update(ideological_ext.extract(ctx))
 
         return self.prepare_single(features)
 

@@ -85,7 +85,7 @@ class InferenceEngine:
             from src.inference.prediction_service import PredictionService
 
             self.prediction_service = PredictionService(
-                model=self,
+                engine=self,
             )
 
     # =====================================================
@@ -119,12 +119,22 @@ class InferenceEngine:
         self.model.eval()
 
         self._load_label_map(model_path)
+        self._warmup()
 
     def _load_label_map(self, path: Path):
         file = path / "label_map.json"
         if file.exists():
             raw = load_json(file)
             self.label_map = {int(k): v for k, v in raw.items()}
+
+    def _warmup(self):
+        """Single forward pass with a dummy input to trigger JIT/cudnn autotuning."""
+        try:
+            dummy = ["warmup"]
+            self._forward(dummy)
+            logger.info("InferenceEngine warmup complete (device=%s)", self.device)
+        except Exception as exc:
+            logger.debug("InferenceEngine warmup skipped: %s", exc)
 
     # =====================================================
     # HELPERS
@@ -150,10 +160,11 @@ class InferenceEngine:
             truncation=True,
             max_length=self.config.max_length,
             return_tensors="pt",
-        ).to(self.device)
+        )
+        encoded = {k: v.to(self.device, non_blocking=True) for k, v in encoded.items()}
 
         if self.use_amp:
-            with torch.autocast(device_type=self.device.type):
+            with torch.autocast(device_type=self.device.type, dtype=self.amp_dtype):
                 logits = self.model(**encoded).logits
         else:
             logits = self.model(**encoded).logits
@@ -201,15 +212,16 @@ class InferenceEngine:
         all_probs = []
         all_cal = []
 
-        for batch in self._batchify(texts, self.config.batch_size):
+        with torch.inference_mode():
+            for batch in self._batchify(texts, self.config.batch_size):
 
-            logits = self._forward(batch)
-            probs = torch.softmax(logits, dim=-1)
-            cal = self._apply_calibration(logits, probs)
+                logits = self._forward(batch)
+                probs = torch.softmax(logits, dim=-1)
+                cal = self._apply_calibration(logits, probs)
 
-            all_logits.append(logits.detach().cpu())
-            all_probs.append(probs.detach().cpu())
-            all_cal.append(cal.detach().cpu())
+                all_logits.append(logits.detach().cpu())
+                all_probs.append(probs.detach().cpu())
+                all_cal.append(cal.detach().cpu())
 
         logits = torch.cat(all_logits)
         probs = torch.cat(all_probs)
@@ -254,27 +266,20 @@ class InferenceEngine:
     # =====================================================
 
     def predict(self, texts):
-
-        # 🔥 route to full pipeline if enabled
-        if self.prediction_service:
-            return [self.predict_full(t) for t in self._validate_input(texts)]
-
-        # fallback (old behavior)
-        processed = self.predict_with_postprocessing(texts)
-
         texts = self._validate_input(texts)
+        outputs = self.predict_for_evaluation(texts)
+
         results = []
+        probs_arr = outputs["probabilities"]
+        preds_arr = outputs["predictions"]
 
         for i, text in enumerate(texts):
-            item = {"text": text}
-
-            for task, out in processed.items():
-                item[task] = {
-                    "label": out["labels"][i],
-                    "confidence": float(out["confidence"][i]),
-                }
-
-            results.append(item)
+            results.append({
+                "text": text,
+                "label": int(preds_arr[i]),
+                "confidence": float(np.max(probs_arr[i])),
+                "fake_probability": float(probs_arr[i][1]) if probs_arr.shape[1] > 1 else float(probs_arr[i][0]),
+            })
 
         return results
 

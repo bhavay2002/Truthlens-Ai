@@ -288,12 +288,22 @@ class ModelLoader:
         return None
 
     # =====================================================
+    # CACHED ARTIFACTS
+    # =====================================================
+
+    def get_artifacts(self) -> ModelArtifacts:
+        """Return cached artifacts, loading once on first call."""
+        if not hasattr(self, "_artifacts") or self._artifacts is None:
+            self._artifacts = self.load_all()
+        return self._artifacts
+
+    # =====================================================
     # PUBLIC API
     # =====================================================
 
     def predict_for_evaluation(self, texts):
 
-        artifacts = self.load_all()
+        artifacts = self.get_artifacts()
         return artifacts.unified_predictor.predict_for_evaluation(texts)
 
     def get_model_versions(self):
@@ -310,7 +320,7 @@ class ModelLoader:
 
     def validate_features(self, features: Dict[str, Any]):
 
-        schema = self.load_all().feature_schema
+        schema = self.get_artifacts().feature_schema
 
         if not schema:
             return True

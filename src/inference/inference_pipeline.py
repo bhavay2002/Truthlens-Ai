@@ -126,6 +126,12 @@ class PredictionPipeline:
     # MULTI-TASK
     # =====================================================
 
+    # Per-task output type: multiclass uses softmax+argmax,
+    # binary/multilabel use sigmoid+threshold.
+    _BINARY_TASKS = {"propaganda"}
+    _MULTILABEL_TASKS = {"emotion"}
+    _MULTILABEL_THRESHOLD = 0.5
+
     def predict_multitask(self, features: torch.Tensor) -> Dict[str, Any]:
 
         outputs = self._forward_all(features)
@@ -139,12 +145,21 @@ class PredictionPipeline:
             if logits.dim() == 1:
                 logits = logits.unsqueeze(0)
 
-            if task == "emotion":
+            if task in self._MULTILABEL_TASKS:
+                # Multi-label: independent sigmoid per label, threshold at 0.5
                 probs = torch.sigmoid(logits)
+                preds = (probs >= self._MULTILABEL_THRESHOLD).int()
+            elif task in self._BINARY_TASKS:
+                # Binary: sigmoid on single logit or pair, threshold at 0.5
+                probs = torch.sigmoid(logits)
+                if logits.shape[-1] == 1:
+                    preds = (probs >= self._MULTILABEL_THRESHOLD).int().squeeze(-1)
+                else:
+                    preds = torch.argmax(probs, dim=-1)
             else:
+                # Multi-class (bias, ideology, narrative, etc.): softmax + argmax
                 probs = torch.softmax(logits, dim=-1)
-
-            preds = torch.argmax(probs, dim=-1)
+                preds = torch.argmax(probs, dim=-1)
 
             results[task] = {
                 "logits": logits.detach().cpu().numpy(),
