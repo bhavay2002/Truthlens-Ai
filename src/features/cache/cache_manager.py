@@ -27,9 +27,41 @@ FeatureVector = Dict[str, float]
 # =========================================================
 
 class LRUCache:
-    def __init__(self, max_items: int):
+    """Bounded in-process feature-vector LRU.
+
+    Audit fix §7.6 — the previous implementation only enforced an
+    item-count budget (``max_items``). For wide feature vectors (~6k
+    keys at ~80 bytes each ≈ 500KB per entry) ``max_items=10_000``
+    silently consumed several GB of RSS before the count cap kicked in.
+    We now also track an estimated *byte* budget per entry and evict
+    LRU until the global byte total is under ``max_bytes``.
+    """
+
+    # Approximate per-entry overhead: dict header + each (key, float)
+    # pair. Numbers are conservative for CPython 3.11+; the goal is a
+    # stable order-of-magnitude estimate, not a precise heap accountant.
+    _DICT_OVERHEAD_BYTES = 232
+    _PER_ENTRY_BYTES = 80  # str interned ptr + float64 value + slot
+
+    def __init__(
+        self,
+        max_items: int,
+        max_bytes: Optional[int] = None,
+    ):
         self.max_items = max_items
+        # ``None`` disables the byte budget and preserves the previous
+        # count-only semantics for callers that opt out explicitly.
+        self.max_bytes = max_bytes
+
         self.store: OrderedDict[str, FeatureVector] = OrderedDict()
+        self._sizes: Dict[str, int] = {}
+        self._total_bytes: int = 0
+
+    @classmethod
+    def _estimate_bytes(cls, value: FeatureVector) -> int:
+        if not isinstance(value, dict):
+            return cls._DICT_OVERHEAD_BYTES
+        return cls._DICT_OVERHEAD_BYTES + len(value) * cls._PER_ENTRY_BYTES
 
     def get(self, key: str) -> Optional[FeatureVector]:
         if key not in self.store:
@@ -43,11 +75,33 @@ class LRUCache:
     def set(self, key: str, value: FeatureVector) -> None:
         # Store a copy so subsequent caller mutation does not propagate
         # back into the cache.
-        self.store[key] = dict(value)
+        if key in self.store:
+            self._total_bytes -= self._sizes.pop(key, 0)
+            del self.store[key]
+
+        copied = dict(value)
+        size = self._estimate_bytes(copied)
+        self.store[key] = copied
+        self._sizes[key] = size
+        self._total_bytes += size
         self.store.move_to_end(key)
 
-        if len(self.store) > self.max_items:
-            self.store.popitem(last=False)
+        # Evict by item count first (cheap), then by byte budget. The
+        # two caps interact safely because byte eviction also drops
+        # items so the count cap is implicitly respected.
+        while len(self.store) > self.max_items:
+            self._evict_oldest()
+        if self.max_bytes is not None:
+            while self._total_bytes > self.max_bytes and self.store:
+                self._evict_oldest()
+
+    def _evict_oldest(self) -> None:
+        old_key, _ = self.store.popitem(last=False)
+        self._total_bytes -= self._sizes.pop(old_key, 0)
+
+    @property
+    def total_bytes(self) -> int:
+        return self._total_bytes
 
 
 # =========================================================
@@ -59,6 +113,12 @@ class CacheManager:
 
     base_cache_dir: Optional[Path] = None
     max_memory_items: int = 10000
+    # Audit fix §7.6 — global byte budget for the in-process LRU.
+    # ``None`` preserves the previous count-only behaviour. Default
+    # 512MB matches the host RAM headroom we leave for the rest of the
+    # inference pipeline; callers running on smaller workers should
+    # set this explicitly.
+    max_memory_bytes: Optional[int] = 512 * 1024 * 1024
 
     namespaces: Dict[str, FeatureCache] = field(default_factory=dict)
     _memory_cache: LRUCache = field(init=False)
@@ -72,7 +132,9 @@ class CacheManager:
     # -----------------------------------------------------
 
     def __post_init__(self):
-        self._memory_cache = LRUCache(self.max_memory_items)
+        self._memory_cache = LRUCache(
+            self.max_memory_items, max_bytes=self.max_memory_bytes
+        )
 
     # -----------------------------------------------------
 

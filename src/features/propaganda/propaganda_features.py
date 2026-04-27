@@ -13,6 +13,7 @@ from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
 from src.features.base.lexicon_matcher import LexiconMatcher, to_token_array
 from src.features.base.numerics import normalized_entropy
+from src.features.base.text_signals import get_text_signals
 from src.features.base.tokenization import ensure_tokens_word
 
 logger = logging.getLogger(__name__)
@@ -126,19 +127,19 @@ class PropagandaFeatures(BaseFeature):
         diversity = float(np.count_nonzero(values) / len(values))
 
         # -------------------------
-        # RHETORIC
+        # RHETORIC + CAPS (shared, NER-masked)
         # -------------------------
+        # Audit fix §2.3 + §3.2 — share with bias / manipulation
+        # extractors via ``get_text_signals``; question-mark density
+        # stays local because it is not used elsewhere.
 
-        rhetoric = (text.count("!") + text.count("?")) / (n + EPS)
-
-        # -------------------------
-        # CAPS EMPHASIS
-        # -------------------------
-
-        caps_tokens = sum(
-            1 for w in text.split() if w.isupper() and len(w) > 2
-        )
-        caps_ratio = caps_tokens / (n + EPS)
+        signals = get_text_signals(context, n)
+        caps_ratio = signals["caps_ratio"]
+        # ``rhetoric`` historically aggregated ! and ? — keep that
+        # composite, but the ! component now comes from the shared,
+        # headline-weighted, NER-aware path.
+        question_density = text.count("?") / (n + EPS)
+        rhetoric = signals["exclamation_density"] + question_density
 
         # -------------------------
         # OUTPUT

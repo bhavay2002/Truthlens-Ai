@@ -3,12 +3,12 @@ from __future__ import annotations
 import logging
 from collections import defaultdict, Counter
 from dataclasses import dataclass
-from typing import ClassVar, Dict, List, Set, Tuple
+from typing import Dict, List, Set, Tuple
 
 import numpy as np
-import spacy
-from spacy.language import Language
 from spacy.tokens import Doc
+
+from src.features.base.spacy_loader import get_shared_nlp
 
 logger = logging.getLogger(__name__)
 EPS = 1e-12
@@ -82,19 +82,24 @@ class EntityGraphFeatures:
 # =========================================================
 
 class EntityGraphBuilder:
-
-    _NLP_CACHE: ClassVar[dict[str, Language]] = {}
+    """
+    Audit fix §1.7 — this builder used to maintain a private
+    ``_NLP_CACHE`` and call :func:`spacy.load` directly. That meant
+    every process held two copies of ``en_core_web_sm`` (one in this
+    cache, one in :mod:`src.analysis.spacy_loader`) and the parser
+    warmed twice on first call. The shared loader resolves both.
+    """
 
     def __init__(self, model: str = "en_core_web_sm"):
-
-        if model not in self._NLP_CACHE:
-            try:
-                self._NLP_CACHE[model] = spacy.load(model)
-            except Exception:
-                logger.warning("Fallback to blank spaCy model")
-                self._NLP_CACHE[model] = spacy.blank("en")
-
-        self.nlp = self._NLP_CACHE[model]
+        nlp = get_shared_nlp(model)
+        if nlp is None:
+            # ``get_shared_nlp`` already logged a warning; fall back to
+            # an empty pipeline so build_graph still produces an empty
+            # graph instead of raising.
+            import spacy as _spacy  # local import keeps the module hot path lean
+            logger.warning("Fallback to blank spaCy model (model=%s)", model)
+            nlp = _spacy.blank("en")
+        self.nlp = nlp
 
     # =====================================================
     # GRAPH BUILD (🔥 WEIGHTED)

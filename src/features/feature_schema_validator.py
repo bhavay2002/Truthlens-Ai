@@ -47,11 +47,48 @@ class FeatureSchemaValidator:
             f: i for i, f in enumerate(self.expected_features)
         }
 
+        # Audit fix §5.1 — reject schemas that mix word-token and BPE
+        # token denominators in the same vector. Mixing the two silently
+        # produces statistically incomparable rates (one is per-Unicode
+        # word, the other per subword piece) which corrupts every
+        # downstream rate / density feature. We require the entire
+        # schema to commit to a single token source so the contract is
+        # checkable at extractor-output time, not after training.
+        self._check_token_source_consistency(self.expected_features)
+
         logger.info(
             "FeatureSchemaValidator initialized | features=%d strict=%s",
             len(self.expected_features),
             self.strict,
         )
+
+    @staticmethod
+    def _check_token_source_consistency(features: List[str]) -> None:
+        """Audit fix §5.1 — flag mixed ``tokens_word`` vs ``tokens_bpe``
+        derived feature names in the same schema.
+
+        Convention: feature keys denominated against the canonical
+        Unicode word tokenization carry ``_word_`` (or end in
+        ``_per_word``); features denominated against the HF subword
+        tokens carry ``_bpe_`` (or ``_per_bpe``). Any extractor that
+        emits both kinds in the same schema is almost certainly a bug
+        (e.g. a copy-paste of two different rate formulas) and we fail
+        loudly at construction time.
+        """
+        word_keys = [
+            f for f in features
+            if "_word_" in f or f.endswith("_per_word")
+        ]
+        bpe_keys = [
+            f for f in features
+            if "_bpe_" in f or f.endswith("_per_bpe")
+        ]
+        if word_keys and bpe_keys:
+            raise ValueError(
+                "Schema mixes word-token and BPE-token derived features; "
+                f"word keys={word_keys[:5]!r} bpe keys={bpe_keys[:5]!r}. "
+                "Pick a single token source per extractor."
+            )
 
     # =====================================================
     # SINGLE VALIDATION

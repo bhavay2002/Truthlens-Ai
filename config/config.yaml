@@ -127,6 +127,37 @@ evaluation:
   device: null   # auto
 
 # =========================================================
+# FEATURES
+# =========================================================
+# Audit fix §9 — single source of truth for the feature pipeline
+# bootstrap. The previous bootstrap had no config knob and silently
+# defaulted to ``auto_discover=True``, which on a partial codebase
+# would import (and register) features the rest of the pipeline did
+# not know about. Every knob below is read by feature_bootstrap and
+# logged at startup.
+
+features:
+  # Hard-fail (rather than warn) when any module in FEATURE_MODULES
+  # cannot be imported. Production should set this to true.
+  strict: false
+
+  # When true, feature_bootstrap walks ``auto_package`` with
+  # ``FeatureRegistry.auto_discover`` *in addition* to the manual
+  # FEATURE_MODULES list. Off by default — the manual list is the
+  # source of truth.
+  auto_discover: false
+  auto_package: "src.features"
+
+  # Apply scaler at inference (StandardScaler / RobustScaler etc.).
+  # Optional — set null to skip.
+  scaler: null
+
+  # In-process LRU caps (audit §7.6).
+  cache:
+    max_memory_items: 10000
+    max_memory_bytes: 536870912   # 512 MiB
+
+# =========================================================
 # EXPERIMENT TRACKING
 # =========================================================
 

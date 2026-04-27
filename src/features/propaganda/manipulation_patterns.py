@@ -12,6 +12,7 @@ import numpy as np
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
 from src.features.base.numerics import normalized_entropy
+from src.features.base.text_signals import get_text_signals
 from src.features.base.tokenization import ensure_tokens_word
 
 logger = logging.getLogger(__name__)
@@ -117,21 +118,15 @@ class ManipulationPatterns(BaseFeature):
         diversity = float(np.count_nonzero(values) / len(values))
 
         # -------------------------
-        # RHETORIC (FIXED)
+        # RHETORIC + CAPS (shared, NER-masked)
         # -------------------------
+        # Audit fix §2.3 + §3.2 — single canonical computation in
+        # ``text_signals``; this extractor reads from the cache.
 
-        exclam = text.count("!")
-        questions = text.count("?")
-        rhetoric = (exclam + questions) / (n + EPS)
-
-        # -------------------------
-        # CAPS EMPHASIS (FIXED)
-        # -------------------------
-
-        caps_tokens = sum(
-            1 for w in text.split() if w.isupper() and len(w) > 2
-        )
-        caps_ratio = caps_tokens / (n + EPS)
+        signals = get_text_signals(context, n)
+        caps_ratio = signals["caps_ratio"]
+        question_density = text.count("?") / (n + EPS)
+        rhetoric = signals["exclamation_density"] + question_density
 
         # -------------------------
         # OUTPUT

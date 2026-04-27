@@ -141,9 +141,15 @@ class EntityGraphFeatures(BaseFeature):
         # OUTPUT
         # =====================================================
 
+        # Audit fix §1.1 — emit raw log-magnitudes and let
+        # FeatureScalingPipeline learn the normalisation. The previous
+        # ``/ 10.0`` divisor implicitly assumed a corpus where
+        # ``log1p(nodes) ~ 10`` (≈ 22k nodes), saturating short docs at
+        # near-zero and clipping long docs at 1.0.
+
         return {
-            "graph_nodes_norm": self._safe(np.log1p(nodes) / 10.0),
-            "graph_edges_norm": self._safe(np.log1p(edges) / 10.0),
+            "graph_nodes_log": self._safe_unbounded(float(np.log1p(nodes))),
+            "graph_edges_log": self._safe_unbounded(float(np.log1p(edges))),
 
             "graph_density": self._safe(density),
             "graph_sparsity": self._safe(sparsity),
@@ -160,3 +166,13 @@ class EntityGraphFeatures(BaseFeature):
         if not np.isfinite(v):
             return 0.0
         return float(np.clip(v, 0.0, MAX_CLIP))
+
+    def _safe_unbounded(self, v: float) -> float:
+        """Drop NaN / negative values without applying an upper clip.
+
+        Audit fix §1.1 — raw log-magnitudes flow through to the
+        :class:`FeatureScalingPipeline` for corpus-aware normalisation.
+        """
+        if not np.isfinite(v) or v < 0:
+            return 0.0
+        return float(v)

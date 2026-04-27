@@ -146,9 +146,13 @@ class InteractionGraphFeatures(BaseFeature):
         # OUTPUT
         # =====================================================
 
+        # Audit fix §1.1 — raw log-magnitudes for size; ratios stay
+        # bounded. The hand-tuned ``/ 10.0`` divisor was a population
+        # constant masquerading as per-row normalisation.
+
         return {
-            "interaction_nodes_norm": self._safe(np.log1p(nodes) / 10.0),
-            "interaction_edges_norm": self._safe(np.log1p(edges) / 10.0),
+            "interaction_nodes_log": self._safe_unbounded(float(np.log1p(nodes))),
+            "interaction_edges_log": self._safe_unbounded(float(np.log1p(edges))),
 
             "interaction_density": self._safe(density),
             "interaction_sparsity": self._safe(sparsity),
@@ -168,3 +172,13 @@ class InteractionGraphFeatures(BaseFeature):
         if not np.isfinite(v):
             return 0.0
         return float(np.clip(v, 0.0, MAX_CLIP))
+
+    def _safe_unbounded(self, v: float) -> float:
+        """Drop NaN / negative values without applying an upper clip.
+
+        Audit fix §1.1 — raw magnitudes are scaled population-wide by
+        the :class:`FeatureScalingPipeline`, not per-row.
+        """
+        if not np.isfinite(v) or v < 0:
+            return 0.0
+        return float(v)

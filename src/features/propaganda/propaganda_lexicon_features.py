@@ -143,19 +143,17 @@ class PropagandaLexiconFeatures(BaseFeature):
         diversity = float(np.count_nonzero(values) / len(values))
 
         # -------------------------
-        # RHETORIC
+        # RHETORIC + CAPS (shared, NER-masked)
         # -------------------------
+        # Audit fix §2.3 + §3.2 — read the shared signals computed once
+        # per context; both ! and caps emphasis come from the
+        # headline-weighted, NER-aware ``text_signals`` helper.
 
-        rhetoric = (text.count("!") + text.count("?")) / (n + EPS)
-
-        # -------------------------
-        # CAPS EMPHASIS
-        # -------------------------
-
-        caps_tokens = sum(
-            1 for w in text.split() if w.isupper() and len(w) > 2
-        )
-        caps_ratio = caps_tokens / (n + EPS)
+        from src.features.base.text_signals import get_text_signals
+        signals = get_text_signals(context, n)
+        caps_ratio = signals["caps_ratio"]
+        question_density = text.count("?") / (n + EPS)
+        rhetoric = signals["exclamation_density"] + question_density
 
         # -------------------------
         # OUTPUT

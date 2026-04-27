@@ -151,6 +151,40 @@ def bootstrap_feature_registry(
 
         logger.info("Registered features: %d", len(registered))
 
+        # Audit fix §9 — startup diff log. Surface (a) modules that
+        # were declared in FEATURE_MODULES but failed to register any
+        # extractor and (b) extractors that registered themselves
+        # without being in the manual list. Both are silent
+        # configuration drift in the previous code path.
+        expected_modules = set(loaded_modules)
+        registered_modules = set()
+        for name in registered:
+            try:
+                meta = FeatureRegistry.get_metadata(name)
+                mod = meta.get("module")
+                if mod:
+                    registered_modules.add(mod)
+            except Exception:
+                continue
+
+        missing_from_registry = sorted(
+            m for m in expected_modules if m not in registered_modules
+        )
+        if missing_from_registry:
+            logger.warning(
+                "Feature bootstrap diff | imported but no extractor registered: %s",
+                missing_from_registry,
+            )
+
+        unexpected_in_registry = sorted(
+            m for m in registered_modules if m not in expected_modules
+        )
+        if unexpected_in_registry:
+            logger.warning(
+                "Feature bootstrap diff | extractor registered outside FEATURE_MODULES: %s",
+                unexpected_in_registry,
+            )
+
     except Exception as exc:
         logger.error("Feature registry validation failed: %s", exc)
         if strict:

@@ -17,6 +17,7 @@ from src.features.base.lexicon_matcher import (
     to_token_array,
 )
 from src.features.base.numerics import normalized_entropy
+from src.features.base.text_signals import get_text_signals
 from src.features.base.tokenization import ensure_tokens_word
 
 logger = logging.getLogger(__name__)
@@ -144,15 +145,14 @@ class BiasLexiconFeatures(BaseFeature):
         phrase_score = phrase_hits / (n + EPS)
 
         # -------------------------
-        # STRUCTURAL (FIXED)
+        # STRUCTURAL (shared, NER-masked)
         # -------------------------
+        # Audit fix §2.3 + §3.2 — read shared signals so caps and !
+        # densities are headline-weighted and exclude NER spans.
 
-        exclam = text.count("!")
-        exclam_density = exclam / (n + EPS)
-
-        caps_ratio = sum(
-            1 for w in text.split() if w.isupper() and len(w) > 2
-        ) / (n + EPS)
+        signals = get_text_signals(context, n)
+        caps_ratio = signals["caps_ratio"]
+        exclam_density = signals["exclamation_density"]
 
         # -------------------------
         # HIGH-LEVEL SIGNALS

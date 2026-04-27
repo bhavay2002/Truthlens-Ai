@@ -139,6 +139,15 @@ class VarianceThresholdSelector:
 @dataclass
 class CorrelationSelector:
     threshold: float = DEFAULT_CORRELATION_THRESHOLD
+    # Audit fix §6.3 — chunk size for the column-block correlation
+    # computation. ``np.corrcoef(X, rowvar=False)`` on a 100k×800
+    # matrix materialises an 800×800 correlation matrix (cheap, 5MB)
+    # *plus* a transient 800×100k transposed copy of X — which is the
+    # actual memory blow-up. The chunked path computes
+    # ``Z.T @ Z`` (where Z is column-mean-centred / std-scaled) one
+    # ``chunk_size`` block of columns at a time so peak memory stays
+    # at O(chunk_size × N) instead of O(D × N).
+    chunk_size: int = 256
     selected_indices: List[int] = field(default_factory=list)
     fitted: bool = False
 
@@ -150,19 +159,70 @@ class CorrelationSelector:
             self.fitted = True
             return
 
-        corr = np.corrcoef(X, rowvar=False)
-        corr = np.nan_to_num(corr)
+        n, d = X.shape
 
-        upper = np.triu(np.abs(corr), k=1)
+        # Small-matrix fast path: identical to the original behaviour
+        # but without the transposed copy, since we already pay for
+        # the full corrcoef anyway.
+        if d <= self.chunk_size or n <= 1:
+            corr = np.corrcoef(X, rowvar=False)
+            corr = np.nan_to_num(corr)
+            upper = np.triu(np.abs(corr), k=1)
+
+            to_drop: Set[int] = set()
+            for i in range(upper.shape[0]):
+                if i in to_drop:
+                    continue
+                for j in np.where(upper[i] > self.threshold)[0]:
+                    to_drop.add(int(j))
+
+            self.selected_indices = sorted(set(range(d)) - to_drop)
+            self.fitted = True
+            return
+
+        # ---------- chunked path ----------
+        # Standardise once (column-wise mean / std) so each
+        # chunk-vs-chunk product is a correlation by construction.
+        means = X.mean(axis=0)
+        stds = X.std(axis=0)
+        stds_safe = np.where(stds > 0, stds, 1.0)
+        Z = (X - means) / stds_safe
+        Z = np.ascontiguousarray(Z, dtype=np.float32)
+        # ``corr[i, j] = (Z[:, i] @ Z[:, j]) / N``. Constant-column
+        # entries get a real std of 0 → we mapped that to 1 above and
+        # correct here by zeroing the corresponding rows/cols
+        # implicitly (their Z column is all zeros so all dot products
+        # are zero too — i.e. uncorrelated, which is the correct
+        # semantic for "constant feature").
 
         to_drop: Set[int] = set()
-        for i in range(upper.shape[0]):
-            if i in to_drop:
-                continue
-            for j in np.where(upper[i] > self.threshold)[0]:
-                to_drop.add(int(j))
+        chunk = max(1, int(self.chunk_size))
 
-        self.selected_indices = sorted(set(range(X.shape[1])) - to_drop)
+        for i_start in range(0, d, chunk):
+            i_end = min(d, i_start + chunk)
+            block_i = Z[:, i_start:i_end]
+
+            for j_start in range(i_start, d, chunk):
+                j_end = min(d, j_start + chunk)
+                block_j = Z[:, j_start:j_end]
+
+                # (chunk × N) @ (N × chunk) → (chunk × chunk)
+                corr_block = (block_i.T @ block_j) / float(n)
+                corr_block = np.nan_to_num(corr_block)
+
+                # Restrict to strictly-upper-triangular pairs in the
+                # global index space.
+                rows, cols = np.where(np.abs(corr_block) > self.threshold)
+                for r, c in zip(rows, cols):
+                    gi = int(i_start + r)
+                    gj = int(j_start + c)
+                    if gj <= gi:
+                        continue
+                    if gi in to_drop:
+                        continue
+                    to_drop.add(gj)
+
+        self.selected_indices = sorted(set(range(d)) - to_drop)
         self.fitted = True
 
     def transform(self, X: np.ndarray) -> np.ndarray:

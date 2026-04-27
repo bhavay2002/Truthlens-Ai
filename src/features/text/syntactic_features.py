@@ -108,7 +108,15 @@ class SyntacticFeatures(BaseFeature):
 
     def _extract_spacy_doc(self, doc) -> Dict[str, float]:
 
-        tokens = [t for t in doc if not t.is_space]
+        # Audit fix §5.2 — both the token list and the per-sentence
+        # length tally now filter tokens the same way (drop both is_space
+        # and is_punct). Previously the document-level loop dropped only
+        # ``is_space`` while the sentence-level loop dropped ``is_punct``
+        # too, so ``avg_len * num_sentences`` did not equal ``n``.
+        def _is_content_token(t) -> bool:
+            return not (t.is_space or t.is_punct)
+
+        tokens = [t for t in doc if _is_content_token(t)]
         n = len(tokens) or 1
 
         # -------------------------
@@ -131,8 +139,10 @@ class SyntacticFeatures(BaseFeature):
 
         sentences = list(doc.sents)
 
+        # Same content-token filter as the document-level pass above so
+        # the per-sentence lengths are consistent with ``n``.
         lengths = np.array(
-            [len([t for t in s if not t.is_punct]) for s in sentences],
+            [sum(1 for t in s if _is_content_token(t)) for s in sentences],
             dtype=np.float32,
         )
 
@@ -170,15 +180,20 @@ class SyntacticFeatures(BaseFeature):
         # -------------------------
         # OUTPUT
         # -------------------------
+        # Audit fix §1.1 — emit RAW magnitudes for length / complexity.
+        # Population-level scaling is the FeatureScalingPipeline's job;
+        # the per-extractor /50.0 and /10.0 magic divisors that used to
+        # live here pre-scaled the value into [0, 1] using a constant
+        # picked by hand and therefore drifted as the corpus changed.
 
         return {
             "syn_pos_entropy": self._safe(pos_entropy),
 
-            "syn_sentence_avg_len": self._safe(avg_len / 50.0),
+            "syn_sentence_avg_len": self._safe_unbounded(avg_len),
             "syn_sentence_dispersion": self._safe(dispersion),
             "syn_sentence_entropy": self._safe(sent_entropy),
 
-            "syn_complexity": self._safe(complexity / 10.0),
+            "syn_complexity": self._safe_unbounded(complexity),
 
             "syn_coordination": self._safe(coord_ratio),
             "syn_subordination": self._safe(subord_ratio),
@@ -200,7 +215,7 @@ class SyntacticFeatures(BaseFeature):
 
         return {
             "syn_pos_entropy": 0.0,
-            "syn_sentence_avg_len": self._safe(avg_len / 50.0),
+            "syn_sentence_avg_len": self._safe_unbounded(float(avg_len)),
             "syn_sentence_dispersion": 0.0,
             "syn_sentence_entropy": 0.0,
             "syn_complexity": 0.0,
@@ -230,3 +245,18 @@ class SyntacticFeatures(BaseFeature):
         if not np.isfinite(v):
             return 0.0
         return float(np.clip(v, 0.0, MAX_CLIP))
+
+    # -----------------------------------------------------
+
+    def _safe_unbounded(self, v: float) -> float:
+        """Return a finite, non-negative value with no upper clip.
+
+        Audit fix §1.1 — magnitudes such as ``avg_sentence_length`` and
+        ``dependency_depth`` are emitted raw so the
+        :class:`FeatureScalingPipeline` can fit a corpus-aware
+        normalisation. We still drop NaN / inf and floor at zero so a
+        broken extractor cannot poison downstream scaling.
+        """
+        if not np.isfinite(v) or v < 0:
+            return 0.0
+        return float(v)

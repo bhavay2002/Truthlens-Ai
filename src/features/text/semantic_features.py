@@ -28,9 +28,14 @@ class SemanticFeatures(BaseFeature):
 
     def extract(self, context: FeatureContext) -> dict:
 
+        # Audit fix §3.5 — when no embedding is available we now return
+        # the explicit empty dict instead of synthesising a 128-d zero
+        # vector. The previous behaviour produced a degenerate "all
+        # features look identical" row that polluted downstream variance
+        # / correlation pruning and silently masked configuration
+        # mistakes (no encoder configured).
         emb = self._get_embedding(context)
-
-        if emb.size == 0:
+        if emb is None or emb.size == 0:
             return self._empty()
 
         emb = np.nan_to_num(emb)
@@ -94,11 +99,16 @@ class SemanticFeatures(BaseFeature):
     # -----------------------------------------------------
 
     def _get_embedding(self, context: FeatureContext) -> np.ndarray:
+        # Audit fix §3.5 — explicit "no embedding" signal. The previous
+        # ``np.zeros(128)`` fallback silently produced a fully-zero
+        # feature row whenever no encoder was wired up, which then
+        # passed all downstream finite/clip checks and looked like
+        # legitimate output. Returning an empty array forces extract()
+        # to fall back to ``_empty()`` and surface the misconfiguration
+        # via diff logs upstream.
         if context.embeddings is not None:
             return np.asarray(context.embeddings)
-
-        # fallback (you already implemented transformer logic)
-        return np.zeros(128, dtype=np.float32)
+        return np.empty(0, dtype=np.float32)
 
     # -----------------------------------------------------
 

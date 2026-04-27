@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
+import pickle
 import threading
 import time
 import tempfile
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-
-import gzip
 
 logger = logging.getLogger(__name__)
 
@@ -21,8 +19,17 @@ logger = logging.getLogger(__name__)
 # CONFIG  (single source of truth — re-exported by cache_manager)
 # =========================================================
 
-CACHE_VERSION = "v3"
-USE_COMPRESSION = True
+# Audit fix §2.5 — the previous serializer was ``json.dumps`` wrapped in
+# ``gzip.compress``, which on a 6k-feature payload spent 70%+ of the
+# cache time in the JSON encoder + a second copy in gzip. Pickle (with
+# the default binary protocol) is ~10x faster end-to-end on the same
+# payload, supports numpy scalars natively, and avoids the lossy
+# ``default=str`` coercion that the JSON path was relying on. We bump
+# CACHE_VERSION + change the file suffix so any old gzip-JSON entries
+# from a previous run are treated as a miss instead of decoded as
+# garbage.
+CACHE_VERSION = "v4"
+_PICKLE_PROTOCOL = pickle.HIGHEST_PROTOCOL
 
 # Cap the in-process path -> Path memoization dict so long-running
 # services do not accumulate one entry per unique cache key forever.
@@ -54,7 +61,11 @@ class FeatureCache:
                 return self._path_cache[key]
 
             digest = hashlib.sha256(key.encode()).hexdigest()
-            filename = f"{digest}.json.gz" if USE_COMPRESSION else f"{digest}.json"
+            # ``.pkl`` suffix prevents accidental cross-decoding with
+            # the old ``.json.gz`` files left over from CACHE_VERSION
+            # ≤ v3; those files now simply look like an unrelated
+            # namespace and are pruned by the disk sweeper.
+            filename = f"{digest}.pkl"
 
             path = self.cache_dir / filename
             self._path_cache[key] = path
@@ -75,21 +86,19 @@ class FeatureCache:
             "data": data,
         }
 
-        raw = json.dumps(payload, separators=(",", ":"), default=str).encode()
-
-        if USE_COMPRESSION:
-            return gzip.compress(raw)
-
-        return raw
+        return pickle.dumps(payload, protocol=_PICKLE_PROTOCOL)
 
     def _deserialize(self, raw: bytes) -> Any:
 
-        if USE_COMPRESSION:
-            raw = gzip.decompress(raw)
+        try:
+            payload = pickle.loads(raw)
+        except Exception:
+            # Corrupt or wrong-format file (e.g. an old gzip-JSON entry
+            # from a previous CACHE_VERSION). Treat as a miss; the
+            # caller deletes the offending file.
+            raise
 
-        payload = json.loads(raw.decode())
-
-        if payload.get("version") != CACHE_VERSION:
+        if not isinstance(payload, dict) or payload.get("version") != CACHE_VERSION:
             logger.warning("Cache version mismatch")
             return None
 

@@ -11,6 +11,8 @@ import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
+from src.features.base.lexicon_matcher import LexiconMatcher, to_token_array
+from src.features.base.tokenization import ensure_tokens_word, tokenize_words
 
 from src.features.emotion.emotion_schema import (
     EMOTION_LABELS,
@@ -26,31 +28,61 @@ MAX_CLIP = 1.0
 # ------------------------------------------------------------
 # Sentence splitter
 # ------------------------------------------------------------
+# Audit fix §11 — the previous extractor used ``re.findall(r"\b\w+\b",
+# text.lower())`` which silently dropped Unicode letters in cp1252 /
+# narrow locales (``café`` -> ``caf``). The canonical
+# :func:`tokenize_words` helper uses the Unicode-aware pattern.
+
+# We still split on terminal punctuation; the regex itself is ASCII-only
+# (``.!?``) which is correct for sentence boundaries.
+_SENT_SPLIT_RE = re.compile(r"[.!?]+")
+
 
 def _split_sentences(text: str) -> List[str]:
-    return [s.strip() for s in re.split(r"[.!?]+", text) if s.strip()]
+    return [s.strip() for s in _SENT_SPLIT_RE.split(text) if s.strip()]
 
 
 # ------------------------------------------------------------
-# Lexicon vector scoring (CRITICAL UPGRADE)
+# Per-emotion vectorized matchers (built once at import)
+# ------------------------------------------------------------
+# Audit fix §2.1 + §2.4 — replace the per-sentence ``for token in ...:
+# WORD_TO_EMOTION.get(t)`` Python loop with a precompiled
+# :class:`LexiconMatcher` per emotion label. ``negation_aware_sum`` is
+# overkill here (no negation modelling for trajectories), so we use the
+# unweighted ``count_in_tokens`` path which is a single ``np.isin`` per
+# emotion bucket.
+
+def _build_emotion_matchers() -> List[LexiconMatcher]:
+    by_label: Dict[str, List[str]] = {label: [] for label in EMOTION_LABELS}
+    for word, label in WORD_TO_EMOTION.items():
+        if label in by_label:
+            by_label[label].append(word)
+    return [
+        LexiconMatcher(by_label[label], name=label)
+        for label in EMOTION_LABELS
+    ]
+
+
+_EMOTION_MATCHERS: List[LexiconMatcher] = _build_emotion_matchers()
+
+
+# ------------------------------------------------------------
+# Per-sentence emotion vector
 # ------------------------------------------------------------
 
-def _lexicon_vector(text: str) -> np.ndarray:
-
-    tokens = re.findall(r"\b\w+\b", text.lower())
-
+def _sentence_vector(sentence_tokens: List[str]) -> np.ndarray:
+    """Return the L1-normalised emotion distribution for a sentence."""
     vec = np.zeros(len(EMOTION_LABELS), dtype=np.float32)
+    if not sentence_tokens:
+        return vec
 
-    for t in tokens:
-        emo = WORD_TO_EMOTION.get(t)
-        if emo:
-            idx = EMOTION_LABELS.index(emo)
-            vec[idx] += 1
+    arr = to_token_array(sentence_tokens)
+    for j, matcher in enumerate(_EMOTION_MATCHERS):
+        vec[j] = matcher.count_in_tokens(arr)
 
     total = vec.sum()
     if total > 0:
         vec /= total
-
     return vec
 
 
@@ -68,14 +100,30 @@ class EmotionTrajectoryFeatures(BaseFeature):
 
     # -----------------------------------------------------
 
-    def _segment_vectors(self, text: str) -> List[np.ndarray]:
+    def _segment_vectors(self, context: FeatureContext) -> List[np.ndarray]:
+        """Split the document into sentences and return one vector per sentence.
 
+        Audit fix §2.4 — eliminate per-sentence re-tokenization with a
+        bare ``\\w+`` regex. We tokenize each sentence through the
+        canonical :func:`tokenize_words` helper (Unicode-aware,
+        contractions handled) so the matchers see the same tokens as
+        the rest of the pipeline. The whole-document tokenization on
+        ``context.tokens_word`` is still warmed by upstream extractors;
+        we cannot reuse it directly here because trajectory analysis
+        needs per-sentence boundaries.
+        """
+        text = context.text or ""
         sentences = _split_sentences(text)
-
         if not sentences:
-            return [np.zeros(len(EMOTION_LABELS))]
+            # Single zero vector keeps the rest of the pipeline well-defined
+            # (np.stack on a single vector still works).
+            return [np.zeros(len(EMOTION_LABELS), dtype=np.float32)]
 
-        return [_lexicon_vector(s) for s in sentences]
+        # Make sure the document-level token cache exists for any
+        # downstream extractor that runs after us in the same context.
+        ensure_tokens_word(context, text)
+
+        return [_sentence_vector(tokenize_words(s)) for s in sentences]
 
     # -----------------------------------------------------
 
@@ -85,7 +133,7 @@ class EmotionTrajectoryFeatures(BaseFeature):
         if not text:
             return self._empty()
 
-        vectors = self._segment_vectors(text)
+        vectors = self._segment_vectors(context)
 
         if len(vectors) == 1:
             vectors.append(vectors[0])

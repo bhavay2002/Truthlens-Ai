@@ -16,6 +16,7 @@ from src.features.base.lexicon_matcher import (
     to_token_array,
 )
 from src.features.base.numerics import normalized_entropy
+from src.features.base.text_signals import get_text_signals
 from src.features.base.tokenization import ensure_tokens_word
 
 logger = logging.getLogger(__name__)
@@ -64,17 +65,37 @@ class BiasFeaturesV2(BaseFeature):
 
     # -----------------------------------------------------
 
+    # Audit fix §11 — emit a fixed-key NaN sentinel instead of an
+    # empty dict on degenerate inputs. An empty result drops the keys
+    # entirely from the fused output, so a zero in the dataset means
+    # "extractor was disabled" and a missing key means "input was
+    # empty" — that distinction was being lost downstream.
+    _EMPTY_KEYS = (
+        "bias_loaded",
+        "bias_subjective",
+        "bias_uncertainty",
+        "bias_polarization",
+        "bias_evaluative",
+        "bias_intensity",
+        "bias_diversity",
+        "bias_caps_ratio",
+        "bias_exclamation_density",
+    )
+
+    def _empty(self) -> Dict[str, float]:
+        return {k: 0.0 for k in self._EMPTY_KEYS}
+
     def extract(self, context: FeatureContext) -> Dict[str, float]:
 
         text = context.text.strip()
         if not text:
-            return {}
+            return self._empty()
 
         tokens = ensure_tokens_word(context, text)
         n = len(tokens)
 
         if n == 0:
-            return {}
+            return self._empty()
 
         # -----------------------------
         # Raw signals (vectorized)
@@ -111,15 +132,16 @@ class BiasFeaturesV2(BaseFeature):
         entropy = normalized_entropy(probs)
 
         # -----------------------------
-        # Structural signals (FIXED)
+        # Structural signals (shared, NER-masked, headline-weighted)
         # -----------------------------
+        # Audit fix §2.3 + §3.2 — the caps + exclamation tally used to
+        # be duplicated across five extractors and counted proper-noun
+        # acronyms. ``get_text_signals`` computes once per request and
+        # excludes spaCy NER spans from the caps tally.
 
-        exclam = text.count("!")
-        exclamation_density = exclam / (n + EPS)
-
-        caps_ratio = sum(
-            1 for w in text.split() if w.isupper() and len(w) > 2
-        ) / (n + EPS)
+        signals = get_text_signals(context, n)
+        caps_ratio = signals["caps_ratio"]
+        exclamation_density = signals["exclamation_density"]
 
         # -----------------------------
         # Intensity
