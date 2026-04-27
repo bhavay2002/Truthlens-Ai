@@ -94,6 +94,14 @@ class SemanticFeatures(BaseFeature):
             "sem_anisotropy": self._safe(anisotropy),
             "sem_sparsity": self._safe(sparsity),
             "sem_peakiness": self._safe(peak),
+
+            # Audit fix §3.5 — explicit availability indicator. The
+            # 7-dim ``sem_*`` block is identical (all zeros) when no
+            # encoder is wired up, which the model would otherwise
+            # learn as a spurious "encoder-was-up" pattern. Emitting a
+            # binary indicator lets the downstream head attenuate the
+            # semantic block on encoder-failure rows.
+            "sem_available": 1.0,
         }
 
     # -----------------------------------------------------
@@ -113,6 +121,10 @@ class SemanticFeatures(BaseFeature):
     # -----------------------------------------------------
 
     def _empty(self) -> dict:
+        # Audit fix §3.5 — keep the schema stable but flip the
+        # availability indicator off so the downstream model can tell
+        # encoder-failure rows apart from "the encoder ran and emitted
+        # an all-zero embedding" rows.
         return {
             "sem_norm": 0.0,
             "sem_mean": 0.0,
@@ -121,6 +133,7 @@ class SemanticFeatures(BaseFeature):
             "sem_anisotropy": 0.0,
             "sem_sparsity": 0.0,
             "sem_peakiness": 0.0,
+            "sem_available": 0.0,
         }
 
     def _safe(self, v: float) -> float:

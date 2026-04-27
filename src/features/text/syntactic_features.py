@@ -197,6 +197,13 @@ class SyntacticFeatures(BaseFeature):
 
             "syn_coordination": self._safe(coord_ratio),
             "syn_subordination": self._safe(subord_ratio),
+
+            # Audit fix §3.6 — emit an explicit availability indicator
+            # so the downstream model can attenuate syntactic signal on
+            # the rows where spaCy was unavailable instead of having to
+            # learn the "spaCy-was-up" pattern from the bimodal cliff
+            # in the other syn_* columns.
+            "syn_spacy_available": 1.0,
         }
 
     # -----------------------------------------------------
@@ -204,7 +211,16 @@ class SyntacticFeatures(BaseFeature):
     # -----------------------------------------------------
 
     def _extract_fallback(self, context: FeatureContext) -> Dict[str, float]:
-
+        # Audit fix §3.6 — when spaCy is unavailable the POS-tag /
+        # dep-tree / sentence-level features can't be computed at all.
+        # The previous fallback hard-coded them to 0.0, which produced a
+        # bimodal distribution (real values vs constant 0) that the
+        # model learned as a spurious "spaCy-was-up" signal. We now
+        # emit only the spaCy-free columns (`syn_sentence_avg_len`
+        # using the regex token + simple sentence split) plus the
+        # `syn_spacy_available=0.0` indicator. The dropped keys are
+        # imputed downstream by `FeatureSchemaValidator` (fill_value /
+        # training-set mean via `FeatureScalingPipeline`).
         text = context.text
         tokens = ensure_tokens_word(context)
         sentences = _simple_sentence_split(text)
@@ -214,13 +230,8 @@ class SyntacticFeatures(BaseFeature):
         avg_len = n / len(sentences) if sentences else n
 
         return {
-            "syn_pos_entropy": 0.0,
             "syn_sentence_avg_len": self._safe_unbounded(float(avg_len)),
-            "syn_sentence_dispersion": 0.0,
-            "syn_sentence_entropy": 0.0,
-            "syn_complexity": 0.0,
-            "syn_coordination": 0.0,
-            "syn_subordination": 0.0,
+            "syn_spacy_available": 0.0,
         }
 
     # -----------------------------------------------------
