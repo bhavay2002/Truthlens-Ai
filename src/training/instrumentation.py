@@ -290,6 +290,7 @@ class AutoDebugEngine:
         shared_params: Optional[Iterable[nn.Parameter]] = None,
         logits: Optional[torch.Tensor] = None,
         throughput: Optional[float] = None,
+        cached_grad_norm: Optional[float] = None,
     ) -> Dict[str, Any]:
 
         # -------------------------
@@ -301,9 +302,27 @@ class AutoDebugEngine:
 
         # -------------------------
         # GRAD TRACKING
+        #
+        # REC-3: ``GradTracker.update`` iterates every parameter and
+        # computes the L2 total norm — which is the EXACT same work that
+        # the trainer just did via ``clip_grad_norm_``. Worse, by the
+        # time this runs the trainer has already called
+        # ``optimizer.zero_grad(set_to_none=True)``, so ``p.grad`` is
+        # ``None`` for every parameter and ``GradTracker`` would record
+        # ``total_norm=0`` (invisible silent-correctness bug — the
+        # anomaly classifier would see "vanishing_gradients" on every
+        # step!). When the trainer passes the cached value, append it
+        # directly to the GradTracker history without re-iterating.
         # -------------------------
 
-        grad_stats = self.grad_tracker.update(model)
+        if cached_grad_norm is not None:
+            grad_stats = {
+                "total_norm": float(cached_grad_norm),
+                "n_params": -1,  # unknown (not recomputed)
+            }
+            self.grad_tracker.history.append(grad_stats)
+        else:
+            grad_stats = self.grad_tracker.update(model)
 
         # -------------------------
         # GLOBAL LOSS

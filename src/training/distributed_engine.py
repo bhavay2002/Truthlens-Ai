@@ -68,14 +68,35 @@ class DistributedEngine:
                 self.world_size,
             )
 
+            # GPU-3: ``backend="nccl"`` REQUIRES a CUDA build of PyTorch
+            # AND visible CUDA devices. The original code hard-coded
+            # ``backend=self.config.backend`` (defaulting to "nccl") and
+            # then unconditionally called ``torch.cuda.set_device(...)``
+            # — both of which raise on any CPU-only host (CI workers,
+            # Replit Reserved-VM trial tier, debugging a multi-process
+            # run on a laptop, ...) with cryptic errors like
+            # "Distributed package doesn't have NCCL built in" or
+            # "Torch not compiled with CUDA enabled". Auto-fall back to
+            # the ``gloo`` backend (which works on CPU) when CUDA isn't
+            # available, and gate ``set_device`` on the same probe.
+            backend = self.config.backend
+            if backend == "nccl" and not torch.cuda.is_available():
+                logger.warning(
+                    "GPU-3: NCCL backend requested but CUDA is not "
+                    "available — falling back to 'gloo' so single-host "
+                    "/ CPU-only runs don't crash at init_process_group."
+                )
+                backend = "gloo"
+
             dist.init_process_group(
-                backend=self.config.backend,
+                backend=backend,
                 init_method=self.config.init_method,
                 rank=self.rank,
                 world_size=self.world_size,
             )
 
-            torch.cuda.set_device(self.local_rank)
+            if torch.cuda.is_available():
+                torch.cuda.set_device(self.local_rank)
 
             self.initialized = True
 

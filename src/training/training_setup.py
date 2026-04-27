@@ -136,7 +136,16 @@ def run_sanity_check(
     batch = move_to_device(batch, device)
 
     try:
-        outputs = training_step.run(batch, step=0)
+        # MT-3: ``dry_run=True`` runs the full forward + loss + backward
+        # pipeline so any wiring bug surfaces here, but does NOT mutate
+        # any persistent training state — task scheduler index, optimizer
+        # parameters, AMP loss scale, LR scheduler tick, monitor EMAs,
+        # tracker step counter and balancer counters all stay frozen.
+        # Without this flag the sanity check would silently desync every
+        # one of these pieces of state by exactly one step versus a
+        # reproducibility seed, and the round-robin task scheduler would
+        # always start training at task index 1 instead of 0.
+        outputs = training_step.run(batch, step=0, dry_run=True)
 
         # -------------------------
         # LOSS CHECK

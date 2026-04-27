@@ -68,13 +68,56 @@ class LossEngine:
 
         # -------------------------------------------------
         # CORE LOSS MODULE
+        #
+        # MT-1: ``create_trainer_fn`` builds one Trainer per task, so this
+        # engine is overwhelmingly invoked with a SINGLE task. The full
+        # multi-task plumbing (EMA normalizer, coverage tracker, GradNorm /
+        # uncertainty balancer, ``normalization="active"`` head-count
+        # division) is not just no-op overhead in that regime — it is
+        # actively misleading. Specifically:
+        #   * ``EMALossNormalizer`` rescales the loss by an EMA of itself;
+        #     with one task this is a divide-by-self that flattens the
+        #     gradient signal of the early steps and inflates it later.
+        #   * ``EMACoverageTracker`` multiplies by a running coverage
+        #     ratio that is always 1.0 for one task — pure GPU work.
+        #   * ``normalization="active"`` divides by ``active_heads`` which
+        #     is always 1; harmless but advertises a behaviour that
+        #     doesn't apply.
+        #   * ``attach_balancer`` would silently no-op since balancers
+        #     need >= 2 tasks to balance between.
+        # Force-disable them in the single-task path, log a clear warning,
+        # and reject ``attach_balancer`` so callers can't be fooled into
+        # thinking multi-task balancing is active when it isn't. The full
+        # MultiTaskLoss wiring stays available unchanged for any future
+        # caller that genuinely passes >1 tasks.
         # -------------------------------------------------
+
+        single_task = len(task_configs) <= 1
+
+        if single_task:
+            if config.use_normalizer or config.use_coverage or config.normalization != "sum":
+                logger.warning(
+                    "MT-1: LossEngine instantiated with %d task(s); "
+                    "disabling EMA normalizer, coverage tracker, and "
+                    "switching normalization='sum'. Multi-task balancing "
+                    "is a no-op in this configuration.",
+                    len(task_configs),
+                )
+            effective_use_normalizer = False
+            effective_use_coverage = False
+            effective_normalization = "sum"
+        else:
+            effective_use_normalizer = config.use_normalizer
+            effective_use_coverage = config.use_coverage
+            effective_normalization = config.normalization
+
+        self._single_task = single_task
 
         self.loss_module = MultiTaskLoss(
             task_configs=task_configs,
-            normalization=config.normalization,
-            use_normalizer=config.use_normalizer,
-            use_coverage=config.use_coverage,
+            normalization=effective_normalization,
+            use_normalizer=effective_use_normalizer,
+            use_coverage=effective_use_coverage,
         )
 
         self._balancer: Optional[BaseBalancer] = None
@@ -90,6 +133,22 @@ class LossEngine:
     # =====================================================
 
     def attach_balancer(self, balancer: BaseBalancer) -> None:
+
+        # MT-1: balancers (GradNorm / Uncertainty) need >= 2 tasks to
+        # balance between. With one task they're a no-op that still pays
+        # the per-step ``on_before_backward`` autograd-grad cost — and
+        # worse, the caller is led to believe multi-task balancing is
+        # active. Reject loudly so the bug is impossible to ship silently.
+        # This runs BEFORE the BaseBalancer type check so the user gets
+        # the most informative error first (the type check is a generic
+        # contract guard; the single-task check is a specific config bug).
+        if self._single_task:
+            raise RuntimeError(
+                "MT-1: cannot attach a balancer to a single-task LossEngine; "
+                "balancers require >= 2 tasks. Build a multi-task LossEngine "
+                "(pass >1 entries in LossEngineConfig.task_types) before "
+                "calling attach_balancer."
+            )
 
         if not isinstance(balancer, BaseBalancer):
             raise TypeError("balancer must inherit from BaseBalancer")
@@ -136,15 +195,19 @@ class LossEngine:
         )
 
         # -------------------------------------------------
-        # NUMERICAL SAFETY  (LOSS-5: per-task non-finite checks were
-        # duplicated here AND inside ``MultiTaskLoss.forward``. The inner
-        # raise fires first and produces a clearer stack trace; the outer
-        # loop just added N+1 host-device syncs and a redundant exception
-        # path. Keep ONLY the cheap aggregate check on ``total_loss``.)
+        # NUMERICAL SAFETY
+        #
+        # REC-1: the original layer issued THREE separate ``torch.isfinite``
+        # reductions per step:
+        #   * MultiTaskLoss.forward — once per task (N device-host syncs)
+        #   * LossEngine.compute    — once per task + once aggregate (N+1)
+        #   * TrainingStep.run      — once on the aggregate
+        # That's 2N+2 forced syncs per step for an event that fires at most
+        # a handful of times in an entire run. We now keep ONLY the
+        # ``TrainingStep.run`` check (cheapest boundary — exactly the one
+        # ``skip_nan_loss`` semantics need to honour). NaN propagates
+        # through the aggregation, so any per-task NaN still surfaces there.
         # -------------------------------------------------
-
-        if not torch.isfinite(total_loss):
-            raise RuntimeError(f"Non-finite total loss: {total_loss.item()}")
 
         # -------------------------------------------------
         # DEBUG ATTACHMENTS (SAFE)
@@ -156,11 +219,15 @@ class LossEngine:
 
         outputs["total_loss"] = total_loss.detach()
 
+        # REC-2: ``mean_loss`` was a host-side ``.item()`` sync computed every
+        # single step (forces the GPU to drain) and was attached to
+        # ``outputs["loss_stats"]`` — but no consumer ever reads it. Trainer
+        # logs ``raw_loss`` (the total) directly, the tracker logs per-task
+        # losses, and instrumentation has its own EMA. Dropping the
+        # computation removes one full host-device sync per step.
+        # ``num_tasks`` is kept (it's a Python int; no GPU work).
         outputs["loss_stats"] = {
             "num_tasks": len(task_losses),
-            "mean_loss": float(
-                torch.stack(list(task_losses.values())).mean().item()
-            )
         }
 
         return total_loss, task_losses

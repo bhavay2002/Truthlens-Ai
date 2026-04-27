@@ -181,8 +181,13 @@ class MultiTaskLoss(nn.Module):
                 labels[task],
             )
 
-            if not torch.isfinite(raw_loss):
-                raise RuntimeError(f"Non-finite loss in task '{task}'")
+            # REC-1: per-task ``torch.isfinite`` was previously checked HERE,
+            # again in ``LossEngine.compute`` (one per task + one for total),
+            # and again in ``TrainingStep.run`` for the total — three full
+            # device-host syncs per step, two of them N×. Keep ONLY the
+            # cheapest single ``isnan().any()`` reduce on the aggregated
+            # ``total_loss`` at the TrainingStep boundary; NaN propagates
+            # through the sum so any per-task NaN is still caught there.
 
             loss = raw_loss
 
@@ -218,8 +223,21 @@ class MultiTaskLoss(nn.Module):
 
             weighted_loss = loss * float(cfg.weight)
 
-            task_losses[task] = weighted_loss
-            raw_losses[task] = raw_loss  # CRITICAL: true raw loss
+            # MT-4: the second element of the return tuple is the per-task
+            # loss view that downstream consumers (TaskScheduler EMA,
+            # AutoDebugEngine.LossTracker EMA, instrumentation) treat as a
+            # raw loss magnitude. Returning the *weighted+normalized+
+            # coverage-multiplied* value would (a) corrupt the adaptive
+            # scheduler's softmax of EMA losses (it sees post-normalized
+            # ratios and reverse-amplifies the weighting), (b) make
+            # spike/anomaly detection thresholds non-comparable across
+            # tasks with different static weights, and (c) hide regressions
+            # in raw model performance behind balancing changes. Track both
+            # — ``total_loss`` accumulates the WEIGHTED value (correct for
+            # backward) while the returned per-task dict holds RAW values
+            # (correct for diagnostics).
+            task_losses[task] = weighted_loss  # internal, used for total_loss
+            raw_losses[task] = raw_loss
 
             total_loss = (
                 weighted_loss
@@ -270,7 +288,8 @@ class MultiTaskLoss(nn.Module):
 
         self.last_active_heads = active_heads
 
-        return total_loss, task_losses
+        # MT-4: return RAW per-task losses (see MT-4 comment above).
+        return total_loss, raw_losses
 
     # =========================================================
     # TRAINING HOOKS (CALL FROM TRAINER)

@@ -8,7 +8,11 @@ from typing import Optional, Any, Dict
 import torch
 import torch.nn as nn
 
-from src.training.training_utils import compute_grad_norm, get_current_lr
+from src.training.training_utils import (
+    compute_grad_norm,
+    get_current_lr,
+    move_batch_to_device,
+)
 
 # ✅ NEW: observability
 from src.monitoring.feature_logger import (
@@ -75,7 +79,34 @@ class TrainingStep:
         self.device = torch.device(
             device if device else ("cuda" if torch.cuda.is_available() else "cpu")
         )
-        self.model.to(self.device)
+
+        # GPU-1: the model is moved to its final device ONCE in
+        # ``create_trainer_fn`` (BEFORE ``build_optimizer``), so the
+        # optimizer holds parameters that already live on the correct
+        # device. The previous ``self.model.to(self.device)`` here was the
+        # SECOND of three moves (Trainer.__init__ also did one, and
+        # DistributedEngine.wrap_model does a third) — and crucially it
+        # happened AFTER the optimizer was constructed, leaving the
+        # optimizer with stale parameter references on the original device.
+        # That's the classic "expected all tensors to be on the same
+        # device" failure at first ``optimizer.step()``. Validate that the
+        # model is already on the expected device and surface a clear
+        # error if not, instead of silently re-moving it.
+        try:
+            model_device = next(self.model.parameters()).device
+        except StopIteration:
+            model_device = self.device
+
+        if model_device != self.device:
+            logger.warning(
+                "GPU-1: TrainingStep received model on %s but expected %s; "
+                "falling back to in-place move (optimizer may hold stale "
+                "parameter refs — prefer moving the model BEFORE building "
+                "the optimizer in create_trainer_fn).",
+                model_device,
+                self.device,
+            )
+            self.model.to(self.device)
 
         self.use_amp = config.use_mixed_precision and self.device.type == "cuda"
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
@@ -115,7 +146,30 @@ class TrainingStep:
     # RUN STEP
     # =====================================================
 
-    def run(self, batch: Dict[str, Any], step: int) -> Dict[str, Any]:
+    def run(
+        self,
+        batch: Dict[str, Any],
+        step: int,
+        *,
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        MT-3: ``dry_run=True`` validates forward + loss + backward without
+        mutating any persistent training state — specifically:
+          * ``task_scheduler.next_task`` is NOT called (round-robin index
+            and adaptive EMA stay frozen)
+          * ``optimizer.step`` / ``scaler.step`` / ``scaler.update`` /
+            ``scheduler.step`` are skipped (no parameter updates, no LR
+            decay tick, no AMP loss-scale advance)
+          * ``loss_engine.on_after_backward`` / ``on_step_end`` are skipped
+            (balancer counters stay frozen)
+          * ``monitor.update`` and ``instrumentation.step`` are skipped
+            (EMAs / failure memory / spike detector stay frozen)
+        Gradients ARE computed (so the backward path is exercised) and
+        then immediately zeroed so the next real step starts clean. This
+        is the contract the sanity check needs to be both safety-checking
+        AND reproducibility-preserving.
+        """
 
         self.model.train()
         batch = self._move_batch(batch)
@@ -132,9 +186,14 @@ class TrainingStep:
         # loss signal, collapsing it to round-robin behaviour in disguise.
         # MultiTaskLoss already masks per-task via its label dict, so the
         # full batch can flow through unchanged.
+        #
+        # MT-3: in dry-run we DO NOT call ``next_task`` because that
+        # advances the round-robin index — the real first training step
+        # would then start at index 1 instead of 0, silently desyncing
+        # the task schedule from any reproducibility seed.
 
         task = None
-        if self.task_scheduler:
+        if self.task_scheduler and not dry_run:
             task = self.task_scheduler.next_task()
 
         # -------------------------
@@ -191,8 +250,16 @@ class TrainingStep:
         # -------------------------
         # TASK SCHEDULER UPDATE
         # -------------------------
+        #
+        # MT-3: skip in dry-run so the adaptive EMA isn't poisoned by a
+        # one-shot sanity loss before the first real training step.
+        # MT-4: ``task_losses`` here is now the RAW per-task loss dict
+        # (the second element of MultiTaskLoss.forward's return tuple),
+        # which is exactly what the adaptive scheduler's softmax-of-EMA
+        # expects — the previous weighted-and-normalized values would
+        # have skewed the softmax across tasks with different weights.
 
-        if self.task_scheduler and task_losses:
+        if self.task_scheduler and task_losses and not dry_run:
             self.task_scheduler.update_losses(
                 {k: float(v.detach()) for k, v in task_losses.items()}
             )
@@ -228,38 +295,56 @@ class TrainingStep:
             if self.use_amp:
                 self.scaler.unscale_(self.optimizer)
 
-            grad_norm = compute_grad_norm(self.model)
-
+            # REC-3: ``compute_grad_norm`` and ``clip_grad_norm_`` BOTH
+            # iterate every parameter and compute the same total L2 norm
+            # — and ``instrumentation.step`` calls ``GradTracker.update``
+            # which does it a THIRD time (and after ``zero_grad`` clears
+            # the gradients, so it would see zeros). Use ``clip_grad_norm_``
+            # alone when clipping is enabled (it returns the pre-clip norm
+            # — exactly what we want to log) and fall back to
+            # ``compute_grad_norm`` only when clipping is disabled. The
+            # resulting ``grad_norm`` is then forwarded to instrumentation
+            # via ``cached_grad_norm`` so it doesn't redo the work.
             if self.config.max_grad_norm:
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(),
-                    self.config.max_grad_norm,
+                grad_norm = float(
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(),
+                        self.config.max_grad_norm,
+                    )
                 )
-
-            if self.use_amp:
-                prev_scale = self.scaler.get_scale()
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-
-                if self.scaler.get_scale() < prev_scale:
-                    scaler_stepped_ok = False
-                    logger.warning("Gradient overflow detected, step skipped")
             else:
-                self.optimizer.step()
+                grad_norm = compute_grad_norm(self.model)
 
-            # BUG-6 (partial fix): only advance the scheduler when the
-            # optimizer actually stepped, so AMP overflow doesn't drift
-            # the LR schedule.
-            if self.scheduler and scaler_stepped_ok:
-                try:
-                    self.scheduler.step()
-                except TypeError:
-                    self.scheduler.step(float(total_loss.detach()))
+            # MT-3: in dry-run validate forward + loss + backward only.
+            # Skip the optimizer / scaler / scheduler / balancer mutations
+            # so the persistent training state is preserved. Gradients are
+            # zeroed below so the first real step starts clean.
+            if not dry_run:
+
+                if self.use_amp:
+                    prev_scale = self.scaler.get_scale()
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+
+                    if self.scaler.get_scale() < prev_scale:
+                        scaler_stepped_ok = False
+                        logger.warning("Gradient overflow detected, step skipped")
+                else:
+                    self.optimizer.step()
+
+                # BUG-6 (partial fix): only advance the scheduler when the
+                # optimizer actually stepped, so AMP overflow doesn't drift
+                # the LR schedule.
+                if self.scheduler and scaler_stepped_ok:
+                    try:
+                        self.scheduler.step()
+                    except TypeError:
+                        self.scheduler.step(float(total_loss.detach()))
+
+                self.loss_engine.on_after_backward()
+                self.loss_engine.on_step_end()
 
             self.optimizer.zero_grad(set_to_none=True)
-
-            self.loss_engine.on_after_backward()
-            self.loss_engine.on_step_end()
 
         # -------------------------
         # THROUGHPUT
@@ -275,20 +360,34 @@ class TrainingStep:
         # -------------------------
         # MONITORING
         # -------------------------
+        #
+        # MT-3: dry-run skips the monitor entirely so its EMAs / spike
+        # detector / health score don't carry sanity-check noise into
+        # the first real training step.
 
-        monitor_metrics = self.monitor.update(
-            {"loss": float(total_loss.detach())},
-            model=self.model,
-            batch_size=batch_size,
-        )
+        if dry_run:
+            monitor_metrics: Dict[str, Any] = {}
+        else:
+            monitor_metrics = self.monitor.update(
+                {"loss": float(total_loss.detach())},
+                model=self.model,
+                batch_size=batch_size,
+            )
 
         # -------------------------
         # DEBUG ENGINE
         # -------------------------
+        #
+        # MT-3: skip in dry-run for the same reason as the monitor.
+        # REC-3: when we already have ``grad_norm`` from clip_grad_norm_,
+        # pass it through as ``cached_grad_norm`` so the instrumentation's
+        # GradTracker doesn't re-iterate every parameter to recompute the
+        # same value (and on should_step iterations would otherwise see
+        # zeroed-out gradients after ``optimizer.zero_grad``).
 
         debug_info = {}
 
-        if self.instrumentation:
+        if self.instrumentation and not dry_run:
             debug_info = self.instrumentation.step(
                 losses=task_losses,
                 total_loss=total_loss,
@@ -296,6 +395,7 @@ class TrainingStep:
                 shared_params=self.model.parameters(),
                 logits=outputs.get("logits") if isinstance(outputs, dict) else None,
                 throughput=throughput,
+                cached_grad_norm=grad_norm,
             )
 
         # -------------------------
@@ -340,7 +440,9 @@ class TrainingStep:
             **debug_info,
         }
 
-        if self.tracker:
+        # MT-3: dry-run does not pollute the experiment tracker with a
+        # one-shot sanity row that would shift step-indexed plots by 1.
+        if self.tracker and not dry_run:
             self.tracker.log_metrics(log_data, step=step)
 
         # -------------------------
@@ -363,12 +465,14 @@ class TrainingStep:
     # =====================================================
 
     def _move_batch(self, batch):
-        return {
-            k: v.to(self.device, non_blocking=True)
-            if isinstance(v, torch.Tensor)
-            else v
-            for k, v in batch.items()
-        }
+        # GPU-2: ``non_blocking=True`` is silently a no-op unless the
+        # source tensor is in pinned host memory. The previous inline
+        # comprehension passed ``non_blocking=True`` unconditionally,
+        # advertising async H2D copies that never actually happened on
+        # un-pinned tensors (e.g. CPU-only runs, or any DataLoader built
+        # with ``pin_memory=False``). Delegate to the shared utility that
+        # gates ``non_blocking`` on the per-tensor ``is_pinned()`` check.
+        return move_batch_to_device(batch, self.device, non_blocking=True)
 
     def _infer_batch_size(self, batch):
         for v in batch.values():
@@ -376,19 +480,10 @@ class TrainingStep:
                 return v.size(0)
         return 1
 
-    def _filter_batch(self, batch, task):
-        if "labels" not in batch:
-            return batch
-
-        labels = batch["labels"]
-
-        if isinstance(labels, dict) and task in labels:
-            return {
-                **batch,
-                "labels": {task: labels[task]},
-            }
-
-        return batch
+    # NOTE: ``_filter_batch`` was removed (LOSS-2). The model is multi-task
+    # and produces logits for every head from a single forward pass; the
+    # MultiTaskLoss orchestrator masks per-task via the labels dict, so
+    # there is no value in pre-filtering the batch.
 
     def _reduce_lr(self, factor: float = 0.5):
         # BUG-6: a LambdaLR (and most functional schedulers) compute

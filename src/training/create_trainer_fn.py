@@ -77,6 +77,18 @@ def create_trainer_fn(
         config=params,
     )
 
+    # GPU-1: move the model to its target device EXACTLY ONCE, BEFORE
+    # ``build_optimizer`` runs. This is the single hard requirement: the
+    # optimizer captures parameter references by id, so any subsequent
+    # ``model.to(...)`` swaps the underlying ``Tensor`` storage and
+    # leaves the optimizer pointing at the old (CPU) parameters — which
+    # is why ``optimizer.step()`` would raise the classic "expected all
+    # tensors to be on the same device" error on the first step under
+    # AMP/CUDA. Both ``Trainer.__init__`` and ``TrainingStep.__init__``
+    # now only validate the device match (with a loud warning + fallback
+    # in-place move) instead of silently re-moving.
+    model = model.to(device)
+
     # =====================================================
     # DATALOADERS  (BUG-1: build_dataloader requires
     # dataset/split/config, not batch_size/shuffle directly)

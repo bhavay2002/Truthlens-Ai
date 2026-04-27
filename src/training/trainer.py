@@ -73,7 +73,31 @@ class Trainer:
         self.device = setup_runtime(self.setup_cfg)
 
         self.model = optimize_model(self.model)
-        self.model.to(self.device)
+
+        # GPU-1: the model is moved to its final device EXACTLY ONCE in
+        # ``create_trainer_fn`` BEFORE ``build_optimizer`` runs, so that
+        # the optimizer captures parameter references already living on
+        # the target device. The previous in-place ``self.model.to(self.device)``
+        # here was the first of three redundant moves (TrainingStep also
+        # did one, DistributedEngine.wrap_model another) and silently
+        # broke optimizer state on AMP/CUDA when the model was created on
+        # CPU. We now validate device match instead of re-moving — if the
+        # caller forgot to move the model first, surface a loud warning
+        # rather than papering over a stale-optimizer-state bug.
+        try:
+            model_device = next(self.model.parameters()).device
+        except StopIteration:
+            model_device = self.device
+
+        if model_device != self.device:
+            logger.warning(
+                "GPU-1: Trainer received model on %s but expected %s; "
+                "in-place moving (optimizer parameter refs may be stale). "
+                "Move the model BEFORE build_optimizer in create_trainer_fn.",
+                model_device,
+                self.device,
+            )
+            self.model.to(self.device)
 
         # -------------------------------------------------
         # TRAINING PARAMS  (BUG-9: honour params["epochs"] from

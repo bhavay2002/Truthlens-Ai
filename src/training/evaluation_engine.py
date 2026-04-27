@@ -8,6 +8,8 @@ from typing import Dict, Any, Optional
 import torch
 import torch.nn as nn
 
+from src.training.training_utils import move_batch_to_device
+
 logger = logging.getLogger(__name__)
 
 
@@ -171,7 +173,21 @@ class EvaluationEngine:
     @torch.inference_mode()
     def evaluate(self, model: nn.Module, dataloader) -> Dict[str, Any]:
 
-        model = model.to(self.device)
+        # GPU-4: ``model.to(device)`` was called unconditionally on every
+        # ``evaluate`` invocation. When the model is already on the right
+        # device this is a no-op cost; when the model has been wrapped
+        # (DDP / torch.compile) re-moving it can break those wrappers
+        # (DDP holds its device_ids at wrap time and an in-place move
+        # corrupts the bucket assignment). Probe the first parameter and
+        # only move when the device actually differs.
+        try:
+            current_device = next(model.parameters()).device
+        except StopIteration:
+            current_device = self.device
+
+        if current_device != self.device:
+            model = model.to(self.device)
+
         model.eval()
 
         metrics = self._init_metrics()
@@ -200,6 +216,18 @@ class EvaluationEngine:
                 metrics[task] = StreamingAccuracy()
 
             elif ttype == "multilabel":
+                metrics[task] = StreamingF1()
+
+            # MT-2: ``binary`` was previously dropped on the floor — no
+            # metric was constructed for tasks like ``propaganda`` (binary
+            # in the registry), so ``_compute_metrics`` returned an empty
+            # ``{task}_score`` and the Trainer's early-stopping monitor
+            # never saw a value → training silently consumed the full
+            # epoch budget. Treat binary as the 1-D analogue of multilabel:
+            # ``StreamingF1`` already operates on {0, 1} predictions and
+            # labels, so it works directly once we threshold the sigmoid
+            # of a single logit per sample (handled in ``_update_metrics``).
+            elif ttype == "binary":
                 metrics[task] = StreamingF1()
 
             elif ttype == "regression":
@@ -244,6 +272,24 @@ class EvaluationEngine:
                 preds = preds[mask]
                 labels = labels[mask]
 
+            # MT-2: binary head emits a single logit per sample (shape
+            # ``[B]`` or ``[B, 1]``). Flatten to ``[B]`` so the predictions
+            # and labels both reduce to {0, 1} 1-D tensors that match
+            # StreamingF1's update contract.
+            elif ttype == "binary":
+
+                if logits.dim() > 1 and logits.size(-1) == 1:
+                    logits = logits.squeeze(-1)
+
+                preds = (torch.sigmoid(logits) > self.config.threshold).int()
+
+                if labels.dim() > 1 and labels.size(-1) == 1:
+                    labels = labels.squeeze(-1)
+
+                mask = labels != self.config.ignore_index
+                preds = preds[mask]
+                labels = labels[mask]
+
             elif ttype == "regression":
 
                 preds = logits
@@ -282,10 +328,11 @@ class EvaluationEngine:
     # =====================================================
 
     def _move_batch(self, batch):
-
-        return {
-            k: v.to(self.device, non_blocking=True)
-            if isinstance(v, torch.Tensor)
-            else v
-            for k, v in batch.items()
-        }
+        # GPU-2: ``non_blocking=True`` is silently ignored unless the
+        # source tensor is in pinned memory AND the destination is CUDA.
+        # The previous inline lambda set ``non_blocking=True``
+        # unconditionally — which gave a false impression of an async
+        # H2D copy on CPU runs and on un-pinned tensors. Delegate to the
+        # shared utility that gates ``non_blocking`` on
+        # ``tensor.is_pinned()`` so the flag carries its real meaning.
+        return move_batch_to_device(batch, self.device, non_blocking=True)
