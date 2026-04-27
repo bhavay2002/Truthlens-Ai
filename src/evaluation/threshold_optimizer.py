@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, Iterable, Optional, Literal
+from typing import Any, Dict, Iterable, Literal, Optional
 
 import numpy as np
-from sklearn.metrics import f1_score, precision_score, recall_score
+from sklearn.metrics import (
+    f1_score,
+    precision_recall_curve,
+    precision_score,
+    recall_score,
+)
 
 from src.config.task_config import get_task_type
 
@@ -14,26 +19,7 @@ EPS = 1e-12
 
 
 # =========================================================
-# METRIC SELECTION
-# =========================================================
-
-def _compute_metric(y_true, y_pred, metric: str):
-
-    if metric == "f1":
-        return f1_score(y_true, y_pred, average="binary")
-
-    elif metric == "precision":
-        return precision_score(y_true, y_pred, average="binary")
-
-    elif metric == "recall":
-        return recall_score(y_true, y_pred, average="binary")
-
-    else:
-        raise ValueError(f"Unsupported metric: {metric}")
-
-
-# =========================================================
-# BINARY THRESHOLD OPTIMIZATION
+# BINARY THRESHOLD (vectorized)
 # =========================================================
 
 def optimize_binary_threshold(
@@ -41,112 +27,120 @@ def optimize_binary_threshold(
     probs: Iterable,
     *,
     metric: Literal["f1", "precision", "recall"] = "f1",
-    thresholds: Optional[np.ndarray] = None,
 ) -> Dict[str, float]:
+    y_true = np.asarray(y_true).astype(int).reshape(-1)
+    probs = np.asarray(probs, dtype=float).reshape(-1)
 
-    y_true = np.asarray(y_true)
-    probs = np.asarray(probs).reshape(-1)
+    if y_true.shape != probs.shape:
+        raise ValueError("y_true and probs must have the same length")
 
-    if thresholds is None:
-        thresholds = np.linspace(0.01, 0.99, 99)
+    if len(np.unique(y_true)) < 2:
+        return {"threshold": 0.5, "score": 0.0, "metric": metric}
 
-    best_t = 0.5
-    best_score = -1.0
+    precision, recall, thresholds = precision_recall_curve(y_true, probs)
 
-    for t in thresholds:
-        preds = (probs >= t).astype(int)
-        score = _compute_metric(y_true, preds, metric)
+    # Drop the trailing point that has no associated threshold.
+    precision = precision[:-1]
+    recall = recall[:-1]
 
-        if score > best_score:
-            best_score = score
-            best_t = t
+    if metric == "f1":
+        scores = 2 * precision * recall / (precision + recall + EPS)
+    elif metric == "precision":
+        scores = precision
+    elif metric == "recall":
+        scores = recall
+    else:
+        raise ValueError(f"Unsupported metric: {metric}")
 
-    return {
-        "threshold": float(best_t),
-        "score": float(best_score),
-        "metric": metric,
-    }
+    if scores.size == 0:
+        return {"threshold": 0.5, "score": 0.0, "metric": metric}
+
+    best_idx = int(np.argmax(scores))
+    best_t = float(thresholds[best_idx])
+    best_score = float(scores[best_idx])
+
+    return {"threshold": best_t, "score": best_score, "metric": metric}
 
 
 # =========================================================
-# MULTILABEL THRESHOLD OPTIMIZATION
+# MULTILABEL THRESHOLD
 # =========================================================
+
+def _score_per_label(
+    y_label: np.ndarray, p_label: np.ndarray, metric: str
+) -> Dict[str, float]:
+    if len(np.unique(y_label)) < 2:
+        return {"threshold": 0.5, "score": 0.0}
+
+    precision, recall, thresholds = precision_recall_curve(y_label, p_label)
+    precision = precision[:-1]
+    recall = recall[:-1]
+
+    if metric == "f1":
+        scores = 2 * precision * recall / (precision + recall + EPS)
+    elif metric == "precision":
+        scores = precision
+    elif metric == "recall":
+        scores = recall
+    else:
+        raise ValueError(f"Unsupported metric: {metric}")
+
+    if scores.size == 0:
+        return {"threshold": 0.5, "score": 0.0}
+
+    best_idx = int(np.argmax(scores))
+    return {"threshold": float(thresholds[best_idx]), "score": float(scores[best_idx])}
+
 
 def optimize_multilabel_thresholds(
     y_true: Iterable,
     probs: Iterable,
     *,
     metric: Literal["f1", "precision", "recall"] = "f1",
-    thresholds: Optional[np.ndarray] = None,
     strategy: Literal["per_label", "global"] = "per_label",
 ) -> Dict[str, Any]:
+    y_true = np.asarray(y_true).astype(int)
+    probs = np.asarray(probs, dtype=float)
 
-    y_true = np.asarray(y_true)
-    probs = np.asarray(probs)
+    if y_true.shape != probs.shape:
+        raise ValueError("y_true and probs must have the same shape")
 
     n_labels = y_true.shape[1]
 
-    if thresholds is None:
-        thresholds = np.linspace(0.01, 0.99, 99)
-
-    # -----------------------------------------------------
-    # GLOBAL THRESHOLD
-    # -----------------------------------------------------
     if strategy == "global":
-
+        candidates = np.linspace(0.05, 0.95, 19)
         best_t = 0.5
         best_score = -1.0
 
-        for t in thresholds:
+        for t in candidates:
             preds = (probs >= t).astype(int)
 
-            score = f1_score(
-                y_true,
-                preds,
-                average="macro" if metric == "f1" else "micro",
-                zero_division=0,
-            )
+            if metric == "f1":
+                score = f1_score(y_true, preds, average="macro", zero_division=0)
+            elif metric == "precision":
+                score = precision_score(y_true, preds, average="macro", zero_division=0)
+            else:
+                score = recall_score(y_true, preds, average="macro", zero_division=0)
 
             if score > best_score:
-                best_score = score
-                best_t = t
+                best_score = float(score)
+                best_t = float(t)
 
-        return {
-            "strategy": "global",
-            "threshold": float(best_t),
-            "score": float(best_score),
-        }
+        return {"strategy": "global", "threshold": best_t, "score": best_score}
 
-    # -----------------------------------------------------
-    # PER LABEL THRESHOLDS
-    # -----------------------------------------------------
-    thresholds_out = []
-    scores_out = []
+    thresholds_out: list[float] = []
+    scores_out: list[float] = []
 
     for i in range(n_labels):
-
-        y_i = y_true[:, i]
-        p_i = probs[:, i]
-
-        best_t = 0.5
-        best_score = -1.0
-
-        for t in thresholds:
-            preds = (p_i >= t).astype(int)
-            score = _compute_metric(y_i, preds, metric)
-
-            if score > best_score:
-                best_score = score
-                best_t = t
-
-        thresholds_out.append(best_t)
-        scores_out.append(best_score)
+        result = _score_per_label(y_true[:, i], probs[:, i], metric)
+        thresholds_out.append(result["threshold"])
+        scores_out.append(result["score"])
 
     return {
         "strategy": "per_label",
-        "thresholds": np.array(thresholds_out),
-        "scores": np.array(scores_out),
-        "mean_score": float(np.mean(scores_out)),
+        "thresholds": thresholds_out,
+        "scores": scores_out,
+        "mean_score": float(np.mean(scores_out)) if scores_out else 0.0,
     }
 
 
@@ -162,28 +156,66 @@ def optimize_thresholds(
     metric: str = "f1",
     strategy: str = "per_label",
 ) -> Dict[str, Any]:
-
-    probs = np.asarray(probs)
-
+    probs_arr = np.asarray(probs, dtype=float)
     task_type = get_task_type(task) if task else None
 
-    # -------------------------
-    # AUTO DETECT
-    # -------------------------
-    if task_type == "binary" or probs.ndim == 1:
-        return optimize_binary_threshold(
-            y_true,
-            probs,
-            metric=metric,
-        )
+    if task_type == "multiclass":
+        # Threshold optimization is not meaningful for argmax decisions.
+        return {
+            "task_type": "multiclass",
+            "skipped": True,
+            "reason": "argmax decision rule",
+        }
 
-    elif task_type == "multilabel" or probs.ndim == 2:
+    if task_type == "binary" or (task_type is None and probs_arr.ndim == 1):
+        if probs_arr.ndim == 2 and probs_arr.shape[1] == 2:
+            probs_arr = probs_arr[:, 1]
+        return optimize_binary_threshold(y_true, probs_arr, metric=metric)
+
+    if task_type == "multilabel" or (task_type is None and probs_arr.ndim == 2):
         return optimize_multilabel_thresholds(
-            y_true,
-            probs,
-            metric=metric,
-            strategy=strategy,
+            y_true, probs_arr, metric=metric, strategy=strategy
         )
 
-    else:
-        raise ValueError(f"Unsupported task_type: {task_type}")
+    raise ValueError(f"Unsupported task_type: {task_type}")
+
+
+# =========================================================
+# CLASS WRAPPER
+# =========================================================
+
+class ThresholdOptimizer:
+    """Stateless wrapper around the threshold optimization helpers."""
+
+    def __init__(self, *, metric: str = "f1", strategy: str = "per_label"):
+        self.metric = metric
+        self.strategy = strategy
+
+    def optimize(self, collected: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not isinstance(collected, dict):
+            return None
+
+        y_true = collected.get("y_true")
+        y_proba = collected.get("y_proba")
+
+        if y_true is None or y_proba is None:
+            return None
+
+        task_type = collected.get("task_type")
+        task = collected.get("task")
+
+        return optimize_thresholds(
+            y_true=y_true,
+            probs=y_proba,
+            task=task if task_type is None else None,
+            metric=self.metric,
+            strategy=self.strategy,
+        )
+
+
+__all__ = [
+    "ThresholdOptimizer",
+    "optimize_binary_threshold",
+    "optimize_multilabel_thresholds",
+    "optimize_thresholds",
+]

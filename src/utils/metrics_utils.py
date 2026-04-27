@@ -247,6 +247,32 @@ def safe_mean(values, default: float = 0.0) -> float:
     return float(arr.mean())
 
 
+def compute_metrics_from_preds(
+    y_true,
+    y_pred,
+    *,
+    task_type: str,
+    y_proba=None,
+    threshold: float = 0.5,
+    average: str | None = None,
+) -> Dict[str, Any]:
+    """Forward to :mod:`src.evaluation.metrics_engine` for hard-prediction inputs.
+
+    This indirection lets callers in ``src.utils`` stay loosely coupled to the
+    evaluation package while still exposing the same calculation.
+    """
+    from src.evaluation.metrics_engine import compute_metrics_from_preds as _impl
+
+    return _impl(
+        y_true=y_true,
+        y_pred=y_pred,
+        task_type=task_type,
+        y_proba=y_proba,
+        threshold=threshold,
+        average=average,
+    )
+
+
 def normalize_score(value, *, lo: float = 0.0, hi: float = 1.0) -> float:
     """Clamp ``value`` into the closed interval ``[lo, hi]``."""
     try:

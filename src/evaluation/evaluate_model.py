@@ -1,36 +1,49 @@
-#File: evaluate_model.py
+"""
+File: evaluate_model.py
+Location: src/evaluation/
+
+Top-level numpy-friendly :func:`evaluate` entry point used by tests, notebooks
+and the saved-model report path.
+"""
+
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, Optional, List
+import logging
+from typing import Any, Dict, Iterable, List, Optional
 
 import numpy as np
 import torch
 from transformers import AutoTokenizer
 
-from src.utils.device_utils import move_batch, autocast_context
-from src.utils.metrics_utils import compute_task_metrics
-from src.config.task_config import TASK_CONFIG
+from src.config.task_config import TASK_CONFIG, get_task_type
+from src.evaluation.metrics_engine import (
+    compute_classification_metrics,
+    compute_multilabel_metrics,
+)
+from src.utils.device_utils import autocast_context, move_batch
+
+logger = logging.getLogger(__name__)
 
 
 # =========================================================
 # ACTIVATIONS
 # =========================================================
 
-def _softmax(x):
+def _softmax(x: np.ndarray) -> np.ndarray:
     x = x - np.max(x, axis=1, keepdims=True)
     e = np.exp(x)
     return e / (np.sum(e, axis=1, keepdims=True) + 1e-12)
 
 
-def _sigmoid(x):
-    return 1 / (1 + np.exp(-x))
+def _sigmoid(x: np.ndarray) -> np.ndarray:
+    return 1.0 / (1.0 + np.exp(-x))
 
 
 # =========================================================
 # TOKENIZATION
 # =========================================================
 
-def _tokenize(tokenizer, texts: List[str], max_length=512):
+def _tokenize(tokenizer, texts: List[str], max_length: int = 512):
     return tokenizer(
         texts,
         padding=True,
@@ -41,7 +54,7 @@ def _tokenize(tokenizer, texts: List[str], max_length=512):
 
 
 # =========================================================
-# MODEL PREDICT (FIXED)
+# MODEL PREDICT
 # =========================================================
 
 def _predict_model(
@@ -50,18 +63,15 @@ def _predict_model(
     task: str,
     tokenizer: AutoTokenizer,
     batch_size: int = 32,
-):
+) -> np.ndarray:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
     model.to(device)
     model.eval()
 
-    outputs = []
-
+    outputs: List[np.ndarray] = []
     with torch.no_grad():
         for i in range(0, len(texts), batch_size):
-            batch_texts = texts[i : i + batch_size]
-
+            batch_texts = texts[i: i + batch_size]
             encoded = _tokenize(tokenizer, batch_texts)
             encoded = move_batch(encoded, device)
 
@@ -72,33 +82,51 @@ def _predict_model(
                     task=task,
                 )
 
-            logits = out["logits"].detach().cpu().numpy()
-            outputs.append(logits)
+            outputs.append(out["logits"].detach().cpu().numpy())
 
     return np.vstack(outputs)
 
 
 # =========================================================
-# POSTPROCESS (TASK-AWARE)
+# POSTPROCESS
 # =========================================================
 
-def _postprocess_logits(logits, task_type):
+def _postprocess_logits(logits: np.ndarray, task_type: str):
+    arr = np.asarray(logits, dtype=float)
+
     if task_type == "multiclass":
-        probs = _softmax(logits)
+        probs = _softmax(arr)
         preds = np.argmax(probs, axis=1)
+        return preds.astype(int), probs
 
-    elif task_type == "binary":
-        probs = _sigmoid(logits).reshape(-1)
-        preds = (probs > 0.5).astype(int)
+    if task_type == "binary":
+        if arr.ndim == 2 and arr.shape[1] == 2:
+            probs_full = _softmax(arr)
+            probs = probs_full[:, 1]
+        else:
+            probs = _sigmoid(arr).reshape(-1)
+        preds = (probs >= 0.5).astype(int)
+        return preds, probs
 
-    elif task_type == "multilabel":
-        probs = _sigmoid(logits)
-        preds = (probs > 0.5).astype(int)
+    if task_type == "multilabel":
+        probs = _sigmoid(arr)
+        preds = (probs >= 0.5).astype(int)
+        return preds, probs
 
-    else:
-        raise ValueError(f"Unknown task_type: {task_type}")
+    raise ValueError(f"Unknown task_type: {task_type}")
 
-    return preds, probs
+
+# =========================================================
+# TASK INFERENCE
+# =========================================================
+
+def _infer_task_type(y_true: np.ndarray, y_pred: np.ndarray) -> str:
+    if y_true.ndim == 2:
+        return "multilabel"
+    classes = set(np.unique(y_true).tolist()) | set(np.unique(y_pred).tolist())
+    if classes.issubset({0, 1}) and len(classes) <= 2:
+        return "binary"
+    return "multiclass"
 
 
 # =========================================================
@@ -115,95 +143,120 @@ def evaluate(
     tokenizer: Optional[AutoTokenizer] = None,
     task: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """Evaluate predictions against labels.
 
-    # =====================================================
-    # VALIDATE TASK
-    # =====================================================
-    if task is not None:
-        if task not in TASK_CONFIG:
-            raise ValueError(f"Unknown task: {task}")
-
-        task_type = TASK_CONFIG[task]["type"]
-        num_labels = TASK_CONFIG[task]["num_labels"]
-    else:
-        raise ValueError("task must be provided")
-
+    The ``task`` argument is optional — when omitted the task type is inferred
+    from the shape and value range of ``y_true`` / ``y_pred``. ``y_proba`` is
+    used only for probability-based metrics (e.g. ROC-AUC) and is fed straight
+    through; it is never re-activated when ``y_pred`` is already a hard label.
+    """
     # =====================================================
     # MODEL MODE
     # =====================================================
+    task_type: Optional[str] = None
+    num_labels: Optional[int] = None
+
+    if task is not None:
+        if task not in TASK_CONFIG:
+            raise ValueError(f"Unknown task: {task}")
+        task_type = get_task_type(task)
+        num_labels = TASK_CONFIG[task]["num_labels"]
+
     if model is not None:
-        if texts is None or tokenizer is None:
-            raise ValueError("model mode requires texts + tokenizer")
+        if texts is None or tokenizer is None or task is None:
+            raise ValueError("model mode requires texts + tokenizer + task")
 
-        logits = _predict_model(
-            model=model,
-            texts=texts,
-            task=task,
-            tokenizer=tokenizer,
-        )
-
+        logits = _predict_model(model=model, texts=texts, task=task, tokenizer=tokenizer)
         y_pred, y_proba = _postprocess_logits(logits, task_type)
 
     # =====================================================
     # NUMPY MODE
     # =====================================================
     y_true_arr = np.asarray(y_true)
-
     if y_true_arr.size == 0:
         raise ValueError("y_true cannot be empty")
 
-    is_multilabel = y_true_arr.ndim == 2
+    if y_pred is None:
+        raise ValueError("y_pred must be provided if model is None")
 
     y_pred_arr = np.asarray(y_pred)
-    y_proba_arr = np.asarray(y_proba) if y_proba is not None else None
+    y_proba_arr = np.asarray(y_proba, dtype=float) if y_proba is not None else None
+
+    if y_proba_arr is not None and y_proba_arr.shape[0] != y_true_arr.shape[0]:
+        raise ValueError(
+            f"y_proba length {y_proba_arr.shape[0]} does not match y_true length {y_true_arr.shape[0]}"
+        )
+
+    if task_type is None:
+        task_type = _infer_task_type(y_true_arr, y_pred_arr)
+
+    is_multilabel = task_type == "multilabel"
 
     # =====================================================
     # SHAPE VALIDATION
     # =====================================================
     if not is_multilabel:
         if y_pred_arr.ndim != 1:
-            raise ValueError("y_pred must be 1D")
-
+            raise ValueError("y_pred must be 1D for binary/multiclass tasks")
         if y_true_arr.shape != y_pred_arr.shape:
-            raise ValueError("Shape mismatch")
-
+            raise ValueError(
+                f"Shape mismatch: y_true {y_true_arr.shape} vs y_pred {y_pred_arr.shape}"
+            )
     else:
         if y_pred_arr.shape != y_true_arr.shape:
-            raise ValueError("Multilabel mismatch")
+            raise ValueError(
+                f"Shape mismatch: y_true {y_true_arr.shape} vs y_pred {y_pred_arr.shape}"
+            )
 
     # =====================================================
-    # METRICS (TASK-AWARE)
+    # METRICS
     # =====================================================
-    metrics = compute_task_metrics(
-        logits=torch.tensor(y_proba_arr if y_proba_arr is not None else y_pred_arr),
-        labels=torch.tensor(y_true_arr),
-        task_type=task_type,
-        num_labels=num_labels,
-    )
+    if is_multilabel:
+        metrics = compute_multilabel_metrics(
+            y_true=y_true_arr,
+            y_pred=y_pred_arr,
+            y_proba=y_proba_arr,
+        )
+    else:
+        metrics = compute_classification_metrics(
+            y_true=y_true_arr,
+            y_pred=y_pred_arr,
+            y_proba=y_proba_arr,
+        )
 
     # =====================================================
     # DATASET STATS
     # =====================================================
     if not is_multilabel:
         labels, counts = np.unique(y_true_arr, return_counts=True)
+        class_counts = {str(int(label)): int(count) for label, count in zip(labels, counts)}
 
         dataset_stats = {
             "num_samples": int(len(y_true_arr)),
             "num_classes": int(len(labels)),
-            "class_distribution": {
-                str(l): int(c) for l, c in zip(labels, counts)
-            },
+            "class_counts": class_counts,
+            "class_distribution": class_counts,
         }
     else:
         dataset_stats = {
             "num_samples": int(y_true_arr.shape[0]),
             "num_labels": int(y_true_arr.shape[1]),
             "label_density": float(np.mean(y_true_arr)),
+            "density": float(np.mean(y_true_arr)),
         }
 
-    return {
+    # =====================================================
+    # FINAL RESULT — flatten metric keys into the top-level
+    # dict for backward compatibility with consumers that
+    # expect ``results["accuracy"]`` / ``results["f1"]`` etc.
+    # =====================================================
+    result: Dict[str, Any] = {
         "task": task,
         "task_type": task_type,
         "metrics": metrics,
         "dataset_stats": dataset_stats,
     }
+    result.update(metrics)
+    if num_labels is not None:
+        result["num_labels"] = num_labels
+    return result

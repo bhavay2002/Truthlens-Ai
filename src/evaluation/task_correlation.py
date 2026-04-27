@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Dict, Any, Literal, Optional
+from typing import Any, Dict, Literal, Optional
 
 import numpy as np
 import pandas as pd
 
-from src.config.task_config import TASK_CONFIG
+from src.config.task_config import TASK_CONFIG, get_task_type
 
 logger = logging.getLogger(__name__)
 
 EPS = 1e-12
+
+# Use a delimiter that won't collide with task names that contain underscores
+# (e.g. ``narrative_frame``).
+_DELIM = "::"
 
 
 # =========================================================
@@ -22,11 +26,7 @@ def _normalize(df: pd.DataFrame) -> pd.DataFrame:
     return (df - df.mean()) / (df.std(ddof=0) + EPS)
 
 
-# =========================================================
-# 🔥 ROBUST CLIPPING (NEW)
-# =========================================================
-
-def _winsorize(df: pd.DataFrame, lower=0.01, upper=0.99):
+def _winsorize(df: pd.DataFrame, lower: float = 0.01, upper: float = 0.99) -> pd.DataFrame:
     return df.clip(
         lower=df.quantile(lower),
         upper=df.quantile(upper),
@@ -38,38 +38,58 @@ def _winsorize(df: pd.DataFrame, lower=0.01, upper=0.99):
 # TASK FEATURE EXTRACTION
 # =========================================================
 
-def _extract_task_features(predictions: Dict[str, Any]) -> pd.DataFrame:
+def _resolve_task_type(task: str) -> Optional[str]:
+    if task in TASK_CONFIG:
+        return TASK_CONFIG[task]["type"]
+    try:
+        return get_task_type(task)
+    except (KeyError, AttributeError):
+        return None
 
-    features = {}
+
+def _extract_task_features(predictions: Dict[str, Any]) -> pd.DataFrame:
+    features: Dict[str, np.ndarray] = {}
 
     for task, values in predictions.items():
+        if isinstance(values, dict):
+            # Allow PredictionCollector-style dicts
+            values = values.get("y_proba", values.get("probabilities", values.get("y_pred")))
 
         arr = np.asarray(values)
-        task_type = TASK_CONFIG[task]["type"]
+        task_type = _resolve_task_type(task)
 
         if task_type == "binary":
+            if arr.ndim == 2 and arr.shape[1] == 2:
+                arr = arr[:, 1]
             features[task] = arr.reshape(-1)
 
         elif task_type == "multiclass":
-
             if arr.ndim == 1:
                 features[task] = arr
             else:
                 for i in range(arr.shape[1]):
-                    features[f"{task}_class_{i}"] = arr[:, i]
+                    features[f"{task}{_DELIM}class_{i}"] = arr[:, i]
 
         elif task_type == "multilabel":
-            for i in range(arr.shape[1]):
-                features[f"{task}_label_{i}"] = arr[:, i]
+            if arr.ndim == 1:
+                features[task] = arr
+            else:
+                for i in range(arr.shape[1]):
+                    features[f"{task}{_DELIM}label_{i}"] = arr[:, i]
 
         else:
-            raise ValueError(f"Unsupported task_type: {task_type}")
+            # Unknown task — flatten as best-effort
+            if arr.ndim == 1:
+                features[task] = arr
+            elif arr.ndim == 2:
+                for i in range(arr.shape[1]):
+                    features[f"{task}{_DELIM}c{i}"] = arr[:, i]
 
     return pd.DataFrame(features)
 
 
 # =========================================================
-# 🔥 MAIN CORRELATION (UPGRADED)
+# MAIN CORRELATION
 # =========================================================
 
 def compute_task_correlation(
@@ -77,13 +97,12 @@ def compute_task_correlation(
     *,
     normalize: bool = True,
     method: Literal["pearson", "spearman"] = "spearman",
-    robust: bool = True,  # 🔥 NEW
+    robust: bool = True,
     confidence: Optional[np.ndarray] = None,
     uncertainty: Optional[np.ndarray] = None,
     graph_signal: Optional[np.ndarray] = None,
 ) -> pd.DataFrame:
-
-    logger.info(f"[CORRELATION] computing (method={method})")
+    logger.info("[CORRELATION] computing (method=%s)", method)
 
     if isinstance(predictions, dict):
         df = _extract_task_features(predictions)
@@ -94,92 +113,78 @@ def compute_task_correlation(
     df = df.dropna(axis=1, how="all")
 
     if df.shape[1] < 2:
-        raise ValueError("Insufficient data")
+        raise RuntimeError(
+            "Insufficient numeric data to compute task correlation"
+        )
 
-    # -------------------------
-    # 🔥 ROBUST HANDLING
-    # -------------------------
     if robust:
         df = _winsorize(df)
 
-    # -------------------------
-    # NORMALIZATION
-    # -------------------------
     if normalize:
         df = _normalize(df)
 
-    # -------------------------
-    # 🔥 ADD AUX SIGNALS
-    # -------------------------
     if confidence is not None:
-        df["global_confidence"] = confidence
+        df["global_confidence"] = np.asarray(confidence).reshape(-1)[: len(df)]
 
     if uncertainty is not None:
-        df["global_uncertainty"] = uncertainty
+        df["global_uncertainty"] = np.asarray(uncertainty).reshape(-1)[: len(df)]
 
     if graph_signal is not None:
-        df["graph_signal"] = graph_signal
+        df["graph_signal"] = np.asarray(graph_signal).reshape(-1)[: len(df)]
 
-    # -------------------------
-    # CORRELATION
-    # -------------------------
     corr = df.corr(method=method)
-
-    # -------------------------
-    # STABILITY
-    # -------------------------
-    corr = corr.replace([np.inf, -np.inf], 0.0)
-    corr = corr.fillna(0.0)
-
+    corr = corr.replace([np.inf, -np.inf], 0.0).fillna(0.0)
     return corr
 
 
 # =========================================================
-# 🔥 AGGREGATION (UPGRADED)
+# AGGREGATION (UNWEIGHTED MEAN)
 # =========================================================
+
+def _column_to_task(col: str) -> str:
+    return col.split(_DELIM, 1)[0]
+
 
 def aggregate_task_correlation(corr: pd.DataFrame) -> pd.DataFrame:
-
-    task_map = {}
-
+    task_map: Dict[str, list[str]] = {}
     for col in corr.columns:
-        task = col.split("_")[0]
-        task_map.setdefault(task, []).append(col)
+        task_map.setdefault(_column_to_task(col), []).append(col)
 
-    agg = pd.DataFrame(index=task_map.keys(), columns=task_map.keys())
+    tasks = list(task_map.keys())
+    agg = pd.DataFrame(0.0, index=tasks, columns=tasks)
 
-    for t1, cols1 in task_map.items():
-        for t2, cols2 in task_map.items():
+    for t1 in tasks:
+        for t2 in tasks:
+            if t1 == t2:
+                agg.loc[t1, t2] = 1.0
+                continue
 
-            vals = []
+            block = corr.loc[task_map[t1], task_map[t2]].values.flatten()
+            block = block[np.isfinite(block)]
+            if block.size == 0:
+                agg.loc[t1, t2] = 0.0
+            else:
+                agg.loc[t1, t2] = float(np.mean(block))
 
-            for c1 in cols1:
-                for c2 in cols2:
-                    vals.append(corr.loc[c1, c2])
-
-            vals = np.asarray(vals)
-
-            # 🔥 confidence weighting via variance
-            weight = np.var(vals) + EPS
-
-            agg.loc[t1, t2] = float(np.mean(vals) * weight)
-
-    agg = agg.astype(float)
-
-    # diagonal stability
-    for t in agg.index:
-        agg.loc[t, t] = 1.0
-
-    return agg
+    return agg.astype(float)
 
 
 # =========================================================
-# 🔥 MONITORING SIGNALS (NEW)
+# MONITORING SIGNALS
 # =========================================================
 
 def correlation_statistics(corr: pd.DataFrame) -> Dict[str, float]:
-
     values = corr.values.flatten()
+    values = values[np.isfinite(values)]
+
+    if values.size == 0:
+        return {
+            "mean_correlation": 0.0,
+            "std_correlation": 0.0,
+            "max_correlation": 0.0,
+            "min_correlation": 0.0,
+            "high_correlation_ratio": 0.0,
+        }
 
     return {
         "mean_correlation": float(np.mean(values)),
@@ -194,16 +199,17 @@ def correlation_statistics(corr: pd.DataFrame) -> Dict[str, float]:
 # SAVE
 # =========================================================
 
-def save_correlation_matrix(
-    corr: pd.DataFrame,
-    path: str | Path,
-) -> Path:
-
+def save_correlation_matrix(corr: pd.DataFrame, path: str | Path) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-
     corr.to_csv(path)
-
-    logger.info(f"Saved correlation matrix: {path}")
-
+    logger.info("Saved correlation matrix: %s", path)
     return path
+
+
+__all__ = [
+    "aggregate_task_correlation",
+    "compute_task_correlation",
+    "correlation_statistics",
+    "save_correlation_matrix",
+]

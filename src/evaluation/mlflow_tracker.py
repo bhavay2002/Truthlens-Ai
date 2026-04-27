@@ -184,25 +184,36 @@ def log_artifact(path: str | Path, artifact_path: str):
 
 
 # =========================================================
-# EVALUATION LOGGING (NEW 🔥)
+# EVALUATION LOGGING
 # =========================================================
 
-def log_evaluation_report(report: Dict[str, Any]):
+def log_evaluation_report(report: Dict[str, Any]) -> None:
+    """Serialize an evaluation report to a temp JSON and log it as an artifact."""
     _ensure_mlflow()
 
     if not is_primary_process():
         return
 
-    # save temporary json
-    tmp_path = Path("temp_eval.json")
-
     import json
-    with tmp_path.open("w") as f:
-        json.dump(report, f, indent=2)
+    import tempfile
 
-    mlflow.log_artifact(str(tmp_path), artifact_path="evaluation")
+    from src.evaluation.report_writer import _make_serializable
 
-    tmp_path.unlink(missing_ok=True)
+    safe_report = _make_serializable(report)
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", prefix="eval_", delete=False
+    ) as fh:
+        tmp_path = Path(fh.name)
+        json.dump(safe_report, fh, indent=2)
+
+    try:
+        mlflow.log_artifact(str(tmp_path), artifact_path="evaluation")
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            logger.debug("Could not remove temp eval file: %s", tmp_path)
 
 
 # =========================================================

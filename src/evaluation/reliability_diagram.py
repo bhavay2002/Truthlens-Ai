@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, Any, Optional, Literal
+from typing import Any, Dict, Literal, Optional
 
-import numpy as np
+import matplotlib
+
+matplotlib.use("Agg", force=False)  # headless friendly
 import matplotlib.pyplot as plt
+import numpy as np
 
 from src.config.task_config import get_task_type
 
@@ -14,28 +17,26 @@ EPS = 1e-12
 
 
 # =========================================================
-# BINNING
+# BINNING (vectorized)
 # =========================================================
 
-def _bin_stats(confidence, correctness, n_bins: int):
-    """
-    Compute bin-wise accuracy and confidence.
-    """
+def _bin_stats(confidence: np.ndarray, correctness: np.ndarray, n_bins: int) -> Dict[str, np.ndarray]:
+    confidence = np.asarray(confidence, dtype=float).reshape(-1)
+    correctness = np.asarray(correctness, dtype=float).reshape(-1)
+
+    if confidence.shape != correctness.shape:
+        raise ValueError("confidence and correctness must have the same shape")
+
     bins = np.linspace(0.0, 1.0, n_bins + 1)
+    bin_ids = np.clip(np.digitize(confidence, bins, right=False) - 1, 0, n_bins - 1)
 
-    bin_ids = np.digitize(confidence, bins) - 1
-    bin_ids = np.clip(bin_ids, 0, n_bins - 1)
+    counts = np.bincount(bin_ids, minlength=n_bins).astype(float)
+    sum_acc = np.bincount(bin_ids, weights=correctness, minlength=n_bins)
+    sum_conf = np.bincount(bin_ids, weights=confidence, minlength=n_bins)
 
-    acc = np.zeros(n_bins)
-    conf = np.zeros(n_bins)
-    counts = np.zeros(n_bins)
-
-    for b in range(n_bins):
-        idx = bin_ids == b
-        if np.any(idx):
-            counts[b] = np.sum(idx)
-            acc[b] = np.mean(correctness[idx])
-            conf[b] = np.mean(confidence[idx])
+    safe_counts = np.where(counts > 0, counts, 1.0)
+    acc = np.where(counts > 0, sum_acc / safe_counts, 0.0)
+    conf = np.where(counts > 0, sum_conf / safe_counts, 0.0)
 
     return {
         "accuracy": acc,
@@ -46,64 +47,44 @@ def _bin_stats(confidence, correctness, n_bins: int):
 
 
 # =========================================================
-# BINARY RELIABILITY
+# TASK-SPECIFIC RELIABILITY
 # =========================================================
 
 def _binary_reliability(y_true, probs, n_bins):
-    probs = probs.reshape(-1)
+    probs = np.asarray(probs, dtype=float).reshape(-1)
     preds = (probs >= 0.5).astype(int)
-    correctness = (preds == y_true).astype(float)
-
+    correctness = (preds == np.asarray(y_true)).astype(float)
     return _bin_stats(probs, correctness, n_bins)
 
 
-# =========================================================
-# MULTICLASS RELIABILITY
-# =========================================================
-
 def _multiclass_reliability(y_true, probs, n_bins):
-
+    probs = np.asarray(probs, dtype=float)
     preds = np.argmax(probs, axis=1)
     confidence = np.max(probs, axis=1)
-    correctness = (preds == y_true).astype(float)
-
+    correctness = (preds == np.asarray(y_true)).astype(float)
     return _bin_stats(confidence, correctness, n_bins)
 
 
-# =========================================================
-# PER-CLASS RELIABILITY
-# =========================================================
-
 def _per_class_reliability(y_true, probs, n_bins):
-
+    probs = np.asarray(probs, dtype=float)
+    y_true = np.asarray(y_true)
     n_classes = probs.shape[1]
-    results = {}
 
-    for c in range(n_classes):
-        y_bin = (y_true == c).astype(int)
-        p_c = probs[:, c]
+    return {
+        f"class_{c}": _bin_stats(probs[:, c], (y_true == c).astype(float), n_bins)
+        for c in range(n_classes)
+    }
 
-        results[f"class_{c}"] = _bin_stats(p_c, y_bin, n_bins)
-
-    return results
-
-
-# =========================================================
-# MULTILABEL RELIABILITY
-# =========================================================
 
 def _multilabel_reliability(y_true, probs, n_bins):
-
+    probs = np.asarray(probs, dtype=float)
+    y_true = np.asarray(y_true)
     n_labels = probs.shape[1]
-    results = {}
 
-    for i in range(n_labels):
-        y_i = y_true[:, i]
-        p_i = probs[:, i]
-
-        results[f"label_{i}"] = _bin_stats(p_i, y_i, n_bins)
-
-    return results
+    return {
+        f"label_{i}": _bin_stats(probs[:, i], y_true[:, i].astype(float), n_bins)
+        for i in range(n_labels)
+    }
 
 
 # =========================================================
@@ -111,25 +92,23 @@ def _multilabel_reliability(y_true, probs, n_bins):
 # =========================================================
 
 def _plot_curve(bin_data, title="Reliability Diagram", save_path=None):
-
     fig, ax = plt.subplots()
-
-    ax.plot([0, 1], [0, 1], linestyle="--")  # perfect calibration
-
-    ax.plot(
-        bin_data["confidence"],
-        bin_data["accuracy"],
-        marker="o",
-    )
-
+    ax.plot([0, 1], [0, 1], linestyle="--", label="Perfect")
+    ax.plot(bin_data["confidence"], bin_data["accuracy"], marker="o", label="Model")
     ax.set_xlabel("Confidence")
     ax.set_ylabel("Accuracy")
     ax.set_title(title)
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.legend()
 
-    if save_path:
-        fig.savefig(save_path)
+    try:
+        if save_path:
+            fig.savefig(save_path, bbox_inches="tight")
+    finally:
+        plt.close(fig)
 
-    return fig
+    return None  # we close the figure to free memory; consumers shouldn't keep handles
 
 
 # =========================================================
@@ -141,56 +120,44 @@ def reliability_diagram(
     probs,
     *,
     task: Optional[str] = None,
+    task_type: Optional[str] = None,
     n_bins: int = 10,
     mode: Literal["global", "per_class"] = "global",
     save_path: Optional[str] = None,
 ) -> Dict[str, Any]:
-
     y_true = np.asarray(y_true)
     probs = np.asarray(probs)
 
-    task_type = get_task_type(task) if task else None
+    if task_type is None:
+        task_type = get_task_type(task) if task else None
 
-    logger.info(f"[RELIABILITY] task={task} type={task_type}")
+    logger.info("[RELIABILITY] task=%s type=%s", task, task_type)
 
-    # -----------------------------------------------------
-    # GLOBAL
-    # -----------------------------------------------------
     if task_type == "binary":
         stats = _binary_reliability(y_true, probs, n_bins)
-        fig = _plot_curve(stats, "Binary Reliability", save_path)
+        _plot_curve(stats, "Binary Reliability", save_path)
+        return {"global": stats}
 
-        return {"global": stats, "figure": fig}
-
-    elif task_type == "multiclass":
-
+    if task_type == "multiclass":
         global_stats = _multiclass_reliability(y_true, probs, n_bins)
-        fig = _plot_curve(global_stats, "Multiclass Reliability", save_path)
-
-        result = {"global": global_stats, "figure": fig}
-
+        _plot_curve(global_stats, "Multiclass Reliability", save_path)
+        result = {"global": global_stats}
         if mode == "per_class":
             result["per_class"] = _per_class_reliability(y_true, probs, n_bins)
-
         return result
 
-    elif task_type == "multilabel":
+    if task_type == "multilabel":
+        return {"per_label": _multilabel_reliability(y_true, probs, n_bins)}
 
-        per_label = _multilabel_reliability(y_true, probs, n_bins)
+    raise ValueError(f"Unsupported task_type: {task_type}")
 
-        return {
-            "per_label": per_label,
-        }
-
-    else:
-        raise ValueError(f"Unsupported task_type: {task_type}")
 
 # =========================================================
 # CLASS WRAPPER (used by src.evaluation.calibration)
 # =========================================================
 
 class ReliabilityDiagram:
-    """Lightweight OO wrapper around the functional reliability_diagram API."""
+    """OO wrapper around :func:`reliability_diagram`."""
 
     def __init__(self, n_bins: int = 10):
         self.n_bins = n_bins
@@ -206,11 +173,14 @@ class ReliabilityDiagram:
                 save_path=save_path,
                 mode=mode,
             )
-        except TypeError:
-            # Fallback for unknown task type — compute multiclass stats directly.
+        except (TypeError, ValueError) as exc:
+            logger.debug("ReliabilityDiagram fallback: %s", exc)
             try:
                 stats = _multiclass_reliability(y_true, probs, self.n_bins)
                 return {"global": stats}
-            except Exception as e:
+            except Exception as e:  # pragma: no cover
                 logger.warning("ReliabilityDiagram.compute fallback failed: %s", e)
                 return {}
+
+
+__all__ = ["ReliabilityDiagram", "reliability_diagram"]

@@ -205,7 +205,20 @@ def render_thresholds(report, task):
 
     st.subheader("Optimal Threshold")
 
-    st.metric("Threshold", f"{th:.4f}")
+    if isinstance(th, dict):
+        if isinstance(th.get("threshold"), (int, float)):
+            st.metric("Threshold", f"{th['threshold']:.4f}")
+        if isinstance(th.get("score"), (int, float)):
+            st.metric("Score", f"{th['score']:.4f}")
+        if isinstance(th.get("thresholds"), list):
+            df = pd.DataFrame(
+                {"label": list(range(len(th["thresholds"]))), "threshold": th["thresholds"]}
+            )
+            st.dataframe(df, use_container_width=True)
+    elif isinstance(th, (int, float)):
+        st.metric("Threshold", f"{th:.4f}")
+    else:
+        st.json(th)
 
 
 # =========================================================
@@ -238,26 +251,30 @@ def render_correlation(report):
 
     st.subheader("Task Correlation")
 
-    keys = list(corr.keys())
-    tasks = list(set(k.split("_")[0] for k in keys))
+    try:
+        if isinstance(corr, dict) and corr and all(isinstance(v, dict) for v in corr.values()):
+            matrix = pd.DataFrame(corr).astype(float)
+        else:
+            matrix = pd.DataFrame(corr)
+    except Exception as exc:
+        logger.warning("Could not render correlation matrix: %s", exc)
+        st.json(corr)
+        return
 
-    matrix = pd.DataFrame(0.0, index=tasks, columns=tasks)
-
-    for k, v in corr.items():
-        t1, t2 = k.split("_")
-        matrix.loc[t1, t2] = v
-        matrix.loc[t2, t1] = v
+    if matrix.empty:
+        return
 
     fig, ax = plt.subplots()
-    cax = ax.matshow(matrix, cmap="coolwarm")
+    cax = ax.matshow(matrix.values, cmap="coolwarm")
     fig.colorbar(cax)
 
-    ax.set_xticks(range(len(tasks)))
-    ax.set_yticks(range(len(tasks)))
-    ax.set_xticklabels(tasks, rotation=45)
-    ax.set_yticklabels(tasks)
+    ax.set_xticks(range(len(matrix.columns)))
+    ax.set_yticks(range(len(matrix.index)))
+    ax.set_xticklabels(list(matrix.columns), rotation=45)
+    ax.set_yticklabels(list(matrix.index))
 
     st.pyplot(fig)
+    plt.close(fig)
 
 
 # =========================================================

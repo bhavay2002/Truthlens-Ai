@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict
+from typing import Any, Dict
 
 from src.utils.config_loader import load_app_config
 
@@ -161,3 +161,69 @@ def is_binary(task: str) -> bool:
 
 def is_multiclass(task: str) -> bool:
     return _TASK_REGISTRY[task].task_type == "multiclass"
+
+
+# =========================================================
+# BACKWARD COMPATIBILITY: dict-style TASK_CONFIG proxy
+# =========================================================
+# Older modules import ``TASK_CONFIG`` and access it as
+# ``TASK_CONFIG[task]["type"]`` / ``["num_labels"]`` and iterate via
+# ``TASK_CONFIG.keys()`` / ``TASK_CONFIG.items()``. The registry is the new
+# source of truth; this proxy preserves the legacy contract without forcing
+# the rest of the codebase to change.
+
+class _TaskConfigProxy:
+    """Read-only mapping wrapper around the task registry.
+
+    Exposes each registered task as ``{"type": str, "num_labels": int,
+    "loss": str, "loss_weight": float, "threshold": float,
+    "auto_threshold": bool}`` so historical lookups continue to work.
+    """
+
+    __slots__ = ()
+
+    @staticmethod
+    def _as_dict(td: TaskDefinition) -> Dict[str, Any]:
+        return {
+            "type": td.task_type,
+            "task_type": td.task_type,
+            "num_labels": td.num_labels,
+            "loss": td.loss,
+            "loss_weight": td.loss_weight,
+            "threshold": td.threshold,
+            "auto_threshold": td.auto_threshold,
+        }
+
+    def __getitem__(self, task: str) -> Dict[str, Any]:
+        if task not in _TASK_REGISTRY:
+            raise KeyError(task)
+        return self._as_dict(_TASK_REGISTRY[task])
+
+    def __contains__(self, task: object) -> bool:
+        return task in _TASK_REGISTRY
+
+    def __iter__(self):
+        return iter(_TASK_REGISTRY)
+
+    def __len__(self) -> int:
+        return len(_TASK_REGISTRY)
+
+    def keys(self):
+        return _TASK_REGISTRY.keys()
+
+    def values(self):
+        return [self._as_dict(td) for td in _TASK_REGISTRY.values()]
+
+    def items(self):
+        return [(name, self._as_dict(td)) for name, td in _TASK_REGISTRY.items()]
+
+    def get(self, task: str, default: Any = None) -> Any:
+        td = _TASK_REGISTRY.get(task)
+        return self._as_dict(td) if td is not None else default
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"TaskConfigProxy({list(_TASK_REGISTRY)!r})"
+
+
+# Public dict-like API expected by legacy callers.
+TASK_CONFIG: _TaskConfigProxy = _TaskConfigProxy()
