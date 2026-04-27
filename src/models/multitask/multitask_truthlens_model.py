@@ -78,9 +78,24 @@ _DEFAULT_TASK_SPEC: Dict[str, Dict[str, Any]] = {
 class MultiTaskTruthLensConfig:
     """Lightweight config for the convenience-construction path.
 
-    For the YAML-driven path use
-    :class:`~src.models.config.MultiTaskModelConfig` together with
-    :meth:`MultiTaskTruthLensModel.from_model_config`.
+    .. note::
+       **A6 — naming caveat.** The TruthLens codebase has *two*
+       multi-task configuration objects and they are NOT interchangeable:
+
+         * :class:`MultiTaskTruthLensConfig` (this class) — a
+           narrow, hand-tuned dataclass used by the convenience
+           constructor ``MultiTaskTruthLensModel(config=...)``. Builds
+           the canonical TruthLens task set with default head sizes;
+           cannot express per-task type / loss / regression overrides.
+         * :class:`~src.models.config.MultiTaskModelConfig` — the
+           YAML-backed, fully-structured config used by the model
+           registry, the inference engine and the training pipeline
+           via :meth:`MultiTaskTruthLensModel.from_model_config`.
+
+       Mixing them (e.g. passing a ``MultiTaskModelConfig`` as
+       ``config=`` here) raises a ``TypeError`` rather than silently
+       constructing the wrong model. Unknown keyword arguments are
+       rejected by the underlying dataclass init.
     """
 
     model_name: str = "roberta-base"

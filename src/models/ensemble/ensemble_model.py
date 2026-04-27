@@ -57,6 +57,12 @@ class EnsembleModel(nn.Module):
             self._weights = None
 
         self.device = torch.device(self.config.device)
+        # P2: move sub-models to the ensemble's device exactly once,
+        # at construction time. The previous code did
+        # ``model = model.to(self.device)`` inside ``forward``, which
+        # both incurred a device-check on every call AND quietly
+        # reassigned the local variable instead of materialising the
+        # move on the registered ``nn.ModuleList`` entry.
         self.to(self.device)
 
         logger.info(
@@ -74,7 +80,6 @@ class EnsembleModel(nn.Module):
         logits_list: List[torch.Tensor] = []
 
         for model in self.models:
-            model = model.to(self.device)
             output = model(*args, **kwargs)
             logits = extract_logits(output)
             logits_list.append(logits)
@@ -146,7 +151,10 @@ class EnsembleModel(nn.Module):
     # =====================================================
 
     def add_model(self, model: nn.Module) -> None:
-        self.models.append(model)
+        # P2: keep the device-placement invariant — every member of
+        # ``self.models`` lives on ``self.device`` — true for any model
+        # added after construction, not just those passed to ``__init__``.
+        self.models.append(model.to(self.device))
 
     def get_num_models(self) -> int:
         return len(self.models)

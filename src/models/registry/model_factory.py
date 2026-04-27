@@ -130,7 +130,14 @@ class ModelFactory:
                 model = EmotionClassifier(EmotionClassifierConfig(**merged))
 
             elif model_type == "multitask_truthlens":
-                model = MultiTaskTruthLensModel(MultiTaskTruthLensConfig(**merged))
+                # P4: MultiTaskTruthLensModel.__init__ accepts the
+                # convenience-config exclusively as a *keyword* arg
+                # (so the (encoder, task_heads) positional contract
+                # stays unambiguous). Passing it positionally would
+                # bind to ``encoder`` and explode at validation time.
+                model = MultiTaskTruthLensModel(
+                    config=MultiTaskTruthLensConfig(**merged)
+                )
 
             else:
                 raise RuntimeError("Invalid model type")

@@ -139,16 +139,20 @@ class ClassificationHead(nn.Module):
             x = self.dropout(x)
             logits = self.fc(x)
 
-        probs = F.softmax(logits, dim=-1)
-        confidence = torch.max(probs, dim=-1).values
-        entropy = -torch.sum(probs * torch.log(probs + 1e-12), dim=-1)
+        # Derived statistics (probabilities / confidence / entropy) are
+        # only meaningful at inference time. Computing them during
+        # training wastes compute and pulls extra activations into the
+        # autograd graph for tensors the loss never reads. Skip them
+        # when ``self.training`` is True (P1).
+        output: Dict[str, Any] = {"logits": logits}
 
-        output = {
-            "logits": logits,
-            "probabilities": probs,
-            "confidence": confidence,
-            "entropy": entropy,
-        }
+        if not self.training:
+            probs = F.softmax(logits, dim=-1)
+            confidence = torch.max(probs, dim=-1).values
+            entropy = -torch.sum(probs * torch.log(probs + 1e-12), dim=-1)
+            output["probabilities"] = probs
+            output["confidence"] = confidence
+            output["entropy"] = entropy
 
         if self.config.return_features:
             output["features"] = x

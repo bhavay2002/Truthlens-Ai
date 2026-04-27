@@ -67,7 +67,11 @@ class MaxPooling(BasePooling):
             return torch.max(last_hidden_state, dim=1).values
 
         mask = attention_mask.unsqueeze(-1).expand(last_hidden_state.size())
-        masked = last_hidden_state.masked_fill(mask == 0, -1e9)
+        # Use the dtype-correct minimum so the mask still wins over the
+        # smallest representable activation under fp16/bf16 (where -1e9
+        # silently flushes to -inf or worse, NaN). (A3)
+        fill_value = torch.finfo(last_hidden_state.dtype).min
+        masked = last_hidden_state.masked_fill(mask == 0, fill_value)
 
         return torch.max(masked, dim=1).values
 
@@ -90,7 +94,11 @@ class AttentionPooling(BasePooling):
         scores = self.attention(last_hidden_state).squeeze(-1)
 
         if attention_mask is not None:
-            scores = scores.masked_fill(attention_mask == 0, -1e9)
+            # Mirror MaxPooling: use the dtype-aware floor so masked
+            # positions get exactly zero softmax weight under fp16/bf16
+            # without underflow / NaN propagation. (A3)
+            fill_value = torch.finfo(scores.dtype).min
+            scores = scores.masked_fill(attention_mask == 0, fill_value)
 
         weights = torch.softmax(scores, dim=1)
         weights = weights.unsqueeze(-1)

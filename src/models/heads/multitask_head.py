@@ -82,7 +82,14 @@ class MultiTaskHead(nn.Module):
                 logits = head_output
                 task_output = {"logits": logits}
             else:
-                task_output = head_output
+                # Copy the sub-head's dict into a fresh container before
+                # any mutation. Otherwise ``task_output["loss"] = ...``
+                # below would alias and mutate the very dict the sub-head
+                # returned, which becomes a problem when the caller (or a
+                # second forward pass) re-reads the head's output and
+                # finds an unexpected ``loss`` key from a *previous*
+                # batch (P5).
+                task_output = dict(head_output)
 
                 if "logits" not in task_output:
                     raise RuntimeError(

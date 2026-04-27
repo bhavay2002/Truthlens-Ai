@@ -13,7 +13,9 @@ from ...encoder.encoder_config import EncoderConfig
 from ...encoder.encoder_factory import EncoderFactory
 from ...heads.multilabel_head import MultiLabelHead, MultiLabelHeadConfig
 from ...heads.regression_head import RegressionHead, RegressionHeadConfig
-from ....training.trainer import Trainer, TrainerConfig
+
+# A1: no imports from ``src.training`` — the models package must not
+# depend on the training layer.
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +31,30 @@ class NarrativeDetectorConfig:
     regression_output_dim: int = 1
     regression_hidden_dim: Optional[int] = None
     regression_activation: str = "gelu"
+    # P3: opt-in gradient checkpointing (off by default).
+    enable_gradient_checkpointing: bool = False
 
 
 class NarrativeDetector(BaseModel):
+    """Single-task narrative detector.
+
+    .. warning::
+       **A4 — semantic conflation in ``LABELS``.**
+       The 11-element label list below mixes three orthogonal axes
+       under one multi-label head:
+
+         * narrative *roles* (``hero`` / ``villain`` / ``victim``),
+         * the *entities* that fill those roles
+           (``hero_entities`` / ``villain_entities`` / ``victim_entities``),
+         * narrative *frames* (``RE`` / ``HI`` / ``CO`` / ``MO`` / ``EC``).
+
+       That conflation is intentionally preserved here for backward
+       compatibility with existing checkpoints and downstream label
+       maps. New code should prefer the multitask path
+       (``MultiTaskTruthLensModel``), which exposes ``narrative``
+       (3-class roles) and ``narrative_frame`` (5-class frames) as
+       distinct heads with distinct loss signals.
+    """
 
     LABELS: List[str] = [
         "hero",
@@ -71,7 +94,10 @@ class NarrativeDetector(BaseModel):
             )
         )
 
-        if hasattr(self.encoder, "gradient_checkpointing_enable"):
+        if (
+            config.enable_gradient_checkpointing
+            and hasattr(self.encoder, "gradient_checkpointing_enable")
+        ):
             self.encoder.gradient_checkpointing_enable()
 
         # -------------------------------------------------
@@ -138,13 +164,19 @@ class NarrativeDetector(BaseModel):
 
         outputs: Dict[str, Any] = {
             "logits": head_outputs["logits"],
-            "probabilities": head_outputs["probabilities"],
-            "predictions": head_outputs["predictions"],
-            "confidence": head_outputs["confidence"],
-            "entropy": head_outputs["entropy"],
-            "loss": head_outputs.get("loss"),
             "embeddings": pooled_output,
         }
+
+        # P1: derived stats are inference-only. The multilabel head
+        # also skips them in train mode, so use ``.get`` to stay safe.
+        if not self.training:
+            for key in ("probabilities", "predictions", "confidence", "entropy"):
+                value = head_outputs.get(key)
+                if value is not None:
+                    outputs[key] = value
+
+        if "loss" in head_outputs:
+            outputs["loss"] = head_outputs["loss"]
 
         if self.regression_head is not None:
             outputs["regression"] = self.regression_head(pooled_output)
@@ -270,30 +302,6 @@ class NarrativeDetector(BaseModel):
             ),
         )
 
-    # -----------------------------------------------------
-    # TRAINER
-    # -----------------------------------------------------
-
-    def create_trainer(
-        self,
-        optimizer: torch.optim.Optimizer,
-        scheduler: Optional[Any] = None,
-        config: Optional[TrainerConfig] = None,
-    ) -> Trainer:
-
-        from dataclasses import replace as _replace
-
-        effective_config = config if config is not None else TrainerConfig()
-
-        effective_config = _replace(
-            effective_config,
-            architecture=type(self).__name__,
-            model_name=self.config.model_name,
-        )
-
-        return Trainer(
-            model=self,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            config=effective_config,
-        )
+    # A1: ``create_trainer`` removed. Trainer construction lives in
+    # ``src.training`` (see ``src.training.create_trainer_fn``); the
+    # models layer must not depend on the training layer.

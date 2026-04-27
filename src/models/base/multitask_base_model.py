@@ -90,23 +90,26 @@ class MultiTaskBaseModel(BaseModel):
             cfg = self.task_configs.get(name, {})
             task_type = cfg.get("type", "classification")
 
-            if task_type == "multilabel":
-                probs = torch.sigmoid(logits)
-                preds = (probs > 0.5).long()
-            else:
-                probs = F.softmax(logits, dim=-1)
-                preds = torch.argmax(probs, dim=-1)
+            task_out: Dict[str, torch.Tensor] = {"logits": logits}
 
-            confidence = probs.max(dim=-1).values
-            entropy = -torch.sum(probs * torch.log(probs + 1e-12), dim=-1)
+            # Derived per-task statistics are inference-only; computing
+            # them in training mode is wasted compute that also inflates
+            # the autograd graph for tensors the loss never touches (P1).
+            if not self.training:
+                if task_type == "multilabel":
+                    probs = torch.sigmoid(logits)
+                    preds = (probs > 0.5).long()
+                else:
+                    probs = F.softmax(logits, dim=-1)
+                    preds = torch.argmax(probs, dim=-1)
 
-            task_out: Dict[str, torch.Tensor] = {
-                "logits": logits,
-                "probabilities": probs,
-                "predictions": preds,
-                "confidence": confidence,
-                "entropy": entropy,
-            }
+                confidence = probs.max(dim=-1).values
+                entropy = -torch.sum(probs * torch.log(probs + 1e-12), dim=-1)
+
+                task_out["probabilities"] = probs
+                task_out["predictions"] = preds
+                task_out["confidence"] = confidence
+                task_out["entropy"] = entropy
 
             if labels and name in labels:
 

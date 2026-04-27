@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 # CONSTANTS
 # =========================================================
 
-VALID_POOLING_STRATEGIES = {"cls", "mean", "attention"}
+VALID_POOLING_STRATEGIES = {"cls", "mean", "max", "attention"}
 VALID_MODEL_TYPES = {"transformer"}
 
 

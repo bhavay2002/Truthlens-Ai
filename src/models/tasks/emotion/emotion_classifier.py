@@ -12,8 +12,10 @@ from ...config import HeadConfig, TaskConfig, MultiTaskModelConfig
 from ...encoder.encoder_config import EncoderConfig
 from ...encoder.encoder_factory import EncoderFactory
 from ...heads.multilabel_head import MultiLabelHead, MultiLabelHeadConfig
-from ....training.trainer import Trainer, TrainerConfig
 from src.features.emotion.emotion_schema import EMOTION_LABELS
+
+# A1: no imports from ``src.training`` — the models package must not
+# depend on the training layer.
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +27,8 @@ class EmotionClassifierConfig:
     dropout: float = 0.1
     device: Optional[str] = None
     threshold: float = 0.5
+    # P3: opt-in gradient checkpointing (off by default).
+    enable_gradient_checkpointing: bool = False
 
 
 class EmotionClassifier(BaseModel):
@@ -51,7 +55,10 @@ class EmotionClassifier(BaseModel):
             )
         )
 
-        if hasattr(self.encoder, "gradient_checkpointing_enable"):
+        if (
+            config.enable_gradient_checkpointing
+            and hasattr(self.encoder, "gradient_checkpointing_enable")
+        ):
             self.encoder.gradient_checkpointing_enable()
 
         # ------------------------------------------------
@@ -108,15 +115,23 @@ class EmotionClassifier(BaseModel):
             labels=labels,
         )
 
-        return {
+        outputs: Dict[str, Any] = {
             "logits": head_outputs["logits"],
-            "probabilities": head_outputs["probabilities"],
-            "predictions": head_outputs["predictions"],
-            "confidence": head_outputs["confidence"],
-            "entropy": head_outputs["entropy"],
-            "loss": head_outputs.get("loss"),
             "embeddings": pooled_output,
         }
+
+        # P1: derived stats only at inference (the multilabel head also
+        # skips them in train mode).
+        if not self.training:
+            for key in ("probabilities", "predictions", "confidence", "entropy"):
+                value = head_outputs.get(key)
+                if value is not None:
+                    outputs[key] = value
+
+        if "loss" in head_outputs:
+            outputs["loss"] = head_outputs["loss"]
+
+        return outputs
 
     # ------------------------------------------------------------
     # PREDICT
@@ -208,30 +223,6 @@ class EmotionClassifier(BaseModel):
             ),
         )
 
-    # ------------------------------------------------------------
-    # TRAINER
-    # ------------------------------------------------------------
-
-    def create_trainer(
-        self,
-        optimizer: torch.optim.Optimizer,
-        scheduler: Optional[Any] = None,
-        config: Optional[TrainerConfig] = None,
-    ) -> Trainer:
-
-        from dataclasses import replace as _replace
-
-        effective_config = config if config is not None else TrainerConfig()
-
-        effective_config = _replace(
-            effective_config,
-            architecture=type(self).__name__,
-            model_name=self.config.model_name,
-        )
-
-        return Trainer(
-            model=self,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            config=effective_config,
-        )
+    # A1: ``create_trainer`` removed. Trainer construction lives in
+    # ``src.training`` (see ``src.training.create_trainer_fn``); the
+    # models layer must not depend on the training layer.

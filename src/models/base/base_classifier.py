@@ -83,26 +83,29 @@ class BaseClassifier(BaseModel):
         logits = self.classifier(features)
 
         # -------------------------------------------------
-        # PROBS
+        # PROBS / DERIVED STATISTICS
         # -------------------------------------------------
+        # During training the loss runs against ``logits`` directly; the
+        # derived stats below would only inflate the autograd graph
+        # without ever being read. Compute them only at inference (P1).
 
-        if self.multi_label:
-            probs = torch.sigmoid(logits)
-            preds = (probs > 0.5).long()
-        else:
-            probs = F.softmax(logits, dim=-1)
-            preds = torch.argmax(probs, dim=-1)
+        output: Dict[str, torch.Tensor] = {"logits": logits}
 
-        confidence = probs.max(dim=-1).values
-        entropy = -torch.sum(probs * torch.log(probs + 1e-12), dim=-1)
+        if not self.training:
+            if self.multi_label:
+                probs = torch.sigmoid(logits)
+                preds = (probs > 0.5).long()
+            else:
+                probs = F.softmax(logits, dim=-1)
+                preds = torch.argmax(probs, dim=-1)
 
-        output: Dict[str, torch.Tensor] = {
-            "logits": logits,
-            "probabilities": probs,
-            "predictions": preds,
-            "confidence": confidence,
-            "entropy": entropy,
-        }
+            confidence = probs.max(dim=-1).values
+            entropy = -torch.sum(probs * torch.log(probs + 1e-12), dim=-1)
+
+            output["probabilities"] = probs
+            output["predictions"] = preds
+            output["confidence"] = confidence
+            output["entropy"] = entropy
 
         # -------------------------------------------------
         # LOSS

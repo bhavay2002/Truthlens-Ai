@@ -17,8 +17,11 @@ from ...heads.classification_head import (
     ClassificationHeadConfig,
 )
 from ...heads.regression_head import RegressionHead, RegressionHeadConfig
-from ....training.loss_functions import LossConfig, LossFactory
-from ....training.trainer import Trainer, TrainerConfig
+
+# A1: the ``models`` package no longer imports anything from
+# ``src.training.*``. The loss is constructed locally with a stock
+# PyTorch loss to keep the dependency arrow strictly
+# training -> models, never the other way around.
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +37,10 @@ class BiasClassifierConfig:
     regression_output_dim: int = 1
     regression_hidden_dim: Optional[int] = None
     regression_activation: str = "gelu"
+    # P3: gradient checkpointing trades ~30% throughput for activation
+    # memory savings — only useful when training a large model on a
+    # memory-constrained GPU. Default off; opt in explicitly.
+    enable_gradient_checkpointing: bool = False
 
 
 class BiasClassifier(BaseModel):
@@ -60,7 +67,10 @@ class BiasClassifier(BaseModel):
             )
         )
 
-        if hasattr(self.encoder, "gradient_checkpointing_enable"):
+        if (
+            config.enable_gradient_checkpointing
+            and hasattr(self.encoder, "gradient_checkpointing_enable")
+        ):
             self.encoder.gradient_checkpointing_enable()
 
         # --------------------------------------------------
@@ -97,11 +107,8 @@ class BiasClassifier(BaseModel):
         # Loss
         # --------------------------------------------------
 
-        self.loss_fn = LossFactory.create(
-            LossConfig(
-                loss_type="multi_class",
-                label_smoothing=config.label_smoothing,
-            )
+        self.loss_fn = nn.CrossEntropyLoss(
+            label_smoothing=config.label_smoothing,
         )
 
         # --------------------------------------------------
@@ -150,18 +157,27 @@ class BiasClassifier(BaseModel):
             temperature = torch.clamp(self.temperature, 0.5, 5.0)
             scaled_logits = raw_logits / temperature
 
-        probs = F.softmax(scaled_logits, dim=-1)
-        preds = probs.argmax(dim=-1)
-        confidence = probs.max(dim=-1).values
-
         outputs: Dict[str, Any] = {
             "logits": scaled_logits,
-            "probabilities": probs,
-            "predictions": preds,
-            "confidence": confidence,
-            "entropy": head_output["entropy"],
             "embeddings": pooled_output,
         }
+
+        # P1: derived statistics are inference-only — they would just
+        # bloat the autograd graph during training without ever being
+        # consumed by the loss. The classification head also skips them
+        # in train mode, so we ``.get`` rather than indexing.
+        if not self.training:
+            probs = F.softmax(scaled_logits, dim=-1)
+            preds = probs.argmax(dim=-1)
+            confidence = probs.max(dim=-1).values
+
+            outputs["probabilities"] = probs
+            outputs["predictions"] = preds
+            outputs["confidence"] = confidence
+
+            entropy = head_output.get("entropy")
+            if entropy is not None:
+                outputs["entropy"] = entropy
 
         if self.regression_head is not None:
             outputs["regression"] = self.regression_head(pooled_output)
@@ -282,28 +298,7 @@ class BiasClassifier(BaseModel):
             ),
         )
 
-    # --------------------------------------------------
-
-    def create_trainer(
-        self,
-        optimizer: torch.optim.Optimizer,
-        scheduler: Optional[Any] = None,
-        config: Optional[TrainerConfig] = None,
-    ) -> Trainer:
-
-        from dataclasses import replace as _replace
-
-        effective_config = config if config is not None else TrainerConfig()
-
-        effective_config = _replace(
-            effective_config,
-            architecture=type(self).__name__,
-            model_name=self.config.model_name,
-        )
-
-        return Trainer(
-            model=self,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            config=effective_config,
-        )
+    # A1: ``create_trainer`` was removed from this module. Trainer
+    # construction lives in ``src.training`` (see
+    # ``src.training.create_trainer_fn``); the models layer must not
+    # depend on the training layer.

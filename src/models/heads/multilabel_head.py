@@ -149,22 +149,27 @@ class MultiLabelHead(nn.Module):
             x = self.dropout(x)
             logits = self.fc(x)
 
-        probs = torch.sigmoid(logits)
-        predictions = probs >= self.config.threshold
+        # Sigmoid / threshold / per-label entropy are only useful at
+        # inference. Computing them inside the autograd graph during
+        # training is dead weight (the loss runs against ``logits``
+        # directly via ``BCEWithLogitsLoss``). Skip them in training
+        # mode (P1).
+        outputs: Dict[str, Any] = {"logits": logits}
 
-        confidence = probs.mean(dim=-1)
-        entropy = -(
-            probs * torch.log(probs + 1e-12)
-            + (1 - probs) * torch.log(1 - probs + 1e-12)
-        ).mean(dim=-1)
+        if not self.training:
+            probs = torch.sigmoid(logits)
+            predictions = probs >= self.config.threshold
 
-        outputs: Dict[str, Any] = {
-            "logits": logits,
-            "probabilities": probs,
-            "predictions": predictions,
-            "confidence": confidence,
-            "entropy": entropy,
-        }
+            confidence = probs.mean(dim=-1)
+            entropy = -(
+                probs * torch.log(probs + 1e-12)
+                + (1 - probs) * torch.log(1 - probs + 1e-12)
+            ).mean(dim=-1)
+
+            outputs["probabilities"] = probs
+            outputs["predictions"] = predictions
+            outputs["confidence"] = confidence
+            outputs["entropy"] = entropy
 
         if labels is not None:
             if labels.shape != logits.shape:

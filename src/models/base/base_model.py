@@ -121,8 +121,15 @@ class BaseModel(nn.Module, ABC):
         path: Path | str,
         optimizer: Optional[torch.optim.Optimizer] = None,
         map_location: Optional[str | torch.device] = None,
-        strict: bool = False,
+        strict: bool = True,
     ) -> Dict[str, Any]:
+        # NOTE (A5): default switched from ``strict=False`` to ``True``.
+        # Silent acceptance of mismatched checkpoints lets a stale or
+        # mislabelled .pt file load against a different head/encoder
+        # configuration, producing a "working" model whose predictions
+        # silently come from re-initialised weights. Callers that
+        # genuinely need partial loads (e.g. fine-tuning a new head on
+        # top of a pretrained encoder) must now opt in explicitly.
 
         path = Path(path)
 
