@@ -106,6 +106,16 @@ _DEFAULT_INFERENCE: Dict[str, Any] = {
     "allow_raw_text_fallback": True,
 }
 
+_DEFAULT_PATHS: Dict[str, Any] = {
+    "tfidf_vectorizer_path": "saved_models/tfidf_vectorizer.joblib",
+    "evaluation_results_path": "reports/evaluation_results.json",
+    "confusion_matrix_path": "reports/confusion_matrix.png",
+    "cleaning_report_path": "reports/cleaning_report.json",
+    "models_dir": "saved_models",
+    "logs_dir": "logs",
+    "reports_dir": "reports",
+}
+
 
 def _ensure_defaults(target: AttrDict, defaults: Dict[str, Any]) -> None:
     for key, val in defaults.items():
@@ -138,9 +148,13 @@ def load_settings(config_path: str | Path | None = None) -> AttrDict:
 
     # ---- model ----
     model = getattr(settings, "model", AttrDict())
-    if hasattr(model, "path"):
-        model.path = _resolve_path(model.path)
+    if not hasattr(model, "path"):
+        # Sensible default so callers like ``api/app.py`` always have a value.
+        model.path = "saved_models"
+    model.path = _resolve_path(model.path)
     encoder = getattr(model, "encoder", AttrDict())
+    if isinstance(encoder, str):
+        encoder = AttrDict(name=encoder)
     if not hasattr(model, "name"):
         model.name = getattr(encoder, "name", "roberta-base")
     if not hasattr(model, "max_length"):
@@ -149,6 +163,7 @@ def load_settings(config_path: str | Path | None = None) -> AttrDict:
 
     # ---- paths ----
     paths = getattr(settings, "paths", AttrDict())
+    _ensure_defaults(paths, _DEFAULT_PATHS)
     _resolve_paths(
         paths,
         (

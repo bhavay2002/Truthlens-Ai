@@ -6,7 +6,8 @@ from typing import Optional
 
 import torch
 
-from .transformer_encoder import TransformerEncoder
+# Self-import was a leftover from a refactor; pull the real class from where it lives.
+from src.models.inference.model_wrapper import TransformerEncoder
 from .encoder_config import EncoderConfig
 from ..config import (
     EncoderConfig as ModelEncoderConfig,

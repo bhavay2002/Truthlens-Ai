@@ -208,3 +208,14 @@ class CalibrationMetrics:
         logger.info("Calibration metrics: %s", metrics)
 
         return metrics
+
+# =========================================================
+# COMPAT: re-export IsotonicCalibrator/IsotonicCalibrationConfig
+# from src.models.calibration.temperature_scaling (where they
+# physically live in this snapshot of the repo).
+# =========================================================
+
+from src.models.calibration.temperature_scaling import (  # noqa: F401
+    IsotonicCalibrationConfig,
+    IsotonicCalibrator,
+)

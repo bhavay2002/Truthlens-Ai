@@ -54,11 +54,14 @@ class ScoreExplainer:
         *,
         device: Optional[str] = None,
         steps: int = 32,
+        method: Optional[str] = None,
+        **_kwargs: Any,
     ):
         self.model = model
         self.tokenizer = tokenizer
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.steps = steps
+        self.method = method or "integrated_gradients"
 
         if self.model is not None:
             self.model.to(self.device)

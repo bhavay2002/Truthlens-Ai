@@ -137,3 +137,21 @@ class IsotonicCalibrator:
 
         self.fit(probabilities, labels)
         return self.predict_proba(probabilities)
+
+# =========================================================
+# COMPAT: TemperatureScaler / TemperatureScalingConfig
+# Re-exported here so callers importing from
+# ``src.models.calibration.temperature_scaling`` continue to work.
+# (The actual TemperatureScaler implementation lives in
+#  src.evaluation.calibration.)
+# =========================================================
+
+from dataclasses import dataclass as _dataclass
+
+from src.evaluation.calibration import TemperatureScaler  # noqa: F401  (re-export)
+
+
+@_dataclass
+class TemperatureScalingConfig:
+    max_iter: int = 50
+    lr: float = 0.01

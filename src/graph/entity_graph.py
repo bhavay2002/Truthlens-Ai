@@ -212,3 +212,7 @@ def graph_to_vector(features: Dict[str, float]) -> np.ndarray:
     ]
 
     return np.array([features.get(k, 0.0) for k in keys], dtype=np.float32)
+
+# Alias maintained for backward compatibility with src.graph.graph_features.
+ordered_entity_graph_vector = graph_to_vector
+

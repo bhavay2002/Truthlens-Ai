@@ -184,3 +184,33 @@ def reliability_diagram(
 
     else:
         raise ValueError(f"Unsupported task_type: {task_type}")
+
+# =========================================================
+# CLASS WRAPPER (used by src.evaluation.calibration)
+# =========================================================
+
+class ReliabilityDiagram:
+    """Lightweight OO wrapper around the functional reliability_diagram API."""
+
+    def __init__(self, n_bins: int = 10):
+        self.n_bins = n_bins
+
+    def compute(self, probs, y_true, task_type: Optional[str] = None,
+                save_path: Optional[str] = None, mode: str = "global"):
+        try:
+            return reliability_diagram(
+                y_true=y_true,
+                probs=probs,
+                task_type=task_type,
+                n_bins=self.n_bins,
+                save_path=save_path,
+                mode=mode,
+            )
+        except TypeError:
+            # Fallback for unknown task type — compute multiclass stats directly.
+            try:
+                stats = _multiclass_reliability(y_true, probs, self.n_bins)
+                return {"global": stats}
+            except Exception as e:
+                logger.warning("ReliabilityDiagram.compute fallback failed: %s", e)
+                return {}

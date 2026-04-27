@@ -13,7 +13,8 @@ from src.models.calibration import IsotonicCalibrator, TemperatureScaler
 from src.inference.postprocessing import Postprocessor
 
 # 🔥 NEW IMPORTS
-from src.inference.prediction_service import PredictionService
+# NOTE: PredictionService is imported lazily inside ``InferenceEngine.__init__``
+# to avoid the circular import (prediction_service ← inference_engine).
 from src.inference.schema import PredictionOutput
 
 from src.utils import (
@@ -77,9 +78,12 @@ class InferenceEngine:
         self._load_model()
 
         # 🔥 NEW: Prediction Service (FULL SYSTEM)
-        self.prediction_service: Optional[PredictionService] = None
+        self.prediction_service = None
 
         if config.enable_full_pipeline:
+            # Lazy import to break circular dependency.
+            from src.inference.prediction_service import PredictionService
+
             self.prediction_service = PredictionService(
                 model=self,
             )

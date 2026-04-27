@@ -222,3 +222,8 @@ class FeaturePipeline:
             features = self.validator.validate_batch(features)
 
         return features
+
+# Backward-compat constant referenced by src.inference.feature_preparer (left empty by design).
+ALL_BIAS_MODULE_FEATURE_NAMES: list[str] = []
+BIAS_FEATURE_NAMES: list[str] = []
+

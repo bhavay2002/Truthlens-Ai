@@ -279,3 +279,7 @@ class CheckpointManager:
             logger.info("Removing old checkpoint: %s", p)
             import shutil
             shutil.rmtree(p, ignore_errors=True)
+
+# Backward-compat alias used by src.training.trainer.
+CheckpointEngine = CheckpointManager
+

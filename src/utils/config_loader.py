@@ -169,6 +169,62 @@ def _validate_task(name: str, cfg: Dict[str, Any]):
 
 
 # =========================================================
+# COMPAT: normalize the lightweight YAML schema to the
+# verbose one expected by the loader below.
+# =========================================================
+
+_DEFAULT_NUM_LABELS = {
+    "binary": 2,
+    "multiclass": 3,
+    "multilabel": 2,
+}
+
+
+def _normalize_encoder(model_cfg: Any) -> Dict[str, Any]:
+    """Accept either ``encoder: "name"`` or ``encoder: {name: ...}``."""
+    if not isinstance(model_cfg, dict):
+        return {}
+
+    encoder = model_cfg.get("encoder", {})
+    if isinstance(encoder, str):
+        return {
+            "name": encoder,
+            "hidden_size": model_cfg.get("hidden_dim", model_cfg.get("hidden_size", 768)),
+        }
+    if isinstance(encoder, dict):
+        return encoder
+    return {}
+
+
+def _normalize_task(name: str, cfg: Any) -> Dict[str, Any]:
+    """Accept either ``task: "multiclass"`` or full task dict."""
+    if isinstance(cfg, str):
+        task_type = cfg
+        return {
+            "type": task_type,
+            "num_labels": _DEFAULT_NUM_LABELS.get(task_type, 2),
+            "dataset": {
+                "train_path": f"data/{name}/train.csv",
+                "validation_path": None,
+                "test_path": None,
+            },
+        }
+    if isinstance(cfg, dict):
+        out = dict(cfg)
+        out.setdefault("num_labels", _DEFAULT_NUM_LABELS.get(out.get("type", ""), 2))
+        out.setdefault(
+            "dataset",
+            {
+                "train_path": f"data/{name}/train.csv",
+                "validation_path": None,
+                "test_path": None,
+            },
+        )
+        return out
+    raise ValueError(f"{name}: unsupported task config form ({type(cfg).__name__})")
+
+
+# =========================================================
 # MAIN LOADER
 # =========================================================
 
@@ -178,7 +234,7 @@ def load_app_config(config_path: str | Path | None = None) -> AppConfig:
     _validate_required(config, ["model", "tasks", "training"])
 
     # ---------------- MODEL ----------------
-    encoder_cfg = config["model"].get("encoder", {})
+    encoder_cfg = _normalize_encoder(config["model"])
 
     model = ModelConfig(
         encoder=EncoderConfig(
@@ -193,7 +249,8 @@ def load_app_config(config_path: str | Path | None = None) -> AppConfig:
     # ---------------- TASKS ----------------
     tasks: Dict[str, TaskConfig] = {}
 
-    for name, cfg in config["tasks"].items():
+    for name, raw_cfg in config["tasks"].items():
+        cfg = _normalize_task(name, raw_cfg)
         _validate_task(name, cfg)
 
         ds = cfg["dataset"]
@@ -215,11 +272,13 @@ def load_app_config(config_path: str | Path | None = None) -> AppConfig:
 
     # ---------------- TRAINING ----------------
     t = config["training"]
+    optim_cfg = config.get("optimizer", {}) if isinstance(config.get("optimizer", {}), dict) else {}
+    data_cfg = config.get("data", {}) if isinstance(config.get("data", {}), dict) else {}
 
     training = TrainingConfig(
-        batch_size=t["batch_size"],
-        epochs=t["epochs"],
-        learning_rate=t["learning_rate"],
+        batch_size=t.get("batch_size", data_cfg.get("batch_size", 16)),
+        epochs=t.get("epochs", 1),
+        learning_rate=t.get("learning_rate", optim_cfg.get("lr", 3e-5)),
         gradient_accumulation_steps=t.get("gradient_accumulation_steps", 1),
         device=t.get("device", "auto"),
         max_grad_norm=t.get("max_grad_norm", 1.0),

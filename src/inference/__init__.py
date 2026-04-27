@@ -12,7 +12,6 @@ from src.inference.inference_cache import InferenceCache, InferenceCacheConfig
 from src.inference.inference_engine import (
     InferenceConfig as EngineInferenceConfig,
     InferenceEngine,
-    PredictionResult,
 )
 from src.inference.inference_logger import InferenceLogEntry, InferenceLogger
 from src.inference.feature_preparer import FeaturePreparer, FeaturePreparationConfig
@@ -26,7 +25,6 @@ __all__ = [
     "InferenceCacheConfig",
     "EngineInferenceConfig",
     "InferenceEngine",
-    "PredictionResult",
     "InferenceLogEntry",
     "InferenceLogger",
     "FeaturePreparer",

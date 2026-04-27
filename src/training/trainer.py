@@ -304,3 +304,18 @@ class Trainer:
 
     def _is_main(self):
         return not self.distributed or self.distributed.is_main_process()
+
+# =========================================================
+# COMPAT: lightweight TrainerConfig dataclass
+# =========================================================
+
+from dataclasses import dataclass as _dataclass, field as _field
+from typing import Any as _Any, Dict as _Dict, Optional as _Optional
+
+
+@_dataclass
+class TrainerConfig:
+    config_path: str = ""
+    monitor_metric: str = "val_loss"
+    maximize_metric: bool = False
+    extras: _Dict[str, _Any] = _field(default_factory=dict)

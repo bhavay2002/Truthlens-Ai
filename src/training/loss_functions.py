@@ -79,3 +79,37 @@ def regression_loss(
         raise RuntimeError("Shape mismatch in regression_loss")
 
     return F.mse_loss(preds.float(), targets.float())
+
+# =========================================================
+# COMPAT: minimal Loss config + factory stubs
+# =========================================================
+
+from dataclasses import dataclass as _dataclass
+
+
+@_dataclass
+class LossConfig:
+    """Lightweight loss-config used by classifier modules."""
+    task_type: str = "multiclass"
+    label_smoothing: float = 0.0
+    pos_weight: float | None = None
+
+
+class LossFactory:
+    """Tiny dispatcher used by classifier modules.
+
+    Returns one of the loss functions defined above based on ``config.task_type``.
+    """
+
+    @staticmethod
+    def create(config: "LossConfig"):
+        t = (config.task_type or "").lower()
+        if t == "binary":
+            return binary_loss
+        if t == "multiclass":
+            return multiclass_loss
+        if t == "multilabel":
+            return multilabel_loss
+        if t == "regression":
+            return regression_loss
+        raise ValueError(f"Unknown task_type: {config.task_type}")

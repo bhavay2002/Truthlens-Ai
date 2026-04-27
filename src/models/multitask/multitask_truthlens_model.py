@@ -136,3 +136,11 @@ class MultiTaskTruthLensModel(nn.Module):
 
     def extra_repr(self) -> str:
         return f"tasks={list(self.task_heads.keys())}"
+
+# Backward-compat alias: MultiTaskTruthLensConfig for callers expecting a Config name.
+class MultiTaskTruthLensConfig:
+    """Lightweight stub config; the actual model is configured via dict kwargs."""
+    def __init__(self, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+

@@ -178,3 +178,7 @@ class BiasFeaturesV2(BaseFeature):
         if not np.isfinite(v):
             return 0.0
         return float(np.clip(v, 0.0, MAX_CLIP))
+
+# Backward-compat alias used across the inference layer.
+BiasFeatures = BiasFeaturesV2
+
