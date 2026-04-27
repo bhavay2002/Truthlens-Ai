@@ -2,4 +2,35 @@
 name = "workspace"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "contractions>=0.1.73",
+    "datasets>=4.8.4",
+    "fastapi>=0.136.1",
+    "gunicorn>=25.3.0",
+    "huggingface-hub>=1.12.0",
+    "joblib>=1.5.3",
+    "langdetect>=1.0.9",
+    "lime>=0.2.0.1",
+    "matplotlib>=3.10.9",
+    "networkx>=3.6.1",
+    "nltk>=3.9.4",
+    "numpy>=2.4.4",
+    "pandas>=3.0.2",
+    "portalocker>=3.2.0",
+    "pydantic>=2.13.3",
+    "pyyaml>=6.0.3",
+    "reportlab>=4.4.10",
+    "scikit-learn>=1.8.0",
+    "scipy>=1.17.1",
+    "seaborn>=0.13.2",
+    "sentence-transformers>=5.4.1",
+    "shap>=0.51.0",
+    "spacy>=3.8.14",
+    "tarsafe>=0.0.5",
+    "torch>=2.11.0",
+    "tqdm>=4.67.3",
+    "transformers>=5.6.2",
+    "uvicorn[standard]>=0.46.0",
+    "vadersentiment>=3.3.2",
+    "wordcloud>=1.9.6",
+]
