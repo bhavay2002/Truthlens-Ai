@@ -95,6 +95,13 @@ class MCDropoutPredictor:
         """
         Returns:
             prob_samples: (T, B, C)
+
+        G2: build the sample stack on the *device* (one tensor per
+        forward pass kept as a GPU tensor, then ``torch.stack`` once,
+        then a single ``.cpu().numpy()`` at the end). The previous
+        implementation called ``.detach().cpu().numpy()`` after every
+        forward pass, which serialises ``mc_samples`` extra
+        device→host syncs and dominates wall-time on GPU.
         """
 
         input_ids = input_ids.to(self.device)
@@ -102,7 +109,7 @@ class MCDropoutPredictor:
 
         _enable_dropout(self.model)
 
-        samples = []
+        samples: list[torch.Tensor] = []
 
         for _ in range(self.mc_samples):
 
@@ -117,9 +124,10 @@ class MCDropoutPredictor:
             else:
                 probs = _sigmoid(logits)
 
-            samples.append(_to_numpy(probs))
+            samples.append(probs.detach())
 
-        return np.stack(samples, axis=0)
+        # Single device→host transfer for the entire (T, B, C) block.
+        return torch.stack(samples, dim=0).cpu().numpy()
 
     # =====================================================
     # UNCERTAINTY METRICS
@@ -134,17 +142,33 @@ class MCDropoutPredictor:
         return np.var(prob_samples, axis=0).mean(axis=1)
 
     @staticmethod
-    def predictive_entropy(prob_samples: np.ndarray) -> np.ndarray:
-        mean_probs = np.mean(prob_samples, axis=0)
-        return -np.sum(mean_probs * np.log(mean_probs + EPS), axis=1)
+    def _xlogx(probs: np.ndarray) -> np.ndarray:
+        """``p * log(p)`` with the convention ``0 * log(0) := 0``.
 
-    @staticmethod
-    def mutual_information(prob_samples: np.ndarray) -> np.ndarray:
+        N1: avoids the ``log(probs + EPS)`` formulation, whose additive
+        bias dominates the log term whenever ``probs`` is small. We
+        ``np.where`` zero-mass entries to ``0`` (the analytic limit)
+        and ``log`` only the strictly positive entries, so the sum is
+        exact for any peaked distribution.
+        """
+        probs = np.asarray(probs)
+        out = np.zeros_like(probs, dtype=float)
+        positive = probs > 0
+        out[positive] = probs[positive] * np.log(probs[positive])
+        return out
+
+    @classmethod
+    def predictive_entropy(cls, prob_samples: np.ndarray) -> np.ndarray:
+        mean_probs = np.mean(prob_samples, axis=0)
+        return -np.sum(cls._xlogx(mean_probs), axis=1)
+
+    @classmethod
+    def mutual_information(cls, prob_samples: np.ndarray) -> np.ndarray:
         mean_probs = np.mean(prob_samples, axis=0)
 
-        entropy_mean = -np.sum(mean_probs * np.log(mean_probs + EPS), axis=1)
+        entropy_mean = -np.sum(cls._xlogx(mean_probs), axis=1)
         entropy_expected = -np.mean(
-            np.sum(prob_samples * np.log(prob_samples + EPS), axis=2),
+            np.sum(cls._xlogx(prob_samples), axis=2),
             axis=0,
         )
 

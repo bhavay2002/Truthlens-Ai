@@ -96,15 +96,25 @@ class MultiTaskBaseModel(BaseModel):
             # them in training mode is wasted compute that also inflates
             # the autograd graph for tensors the loss never touches (P1).
             if not self.training:
+                # N1: stable entropy in log-space — never take ``log``
+                # of an EPS-shifted probability. For multiclass we use
+                # ``log_softmax``; for multilabel we use ``logsigmoid``
+                # of ``±logits`` for the per-label binary entropy.
                 if task_type == "multilabel":
+                    log_p = F.logsigmoid(logits)
+                    log_1mp = F.logsigmoid(-logits)
                     probs = torch.sigmoid(logits)
                     preds = (probs > 0.5).long()
+                    confidence = probs.max(dim=-1).values
+                    entropy = -(
+                        probs * log_p + (1.0 - probs) * log_1mp
+                    ).mean(dim=-1)
                 else:
-                    probs = F.softmax(logits, dim=-1)
+                    log_probs = F.log_softmax(logits, dim=-1)
+                    probs = log_probs.exp()
                     preds = torch.argmax(probs, dim=-1)
-
-                confidence = probs.max(dim=-1).values
-                entropy = -torch.sum(probs * torch.log(probs + 1e-12), dim=-1)
+                    confidence = probs.max(dim=-1).values
+                    entropy = -(probs * log_probs).sum(dim=-1)
 
                 task_out["probabilities"] = probs
                 task_out["predictions"] = preds

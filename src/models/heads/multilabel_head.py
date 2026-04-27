@@ -157,14 +157,21 @@ class MultiLabelHead(nn.Module):
         outputs: Dict[str, Any] = {"logits": logits}
 
         if not self.training:
+            # N1: per-label binary entropy via ``logsigmoid`` so we never
+            # take ``log`` of a value that has been additively biased
+            # by an EPS. ``log p   = logsigmoid(x)`` and
+            # ``log (1 - p) = logsigmoid(-x)`` are computed in
+            # log-space and are exact at the saturation tails where the
+            # old ``log(p + 1e-12)`` formulation was dominated by the
+            # eps term. ``probs`` itself is materialised via ``sigmoid``
+            # for the threshold/predictions output.
+            log_p = F.logsigmoid(logits)
+            log_1mp = F.logsigmoid(-logits)
             probs = torch.sigmoid(logits)
             predictions = probs >= self.config.threshold
 
             confidence = probs.mean(dim=-1)
-            entropy = -(
-                probs * torch.log(probs + 1e-12)
-                + (1 - probs) * torch.log(1 - probs + 1e-12)
-            ).mean(dim=-1)
+            entropy = -(probs * log_p + (1.0 - probs) * log_1mp).mean(dim=-1)
 
             outputs["probabilities"] = probs
             outputs["predictions"] = predictions

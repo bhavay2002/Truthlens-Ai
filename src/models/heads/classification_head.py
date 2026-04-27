@@ -147,9 +147,17 @@ class ClassificationHead(nn.Module):
         output: Dict[str, Any] = {"logits": logits}
 
         if not self.training:
-            probs = F.softmax(logits, dim=-1)
+            # N1: derive probabilities and entropy from a single
+            # ``log_softmax`` pass. The previous formulation
+            # (``-sum(p * log(p + 1e-12))``) was numerically dominated
+            # by the EPS term whenever the predictive distribution was
+            # peaked, because each subdominant ``log(eps)`` contributes
+            # a fixed bias. ``log_softmax`` avoids the EPS entirely
+            # AND amortises the second softmax pass.
+            log_probs = F.log_softmax(logits, dim=-1)
+            probs = log_probs.exp()
             confidence = torch.max(probs, dim=-1).values
-            entropy = -torch.sum(probs * torch.log(probs + 1e-12), dim=-1)
+            entropy = -(probs * log_probs).sum(dim=-1)
             output["probabilities"] = probs
             output["confidence"] = confidence
             output["entropy"] = entropy

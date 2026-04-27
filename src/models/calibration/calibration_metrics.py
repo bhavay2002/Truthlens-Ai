@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 import numpy as np
 import torch
@@ -47,9 +47,44 @@ class CalibrationMetrics:
     # -----------------------------------------------------
 
     @staticmethod
-    def _to_probs(x: torch.Tensor) -> torch.Tensor:
-        if x.max() > 1 or x.min() < 0:
+    def _to_probs(
+        x: torch.Tensor,
+        *,
+        is_logits: Optional[bool] = None,
+    ) -> torch.Tensor:
+        """Coerce ``x`` to a row-stochastic probability matrix.
+
+        N4: callers are expected to pass ``is_logits`` explicitly. The
+        old auto-detect heuristic ("if anything is outside [0, 1], assume
+        logits") silently misclassifies pre-softmax probabilities that
+        happen to lie in that range and any probability tensor with a
+        floating-point round-off below zero. We only fall back to the
+        heuristic when ``is_logits is None`` and emit a warning so the
+        ambiguity shows up in logs instead of being absorbed.
+        """
+        if is_logits is True:
             return torch.softmax(x, dim=1)
+        if is_logits is False:
+            return x
+
+        x_min = float(x.min())
+        x_max = float(x.max())
+        if x_max > 1.0 or x_min < 0.0:
+            logger.warning(
+                "CalibrationMetrics._to_probs: is_logits not specified "
+                "and tensor falls outside [0, 1] (min=%.4f, max=%.4f); "
+                "applying softmax. Pass is_logits=True/False explicitly "
+                "to silence this warning.",
+                x_min,
+                x_max,
+            )
+            return torch.softmax(x, dim=1)
+
+        logger.warning(
+            "CalibrationMetrics._to_probs: is_logits not specified and "
+            "tensor lies in [0, 1]; assuming probabilities. Pass "
+            "is_logits=True/False explicitly to silence this warning."
+        )
         return x
 
     # =====================================================
@@ -60,9 +95,11 @@ class CalibrationMetrics:
         self,
         logits_or_probs: torch.Tensor,
         labels: torch.Tensor,
+        *,
+        is_logits: Optional[bool] = None,
     ) -> float:
 
-        probs = self._to_probs(logits_or_probs)
+        probs = self._to_probs(logits_or_probs, is_logits=is_logits)
         self._validate(probs, labels)
 
         conf, preds = torch.max(probs, dim=1)
@@ -90,9 +127,11 @@ class CalibrationMetrics:
         self,
         logits_or_probs: torch.Tensor,
         labels: torch.Tensor,
+        *,
+        is_logits: Optional[bool] = None,
     ) -> float:
 
-        probs = self._to_probs(logits_or_probs)
+        probs = self._to_probs(logits_or_probs, is_logits=is_logits)
         self._validate(probs, labels)
 
         conf, preds = torch.max(probs, dim=1)
@@ -120,9 +159,11 @@ class CalibrationMetrics:
         self,
         logits_or_probs: torch.Tensor,
         labels: torch.Tensor,
+        *,
+        is_logits: Optional[bool] = None,
     ) -> float:
 
-        probs = self._to_probs(logits_or_probs)
+        probs = self._to_probs(logits_or_probs, is_logits=is_logits)
         self._validate(probs, labels)
 
         one_hot = F.one_hot(labels, num_classes=probs.shape[1]).float()
@@ -138,15 +179,50 @@ class CalibrationMetrics:
         self,
         logits_or_probs: torch.Tensor,
         labels: torch.Tensor,
+        *,
+        is_logits: Optional[bool] = None,
     ) -> float:
+        """Mean negative-log-likelihood under the predictive distribution.
 
-        if logits_or_probs.max() <= 1 and logits_or_probs.min() >= 0:
-            probs = logits_or_probs
-            loss = F.nll_loss(torch.log(probs + 1e-12), labels)
+        N5: when given probabilities we route through ``log`` of a
+        ``clamp_min``-floored copy and use ``F.nll_loss`` (the
+        old ``log(probs + 1e-12)`` formulation drifted by EPS for any
+        confident prediction). When given logits we route through
+        ``log_softmax`` + ``F.nll_loss`` rather than ``F.cross_entropy``,
+        which is mathematically equivalent but makes the call site
+        explicit and easy to audit.
+        """
+
+        if is_logits is True:
+            log_probs = F.log_softmax(logits_or_probs, dim=1)
+            return float(F.nll_loss(log_probs, labels).item())
+
+        if is_logits is False:
+            log_probs = logits_or_probs.clamp_min(1e-12).log()
+            return float(F.nll_loss(log_probs, labels).item())
+
+        # Auto-detect (warned in ``_to_probs``); mirror the original
+        # heuristic here so callers that haven't been updated yet still
+        # work, but emit a warning so the ambiguity is visible.
+        x_min = float(logits_or_probs.min())
+        x_max = float(logits_or_probs.max())
+        if x_max <= 1.0 and x_min >= 0.0:
+            logger.warning(
+                "negative_log_likelihood: is_logits not specified; "
+                "tensor lies in [0, 1] so assuming probabilities."
+            )
+            log_probs = logits_or_probs.clamp_min(1e-12).log()
         else:
-            loss = F.cross_entropy(logits_or_probs, labels)
+            logger.warning(
+                "negative_log_likelihood: is_logits not specified; "
+                "tensor outside [0, 1] (min=%.4f, max=%.4f) so "
+                "assuming logits.",
+                x_min,
+                x_max,
+            )
+            log_probs = F.log_softmax(logits_or_probs, dim=1)
 
-        return float(loss.item())
+        return float(F.nll_loss(log_probs, labels).item())
 
     # =====================================================
     # RELIABILITY
@@ -156,9 +232,11 @@ class CalibrationMetrics:
         self,
         logits_or_probs: torch.Tensor,
         labels: torch.Tensor,
+        *,
+        is_logits: Optional[bool] = None,
     ) -> Dict[str, np.ndarray]:
 
-        probs = self._to_probs(logits_or_probs)
+        probs = self._to_probs(logits_or_probs, is_logits=is_logits)
         self._validate(probs, labels)
 
         conf, preds = torch.max(probs, dim=1)
@@ -196,13 +274,23 @@ class CalibrationMetrics:
         self,
         logits_or_probs: torch.Tensor,
         labels: torch.Tensor,
+        *,
+        is_logits: Optional[bool] = None,
     ) -> Dict[str, float]:
 
         metrics = {
-            "ece": self.expected_calibration_error(logits_or_probs, labels),
-            "mce": self.maximum_calibration_error(logits_or_probs, labels),
-            "brier_score": self.brier_score(logits_or_probs, labels),
-            "nll": self.negative_log_likelihood(logits_or_probs, labels),
+            "ece": self.expected_calibration_error(
+                logits_or_probs, labels, is_logits=is_logits
+            ),
+            "mce": self.maximum_calibration_error(
+                logits_or_probs, labels, is_logits=is_logits
+            ),
+            "brier_score": self.brier_score(
+                logits_or_probs, labels, is_logits=is_logits
+            ),
+            "nll": self.negative_log_likelihood(
+                logits_or_probs, labels, is_logits=is_logits
+            ),
         }
 
         logger.info("Calibration metrics: %s", metrics)

@@ -26,6 +26,16 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class PropagandaDetectorConfig:
+    """Standalone-test config for :class:`PropagandaDetector`.
+
+    CFG4: see :class:`BiasClassifierConfig` — the canonical source for
+    ``model_name`` / ``pooling`` / ``dropout`` / ``device`` /
+    ``label_smoothing`` in production is :class:`MultiTaskModelConfig`,
+    via :meth:`PropagandaDetector.from_model_config`. This dataclass
+    exists so the detector can be instantiated in isolation (unit
+    tests, single-task experiments).
+    """
+
     model_name: str = "roberta-base"
     pooling: str = "cls"
     dropout: float = 0.1

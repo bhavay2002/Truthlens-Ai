@@ -96,6 +96,16 @@ class MultiTaskTruthLensConfig:
        ``config=`` here) raises a ``TypeError`` rather than silently
        constructing the wrong model. Unknown keyword arguments are
        rejected by the underlying dataclass init.
+
+    .. note::
+       **CFG2 — strict validation.** Because this is a typed
+       ``@dataclass`` with no ``**kwargs`` catch-all, any unknown
+       attribute supplied at construction time fails immediately with
+       ``TypeError``. There is no silent-drop / silent-coerce path:
+       a typo in a YAML field surfaces as a load-time error rather
+       than a model that quietly ignores the override. Update the
+       dataclass schema (and the docs above) before adding a new
+       field.
     """
 
     model_name: str = "roberta-base"

@@ -88,6 +88,63 @@ class BaseModel(nn.Module, ABC):
         return result
 
     # =====================================================
+    # OPTIMIZER PARAMETER GROUPS  (G4)
+    # =====================================================
+    #
+    # G4: post-hoc calibration parameters (notably ``self.temperature``
+    # on the per-task classifiers) MUST NOT receive the same gradient
+    # signal as the rest of the model. They are fitted on held-out
+    # logits AFTER training; if the main optimizer touches them the
+    # network learns to drive ``T`` to a degenerate value to lower the
+    # loss, which destroys both the calibration AND the classification
+    # head it scales.
+    #
+    # Trainers should build their optimizer with two parameter groups:
+    # one for ``model.get_optimization_parameters()`` (the parameters
+    # that should be updated by the main loss) and one for
+    # ``model.get_calibration_parameters()`` (excluded from the main
+    # optimizer; fitted separately by ``TemperatureScaler`` /
+    # ``fit_temperature``). The names below are the canonical
+    # markers — anything matching is treated as a calibration param.
+
+    #: Names that identify a parameter as belonging to the calibration
+    #: subsystem (G4). Subclasses may override or extend this set.
+    CALIBRATION_PARAMETER_NAMES: tuple[str, ...] = ("temperature",)
+
+    def _is_calibration_parameter_name(self, name: str) -> bool:
+        """Return True iff ``name`` is a calibration parameter (G4).
+
+        We match on the *trailing* component of the dotted parameter
+        name so that nested modules with their own temperature scalar
+        are picked up too (e.g. ``"task_heads.bias.temperature"``).
+        """
+        leaf = name.rsplit(".", 1)[-1]
+        return leaf in self.CALIBRATION_PARAMETER_NAMES
+
+    def get_calibration_parameters(self) -> list[nn.Parameter]:
+        """Parameters fitted post-hoc on held-out logits (G4).
+
+        These MUST be excluded from the main training optimizer.
+        """
+        return [
+            p
+            for n, p in self.named_parameters()
+            if self._is_calibration_parameter_name(n)
+        ]
+
+    def get_optimization_parameters(self) -> list[nn.Parameter]:
+        """Parameters that the main training optimizer should update (G4).
+
+        Complement of ``get_calibration_parameters`` — every parameter
+        on the model that is NOT a calibration scalar.
+        """
+        return [
+            p
+            for n, p in self.named_parameters()
+            if not self._is_calibration_parameter_name(n)
+        ]
+
+    # =====================================================
     # CHECKPOINT
     # =====================================================
 

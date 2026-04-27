@@ -41,10 +41,30 @@ def _compute_confidence(
     return None
 
 
-def _compute_entropy(probs: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+def _compute_entropy(
+    probs: Optional[torch.Tensor],
+    *,
+    logits: Optional[torch.Tensor] = None,
+) -> Optional[torch.Tensor]:
+    """Numerically stable Shannon entropy.
+
+    N1: when ``logits`` are available we compute entropy as
+    ``-sum(softmax(x) * log_softmax(x))`` so the ``log`` is taken in
+    log-space rather than against an EPS-shifted probability. The
+    additive ``+1e-12`` formulation is dominated by the EPS term once
+    the distribution is peaked and biases entropy toward a fixed
+    lower bound. When only ``probs`` are passed we still avoid the
+    additive bias by clamping with ``clamp_min`` before ``log``.
+    """
+    if logits is not None:
+        log_probs = torch.log_softmax(logits, dim=-1)
+        return -(log_probs.exp() * log_probs).sum(dim=-1)
+
     if probs is None:
         return None
-    return -torch.sum(probs * torch.log(probs + 1e-12), dim=-1)
+
+    log_probs = probs.clamp_min(1e-12).log()
+    return -(probs * log_probs).sum(dim=-1)
 
 
 # =========================================================
@@ -170,7 +190,10 @@ class PredictionOutput:
             except Exception:
                 pass
 
-        entropy = _compute_entropy(probabilities)
+        # N1: pass ``logits`` through so entropy is computed in
+        # log-space when possible — strictly more accurate than the
+        # ``log(probs + EPS)`` fallback.
+        entropy = _compute_entropy(probabilities, logits=logits)
 
         self.tasks[task_name] = TaskPrediction(
             logits=logits,

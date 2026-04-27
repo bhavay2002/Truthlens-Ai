@@ -41,6 +41,14 @@ class KnowledgeDistillationLoss(nn.Module):
         L = alpha * CE + (1 - alpha) * KL(student || teacher)
     """
 
+    # N2: ``ignore_index`` is the standard PyTorch convention for "no
+    # label here, exclude from loss". The previous implementation hard-
+    # coded the default and silently included rows with ``label == -100``
+    # (sentinel produced by every HuggingFace tokenizer for padded /
+    # masked positions) in the cross-entropy, biasing gradients toward
+    # whatever class index the sentinel happened to coincide with.
+    IGNORE_INDEX: int = -100
+
     def __init__(self, config: DistillationConfig) -> None:
         super().__init__()
         self.config = config
@@ -58,19 +66,42 @@ class KnowledgeDistillationLoss(nn.Module):
         # -------------------------
         # HARD LOSS (ground truth)
         # -------------------------
-        hard_loss = F.cross_entropy(student_logits, labels)
+        # N2: respect the ignore_index sentinel — rows with label
+        # ``-100`` represent positions with no supervision (padding,
+        # masked tokens, missing-task rows in multi-task batches) and
+        # must NOT contribute to the cross-entropy. ``F.cross_entropy``
+        # natively supports this through the ``ignore_index`` kwarg.
+        hard_loss = F.cross_entropy(
+            student_logits,
+            labels,
+            ignore_index=self.IGNORE_INDEX,
+        )
 
         # -------------------------
         # SOFT LOSS (teacher)
         # -------------------------
+        # N2 (cont): KL-divergence has no ``ignore_index``, so we
+        # explicitly mask out the no-label rows before reduction. Done
+        # by computing per-sample KL with ``reduction="none"``, summing
+        # over the class axis, masking, and dividing by the count of
+        # *valid* rows (mirrors ``reduction="batchmean"`` semantics).
         student_log_probs = F.log_softmax(student_logits / T, dim=-1)
-        teacher_probs = F.softmax(teacher_logits / T, dim=-1)
+        teacher_log_probs = F.log_softmax(teacher_logits / T, dim=-1)
+        teacher_probs = teacher_log_probs.exp()
 
-        soft_loss = F.kl_div(
-            student_log_probs,
-            teacher_probs,
-            reduction="batchmean",
-        ) * (T * T)
+        valid_mask = (labels != self.IGNORE_INDEX)
+        n_valid = int(valid_mask.sum().item())
+
+        if n_valid == 0:
+            # No supervised rows in this batch — return a zero soft loss
+            # that still lives in the autograd graph.
+            soft_loss = student_log_probs.sum() * 0.0
+        else:
+            per_sample_kl = (
+                teacher_probs * (teacher_log_probs - student_log_probs)
+            ).sum(dim=-1)
+            soft_loss = (per_sample_kl * valid_mask.float()).sum() / n_valid
+            soft_loss = soft_loss * (T * T)
 
         # -------------------------
         # TOTAL

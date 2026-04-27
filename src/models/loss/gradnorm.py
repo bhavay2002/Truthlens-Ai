@@ -42,19 +42,63 @@ class GradNormBalancer(BaseBalancer):
         task_losses: Dict[str, torch.Tensor],
     ) -> torch.Tensor:
 
-        weights = torch.exp(self.log_weights)
+        # N6: only consider tasks that actually contributed a loss to
+        # this batch. The previous ``task_losses[t]`` indexing raised a
+        # KeyError when a task was missing (real after we added the
+        # ignore-index path through ``_compute_task_loss``) AND it
+        # silently included tasks whose loss was ``None`` in the wrong
+        # rows of ``self.log_weights``. Iterate by *position* so the
+        # parameter and weight dimensions stay aligned; skip rows whose
+        # loss is missing or ``None``.
+        active_indices: list[int] = []
+        active_losses: list[torch.Tensor] = []
 
-        # ✅ normalize weights (CRITICAL)
+        for i, t in enumerate(self.task_names):
+            loss = task_losses.get(t)
+            if loss is None:
+                continue
+            active_indices.append(i)
+            active_losses.append(loss)
+
+        if not active_losses:
+            raise RuntimeError(
+                "GradNormBalancer.combine() received no active task "
+                "losses; nothing to combine."
+            )
+
+        # Select the *active* rows of log_weights (preserving autograd)
+        # and renormalise so the mean remains ~1 across active tasks.
+        active_idx_tensor = torch.tensor(
+            active_indices,
+            device=self.log_weights.device,
+        )
+        active_log_weights = self.log_weights.index_select(
+            0, active_idx_tensor
+        )
+        weights = torch.exp(active_log_weights)
         weights = weights * (len(weights) / weights.sum().detach())
 
-        losses = torch.stack([task_losses[t] for t in self.task_names])
+        losses = torch.stack(active_losses)
 
         if not self._initialized:
+            # Record initial losses only for the tasks that showed up
+            # this batch; tasks that arrive later will be initialised
+            # on their first appearance via the same code path.
             self.initial_losses = {
                 t: float(task_losses[t].detach().item())
                 for t in self.task_names
+                if task_losses.get(t) is not None
             }
             self._initialized = True
+        else:
+            # Late-arriving task — record its initial loss now so the
+            # subsequent ``current / initial`` ratio in
+            # ``on_before_backward`` is well-defined.
+            for t in self.task_names:
+                loss_t = task_losses.get(t)
+                if loss_t is None or t in self.initial_losses:
+                    continue
+                self.initial_losses[t] = float(loss_t.detach().item())
 
         weighted_losses = weights * losses
 
@@ -76,17 +120,35 @@ class GradNormBalancer(BaseBalancer):
         if shared_parameters is None:
             raise RuntimeError("GradNorm requires shared_parameters")
 
+        # N6: same active-task filter as ``combine`` — operate only on
+        # the rows of ``log_weights`` whose task showed up in this
+        # batch and whose initial loss has been recorded. Iterating by
+        # position keeps parameter / weight / grad-norm dimensions in
+        # lock-step.
+        active_indices: list[int] = []
+        active_tasks: list[str] = []
+        active_losses: list[torch.Tensor] = []
+
+        for i, task in enumerate(self.task_names):
+            loss = task_losses.get(task)
+            if loss is None or task not in self.initial_losses:
+                continue
+            active_indices.append(i)
+            active_tasks.append(task)
+            active_losses.append(loss)
+
+        if not active_losses:
+            return
+
         weights = torch.exp(self.log_weights)
         weights = weights * (len(weights) / weights.sum().detach())
 
         grad_norms = []
 
-        for i, task in enumerate(self.task_names):
-
-            loss = task_losses[task]
+        for idx, loss in zip(active_indices, active_losses):
 
             grads = torch.autograd.grad(
-                weights[i] * loss,
+                weights[idx] * loss,
                 shared_parameters,
                 retain_graph=True,
                 create_graph=True,
@@ -105,16 +167,16 @@ class GradNormBalancer(BaseBalancer):
         grad_norms = torch.stack(grad_norms)
 
         self._last_grad_norms = {
-            t: g.detach() for t, g in zip(self.task_names, grad_norms)
+            t: g.detach() for t, g in zip(active_tasks, grad_norms)
         }
 
         current_losses = torch.tensor(
-            [task_losses[t].detach().item() for t in self.task_names],
+            [loss.detach().item() for loss in active_losses],
             device=grad_norms.device,
         )
 
         initial_losses = torch.tensor(
-            [self.initial_losses[t] for t in self.task_names],
+            [self.initial_losses[t] for t in active_tasks],
             device=grad_norms.device,
         )
 

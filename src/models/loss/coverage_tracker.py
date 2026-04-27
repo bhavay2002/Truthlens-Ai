@@ -20,6 +20,7 @@ class EMACoverageTracker:
         cap: float = 10.0,
         enabled: bool = True,
         warmup_steps: int = 0,  # ✅ optional (no behavior change by default)
+        temper: float = 0.5,
     ) -> None:
 
         if not 0.0 < alpha <= 1.0:
@@ -34,11 +35,24 @@ class EMACoverageTracker:
         if warmup_steps < 0:
             raise ValueError(f"warmup_steps must be >= 0, got {warmup_steps}")
 
+        if not 0.0 < temper <= 1.0:
+            raise ValueError(
+                f"temper must be in (0, 1], got {temper}"
+            )
+
         self.alpha = float(alpha)
         self.floor = float(floor)
         self.cap = float(cap)
         self.enabled = enabled
         self.warmup_steps = int(warmup_steps)
+        # N3: ``temper`` is the exponent applied to the
+        # ``target_cov / cov`` ratio when deriving the per-task
+        # multiplier. ``temper=1.0`` recovers the old behaviour
+        # (multiplier = target / cov, capped); ``temper=0.5`` (the
+        # default) is sqrt-tempering, which is what the audit asks
+        # for: it dampens early-step swings when one task dominates
+        # the EMA, while still removing imbalance asymptotically.
+        self.temper = float(temper)
 
         # per-task EMA coverage
         self._coverage: Dict[str, float] = {}
@@ -100,6 +114,32 @@ class EMACoverageTracker:
     # APPLY WEIGHTING
     # =========================================================
 
+    def _target_coverage(self) -> float:
+        """Mean of the per-task EMA coverage values, floored.
+
+        N3: anchoring multipliers to the *mean* coverage rather than
+        ``1.0`` keeps them centred around 1 (so the total loss scale
+        is preserved) and gives an interpretable target — "the typical
+        task". Falls back to ``floor`` when no task has been seen yet.
+        """
+        if not self._coverage:
+            return self.floor
+        return max(
+            sum(self._coverage.values()) / len(self._coverage),
+            self.floor,
+        )
+
+    def _multiplier_for(self, cov: float, target_cov: float) -> float:
+        """Sqrt-tempered (default) multiplier with a hard cap.
+
+        Implements ``min((target / cov) ** temper, cap)``. The temper
+        exponent < 1 dampens swings when ``cov`` is far below
+        ``target`` while still removing imbalance asymptotically.
+        """
+        cov_safe = max(cov, self.floor)
+        ratio = target_cov / cov_safe
+        return min(ratio ** self.temper, self.cap)
+
     def weight(
         self,
         task: str,
@@ -121,8 +161,11 @@ class EMACoverageTracker:
         if step < self.warmup_steps:
             return loss
 
-        cov = max(self._coverage.get(task, 0.0), self.floor)
-        multiplier = min(1.0 / cov, self.cap)
+        target_cov = self._target_coverage()
+        multiplier = self._multiplier_for(
+            self._coverage.get(task, 0.0),
+            target_cov,
+        )
 
         # ---- device-safe tensor ----
         multiplier_tensor = loss.new_tensor(multiplier)
@@ -139,13 +182,11 @@ class EMACoverageTracker:
         return dict(self._coverage)
 
     def get_multipliers(self) -> Dict[str, float]:
-        result = {}
-
-        for t, cov in self._coverage.items():
-            cov_safe = max(cov, self.floor)
-            result[t] = min(1.0 / cov_safe, self.cap)
-
-        return result
+        target_cov = self._target_coverage()
+        return {
+            t: self._multiplier_for(cov, target_cov)
+            for t, cov in self._coverage.items()
+        }
 
     def reset(self) -> None:
         self._coverage.clear()

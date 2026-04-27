@@ -28,6 +28,22 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class BiasClassifierConfig:
+    """Standalone-test config for :class:`BiasClassifier`.
+
+    CFG4: in production training/inference the source of truth for
+    encoder placement, pooling, dropout, and label smoothing is the
+    repo-wide :class:`MultiTaskModelConfig` — use
+    :meth:`BiasClassifier.from_model_config` (which reads those values
+    off ``model_config.encoder`` / ``model_config.dropout`` /
+    ``model_config.metadata``). The fields below duplicate those
+    values intentionally so the classifier can be instantiated in
+    isolation (unit tests, single-task experiments) without spinning
+    up the full multitask config; their defaults are deliberately
+    chosen to match the multitask defaults. If you ever need to vary
+    them for a real run, prefer editing the multitask config instead
+    of constructing this dataclass directly.
+    """
+
     model_name: str = "roberta-base"
     pooling: str = "cls"
     dropout: float = 0.1

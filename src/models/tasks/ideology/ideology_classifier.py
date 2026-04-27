@@ -26,6 +26,16 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class IdeologyClassifierConfig:
+    """Standalone-test config for :class:`IdeologyClassifier`.
+
+    CFG4: see the matching note on :class:`BiasClassifierConfig`. The
+    canonical source for ``model_name`` / ``pooling`` / ``dropout`` /
+    ``device`` / ``label_smoothing`` is :class:`MultiTaskModelConfig`;
+    use :meth:`IdeologyClassifier.from_model_config` for production
+    runs and reserve this dataclass for isolated experiments and unit
+    tests.
+    """
+
     model_name: str = "roberta-base"
     pooling: str = "cls"
     dropout: float = 0.1

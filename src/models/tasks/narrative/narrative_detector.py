@@ -22,6 +22,16 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class NarrativeDetectorConfig:
+    """Standalone-test config for :class:`NarrativeDetector`.
+
+    CFG4: see :class:`BiasClassifierConfig` — the canonical source for
+    ``model_name`` / ``pooling`` / ``dropout`` / ``device`` is
+    :class:`MultiTaskModelConfig`, via
+    :meth:`NarrativeDetector.from_model_config`. This dataclass exists
+    so the detector can be instantiated in isolation (unit tests,
+    single-task experiments).
+    """
+
     model_name: str = "roberta-base"
     pooling: str = "cls"
     dropout: float = 0.1

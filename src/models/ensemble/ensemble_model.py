@@ -56,14 +56,15 @@ class EnsembleModel(nn.Module):
         else:
             self._weights = None
 
-        self.device = torch.device(self.config.device)
-        # P2: move sub-models to the ensemble's device exactly once,
-        # at construction time. The previous code did
-        # ``model = model.to(self.device)`` inside ``forward``, which
-        # both incurred a device-check on every call AND quietly
-        # reassigned the local variable instead of materialising the
-        # move on the registered ``nn.ModuleList`` entry.
-        self.to(self.device)
+        # G3: ``self.config.device`` is a *string* captured once at
+        # construction, but PyTorch can move the module across devices
+        # at any time (``.to(...)``, DDP, autocast contexts, etc.). We
+        # therefore record the *initial* placement only as a hint and
+        # always derive the current device from the live parameters at
+        # forward time via ``_runtime_device()``. ``add_model`` and the
+        # initial ``self.to(...)`` use the hint so members are pre-moved.
+        self._init_device_hint = torch.device(self.config.device)
+        self.to(self._init_device_hint)
 
         logger.info(
             "EnsembleModel | strategy=%s | models=%d",
@@ -74,6 +75,20 @@ class EnsembleModel(nn.Module):
     # =====================================================
     # FORWARD
     # =====================================================
+
+    def _runtime_device(self) -> torch.device:
+        """Live device of the ensemble (G3).
+
+        Reading from a parameter tracks any subsequent ``.to(...)`` /
+        DDP move; the captured-at-init ``self.config.device`` string
+        does not. Falls back to the construction-time hint if the
+        module somehow has no parameters yet (e.g. empty stub models
+        in tests).
+        """
+        try:
+            return next(self.parameters()).device
+        except StopIteration:
+            return self._init_device_hint
 
     def forward(self, *args, **kwargs) -> Dict[str, Any]:
 
@@ -98,21 +113,27 @@ class EnsembleModel(nn.Module):
             denom = vote_counts.sum(dim=-1, keepdim=True).clamp(min=1.0)
             probs = vote_counts / denom
             logits = torch.log(probs.clamp(min=1e-12))
+            log_probs = logits  # already in log-space (== log(probs))
 
         elif self.config.strategy == "weighted" and self._weights is not None:
+            # G3: align weights with the *live* tensor's device, not the
+            # init-time string captured in ``self.config.device``.
             weights = self._weights.to(stacked.device).view(
                 -1, *([1] * (stacked.dim() - 1))
             )
             logits = (stacked * weights).sum(dim=0) / weights.sum()
-            probs = F.softmax(logits, dim=-1)
+            log_probs = F.log_softmax(logits, dim=-1)
+            probs = log_probs.exp()
 
         else:
             logits = stacked.mean(dim=0)
-            probs = F.softmax(logits, dim=-1)
+            log_probs = F.log_softmax(logits, dim=-1)
+            probs = log_probs.exp()
 
         preds = probs.argmax(dim=-1)
         confidence = probs.max(dim=-1).values
-        entropy = -torch.sum(probs * torch.log(probs + 1e-12), dim=-1)
+        # N1: entropy in log-space — never ``log(probs + EPS)``.
+        entropy = -(probs * log_probs).sum(dim=-1)
 
         return {
             "logits": logits,
@@ -151,10 +172,10 @@ class EnsembleModel(nn.Module):
     # =====================================================
 
     def add_model(self, model: nn.Module) -> None:
-        # P2: keep the device-placement invariant — every member of
-        # ``self.models`` lives on ``self.device`` — true for any model
-        # added after construction, not just those passed to ``__init__``.
-        self.models.append(model.to(self.device))
+        # P2 + G3: keep the device-placement invariant — every member of
+        # ``self.models`` lives on the *current* runtime device, which
+        # may differ from the init-time hint after a ``.to(...)`` move.
+        self.models.append(model.to(self._runtime_device()))
 
     def get_num_models(self) -> int:
         return len(self.models)

@@ -92,15 +92,25 @@ class BaseClassifier(BaseModel):
         output: Dict[str, torch.Tensor] = {"logits": logits}
 
         if not self.training:
+            # N1: stable entropy via ``log_softmax`` / ``logsigmoid`` so
+            # we never take ``log(prob + 1e-12)``. The additive EPS
+            # dominates the log term whenever the distribution is peaked
+            # and biases the entropy toward a fixed lower bound.
             if self.multi_label:
+                log_p = F.logsigmoid(logits)
+                log_1mp = F.logsigmoid(-logits)
                 probs = torch.sigmoid(logits)
                 preds = (probs > 0.5).long()
+                confidence = probs.max(dim=-1).values
+                entropy = -(
+                    probs * log_p + (1.0 - probs) * log_1mp
+                ).mean(dim=-1)
             else:
-                probs = F.softmax(logits, dim=-1)
+                log_probs = F.log_softmax(logits, dim=-1)
+                probs = log_probs.exp()
                 preds = torch.argmax(probs, dim=-1)
-
-            confidence = probs.max(dim=-1).values
-            entropy = -torch.sum(probs * torch.log(probs + 1e-12), dim=-1)
+                confidence = probs.max(dim=-1).values
+                entropy = -(probs * log_probs).sum(dim=-1)
 
             output["probabilities"] = probs
             output["predictions"] = preds

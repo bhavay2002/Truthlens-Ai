@@ -9,6 +9,13 @@ import torch.nn as nn
 import torch.optim as optim
 
 from src.evaluation.reliability_diagram import ReliabilityDiagram
+# CFG6: ``TemperatureScaler`` now lives in ``src.models.calibration``.
+# We re-export it from this module so the public ``src.evaluation.
+# calibration.TemperatureScaler`` symbol stays stable, while the
+# import arrow runs ``evaluation -> models`` like every other
+# production-stack import (the previous arrangement had the models
+# layer importing from evaluation, which was a layering violation).
+from src.models.calibration.temperature_scaling import TemperatureScaler  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -71,16 +78,9 @@ def extract_confidence(probs: np.ndarray, *, task_type: str = "multiclass") -> n
 # =========================================================
 # TEMPERATURE SCALER
 # =========================================================
-
-class TemperatureScaler(nn.Module):
-    """A single learnable scalar that divides the logits."""
-
-    def __init__(self):
-        super().__init__()
-        self.temperature = nn.Parameter(torch.ones(1))
-
-    def forward(self, logits: torch.Tensor) -> torch.Tensor:
-        return logits / torch.clamp(self.temperature, min=EPS)
+# CFG6: ``TemperatureScaler`` is now defined in
+# ``src.models.calibration.temperature_scaling`` and re-exported above.
+# The class is intentionally NOT redefined here.
 
 
 def fit_temperature(

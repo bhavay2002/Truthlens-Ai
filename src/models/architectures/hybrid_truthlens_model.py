@@ -102,6 +102,36 @@ class HybridTruthLensModel(nn.Module):
             {name: nn.Linear(hidden_dim, n) for name, n in resolved.items()}
         )
 
+        # CFG1: explicit Xavier init for the projection / fusion /
+        # classification heads. ``nn.Linear`` defaults to
+        # ``kaiming_uniform_`` which is tuned for ReLU *hidden* layers
+        # — fine for ``feature_proj`` and ``fusion`` but it leaves the
+        # task heads with a noticeably wider output distribution than
+        # the per-task standalone classifiers (which initialise on top
+        # of HF's pretrained head with much smaller variance). The
+        # mismatch shows up at evaluation time as the hybrid model
+        # being systematically over-confident on cold-start runs. We
+        # re-init explicitly so behaviour is deterministic and matches
+        # the rest of the model family.
+        self._init_weights()
+
+    # =====================================================
+    # INIT  (CFG1)
+    # =====================================================
+
+    def _init_weights(self) -> None:
+        for module in (self.feature_proj, self.fusion):
+            for layer in module:
+                if isinstance(layer, nn.Linear):
+                    nn.init.xavier_uniform_(layer.weight)
+                    if layer.bias is not None:
+                        nn.init.zeros_(layer.bias)
+
+        for head in self.task_heads.values():
+            nn.init.xavier_uniform_(head.weight)
+            if head.bias is not None:
+                nn.init.zeros_(head.bias)
+
     # =====================================================
     # FORWARD
     # =====================================================
