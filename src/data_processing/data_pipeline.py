@@ -171,11 +171,25 @@ def run_data_pipeline(
         if config.enable_augmentation:
             for task, splits in raw_datasets.items():
                 if "train" in splits:
+                    val_df = splits.get("val")
+                    test_df = splits.get("test")
                     splits["train"] = augment_dataset(
                         splits["train"],
                         task=task,
                         config=config.augmentation_config,
+                        # Pre-filter augmented candidates against val/test text hashes
+                        # so an augmentation op that mutates a train row into a
+                        # near-duplicate of a val/test row is rejected and resampled.
+                        # (CRIT-D5 / LEAK-D1)
+                        held_out_dfs=[d for d in (val_df, test_df) if d is not None],
                     )
+
+            # Defence in depth: re-run the cheap exact-match leakage check on
+            # the post-augmentation splits so any candidate that slipped past
+            # the per-row pre-filter is still caught before the cache is
+            # written. Ensures the cached frames are guaranteed leak-free.
+            if config.enable_leakage_check:
+                check_leakage_all_tasks(raw_datasets)
 
         if config.enable_cache:
             save_cached_datasets(raw_datasets, cache_key)

@@ -130,15 +130,44 @@ def check_leakage_all_tasks(
 
 
 # =========================================================
-# OPT-IN NEAR-DUP (O(n·m) — small splits only)
+# OPT-IN NEAR-DUP — fail-fast cap (PERF-D3)
 # =========================================================
+
+# Hard ceiling on (|df1| · |df2|) before we subsample. SequenceMatcher
+# at ~3 µs/comparison gives ~30 s at 1e7 pairs — anything larger is a
+# foot-gun. For 10k × 10k splits the original code triggered ~1e8
+# comparisons (≈5 min). When the ceiling is hit we evenly subsample
+# both sides and warn loudly so the result is still informative.
+_MAX_NEAR_DUP_PAIRS = 10_000_000
+
 
 def check_near_duplicates(
     df1: pd.DataFrame,
     df2: pd.DataFrame,
     threshold: float = 0.9,
+    *,
+    max_pairs: int = _MAX_NEAR_DUP_PAIRS,
+    random_state: int = 0,
 ) -> int:
     from difflib import SequenceMatcher
+    from math import isqrt
+
+    n1, n2 = len(df1), len(df2)
+    total_pairs = n1 * n2
+
+    if total_pairs > max_pairs:
+        # Even subsample: keep √max_pairs from each side.
+        target = max(1, isqrt(max_pairs))
+        if n1 > target:
+            df1 = df1.sample(n=target, random_state=random_state)
+        if n2 > target:
+            df2 = df2.sample(n=target, random_state=random_state)
+        logger.warning(
+            "check_near_duplicates: %d × %d = %d pairs exceeds cap (%d). "
+            "Subsampled to %d × %d. For an exact answer on splits this "
+            "large, swap SequenceMatcher for MinHash + LSH.",
+            n1, n2, total_pairs, max_pairs, len(df1), len(df2),
+        )
 
     overlaps = 0
     texts1 = df1["text"].astype(str).tolist()

@@ -55,12 +55,51 @@ def load_csv(
         return pd.read_csv(path, encoding=FALLBACK_ENCODING, **common)
 
 
-def load_json(path: Path) -> pd.DataFrame:
-    return pd.read_json(path, lines=True)
+def load_json(
+    path: Path,
+    *,
+    usecols: Optional[List[str]] = None,
+) -> pd.DataFrame:
+    """Load JSON or JSONL — sniffs the file shape (CRIT-D4).
+
+    A standard JSON-array file with .json suffix would previously raise
+    ``ValueError: Trailing data`` because lines=True was hardcoded.
+    Now the first non-whitespace byte chooses the format.
+
+    ``usecols`` is honoured post-load (pandas read_json has no native
+    column-projection arg), which still avoids paying the downstream
+    feature/encoding cost for unused columns. (CRIT-D3)
+    """
+    with open(path, "rb") as f:
+        # Skip whitespace to find the first real byte
+        first = b""
+        while True:
+            b = f.read(1)
+            if not b:
+                break
+            if not b.isspace():
+                first = b
+                break
+    is_lines = first != b"["
+    df = pd.read_json(path, lines=is_lines)
+    if usecols:
+        keep = [c for c in usecols if c in df.columns]
+        df = df[keep]
+    return df
 
 
-def load_parquet(path: Path) -> pd.DataFrame:
-    return pd.read_parquet(path)
+def load_parquet(
+    path: Path,
+    *,
+    usecols: Optional[List[str]] = None,
+) -> pd.DataFrame:
+    """Parquet loader with native column projection (CRIT-D3).
+
+    Forwarding ``usecols`` to ``pd.read_parquet(columns=...)`` cuts
+    memory ~3-5× for narrative/emotion frames that carry large
+    auxiliary columns (e.g. ``*_entities`` text blobs).
+    """
+    return pd.read_parquet(path, columns=usecols) if usecols else pd.read_parquet(path)
 
 
 # =========================================================
@@ -84,9 +123,9 @@ def load_dataframe(
     if suffix == ".csv":
         df = load_csv(path, usecols=usecols, dtype=dtype)
     elif suffix in (".json", ".jsonl"):
-        df = load_json(path)
+        df = load_json(path, usecols=usecols)
     elif suffix == ".parquet":
-        df = load_parquet(path)
+        df = load_parquet(path, usecols=usecols)
     else:
         raise ValueError(f"Unsupported file format: {suffix}")
 

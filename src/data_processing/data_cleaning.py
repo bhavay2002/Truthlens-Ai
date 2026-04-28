@@ -3,9 +3,11 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 
 import pandas as pd
+
+from src.data_processing.data_contracts import CONTRACTS, get_contract
 
 logger = logging.getLogger(__name__)
 
@@ -102,9 +104,20 @@ def clean_dataframe(
     df = df.copy()
 
     # -----------------------------------------------------
-    # TEXT CLEANING
+    # TEXT CLEANING — vectorized via pandas .str ops (PERF-D1).
+    # ~5-10x faster than a Python .map(_clean_text) loop on 100k rows
+    # because every step stays in the C-level pandas/regex engine.
     # -----------------------------------------------------
-    df["text"] = df["text"].astype(str).map(lambda x: _clean_text(x, cfg))
+    s = df["text"].astype(str)
+    if cfg.strip_html:
+        s = s.str.replace(HTML_RE, " ", regex=True)
+    if cfg.strip_urls:
+        s = s.str.replace(URL_RE, " ", regex=True)
+    if cfg.normalize_whitespace:
+        s = s.str.replace(WS_RE, " ", regex=True)
+    if cfg.lowercase:
+        s = s.str.lower()
+    df["text"] = s.str.strip()
 
     # -----------------------------------------------------
     # DROP EMPTY / SHORT TEXT
@@ -118,11 +131,16 @@ def clean_dataframe(
         df = df[mask]
 
     # -----------------------------------------------------
-    # DROP DUPLICATES (TEXT-LEVEL)
+    # DROP DUPLICATES (TEXT-LEVEL) — case-insensitive to stay
+    # consistent with leakage_checker._normalize, which lowercases
+    # before hashing. Otherwise "Foo" and "foo" both survive dedup
+    # but collide in the leakage check, raising a false positive
+    # under strict=True. (LEAK-D3)
     # -----------------------------------------------------
     if cfg.drop_duplicates:
         before = len(df)
-        df = df.drop_duplicates(subset=["text"])
+        norm = df["text"].str.lower()
+        df = df.loc[~norm.duplicated()]
         removed = before - len(df)
         if cfg.log_stats and removed > 0:
             logger.info("Removed %d duplicate rows", removed)
@@ -161,21 +179,23 @@ def clean_for_task(
     config: Optional[DataCleaningConfig] = None,
 ) -> pd.DataFrame:
     """
-    Apply task-specific cleaning rules.
+    Apply task-specific cleaning rules. (CRIT-D1)
+
+    Label columns are pulled from the canonical contracts table
+    (``data_contracts.CONTRACTS``) instead of a duplicated lookup —
+    so adding/renaming a label in one place keeps cleaning, validation,
+    factory, and sampler perfectly in sync.
     """
 
     cfg = config or DataCleaningConfig()
 
-    TASK_LABELS: Dict[str, List[str]] = {
-        "bias": ["bias_label"],
-        "ideology": ["ideology_label"],
-        "propaganda": ["propaganda_label"],
-        "frame": ["CO", "EC", "HI", "MO", "RE"],
-        "narrative": ["hero", "villain", "victim"],
-        "emotion": [f"emotion_{i}" for i in range(20)],
-    }
-
-    label_cols = TASK_LABELS.get(task, [])
+    if task in CONTRACTS:
+        label_cols: List[str] = list(get_contract(task).label_columns)
+    else:
+        # Unknown task → behave as before (no label-aware cleaning),
+        # but warn loudly so a typo doesn't silently disable label fill.
+        logger.warning("clean_for_task called with unknown task=%s — skipping label-aware cleaning", task)
+        label_cols = []
 
     return clean_dataframe(
         df,

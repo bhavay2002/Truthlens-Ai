@@ -25,8 +25,8 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# bump this if pipeline logic changes
-CACHE_VERSION = "v3"
+# bump this if pipeline logic changes (v4: full-file fingerprint for files ≤ 2 MB, fixes CRIT-D2 collision band)
+CACHE_VERSION = "v4"
 
 _CACHE_DIR: Optional[Path] = None
 
@@ -56,19 +56,28 @@ def _hash_dict(obj: Dict) -> str:
 
 
 def _file_fingerprint(path: Path) -> Dict[str, Any]:
-    """Stable, mtime-free fingerprint: (size, sha256(head+tail))."""
+    """Stable, mtime-free fingerprint: (size, sha256(content)). (CRIT-D2)
+
+    Files ≤ 2 MB are hashed in full so two files of identical size +
+    identical first 1 MB but different tail cannot collide. Larger
+    files use head + tail to keep the cost bounded — this is the band
+    where a content collision is statistically negligible anyway.
+    """
     if not path.exists():
         return {"missing": True}
 
     size = path.stat().st_size
     h = hashlib.sha256()
     with open(path, "rb") as f:
-        head = f.read(1 << 20)  # 1 MB
-        h.update(head)
-        if size > (2 << 20):
-            f.seek(-(1 << 20), 2)  # last 1 MB
-            tail = f.read()
-            h.update(tail)
+        if size <= (2 << 20):
+            # Small / medium file → hash everything (fixes 1 MB < size ≤ 2 MB blind spot)
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        else:
+            # Large file → head + tail
+            h.update(f.read(1 << 20))
+            f.seek(-(1 << 20), 2)
+            h.update(f.read())
     return {"size": size, "sha": h.hexdigest()}
 
 

@@ -11,14 +11,22 @@ Notes:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import random
+from collections import Counter
 from dataclasses import dataclass
-from typing import Callable, List, Dict, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 
 import pandas as pd
 
+from src.data_processing.data_contracts import CONTRACTS, DataContract, get_contract
+
 logger = logging.getLogger(__name__)
+
+# A label signature is either an int (single-label classification) or a
+# tuple of 0/1 ints (multi-label). This is what label-coupled ops gate on.
+LabelSig = Optional[Union[int, Tuple[int, ...]]]
 
 # =========================================================
 # CONFIG
@@ -100,9 +108,31 @@ def _get_embedder():
 
 # =========================================================
 # BASIC OPS  (each receives a Random instance)
+#
+# Every op accepts an optional ``label=`` kwarg so the call site is
+# uniform. Ops that mutate the *meaning* of the row (propaganda /
+# bias / emotion markers) MUST gate on that label so we never inject
+# a propaganda marker into a propaganda_label=0 row — that would be
+# label-corrupted training data and actively teach the model to
+# ignore the marker. (CRIT-D6)
 # =========================================================
 
-def synonym_replacement(text: str, rng: random.Random) -> str:
+def _is_positive(label: LabelSig) -> bool:
+    """True if at least one label position is positive (multilabel) or
+    the single label equals 1 (binary classification)."""
+    if label is None:
+        # No label info available → fall through to original (loud, label-
+        # safe) behaviour: refuse to inject the marker.
+        return False
+    if isinstance(label, (tuple, list)):
+        return any(int(x) == 1 for x in label)
+    try:
+        return int(label) == 1
+    except (TypeError, ValueError):
+        return False
+
+
+def synonym_replacement(text: str, rng: random.Random, *, label: LabelSig = None) -> str:
     _ensure_nltk()
     stop = _STOPWORDS or set()
     words = text.split()
@@ -118,14 +148,14 @@ def synonym_replacement(text: str, rng: random.Random) -> str:
     return " ".join(words)
 
 
-def random_deletion(text: str, rng: random.Random, p: float = 0.1) -> str:
+def random_deletion(text: str, rng: random.Random, p: float = 0.1, *, label: LabelSig = None) -> str:
     words = text.split()
     if len(words) < 5:
         return text
     return " ".join(w for w in words if rng.random() > p)
 
 
-def random_swap(text: str, rng: random.Random) -> str:
+def random_swap(text: str, rng: random.Random, *, label: LabelSig = None) -> str:
     words = text.split()
     if len(words) < 3:
         return text
@@ -134,23 +164,34 @@ def random_swap(text: str, rng: random.Random) -> str:
     return " ".join(words)
 
 
-def ideology_frame_shift(text: str, rng: random.Random) -> str:
+def ideology_frame_shift(text: str, rng: random.Random, *, label: LabelSig = None) -> str:
     return f"In a broader ideological context, {text}"
 
 
-def propaganda_injection(text: str, rng: random.Random) -> str:
+def propaganda_injection(text: str, rng: random.Random, *, label: LabelSig = None) -> str:
+    # Only augment positives (CRIT-D6) — otherwise we teach the model that
+    # "Clearly, …" is irrelevant to the propaganda label.
+    if not _is_positive(label):
+        return text
     return f"Clearly, {text}"
 
 
-def narrative_reframe(text: str, rng: random.Random) -> str:
+def narrative_reframe(text: str, rng: random.Random, *, label: LabelSig = None) -> str:
     return f"From another perspective, {text}"
 
 
-def emotion_amplify(text: str, rng: random.Random) -> str:
+def emotion_amplify(text: str, rng: random.Random, *, label: LabelSig = None) -> str:
+    # Only augment rows that already have at least one emotion positive
+    # (CRIT-D6). For all-zero rows the amplifier would be label-corrupting.
+    if not _is_positive(label):
+        return text
     return f"{text} This is extremely emotional."
 
 
-def bias_injection(text: str, rng: random.Random) -> str:
+def bias_injection(text: str, rng: random.Random, *, label: LabelSig = None) -> str:
+    # Only augment positives (CRIT-D6).
+    if not _is_positive(label):
+        return text
     return f"{text} Obviously biased."
 
 
@@ -158,7 +199,7 @@ def bias_injection(text: str, rng: random.Random) -> str:
 # HEAVY OPS (OPTIONAL)
 # =========================================================
 
-def contextual_replacement(text: str, rng: random.Random) -> str:
+def contextual_replacement(text: str, rng: random.Random, *, label: LabelSig = None) -> str:
     mlm = _get_mlm()
     if mlm is None:
         return text
@@ -218,16 +259,85 @@ def augment_text(
     task: str,
     config: AugmentationConfig,
     rng: random.Random,
+    label: LabelSig = None,
 ) -> str:
     text = str(text).strip()
     if not text:
         return text
     op = select_operation(task, config, rng)
-    augmented = op(text, rng)
+    augmented = op(text, rng, label=label)
     if config.enable_heavy_ops:
         if not semantic_valid(text, augmented, config.similarity_threshold):
             return text
     return augmented
+
+
+# =========================================================
+# STRATIFIED SAMPLING + LEAK-AWARE AUGMENTATION (CRIT-D7 + CRIT-D5)
+# =========================================================
+
+def _label_signature(row: Dict[str, Any], contract: Optional[DataContract]) -> LabelSig:
+    """Build the per-row label key that label-coupled ops gate on."""
+    if contract is None:
+        return None
+    cols = contract.label_columns
+    if contract.task_type == "classification":
+        v = row.get(cols[0])
+        try:
+            return int(v) if v is not None and not (isinstance(v, float) and pd.isna(v)) else None
+        except (TypeError, ValueError):
+            return None
+    # multilabel
+    sig: List[int] = []
+    for c in cols:
+        v = row.get(c)
+        try:
+            sig.append(int(v))
+        except (TypeError, ValueError):
+            sig.append(0)
+    return tuple(sig)
+
+
+def _stratified_weights(
+    records: Sequence[Dict[str, Any]],
+    contract: Optional[DataContract],
+) -> Optional[List[float]]:
+    """Inverse-frequency weights so rare classes are oversampled (CRIT-D7).
+
+    Without this, ``rng.choice`` is uniform over the input — a 95/5
+    dataset stays 95/5 after augmentation and ``balancing.method:
+    oversample`` is a no-op.
+    """
+    if contract is None or not records:
+        return None
+    sigs = [_label_signature(r, contract) for r in records]
+    counts: Counter = Counter(sigs)
+    # Inverse frequency: rarer signature ⇒ larger weight.
+    return [1.0 / counts[s] for s in sigs]
+
+
+def _leak_key(text: Any) -> str:
+    """Mirror leakage_checker._normalize / _hash_text so the per-row
+    pre-filter agrees with the post-augmentation leakage check (CRIT-D5)."""
+    norm = "" if text is None else str(text).strip().lower()
+    return hashlib.sha256(norm.encode("utf-8")).hexdigest() if norm else ""
+
+
+def _build_held_out_hashes(
+    held_out_dfs: Optional[Iterable[pd.DataFrame]],
+    text_column: str,
+) -> Set[str]:
+    if not held_out_dfs:
+        return set()
+    out: Set[str] = set()
+    for d in held_out_dfs:
+        if d is None or text_column not in d.columns:
+            continue
+        for t in d[text_column].tolist():
+            k = _leak_key(t)
+            if k:
+                out.add(k)
+    return out
 
 
 def augment_dataset(
@@ -236,25 +346,65 @@ def augment_dataset(
     task: str,
     text_column: str = "text",
     config: Optional[AugmentationConfig] = None,
+    held_out_dfs: Optional[Iterable[pd.DataFrame]] = None,
 ) -> pd.DataFrame:
+    """Augment a training dataframe.
+
+    - Stratified by inverse class frequency so balancing actually balances. (CRIT-D7)
+    - Label-coupled ops only fire on positive rows. (CRIT-D6)
+    - If ``held_out_dfs`` (val + test) are provided, candidates whose
+      cleaned text collides with any held-out row are rejected and
+      resampled. Catches the leakage hole where augmentation could
+      mutate a train row into a near-duplicate of a val/test row. (CRIT-D5)
+    """
     config = config or AugmentationConfig()
     if config.multiplier <= 1:
         return df.copy()
 
+    contract = CONTRACTS.get(task)  # None ⇒ unknown task, skip label-aware paths
     rng = random.Random(config.random_seed)
     records = df.to_dict("records")
-    extra = int(len(records) * (config.multiplier - 1))
+    if not records:
+        return df.copy()
 
+    extra = int(len(records) * (config.multiplier - 1))
+    weights = _stratified_weights(records, contract)
+    held_out_hashes = _build_held_out_hashes(held_out_dfs, text_column)
+
+    indices = list(range(len(records)))
     augmented: List[Dict] = []
+    rejected = 0
+    max_attempts_per_slot = 5
+
     for _ in range(extra):
-        row = rng.choice(records).copy()
-        row[text_column] = augment_text(
-            row[text_column], task=task, config=config, rng=rng,
-        )
-        augmented.append(row)
+        for _attempt in range(max_attempts_per_slot):
+            idx = (
+                rng.choices(indices, weights=weights, k=1)[0]
+                if weights
+                else rng.choice(indices)
+            )
+            row = records[idx].copy()
+            label = _label_signature(row, contract)
+            new_text = augment_text(
+                row[text_column], task=task, config=config, rng=rng, label=label,
+            )
+            if held_out_hashes and _leak_key(new_text) in held_out_hashes:
+                rejected += 1
+                continue
+            row[text_column] = new_text
+            augmented.append(row)
+            break
+        # If every attempt collided with held-out, drop this slot rather than
+        # writing a known-leaky row — better to under-augment than to poison
+        # the training set.
 
     result = pd.concat([df, pd.DataFrame(augmented)], ignore_index=True)
 
+    if rejected:
+        logger.info(
+            "Augmentation | task=%s | held-out collisions rejected=%d (pre-filter saved leakage)",
+            task, rejected,
+        )
     logger.info(
         "Augmented | task=%s | original=%d | added=%d | total=%d",
         task, len(df), len(augmented), len(result),
