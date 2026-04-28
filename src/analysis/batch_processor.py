@@ -124,31 +124,26 @@ class BatchProcessor:
 
         indices, texts = zip(*batch)
 
-        # 🔥 SHARED CACHE FOR ENTIRE BATCH
-        shared_cache: Dict[str, Any] = {}
-
-        contexts = [
-            FeatureContext(
-                text=t,
-                shared=shared_cache,   # CRITICAL
-                cache={}
-            )
-            for t in texts
-        ]
+        # IMPORTANT: AnalysisPipeline.run_batch expects List[str]. We pass the
+        # raw strings so spaCy's `nlp.pipe` runs once across the batch and
+        # `from_doc` materializes a fresh FeatureContext per item with its
+        # own (per-doc) shared cache. Sharing a single dict across items
+        # caused cross-contamination of the cached spaCy doc (CRIT-A2).
+        text_list = list(texts)
 
         start_time = time.perf_counter()
 
         try:
-            results = self.pipeline.run_batch(contexts)
+            results = self.pipeline.run_batch(text_list)
 
             latency = time.perf_counter() - start_time
 
             if self.enable_profiling:
                 logger.debug(
                     "Batch processed | size=%d | latency=%.4f sec | throughput=%.2f/s",
-                    len(texts),
+                    len(text_list),
                     latency,
-                    len(texts) / max(latency, 1e-8),
+                    len(text_list) / max(latency, 1e-8),
                 )
 
             # preserve order
@@ -158,7 +153,7 @@ class BatchProcessor:
         except Exception:
             logger.exception("Batch failed → fallback")
 
-            yield from self._fallback_batch(batch, shared_cache)
+            yield from self._fallback_batch(batch)
 
     # =========================================================
     # FALLBACK (ROBUST)
@@ -167,19 +162,17 @@ class BatchProcessor:
     def _fallback_batch(
         self,
         batch: List[Tuple[int, str]],
-        shared_cache: Dict[str, Any],
     ) -> Generator[Dict[str, Any], None, None]:
 
         for idx, text in batch:
 
-            ctx = FeatureContext(
-                text=text,
-                shared=shared_cache,
-                cache={}
-            )
+            # AnalysisPipeline.run accepts a raw text string and builds its
+            # own per-call FeatureContext. We deliberately do NOT reuse a
+            # cross-item shared cache here: each item must get a fresh
+            # spaCy doc to avoid the contamination described in CRIT-A8.
 
             try:
-                result = self.pipeline.run(ctx)
+                result = self.pipeline.run(text)
                 yield self._attach_meta(result, idx)
 
             except Exception:

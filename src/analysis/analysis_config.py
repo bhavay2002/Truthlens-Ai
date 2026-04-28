@@ -176,6 +176,11 @@ def build_default_config() -> AnalysisConfig:
     # Analyzer defaults
     # -----------------------------------------------------
 
+    # NOTE: keys MUST match the names used by `build_default_registry`
+    # (see src/analysis/analysis_registry.py). Previously this dict used
+    # short aliases ("omission", "conflict", "propagation", ...) that did
+    # not exist in the registry — so per-analyzer enabled=False / ordering
+    # / ablation flags silently no-op'd. Keep these aligned.
     default_orders = {
         "rhetorical": 1,
         "argument": 2,
@@ -184,12 +189,13 @@ def build_default_config() -> AnalysisConfig:
         "emotion": 5,
         "framing": 6,
         "information": 7,
-        "omission": 8,
+        "information_omission": 8,
         "ideology": 9,
-        "conflict": 10,
-        "propagation": 11,
-        "temporal": 12,
-        "source": 13,
+        "narrative_role": 10,
+        "narrative_conflict": 11,
+        "narrative_propagation": 12,
+        "narrative_temporal": 13,
+        "source": 14,
     }
 
     for name, order in default_orders.items():
@@ -199,6 +205,30 @@ def build_default_config() -> AnalysisConfig:
         )
 
     return config
+
+
+# =========================================================
+# CONFIG ↔ REGISTRY VALIDATION (CRIT-A3)
+# =========================================================
+
+def validate_config_against_registry(
+    config: "AnalysisConfig",
+    registry_names: List[str],
+) -> None:
+    """Raise if `config.analyzers` references unknown analyzer names.
+
+    Called at pipeline construction time so misspelled aliases (the bug
+    behind CRIT-A3) fail loudly instead of silently no-op'ing ablation /
+    ordering / enabled flags.
+    """
+    registry_set = set(registry_names)
+    unknown = [n for n in config.analyzers.keys() if n not in registry_set]
+    if unknown:
+        raise RuntimeError(
+            "AnalysisConfig.analyzers references unknown analyzer names "
+            f"(not in registry): {unknown}. Registry contains: "
+            f"{sorted(registry_set)}"
+        )
 
 
 # =========================================================

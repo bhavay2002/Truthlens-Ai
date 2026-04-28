@@ -128,6 +128,22 @@ class BaseAnalyzer(ABC):
         if not hasattr(ctx, "cache") or ctx.cache is None:
             ctx.cache = {}
 
+        # CRIT-A6 / F16: a number of analyzers short-circuit when
+        # `ctx.n_tokens == 0`. That property is computed lazily by
+        # `ensure_tokens()`. Calling it here guarantees every analyzer
+        # gets a populated token view regardless of whether upstream
+        # construction (FeatureContext.from_doc, batch_processor, etc.)
+        # has run it. Cheap when already populated.
+        ensure = getattr(ctx, "ensure_tokens", None)
+        if callable(ensure):
+            try:
+                ensure()
+            except Exception:
+                logger.debug(
+                    "ensure_tokens() failed for %s; analyzer will see "
+                    "whatever the context already exposes", self.name,
+                )
+
     # =========================================================
     # OUTPUT VALIDATION
     # =========================================================

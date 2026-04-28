@@ -104,6 +104,82 @@ TruthLens AI is a multi-layer AI platform for misinformation detection and news 
 - **CRIT-P2-1** (second-pass audit): `models/inference/predictor.py` `predict_batch` was collapsing N texts into 1 averaged result and returning a single dict — causing silent data loss and a `KeyError` crash in the `/batch-predict` fallback path. Fixed: per-sample tensor slicing after the batch forward pass; returns `[[real0,fake0], [real1,fake1], …]` as `app.py` expects.
 - **CRIT-P2-2** (second-pass audit): `src/models/inference/predictor.py` `build_fake_real_output` called `probs.argmax(dim=-1).item()` on a (N,2) tensor — raises `RuntimeError` for N>1. Fixed: `probs.mean(dim=0)` collapses batch first; `argmax` and `max` are then safe for any batch size.
 
+## src/analysis/ Audit (April 2026 — CRIT + HIGH pass)
+
+Closed the critical/high-severity items from the `src/analysis/` audit
+(`attached_assets/Pasted-I-have-enough-information…txt`, items CRIT-A1–A8 / HIGH-A1–A11).
+All fixes preserve backward-compatible call sites.
+
+- **CRIT-A1 / A2 / A8 (`batch_processor.py`)** — `_run_batch` now passes a
+  `List[str]` to `AnalysisPipeline.run_batch` (the contract it actually
+  expects) and `_fallback_batch` calls `pipeline.run(text)` per item.
+  Removed the cross-item `shared_cache` dict that was causing batch-wide
+  spaCy doc / token cache contamination.
+- **CRIT-A3 (`analysis_config.py` + `analysis_pipeline.py`)** —
+  `default_orders` now uses canonical registry names
+  (`information_omission`, `narrative_role`, `narrative_conflict`,
+  `narrative_propagation`, `narrative_temporal`) instead of stale
+  aliases (`omission`, `conflict`, …). New
+  `validate_config_against_registry()` is invoked from
+  `AnalysisPipeline.__init__` and raises on unknown analyzer names so
+  ablation / ordering / `enabled=False` flags can never silently no-op.
+- **CRIT-A4 / F5 (`emotion_target_analysis.py`)** — `PhraseMatcher` is
+  built once against `get_task_nlp("ner").vocab` (not lazily against
+  the first incoming `doc.vocab`). `analyze` validates
+  `doc.vocab is matcher.vocab` per call and falls back to token-only
+  matching with a warning if they diverge.
+- **CRIT-A5 (`analysis_registry.py`)** — at registration time we
+  introspect `analyzer.analyze` and cache `accepted_kwargs` /
+  `accepts_var_kwargs` on the `AnalyzerSpec`. `run_all` then forwards
+  only declared kwargs from `extra_inputs`, eliminating spurious
+  `TypeError` on analyzers that don't list every key.
+- **CRIT-A6 / F16 (`base_analyzer.py`)** — `__call__._validate_context`
+  now invokes `ctx.ensure_tokens()` so analyzers that branch on
+  `ctx.n_tokens == 0` always see a populated token view, regardless of
+  whether the upstream constructor (FeatureContext.from_doc /
+  batch_processor) ran it.
+- **CRIT-A7 / F6 (`feature_context.py` + `analysis_pipeline.py`)** —
+  `FeatureContext.from_doc` accepts a `mode` arg (default `"safe"`).
+  In `"safe"` it pre-seeds the `"syntax"` and `"ner"` slots; in
+  `"fast"` (or any other mode) it leaves them empty so downstream
+  `get_doc(ctx, task)` re-parses with the task-appropriate pipeline
+  rather than returning a stripped doc with empty `.ents` / `.dep_`.
+  `AnalysisPipeline.run` and `run_batch` now propagate `self.nlp_mode`
+  into `from_doc`.
+- **F3 (`output_models.py`)** — added missing keys to the Pydantic
+  models: `information_diversity`, `ideology_diversity`,
+  `attribution_intensity`, `attribution_diversity`,
+  `entity_repetition_ratio`. `BiasProfile` and `PipelineOutput` now
+  include `argument`, `source`, `context`, `propaganda`,
+  `information_omission`, `narrative_role`, `narrative_conflict`,
+  `narrative_propagation`, and `narrative_temporal` (default
+  `Field(default_factory=dict)` so older callers still validate).
+  `FullAnalysisOutput.to_vector` appends the new sections at the end
+  of the deterministic order, so the historical vector prefix remains
+  stable.
+- **F10 (`propaganda_pattern_detector.py`)** — added `_mean_present`
+  helper and switched `_fear`'s narrative cue from "first present" to
+  the mean of all present cues so we no longer drop half the
+  narrative signal whenever both `conflict_intensity` and
+  `polarization_ratio` are emitted.
+- **F14 (`discourse_coherence_analyzer.py` + `feature_keys.py` +
+  `output_models.py`)** — `_narrative_continuity` now emits both
+  `narrative_continuity` (legacy) and the canonical alias
+  `entity_repetition_ratio` with the same value;
+  `DISCOURSE_COHERENCE_KEYS` and `DiscourseFeatures` updated to match.
+- **F15** — `SourceAttributionAnalyzer.QUOTE_PATTERN` is now a paired
+  span pattern `\"[^\"]+\"|“[^”]+”` and `_quote_density` returns the
+  number of quoted spans / tokens (it previously summed character
+  counts of unmatched quote runs). `ContextOmissionDetector.QUOTE_PATTERN`
+  no longer matches apostrophes (`'`, `‘`, `’`), so contractions and
+  possessives stop inflating `context_quote_ratio`.
+
+Smoke-tested the full registry: single + batch runs of the pipeline
+under both `nlp_mode="safe"` and `"fast"` produce non-empty
+`information_omission` / `narrative_*` / `propaganda` sections, the new
+keys above appear in the merged feature dict, and
+`validate_config_against_registry` raises on unknown analyzer names.
+
 ## src/data_processing/ Audit v3 (April 2026 — batches 1 + 2)
 Third-pass audit targeting the data layer. All fixes verified by behavioural smoke test. `CACHE_VERSION` was bumped `v3 → v4` in batch 1 to invalidate the fingerprint-bug caches; **batch 2 then converted `CACHE_VERSION` to an auto-derived `f"{_BASE_VERSION}-{md5(source(_file_fingerprint)+source(get_cache_key))[:8]}"`** so any future edit to either function invalidates stale entries automatically (current value: `v4-0773043e`).
 

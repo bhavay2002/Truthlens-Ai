@@ -55,9 +55,14 @@ class EmotionTargetAnalyzer(BaseAnalyzer):
                 self.term_to_emotion[norm] = emotion
                 self.term_weights[norm] = weight
 
-        # Lazy matcher (IMPORTANT)
+        # Phrase matcher state. Built lazily against the NER task NLP's
+        # Vocab so it can be reused across all docs that come through
+        # `get_doc(ctx, "ner")` (they all share that single Vocab).
         self.matcher: Optional[PhraseMatcher] = None
+        self._matcher_vocab = None  # the Vocab the matcher was built against
         self._matcher_initialized = False
+        self.phrase_to_emotion: Dict[Tuple[str, ...], str] = {}
+        self.phrase_weights: Dict[Tuple[str, ...], float] = {}
 
         logger.info("EmotionTargetAnalyzer initialized")
 
@@ -65,15 +70,25 @@ class EmotionTargetAnalyzer(BaseAnalyzer):
     # MATCHER (LAZY INIT — CRITICAL)
     # =========================================================
 
-    def _ensure_matcher(self, doc):
+    def _ensure_matcher(self):
+        """Build the PhraseMatcher against the canonical NER-task Vocab.
+
+        We deliberately do NOT take ``doc.vocab`` from the first call —
+        if some other code path passes a doc parsed by a different NLP
+        instance, the matcher's vocab would diverge from later docs and
+        silently match nothing (CRIT-A4 / F5). Instead we always tie
+        the matcher to ``get_task_nlp("ner").vocab`` and validate
+        per-call in :meth:`analyze`.
+        """
 
         if self._matcher_initialized:
             return
 
-        self.matcher = PhraseMatcher(doc.vocab, attr="LOWER")
+        from src.analysis.spacy_loader import get_task_nlp
+        nlp = get_task_nlp("ner")
 
-        self.phrase_to_emotion: Dict[Tuple[str, ...], str] = {}
-        self.phrase_weights: Dict[Tuple[str, ...], float] = {}
+        self.matcher = PhraseMatcher(nlp.vocab, attr="LOWER")
+        self._matcher_vocab = nlp.vocab
 
         patterns = []
 
@@ -83,15 +98,6 @@ class EmotionTargetAnalyzer(BaseAnalyzer):
             for term in terms:
                 if " " in term or "_" in term:
                     text = term.replace("_", " ")
-
-                    # Use the shared spaCy pipeline to tokenize the
-                    # phrase. `Vocab` no longer exposes `make_doc` in
-                    # current spaCy releases, so we go through the
-                    # blank tokenizer attached to the running pipeline
-                    # via the loader. This also keeps tokenization
-                    # consistent with how the live `doc` was produced.
-                    from src.analysis.spacy_loader import get_task_nlp
-                    nlp = get_task_nlp("ner")
                     span_doc = nlp.make_doc(text)
 
                     patterns.append(span_doc)
@@ -115,7 +121,7 @@ class EmotionTargetAnalyzer(BaseAnalyzer):
         # 🔥 shared spaCy doc
         doc = get_doc(ctx, task="ner")
 
-        self._ensure_matcher(doc)
+        self._ensure_matcher()
 
         entity_emotion_map: DefaultDict[str, float] = defaultdict(float)
         emotion_type_counter: DefaultDict[str, float] = defaultdict(float)
@@ -127,7 +133,21 @@ class EmotionTargetAnalyzer(BaseAnalyzer):
         # PHRASE MATCHING
         # -----------------------------------------------------
 
-        if self.matcher:
+        # CRIT-A4 guard: PhraseMatcher silently returns no matches when
+        # called against a doc whose Vocab differs from the matcher's
+        # Vocab. If that happens we skip phrase matching for this doc
+        # (token-lemma matching below still works) and log once.
+        vocab_ok = (
+            self.matcher is not None
+            and doc.vocab is self._matcher_vocab
+        )
+        if self.matcher is not None and not vocab_ok:
+            logger.warning(
+                "EmotionTarget: doc.vocab does not match PhraseMatcher vocab; "
+                "falling back to token-only matching for this doc"
+            )
+
+        if self.matcher and vocab_ok:
             for _, start, end in self.matcher(doc):
 
                 span = doc[start:end]

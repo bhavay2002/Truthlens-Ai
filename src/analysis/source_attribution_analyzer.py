@@ -34,7 +34,15 @@ class SourceAttributionAnalyzer(BaseAnalyzer):
     CREDIBILITY_TERMS = {...}
     ATTRIBUTION_VERBS = {...}
 
-    QUOTE_PATTERN = re.compile(r"[\"“”]+")
+    # F15: paired-quote regex. The previous `[\"“”]+` pattern matched
+    # individual quote characters (or runs of them) and `_quote_density`
+    # then summed `len(m)` — both inflating the score for stylistic
+    # quoting and counting unmatched quotes. We now capture *quoted
+    # spans* and emit one count per span, which better matches the
+    # metric's intent ("quotation density" → quoted-passage rate).
+    QUOTE_PATTERN = re.compile(
+        r"\"[^\"]+\"|“[^”]+”"
+    )
 
     # =========================================================
 
@@ -152,14 +160,13 @@ class SourceAttributionAnalyzer(BaseAnalyzer):
 
         text = ctx.text_lower or ""
 
+        # F15: count of *quoted spans*, not characters.
         matches = self.QUOTE_PATTERN.findall(text)
 
         if not matches:
             return 0.0
 
-        score = sum(len(m) for m in matches)
-
-        return score / (n_tokens + EPS)
+        return len(matches) / (n_tokens + EPS)
 
     # =========================================================
 

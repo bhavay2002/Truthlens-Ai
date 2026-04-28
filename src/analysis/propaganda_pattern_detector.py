@@ -161,7 +161,14 @@ class PropagandaPatternDetector(BaseAnalyzer):
 
         e = self._get(emotion, "emotion_expression_ratio")
         r = self._get(rhetoric, "rhetoric_fear_appeal_score")
-        n = self._get(narrative, "conflict_intensity", "polarization_ratio")
+
+        # F10: previously `_get(*keys)` returned the FIRST present
+        # value. Both narrative cues are commonly emitted at once, so
+        # we lost half the signal whenever `conflict_intensity` was
+        # present. Use the mean of all present cues instead.
+        n = self._mean_present(
+            narrative, "conflict_intensity", "polarization_ratio"
+        )
 
         return (
             e * self.config.fear_weight_emotion
@@ -248,6 +255,27 @@ class PropagandaPatternDetector(BaseAnalyzer):
                 return float(v)
 
         return default
+
+    def _mean_present(
+        self,
+        features: Dict[str, Any],
+        *keys: str,
+        default: float = 0.0,
+    ) -> float:
+        """F10: mean over keys that are actually present and finite.
+
+        Returns ``default`` when no requested key is present. Use this
+        when several upstream features express the same underlying
+        signal and we want to combine, not pick, them.
+        """
+        vals = []
+        for k in keys:
+            v = features.get(k)
+            if isinstance(v, (int, float)) and np.isfinite(v):
+                vals.append(float(v))
+        if not vals:
+            return default
+        return sum(vals) / len(vals)
 
     def _entropy(self, dist: Dict[str, float]) -> float:
 

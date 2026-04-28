@@ -151,19 +151,29 @@ class DiscourseCoherenceAnalyzer(BaseAnalyzer):
 
         entities = [ent.text.lower() for ent in doc.ents]
 
+        # F14: emit BOTH the new canonical key
+        # ``entity_repetition_ratio`` (which describes what the metric
+        # actually measures: 1 − unique/total over named entities) and
+        # the legacy ``narrative_continuity`` alias so existing
+        # consumers keep working. Both carry the same value.
         if not entities:
-            return {"narrative_continuity": 0.0}
+            return {
+                "narrative_continuity": 0.0,
+                "entity_repetition_ratio": 0.0,
+            }
 
         total = len(entities)
         unique = len(set(entities))
 
-        # repetition ratio (better signal)
         repetition = 1.0 - (unique / (total + EPS))
 
-        # smooth scaling
         continuity = float(np.sqrt(max(repetition, 0.0)))
+        value = self._safe(continuity)
 
-        return {"narrative_continuity": self._safe(continuity)}
+        return {
+            "narrative_continuity": value,
+            "entity_repetition_ratio": value,
+        }
 
     # =========================================================
 

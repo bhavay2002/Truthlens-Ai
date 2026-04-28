@@ -76,6 +76,10 @@ DISCOURSE_COHERENCE_KEYS: Tuple[str, ...] = (
     "sentence_coherence",
     "topic_drift",
     "narrative_continuity",
+    # F14: canonical alias of `narrative_continuity`. The metric measures
+    # entity repetition within the doc; both keys are emitted with the
+    # same value for backward compatibility.
+    "entity_repetition_ratio",
     "discourse_transition_ratio",
 )
 

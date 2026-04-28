@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import inspect
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Set
 
 from src.analysis.base_analyzer import BaseAnalyzer
 from src.analysis.feature_context import FeatureContext
@@ -26,6 +27,13 @@ class AnalyzerSpec:
 
     order: int = 0
     critical: bool = False  # 🔥 new (fail pipeline if breaks)
+
+    # CRIT-A5: cached set of keyword argument names accepted by
+    # `analyzer.analyze`. Used to filter `extra_inputs` so we never
+    # forward kwargs an analyzer doesn't declare (which would raise
+    # TypeError). `None` means "no filtering computed yet".
+    accepted_kwargs: Optional[Set[str]] = None
+    accepts_var_kwargs: bool = False
 
 
 # =========================================================
@@ -66,6 +74,8 @@ class AnalyzerRegistry:
         if name in self._registry:
             raise ValueError(f"Analyzer '{name}' already registered")
 
+        accepted, accepts_var = _inspect_analyzer_kwargs(analyzer)
+
         self._registry[name] = AnalyzerSpec(
             name=name,
             analyzer=analyzer,
@@ -74,6 +84,8 @@ class AnalyzerRegistry:
             provides=provides or [],
             order=order,
             critical=critical,
+            accepted_kwargs=accepted,
+            accepts_var_kwargs=accepts_var,
         )
 
     # -----------------------------------------------------
@@ -143,13 +155,20 @@ class AnalyzerRegistry:
             start = time.time()
 
             try:
-                # Per-analyzer keyword arguments. We intentionally do NOT
-                # forward the dependency dict as kwargs because each
-                # analyzer's `analyze()` has its own keyword contract
-                # (e.g. narrative analyzers want `hero_entities=` not
-                # the full provider's output dict). Dependencies are
-                # exposed via `extra_inputs` only when explicitly named.
-                kwargs = dict(extra_inputs)
+                # CRIT-A5: per-analyzer keyword arguments. We forward
+                # ONLY the kwargs the analyzer's `analyze()` actually
+                # declares (or all of them if it accepts **kwargs).
+                # Previously every analyzer received the full
+                # `extra_inputs` dict, which raised TypeError for any
+                # analyzer that didn't list every key explicitly.
+                if spec.accepts_var_kwargs or spec.accepted_kwargs is None:
+                    kwargs = dict(extra_inputs)
+                else:
+                    kwargs = {
+                        k: v
+                        for k, v in extra_inputs.items()
+                        if k in spec.accepted_kwargs
+                    }
 
                 # Invoke through the BaseAnalyzer __call__ wrapper when
                 # available so caching, validation, and fallbacks run.
@@ -196,6 +215,39 @@ class AnalyzerRegistry:
 
     def list(self) -> List[str]:
         return list(self._registry.keys())
+
+
+# =========================================================
+# KWARG INTROSPECTION (CRIT-A5)
+# =========================================================
+
+def _inspect_analyzer_kwargs(analyzer: Any) -> tuple[Optional[Set[str]], bool]:
+    """Return (accepted_keyword_names, accepts_var_keyword) for an analyzer.
+
+    Inspects ``analyzer.analyze`` (preferred) and falls back to ``__call__``.
+    Returns ``(None, True)`` if introspection fails so the caller forwards
+    everything (matching legacy behavior).
+    """
+    target = getattr(analyzer, "analyze", None) or analyzer
+    try:
+        sig = inspect.signature(target)
+    except (TypeError, ValueError):
+        return None, True
+
+    accepted: Set[str] = set()
+    accepts_var = False
+    for pname, param in sig.parameters.items():
+        if pname in ("self", "ctx"):
+            continue
+        if param.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ):
+            accepted.add(pname)
+        elif param.kind == inspect.Parameter.VAR_KEYWORD:
+            accepts_var = True
+
+    return accepted, accepts_var
 
 
 # =========================================================

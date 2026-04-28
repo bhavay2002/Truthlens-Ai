@@ -9,7 +9,11 @@ from spacy.tokens import Doc
 from src.analysis.spacy_loader import get_shared_nlp
 from src.analysis.feature_context import FeatureContext
 from src.analysis.feature_merger import FeatureMerger
-from src.analysis.analysis_config import AnalysisConfig, build_default_config
+from src.analysis.analysis_config import (
+    AnalysisConfig,
+    build_default_config,
+    validate_config_against_registry,
+)
 from src.analysis.analysis_registry import AnalyzerRegistry, AnalyzerExecution
 
 logger = logging.getLogger(__name__)
@@ -47,6 +51,12 @@ class AnalysisPipeline:
     ):
         self.config = config or build_default_config()
         self.registry = registry
+        self.nlp_mode = nlp_mode
+
+        # CRIT-A3: fail fast if AnalysisConfig.analyzers references analyzer
+        # names that don't exist in the registry. The previous behavior was
+        # a silent no-op for ablation flags / per-analyzer ordering.
+        validate_config_against_registry(self.config, self.registry.list())
 
         self.nlp = get_shared_nlp(mode=nlp_mode)
         self.merger = FeatureMerger()
@@ -78,7 +88,7 @@ class AnalysisPipeline:
             # -------------------------------
             with time_block("nlp_processing"):
                 doc = self.nlp(text)
-                ctx = FeatureContext.from_doc(doc)
+                ctx = FeatureContext.from_doc(doc, mode=self.nlp_mode)
     
             # -------------------------------
             # ANALYZER EXECUTION (TIMED)
@@ -140,7 +150,7 @@ class AnalysisPipeline:
         results = []
 
         for doc in docs:
-            ctx = FeatureContext.from_doc(doc)
+            ctx = FeatureContext.from_doc(doc, mode=self.nlp_mode)
 
             exec_results = self._execute(ctx)
             merged, vector, keys = self._post_process(exec_results)

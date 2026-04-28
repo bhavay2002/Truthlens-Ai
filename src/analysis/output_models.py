@@ -122,6 +122,8 @@ class DiscourseFeatures(FeatureModel):
     sentence_coherence: float = 0.0
     topic_drift: float = 0.0
     narrative_continuity: float = 0.0
+    # F14: canonical alias of `narrative_continuity`. See feature_keys.
+    entity_repetition_ratio: float = 0.0
     discourse_transition_ratio: float = 0.0
 
     def vector(self):
@@ -161,6 +163,10 @@ class InformationFeatures(FeatureModel):
     modal_density: float = 0.0
     rhetorical_punctuation_density: float = 0.0
     information_emotion_ratio: float = 0.0
+    # F3: emitted by InformationDensityAnalyzer + present in
+    # INFORMATION_DENSITY_KEYS but previously dropped here, which
+    # silently truncated the feature row.
+    information_diversity: float = 0.0
 
     def vector(self):
         return self.to_vector(INFORMATION_DENSITY_KEYS)
@@ -173,6 +179,8 @@ class IdeologyFeatures(FeatureModel):
     anti_elite_language_ratio: float = 0.0
     liberty_vs_equality_balance: float = 0.0
     ideology_phrase_density: float = 0.0
+    # F3
+    ideology_diversity: float = 0.0
 
     def vector(self):
         return self.to_vector(IDEOLOGICAL_LANGUAGE_KEYS)
@@ -186,6 +194,9 @@ class SourceAttributionFeatures(FeatureModel):
     quotation_ratio: float = 0.0
     named_source_ratio: float = 0.0
     source_credibility_balance: float = 0.0
+    # F3
+    attribution_intensity: float = 0.0
+    attribution_diversity: float = 0.0
 
     def vector(self):
         return self.to_vector(SOURCE_ATTRIBUTION_KEYS)
@@ -213,6 +224,7 @@ class PropagandaFeatures(FeatureModel):
 # =========================================================
 
 class BiasProfile(BaseModel):
+    # Core sections handled by `BiasProfileBuilder.build_profile`.
     bias: Dict[str, float]
     emotion: Dict[str, float]
     narrative: Dict[str, float]
@@ -220,6 +232,18 @@ class BiasProfile(BaseModel):
     ideology: Dict[str, float]
     metrics: Dict[str, float]
     bias_score: float
+
+    # F3: optional sections that newer analyzers add to the profile.
+    # Default to empty dicts so older callers continue to validate.
+    argument: Dict[str, float] = Field(default_factory=dict)
+    source: Dict[str, float] = Field(default_factory=dict)
+    context: Dict[str, float] = Field(default_factory=dict)
+    propaganda: Dict[str, float] = Field(default_factory=dict)
+    information_omission: Dict[str, float] = Field(default_factory=dict)
+    narrative_role: Dict[str, float] = Field(default_factory=dict)
+    narrative_conflict: Dict[str, float] = Field(default_factory=dict)
+    narrative_propagation: Dict[str, float] = Field(default_factory=dict)
+    narrative_temporal: Dict[str, float] = Field(default_factory=dict)
 
 
 # =========================================================
@@ -236,6 +260,18 @@ class PipelineOutput(BaseModel):
     information: Dict[str, float] = Field(default_factory=dict)
     ideology: Dict[str, float] = Field(default_factory=dict)
     source: Dict[str, float] = Field(default_factory=dict)
+
+    # F3: surface the sections produced by analyzers that were
+    # registered later (information_omission, narrative_role, the three
+    # narrative_* analyzers, and the propaganda detector). Without
+    # these, those analyzer outputs were merged but then dropped at
+    # serialization time.
+    information_omission: Dict[str, float] = Field(default_factory=dict)
+    narrative_role: Dict[str, float] = Field(default_factory=dict)
+    narrative_conflict: Dict[str, float] = Field(default_factory=dict)
+    narrative_propagation: Dict[str, float] = Field(default_factory=dict)
+    narrative_temporal: Dict[str, float] = Field(default_factory=dict)
+    propaganda: Dict[str, float] = Field(default_factory=dict)
 
 
 # =========================================================
@@ -255,7 +291,10 @@ class FullAnalysisOutput(BaseModel):
     def to_vector(self) -> np.ndarray:
         parts: List[float] = []
 
-        # 🔥 enforce deterministic ordering
+        # 🔥 enforce deterministic ordering. Newer sections (F3) are
+        # appended at the end so the historical prefix of the vector
+        # remains stable for any downstream model trained on the old
+        # layout.
         ordered_sections = [
             "rhetorical",
             "argument",
@@ -266,6 +305,12 @@ class FullAnalysisOutput(BaseModel):
             "information",
             "ideology",
             "source",
+            "information_omission",
+            "narrative_role",
+            "narrative_conflict",
+            "narrative_propagation",
+            "narrative_temporal",
+            "propaganda",
         ]
 
         feature_dict = self.features.model_dump()

@@ -81,23 +81,36 @@ class FeatureContext:
     # =========================================================
 
     @classmethod
-    def from_doc(cls, doc: Doc) -> "FeatureContext":
+    def from_doc(cls, doc: Doc, mode: str = "safe") -> "FeatureContext":
         """
         Build a FeatureContext from an already-processed spaCy Doc.
 
-        Pre-seeds the shared spaCy cache for both `"syntax"` and `"ner"`
-        tasks so analyzers downstream get the same doc back via
-        :func:`get_doc` without triggering a re-parse. The pipeline
-        producing `doc` is expected to be the "safe" (full) pipeline,
-        which contains the components both task profiles need.
+        Pre-seeds the shared spaCy cache only for the tasks that the
+        provided pipeline actually supports (driven by ``mode``):
+
+        - ``"safe"`` (default): full pipeline — seed both ``"syntax"``
+          and ``"ner"`` slots so analyzers reuse the doc without a
+          re-parse.
+        - ``"fast"`` / unknown modes: the doc was produced by a stripped
+          pipeline (no NER / tagger / parser / lemmatizer), so we do
+          NOT seed those task slots. Downstream analyzers that ask for
+          ``get_doc(ctx, "ner"|"syntax")`` will then lazily re-parse
+          with the correct task pipeline instead of silently iterating
+          over an empty entity / dep / pos view (CRIT-A7).
         """
         if doc is None:
             raise ValueError("doc must not be None")
 
         ctx = cls(text=doc.text)
         seeded = ctx.shared.setdefault("spacy_docs", {})
-        seeded["syntax"] = doc
-        seeded["ner"] = doc
+
+        if mode == "safe":
+            seeded["syntax"] = doc
+            seeded["ner"] = doc
+        # For "fast" or any non-safe mode the doc lacks the components
+        # that "syntax"/"ner" require, so leave those slots empty and
+        # let `get_doc` re-parse on demand via the task-specific NLP.
+
         return ctx
 
     # =========================================================

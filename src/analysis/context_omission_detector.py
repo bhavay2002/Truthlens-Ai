@@ -70,7 +70,12 @@ class ContextOmissionDetector(BaseAnalyzer):
         "appears","seems","may","might","could"
     }
 
-    QUOTE_PATTERN = re.compile(r"[\"“”‘’']")
+    # F15: drop apostrophes from the quote pattern. Including ASCII `'`
+    # and the curly apostrophes ‘ ’ caused contractions ("don't",
+    # "it's") and possessives ("Alice's") to dominate the count and
+    # inflate `context_quote_ratio` for any normal English prose.
+    # Restrict to actual double-quote glyphs.
+    QUOTE_PATTERN = re.compile(r"[\"“”]")
 
     def __init__(self):
         self.vague_phrases = normalize_lexicon_terms(self.VAGUE_REFERENCES)
