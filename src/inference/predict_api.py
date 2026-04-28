@@ -15,6 +15,7 @@ from src.inference.monitoring import InferenceMonitor
 from src.inference.postprocessing import Postprocessor
 from src.inference.result_formatter import ResultFormatter
 from src.utils.input_validation import ensure_non_empty_text
+from src.utils.settings import load_settings
 
 # =========================================================
 # GLOBAL SINGLETON
@@ -37,11 +38,24 @@ def _get_service() -> PredictionService:
     with _lock:
         if _service is None:
 
+            # CRIT-5: pull the model path (and other inference defaults)
+            # from settings rather than hardcoding ``"models"``. The
+            # hardcoded literal pointed at a directory that does not
+            # exist for any caller that respects ``config/config.yaml``.
+            settings = load_settings()
+            model_path = str(settings.model.path)
+            device = str(getattr(settings.inference, "device", "auto"))
+            max_length = int(getattr(settings.model, "max_length", 512))
+            cache_version = str(
+                getattr(settings.inference, "cache_version", "v2")
+            )
+
             # ---------------- ENGINE ----------------
             engine = InferenceEngine(
                 InferenceConfig(
-                    model_path="models",
-                    device="auto",
+                    model_path=model_path,
+                    device=device,
+                    max_length=max_length,
                 )
             )
 
@@ -49,7 +63,7 @@ def _get_service() -> PredictionService:
             cache = InferenceCache(
                 InferenceCacheConfig(
                     enable_memory_cache=True,
-                    cache_version="v2"
+                    cache_version=cache_version,
                 )
             )
 
@@ -167,16 +181,28 @@ def predict_with_uncertainty(texts: List[str]) -> Dict[str, Any]:
 
     outputs = service.predict_for_evaluation(texts)
 
-    results = {}
+    results: Dict[str, Any] = {}
 
     import numpy as np
 
     for task, out in outputs.items():
 
+        # CRIT-2: ``_meta`` (and any future scratch keys) sit alongside
+        # the per-task entries; they are not classification heads and must
+        # not be treated as such.
+        if not isinstance(out, dict) or "probabilities" not in out:
+            results[task] = out
+            continue
+
         probs = out.get("probabilities")
 
         if probs is not None:
-            entropy = -np.sum(probs * np.log(probs + 1e-12), axis=1)
+            probs_arr = np.asarray(probs)
+            if probs_arr.ndim < 2:
+                entropy = -(probs_arr * np.log(probs_arr + 1e-12)
+                            + (1 - probs_arr) * np.log(1 - probs_arr + 1e-12))
+            else:
+                entropy = -np.sum(probs_arr * np.log(probs_arr + 1e-12), axis=-1)
         else:
             entropy = None
 

@@ -25,6 +25,8 @@ from src.inference.inference_pipeline import (
 from src.inference.report_generator import ReportGenerator
 from src.inference.result_formatter import ResultFormatter
 from src.analysis.integration_runner import AnalysisIntegrationRunner
+from src.features.base.base_feature import FeatureContext
+from src.features.pipelines.feature_pipeline import FeaturePipeline
 from src.graph.graph_pipeline import GraphPipeline, get_default_pipeline
 
 logger = logging.getLogger(__name__)
@@ -52,6 +54,8 @@ class BatchInferenceConfig:
     batch_size: int = 32
     models_dir: str = "models"
     num_workers: int = 0
+    # LAT-6: opt-in for torch.compile, propagated to ModelLoader.
+    use_torch_compile: bool = False
 
 
 # =========================================================
@@ -63,7 +67,10 @@ class BatchInferenceEngine:
     def __init__(self, config: BatchInferenceConfig):
 
         self.config = config
-        self.model_loader = ModelLoader(config.models_dir)
+        self.model_loader = ModelLoader(
+            config.models_dir,
+            use_torch_compile=config.use_torch_compile,
+        )
         self.artifacts = self.model_loader.load_all()
 
         # ---------------- FEATURE PREPARER ----------------
@@ -82,6 +89,13 @@ class BatchInferenceEngine:
             scaler=self.artifacts.feature_scaler,
             selector=self.artifacts.feature_selector,
         )
+
+        # CRIT-6: previously ``_process_batch`` fed the preparer with a stub
+        # ``[{"text": t, "text_length": len(t)}]`` dict, which left every
+        # other slot in the schema (bias_*, framing_*, ideological_*, …)
+        # at zero. We now run the real ``FeaturePipeline`` on each input.
+        self.feature_pipeline = FeaturePipeline()
+        self.feature_pipeline.initialize()
 
         # ---------------- MODEL PIPELINE ----------------
         self.prediction_pipeline = PredictionPipeline(
@@ -116,7 +130,22 @@ class BatchInferenceEngine:
 
     def _process_batch(self, texts: List[str]):
 
-        features = [{"text": t, "text_length": len(t)} for t in texts]
+        # CRIT-6: build the real per-text feature dict via FeaturePipeline
+        # so the preparer receives every named slot the schema expects
+        # (instead of an empty stub that produced silently-wrong inputs).
+        contexts = [FeatureContext(text=t) for t in texts]
+        try:
+            extracted = self.feature_pipeline.batch_extract(contexts)
+        except Exception:
+            extracted = [self.feature_pipeline.extract(c) for c in contexts]
+
+        features = []
+        for t, fdict in zip(texts, extracted):
+            row = dict(fdict) if isinstance(fdict, dict) else {}
+            row.setdefault("text", t)
+            row.setdefault("text_length", float(len(t)))
+            features.append(row)
+
         prepared = self.feature_preparer.prepare_batch(features)
         if not torch.is_tensor(prepared):
             prepared = torch.tensor(prepared, dtype=torch.float32)

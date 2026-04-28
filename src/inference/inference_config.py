@@ -1,63 +1,28 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, fields
+from dataclasses import fields
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import yaml
 import torch
 
+# CRIT-1: single source of truth for the inference dataclass. The loader
+# previously declared its own dataclass with extra fields that were then
+# silently dropped at the engine boundary because the engine used a
+# different ``InferenceConfig`` of the same name. The loader now returns
+# the engine's dataclass directly.
+from src.inference.inference_engine import InferenceConfig
+
 logger = logging.getLogger(__name__)
 
 
-# =========================================================
-# CONFIG
-# =========================================================
-
-@dataclass
-class InferenceConfig:
-    """
-    Runtime configuration for inference.
-    """
-
-    # -------------------------
-    # CORE
-    # -------------------------
-    device: str = "cpu"              # cpu | cuda | auto
-    batch_size: int = 32
-    max_sequence_length: int = 512
-
-    # -------------------------
-    # PIPELINE CONTROL
-    # -------------------------
-    use_graph_analysis: bool = True
-    enable_entity_graph: bool = True
-    enable_narrative_analysis: bool = True
-    enable_explainability: bool = True
-
-    # -------------------------
-    # PREDICTION OUTPUT (🔥 IMPORTANT)
-    # -------------------------
-    return_logits: bool = True
-    return_probabilities: bool = True
-
-    # -------------------------
-    # CACHE
-    # -------------------------
-    cache_predictions: bool = False
-    cache_dir: str = "cache"
-    cache_ttl_seconds: Optional[int] = None
-
-    # -------------------------
-    # SAFETY
-    # -------------------------
-    prediction_timeout: Optional[int] = None
-
-    # -------------------------
-    # REPRODUCIBILITY
-    # -------------------------
-    config_version: str = "v2"
+__all__ = [
+    "InferenceConfig",
+    "InferenceConfigLoader",
+    "load_inference_config",
+]
 
 
 # =========================================================
@@ -100,6 +65,11 @@ class InferenceConfigLoader:
         unknown = sorted(set(config_dict.keys()) - allowed)
         if unknown:
             logger.warning("Unknown config keys ignored: %s", unknown)
+
+        # ``model_path`` is required by the engine's dataclass; if the YAML
+        # does not provide one, fall back to a conservative default so the
+        # loader does not crash before the caller has a chance to override.
+        filtered.setdefault("model_path", str(self.config_path.parent))
 
         config = InferenceConfig(**filtered)
 
@@ -160,7 +130,11 @@ class InferenceConfigLoader:
         if not isinstance(config, dict):
             raise TypeError("config must be dict")
 
-        return InferenceConfig(**config)
+        allowed = {f.name for f in fields(InferenceConfig)}
+        filtered = {k: v for k, v in config.items() if k in allowed}
+        filtered.setdefault("model_path", "")
+
+        return InferenceConfig(**filtered)
 
 
 # =========================================================

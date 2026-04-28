@@ -45,6 +45,14 @@ class InferenceConfig:
     # 🔥 NEW
     enable_full_pipeline: bool = True
 
+    # CRIT-1: previously lived in src.inference.inference_config and were
+    # silently dropped at the engine boundary. Folded in here so the
+    # inference loader and the engine speak the same dataclass.
+    use_graph_analysis: bool = True
+    cache_predictions: bool = False
+    prediction_timeout: Optional[float] = None
+    use_torch_compile: bool = False
+
 
 # =========================================================
 # ENGINE
@@ -65,6 +73,16 @@ class InferenceEngine:
 
         self.temperature_scaler = temperature_scaler
         self.isotonic_calibrator = isotonic_calibrator
+
+        if self.temperature_scaler is None and self.isotonic_calibrator is None:
+            # CRIT-7: previously the calibration code path swallowed every
+            # error inside ``_apply_calibration`` and silently fell back to
+            # raw softmax probabilities. Surface that fact at startup so
+            # operators know calibrated probabilities are uncalibrated.
+            logger.warning(
+                "InferenceEngine: no calibrator attached — "
+                "'calibrated_probabilities' will equal raw softmax probabilities."
+            )
 
         self.model = None
         self.tokenizer = None
@@ -128,10 +146,18 @@ class InferenceEngine:
             self.label_map = {int(k): v for k, v in raw.items()}
 
     def _warmup(self):
-        """Single forward pass with a dummy input to trigger JIT/cudnn autotuning."""
+        """Single forward pass with a representative input.
+
+        LAT-7: the previous warmup used a single token (``"warmup"``),
+        which trained the cudnn autotuner on a one-token sequence and
+        forced a re-tune on the first real request. We now use a longer,
+        more representative string close to ``max_length`` so the first
+        production request is not penalised.
+        """
         try:
-            dummy = ["warmup"]
-            self._forward(dummy)
+            target_tokens = max(64, min(self.config.max_length, 256))
+            dummy_text = (" ".join(["warmup"] * target_tokens)).strip()
+            self._forward([dummy_text])
             logger.info("InferenceEngine warmup complete (device=%s)", self.device)
         except Exception as exc:
             logger.debug("InferenceEngine warmup skipped: %s", exc)
@@ -176,30 +202,36 @@ class InferenceEngine:
     # =====================================================
 
     def _apply_calibration(self, logits, probs):
-
+        # CRIT-7: do not catch arbitrary exceptions silently. A broken
+        # calibrator must surface as a real error during inference rather
+        # than degrade to uncalibrated probabilities without any signal.
         if self.temperature_scaler:
-            try:
-                return self.temperature_scaler.predict_proba(logits)
-            except Exception:
-                pass
+            return self.temperature_scaler.predict_proba(logits)
 
         if self.isotonic_calibrator:
-            try:
-                return torch.tensor(
-                    self.isotonic_calibrator.predict_proba(
-                        probs.detach().cpu().numpy()
-                    ),
-                    device=probs.device,
-                    dtype=probs.dtype,
-                )
-            except Exception:
-                pass
+            return torch.tensor(
+                self.isotonic_calibrator.predict_proba(
+                    probs.detach().cpu().numpy()
+                ),
+                device=probs.device,
+                dtype=probs.dtype,
+            )
 
         return probs
 
     # =====================================================
-    # 🔥 BASE INFERENCE (UNCHANGED)
+    # 🔥 BASE INFERENCE
     # =====================================================
+    #
+    # CRIT-2: the previous return contract was a flat dict
+    # ``{texts, predictions, probabilities, calibrated_probabilities, logits}``
+    # while every downstream consumer (``run_inference``, predict_api's
+    # ``predict_with_uncertainty``, ``prediction_service._compute_uncertainty``)
+    # iterated over it as ``{task: {...}}``. We now return the nested
+    # contract under the single task name ``"main"`` (the engine has one
+    # classification head) and surface batch metadata under ``"_meta"``.
+
+    DEFAULT_TASK_NAME = "main"
 
     def predict_for_evaluation(
         self,
@@ -229,12 +261,34 @@ class InferenceEngine:
 
         preds = np.argmax(cal.numpy(), axis=1)
 
-        return {
-            "texts": texts,
+        task_output = {
             "predictions": preds,
             "probabilities": probs.numpy(),
             "calibrated_probabilities": cal.numpy(),
             "logits": logits.numpy(),
+        }
+
+        # CRIT-3/8: keep the engine's single-task output consistent with
+        # the postprocessor's per-task contract. Calibrated probabilities
+        # have already been computed above so we feed them in directly.
+        try:
+            postprocessed = self.postprocessor.process(
+                {self.DEFAULT_TASK_NAME: {
+                    "logits": task_output["logits"],
+                    "probabilities": task_output["calibrated_probabilities"],
+                }},
+                task_types={self.DEFAULT_TASK_NAME: "multiclass"},
+            )
+            task_output.update({
+                "labels": postprocessed[self.DEFAULT_TASK_NAME].get("labels"),
+                "confidence": postprocessed[self.DEFAULT_TASK_NAME].get("confidence"),
+            })
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Postprocessor wiring skipped: %s", exc)
+
+        return {
+            self.DEFAULT_TASK_NAME: task_output,
+            "_meta": {"texts": texts},
         }
 
     # =====================================================
@@ -269,19 +323,39 @@ class InferenceEngine:
         texts = self._validate_input(texts)
         outputs = self.predict_for_evaluation(texts)
 
-        results = []
-        probs_arr = outputs["probabilities"]
-        preds_arr = outputs["predictions"]
+        task_out = outputs[self.DEFAULT_TASK_NAME]
+        probs_arr = task_out["probabilities"]
+        preds_arr = task_out["predictions"]
 
+        # CRIT-4: ``fake_probability`` is only meaningful when the model's
+        # label map is the legacy binary {0: real, 1: fake} contract. For
+        # any other shape (>2 classes, missing label_map, or label names
+        # that do not match the binary template) we emit ``None`` instead
+        # of silently returning the prob of the second softmax slot.
+        is_legacy_binary = self._is_legacy_binary_label_map(probs_arr.shape[-1])
+
+        results = []
         for i, text in enumerate(texts):
-            results.append({
+            entry: Dict[str, Any] = {
                 "text": text,
                 "label": int(preds_arr[i]),
                 "confidence": float(np.max(probs_arr[i])),
-                "fake_probability": float(probs_arr[i][1]) if probs_arr.shape[1] > 1 else float(probs_arr[i][0]),
-            })
+            }
+            if is_legacy_binary:
+                entry["fake_probability"] = float(probs_arr[i][1])
+            else:
+                entry["fake_probability"] = None
+            results.append(entry)
 
         return results
+
+    def _is_legacy_binary_label_map(self, num_classes: int) -> bool:
+        if num_classes != 2:
+            return False
+        if not self.label_map:
+            return False
+        names = {str(v).lower() for v in self.label_map.values()}
+        return {"real", "fake"}.issubset(names) or {"true", "fake"}.issubset(names)
 
     def predict_single(self, text: str):
         return self.predict([text])[0]

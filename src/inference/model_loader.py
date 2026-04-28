@@ -110,9 +110,19 @@ class UnifiedPredictor:
 
 class ModelLoader:
 
-    def __init__(self, models_dir: str, device: str = "auto") -> None:
+    def __init__(
+        self,
+        models_dir: str,
+        device: str = "auto",
+        *,
+        use_torch_compile: bool = False,
+    ) -> None:
         self.models_dir = Path(models_dir)
         self.device = self._resolve_device(device)
+        # LAT-6: torch.compile is opt-in. The previous unconditional call
+        # paid a 60+ second graph-capture cost on first use of every
+        # model on CUDA — a clear loss for short-lived workers.
+        self.use_torch_compile = bool(use_torch_compile)
 
         if not self.models_dir.exists():
             raise FileNotFoundError(f"Model directory not found: {self.models_dir}")
@@ -156,11 +166,15 @@ class ModelLoader:
 
         model.to(self.device)
 
-        if hasattr(torch, "compile") and self.device.type == "cuda":
+        if (
+            self.use_torch_compile
+            and hasattr(torch, "compile")
+            and self.device.type == "cuda"
+        ):
             try:
                 model = torch.compile(model)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("torch.compile failed; running eager: %s", exc)
 
         model.eval()
         return model

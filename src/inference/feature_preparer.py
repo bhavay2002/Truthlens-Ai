@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 import logging
-import multiprocessing as mp
-from multiprocessing.pool import Pool
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Any
-import atexit
 
 import numpy as np
 import torch
@@ -38,17 +35,27 @@ def _get_text_extractors():
 
 
 # =========================================================
-# FAST WORKER
+# FLATTEN
 # =========================================================
+#
+# LAT-2: this used to live in two places — ``_flatten`` (in-process) and
+# ``_prepare_flat_features_worker`` (multiprocessing fallback). The two
+# disagreed: the worker emitted ``{key}_count`` for list/tuple/set values
+# while ``_flatten`` silently dropped them, so the schema picked up
+# different numbers depending on batch size. They are now a single
+# helper at module scope, used by both code paths.
 
-def _prepare_flat_features_worker(features: Dict[str, Any]) -> Dict[str, float]:
-    flat = {}
+def _flatten_features(features: Dict[str, Any]) -> Dict[str, float]:
+    flat: Dict[str, float] = {}
 
     for key, value in features.items():
         if key == "text":
             continue
 
-        if isinstance(value, (int, float)):
+        if isinstance(value, bool):
+            flat[key] = float(value)
+
+        elif isinstance(value, (int, float)):
             flat[key] = float(value)
 
         elif isinstance(value, (list, tuple, set)):
@@ -106,50 +113,22 @@ class FeaturePreparer:
         # G-R1: reuse the process-wide singleton when graph features
         # are enabled — avoids duplicating spaCy + 15 analyzers.
         self.graph_pipeline = get_default_pipeline() if config.derive_graph_features else None
-        self._pool: Optional[Pool] = None
-
-        atexit.register(self.close_pool)
 
         logger.info(f"FeaturePreparer initialized | dim={self.feature_dim}")
 
     # =====================================================
-    # MULTIPROCESS POOL
-    # =====================================================
-
-    def _get_pool(self):
-        if self._pool is None:
-            ctx = mp.get_context("spawn")
-            self._pool = ctx.Pool(max(1, mp.cpu_count() - 1))
-        return self._pool
-
-    def close_pool(self):
-        if self._pool:
-            self._pool.close()
-            self._pool.join()
-            self._pool = None
-
-    # =====================================================
     # CORE FLATTEN
     # =====================================================
+    #
+    # LAT-2: there used to be a multiprocessing pool path here. Spawning
+    # workers per batch for a CPU-bound dict flatten was strictly slower
+    # than the in-process loop (process startup + pickling cost dwarf the
+    # arithmetic), and the worker emitted a slightly different schema than
+    # the in-process flattener — so the active code path silently changed
+    # under load. Both paths now go through ``_flatten_features``.
 
     def _flatten(self, features: Dict[str, Any]) -> Dict[str, float]:
-
-        flat = {}
-
-        for key, value in features.items():
-
-            if key == "text":
-                continue
-
-            if isinstance(value, (int, float)):
-                flat[key] = float(value)
-
-            elif isinstance(value, dict):
-                for k, v in value.items():
-                    if isinstance(v, (int, float)):
-                        flat[f"{key}_{k}"] = float(v)
-
-        return flat
+        return _flatten_features(features)
 
     # =====================================================
     # VECTORIZE
@@ -202,11 +181,11 @@ class FeaturePreparer:
 
     def prepare_batch(self, feature_dicts: List[Dict[str, Any]]):
 
-        if len(feature_dicts) < 32:
-            flats = [self._flatten(f) for f in feature_dicts]
-        else:
-            pool = self._get_pool()
-            flats = pool.map(_prepare_flat_features_worker, feature_dicts)
+        # LAT-2: always flatten in-process. The previous code spawned a
+        # multiprocessing pool for batches of >=32 dicts, which was both
+        # slower (process startup + pickling for a CPU-trivial flatten)
+        # and emitted a different schema than the in-process branch.
+        flats = [self._flatten(f) for f in feature_dicts]
 
         X = np.zeros((len(flats), self.feature_dim), dtype=np.float32)
 

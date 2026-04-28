@@ -57,34 +57,26 @@ class PredictionService:
         use_cache: bool = True,
     ) -> Dict[str, Any]:
 
-        start = self.logger.start_timer()
+        def _compute() -> Dict[str, Any]:
+            start = self.logger.start_timer()
+            outputs = self.engine.predict_for_evaluation([text])
+            preds = self._postprocess(outputs)
+            self.logger.log_prediction(
+                start_time=start,
+                model_versions={},
+                feature_count=0,
+                predicted_label=preds.get("label"),
+                prediction_confidence=preds.get("confidence"),
+            )
+            return preds
 
-        # ---------------- CACHE ----------------
-        if use_cache:
-            cached = self.cache.get(text)
-            if cached:
-                return cached
+        # LAT-5: route through the cache's single-flight helper so
+        # concurrent requests for the same text only run one forward
+        # pass. When caching is disabled, fall back to direct compute.
+        if use_cache and self.cache is not None:
+            return self.cache.get_or_compute(text, _compute)
 
-        # ---------------- INFERENCE ----------------
-        outputs = self.engine.predict_for_evaluation([text])
-
-        # ---------------- POSTPROCESS ----------------
-        preds = self._postprocess(outputs)
-
-        # ---------------- LOG ----------------
-        self.logger.log_prediction(
-            start_time=start,
-            model_versions={},
-            feature_count=0,
-            predicted_label=preds.get("label"),
-            prediction_confidence=preds.get("confidence"),
-        )
-
-        # ---------------- CACHE SAVE ----------------
-        if use_cache:
-            self.cache.set(text, preds)
-
-        return preds
+        return _compute()
 
     # =====================================================
     # BATCH
@@ -96,16 +88,102 @@ class PredictionService:
     ) -> List[Dict[str, Any]]:
 
         outputs = self.engine.predict_for_evaluation(texts)
+        return self._build_records_from_engine_output(outputs)
 
-        probs_arr = outputs.get("calibrated_probabilities") or outputs.get("probabilities")
-        preds_arr = outputs.get("predictions")
+    # =====================================================
+    # 🔥 LAT-1: BATCHED FULL PREDICTION
+    # =====================================================
+
+    def predict_full_batch(
+        self,
+        texts: List[str],
+        *,
+        use_cache: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """Batched equivalent of ``predict``.
+
+        LAT-1: previously every batched caller (e.g. ``advanced_analysis``)
+        looped ``self.predict(t)`` per text, which re-tokenised and ran a
+        forward pass for every single sample. We now run a single forward
+        pass over the entire batch and split the results per-sample.
+        """
+
+        if not texts:
+            return []
+
+        # ---------------- CACHE LOOKUP ----------------
+        results: List[Optional[Dict[str, Any]]] = [None] * len(texts)
+        pending_idx: List[int] = []
+        pending_texts: List[str] = []
+
+        if use_cache and self.cache is not None:
+            for i, t in enumerate(texts):
+                cached = self.cache.get(t)
+                if cached is not None:
+                    results[i] = cached
+                else:
+                    pending_idx.append(i)
+                    pending_texts.append(t)
+        else:
+            pending_idx = list(range(len(texts)))
+            pending_texts = list(texts)
+
+        # ---------------- BATCHED INFERENCE ----------------
+        if pending_texts:
+            start = self.logger.start_timer()
+            outputs = self.engine.predict_for_evaluation(pending_texts)
+            records = self._build_records_from_engine_output(outputs)
+
+            for slot, record in zip(pending_idx, records):
+                results[slot] = record
+                if use_cache and self.cache is not None:
+                    self.cache.set(texts[slot], record)
+
+            self.logger.log_prediction(
+                start_time=start,
+                model_versions={},
+                feature_count=len(pending_texts),
+                predicted_label=None,
+                prediction_confidence=None,
+            )
+
+        return [r if r is not None else {} for r in results]
+
+    def _build_records_from_engine_output(
+        self,
+        outputs: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """CRIT-2: read the nested ``{task: {...}}`` contract returned by
+        ``InferenceEngine.predict_for_evaluation``."""
+
+        task_name = getattr(self.engine, "DEFAULT_TASK_NAME", "main")
+        task_out = outputs.get(task_name) or {}
+
+        probs_arr = task_out.get("calibrated_probabilities")
+        if probs_arr is None:
+            probs_arr = task_out.get("probabilities")
+        preds_arr = task_out.get("predictions")
+        is_legacy_binary = bool(
+            getattr(self.engine, "_is_legacy_binary_label_map", lambda _n: False)(
+                probs_arr.shape[-1] if probs_arr is not None else 0
+            )
+        )
+
+        n = (
+            len(preds_arr) if preds_arr is not None
+            else (len(probs_arr) if probs_arr is not None else 0)
+        )
 
         results = []
-
-        for i, text in enumerate(texts):
+        for i in range(n):
 
             conf = float(np.max(probs_arr[i])) if probs_arr is not None else None
-            fake_prob = float(probs_arr[i][1]) if (probs_arr is not None and probs_arr.shape[1] > 1) else None
+            # CRIT-4: do not invent a fake_probability when the head is not
+            # the legacy binary classifier.
+            if is_legacy_binary and probs_arr is not None:
+                fake_prob = float(probs_arr[i][1])
+            else:
+                fake_prob = None
 
             results.append({
                 "label": int(preds_arr[i]) if preds_arr is not None else None,
@@ -179,18 +257,13 @@ class PredictionService:
     # =====================================================
 
     def _postprocess(self, outputs):
-
-        probs_arr = outputs.get("calibrated_probabilities") or outputs.get("probabilities")
-        preds_arr = outputs.get("predictions")
-
-        conf = float(np.max(probs_arr[0])) if probs_arr is not None else None
-        fake_prob = float(probs_arr[0][1]) if (probs_arr is not None and probs_arr.shape[1] > 1) else None
-
-        return {
-            "label": int(preds_arr[0]) if preds_arr is not None else None,
-            "confidence": conf,
-            "fake_probability": fake_prob,
-        }
+        # CRIT-2: ``predict_for_evaluation`` now returns the nested
+        # ``{task: {...}}`` contract; the single-text result is the head
+        # of the per-task arrays.
+        records = self._build_records_from_engine_output(outputs)
+        if not records:
+            return {"label": None, "confidence": None, "fake_probability": None}
+        return records[0]
 
     # =====================================================
     # UNCERTAINTY
@@ -202,6 +275,12 @@ class PredictionService:
 
         for task, out in outputs.items():
 
+            # CRIT-2: ``_meta`` (and any other non-task scratch keys) sit
+            # alongside per-task entries; skip anything that does not match
+            # the nested ``{logits/probabilities/...}`` shape.
+            if not isinstance(out, dict) or "probabilities" not in out:
+                continue
+
             probs = out["probabilities"]
 
             if probs is None:
@@ -209,7 +288,15 @@ class PredictionService:
 
             probs = np.asarray(probs)
 
-            entropy = -np.sum(probs * np.log(probs + 1e-12), axis=1)
+            if probs.ndim < 2:
+                # multilabel/binary single-label case — entropy is computed
+                # per-label rather than per-row.
+                entropy = -(probs * np.log(probs + 1e-12)
+                            + (1 - probs) * np.log(1 - probs + 1e-12))
+            else:
+                entropy = -np.sum(probs * np.log(probs + 1e-12), axis=-1)
+
+            entropy = np.atleast_1d(entropy)
 
             results[task] = {
                 "mean_entropy": float(np.mean(entropy)),

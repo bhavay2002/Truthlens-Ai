@@ -163,31 +163,36 @@ class InferenceCache:
 
         key = self._hash_input(data)
 
+        # LAT-4: hold the lock only long enough to consult/mutate the
+        # in-memory dict. Disk reads (especially gzip decompress) used to
+        # block every other inference request because the entire body of
+        # ``get`` ran under ``self._lock``.
         with self._lock:
-
-            # MEMORY
             if self.config.enable_memory_cache:
                 entry = self.memory_cache.get(key)
                 if entry and not self._is_expired(entry["ts"]):
                     return entry["value"]
 
-            # DISK
-            if self.config.enable_disk_cache:
-                path = self._cache_path(key)
+            disk_enabled = self.config.enable_disk_cache
 
-                if path.exists():
-                    try:
-                        entry = self._safe_read(path)
+        if disk_enabled:
+            path = self._cache_path(key)
+            if path.exists():
+                try:
+                    entry = self._safe_read(path)
+                except Exception:
+                    path.unlink(missing_ok=True)
+                    return None
 
-                        if not self._is_expired(entry["ts"]):
-                            if self.config.enable_memory_cache:
-                                self._update_memory(key, entry)
-                            return entry["value"]
+                if self._is_expired(entry["ts"]):
+                    path.unlink(missing_ok=True)
+                    return None
 
-                        path.unlink(missing_ok=True)
+                if self.config.enable_memory_cache:
+                    with self._lock:
+                        self._update_memory(key, entry)
 
-                    except Exception:
-                        path.unlink(missing_ok=True)
+                return entry["value"]
 
         return None
 
@@ -199,25 +204,80 @@ class InferenceCache:
 
         key = self._hash_input(data)
 
+        # LAT-3: store the raw value in memory and serialise exactly once
+        # when writing to disk. The previous code did
+        # ``json.loads(json.dumps(value))`` here AND ``json.dumps(entry)``
+        # below — a full round-trip through JSON on every set.
         entry = {
             "ts": time.monotonic(),
-            "value": json.loads(json.dumps(value, default=_serialize)),
+            "value": value,
         }
 
         with self._lock:
-
             if self.config.enable_memory_cache:
                 self._update_memory(key, entry)
 
-            if self.config.enable_disk_cache:
-                path = self._cache_path(key)
+            disk_enabled = self.config.enable_disk_cache
 
-                try:
-                    payload = json.dumps(entry, separators=(",", ":"))
-                    self._safe_write(path, payload)
+        if disk_enabled:
+            path = self._cache_path(key)
+            try:
+                payload = json.dumps(
+                    entry, separators=(",", ":"), default=_serialize
+                )
+                self._safe_write(path, payload)
+            except Exception as exc:
+                logger.warning(f"Cache write failed: {exc}")
 
-                except Exception as exc:
-                    logger.warning(f"Cache write failed: {exc}")
+    # =====================================================
+    # 🔥 LAT-5: SINGLE-FLIGHT
+    # =====================================================
+
+    def get_or_compute(self, data: Any, compute_fn) -> Dict[str, Any]:
+        """Return the cached entry for ``data`` or compute it once.
+
+        ``self._inflight`` was previously declared but never used, so two
+        concurrent requests for the same uncached input would each run a
+        full inference. Now the second caller blocks on a per-key lock
+        until the first one writes the result, and then reads it from
+        cache — only one forward pass per (input, version) tuple.
+        """
+
+        cached = self.get(data)
+        if cached is not None:
+            return cached
+
+        key = self._hash_input(data)
+
+        with self._lock:
+            inflight = self._inflight.get(key)
+            if inflight is None:
+                inflight = Lock()
+                inflight.acquire()
+                self._inflight[key] = inflight
+                owner = True
+            else:
+                owner = False
+
+        if not owner:
+            with inflight:
+                pass
+            cached = self.get(data)
+            if cached is not None:
+                return cached
+            return self.get_or_compute(data, compute_fn)
+
+        try:
+            value = compute_fn()
+            self.set(data, value)
+            return value
+        finally:
+            with self._lock:
+                self._inflight.pop(key, None)
+            try:
+                inflight.release()
+            except RuntimeError:
+                pass
 
     # =====================================================
     # INVALIDATE

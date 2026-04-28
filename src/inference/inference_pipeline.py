@@ -9,6 +9,7 @@ import numpy as np
 import torch
 
 from src.aggregation.aggregation_pipeline import AggregationPipeline
+from src.config.task_config import TASK_CONFIG
 from src.inference.postprocessing import Postprocessor
 from src.explainability.orchestrator import ExplainabilityOrchestrator
 from src.graph.graph_pipeline import GraphPipeline, get_default_pipeline
@@ -125,12 +126,21 @@ class PredictionPipeline:
     # =====================================================
     # MULTI-TASK
     # =====================================================
+    #
+    # CRIT-3: per-task output type is driven by ``TASK_CONFIG`` (i.e. the
+    # ``tasks:`` block in ``config/config.yaml``) — never by hardcoded
+    # constants in this file. The previous ``_BINARY_TASKS = {"propaganda"}``
+    # contradicted the YAML (which marks propaganda as ``multiclass``) and
+    # silently produced wrong predictions.
 
-    # Per-task output type: multiclass uses softmax+argmax,
-    # binary/multilabel use sigmoid+threshold.
-    _BINARY_TASKS = {"propaganda"}
-    _MULTILABEL_TASKS = {"emotion"}
     _MULTILABEL_THRESHOLD = 0.5
+
+    def _resolve_task_type(self, task: str) -> str:
+        try:
+            return str(TASK_CONFIG[task]["type"])
+        except (KeyError, TypeError):
+            logger.warning("No task type registered for %s; defaulting to multiclass", task)
+            return "multiclass"
 
     def predict_multitask(self, features: torch.Tensor) -> Dict[str, Any]:
 
@@ -145,19 +155,19 @@ class PredictionPipeline:
             if logits.dim() == 1:
                 logits = logits.unsqueeze(0)
 
-            if task in self._MULTILABEL_TASKS:
-                # Multi-label: independent sigmoid per label, threshold at 0.5
+            task_type = self._resolve_task_type(task)
+
+            if task_type == "multilabel":
                 probs = torch.sigmoid(logits)
                 preds = (probs >= self._MULTILABEL_THRESHOLD).int()
-            elif task in self._BINARY_TASKS:
-                # Binary: sigmoid on single logit or pair, threshold at 0.5
+            elif task_type == "binary":
                 probs = torch.sigmoid(logits)
                 if logits.shape[-1] == 1:
                     preds = (probs >= self._MULTILABEL_THRESHOLD).int().squeeze(-1)
                 else:
                     preds = torch.argmax(probs, dim=-1)
             else:
-                # Multi-class (bias, ideology, narrative, etc.): softmax + argmax
+                # multiclass
                 probs = torch.softmax(logits, dim=-1)
                 preds = torch.argmax(probs, dim=-1)
 
@@ -181,6 +191,12 @@ class PredictionPipeline:
     ) -> Dict[str, Any]:
 
         raw = self.predict_multitask(features)
+
+        # CRIT-8: drive the postprocessor's task types from the task
+        # registry whenever the caller does not override them, so the
+        # multilabel/multiclass branches stay in lockstep with the YAML.
+        if task_types is None:
+            task_types = {task: self._resolve_task_type(task) for task in raw}
 
         return self.postprocessor.process(
             raw,

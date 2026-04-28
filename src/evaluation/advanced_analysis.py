@@ -134,13 +134,18 @@ def predict_texts(
     prediction_service: Optional[PredictionService] = None,
 ):
 
-    # 🔥 NEW: use full pipeline if available
+    # 🔥 LAT-1: replace the per-sample loop with a single batched call so
+    # tokenisation + the model forward pass run once for the whole batch
+    # instead of once per text.
     if prediction_service:
-        outputs = [prediction_service.predict(t) for t in texts]
+        if hasattr(prediction_service, "predict_full_batch"):
+            outputs = prediction_service.predict_full_batch(list(texts))
+        else:  # pragma: no cover - legacy fallback
+            outputs = [prediction_service.predict(t) for t in texts]
 
         return {
-            "predictions": [o.get("predictions") for o in outputs],
-            "probabilities": [o.get("probabilities") for o in outputs],
+            "predictions": [o.get("label") for o in outputs],
+            "probabilities": [o.get("fake_probability") for o in outputs],
             "raw": outputs,
         }
 
