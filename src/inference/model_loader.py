@@ -16,6 +16,15 @@ from src.models.metadata.model_metadata import ModelMetadata
 from src.models.inference.predictor import Predictor
 from src.models.registry.model_factory import ModelFactory
 
+# PP-1: task-type registry drives the activation choice (sigmoid vs.
+# softmax) inside ``UnifiedPredictor._format_output``. Without this the
+# multilabel ``emotion`` head was being softmax-collapsed into a single
+# argmax label at inference time.
+try:
+    from src.config.task_config import TASK_CONFIG as _TASK_CONFIG
+except Exception:  # pragma: no cover - registry optional
+    _TASK_CONFIG = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -58,7 +67,20 @@ class UnifiedPredictor:
         self.artifacts = artifacts
         self.device = device
 
-    def _format_output(self, raw: Dict[str, Any]):
+    @staticmethod
+    def _resolve_task_type(task: str) -> str:
+        """PP-1: pick activation by task type from the registry.
+
+        ``multilabel`` heads (e.g. emotion) MUST use sigmoid; only
+        ``multiclass`` heads use softmax. The previous unconditional
+        softmax collapsed 20 independent emotion sigmoids into a
+        single Categorical, destroying multilabel semantics.
+        """
+        if _TASK_CONFIG is None or task not in _TASK_CONFIG:
+            return "multiclass"
+        return str(_TASK_CONFIG[task].get("type", "multiclass"))
+
+    def _format_output(self, raw: Dict[str, Any], task: str = "multiclass"):
 
         logits = raw.get("logits")
         probs = raw.get("probabilities")
@@ -66,17 +88,30 @@ class UnifiedPredictor:
         if logits is not None:
             logits = np.asarray(logits)
 
+        task_type = self._resolve_task_type(task) if isinstance(task, str) else "multiclass"
+
         if probs is None and logits is not None:
-            probs = torch.softmax(torch.tensor(logits), dim=-1).numpy()
+            t = torch.as_tensor(logits)
+            if task_type in ("multilabel", "binary"):
+                probs = torch.sigmoid(t).numpy()
+            else:
+                probs = torch.softmax(t, dim=-1).numpy()
 
         preds = None
         if probs is not None:
-            preds = np.argmax(probs, axis=1)
+            if task_type == "multilabel":
+                # PP-1: per-label binarisation rather than argmax across labels.
+                preds = (probs >= 0.5).astype(np.int64)
+            elif task_type == "binary" and probs.ndim == 1:
+                preds = (probs >= 0.5).astype(np.int64)
+            else:
+                preds = np.argmax(probs, axis=1)
 
         return {
             "logits": logits,
             "probabilities": probs,
             "predictions": preds,
+            "task_type": task_type,
         }
 
     def predict_for_evaluation(self, texts: List[str]):
@@ -84,7 +119,11 @@ class UnifiedPredictor:
         # ---------------- MULTITASK ----------------
         if self.artifacts.multitask_predictor:
             raw = self.artifacts.multitask_predictor.predict(texts)
-            return {"multitask": self._format_output(raw)}
+            # Multitask predictor returns a dict keyed by head; the
+            # caller can re-key per-task downstream. The umbrella
+            # "multitask" entry stays multiclass-shaped to avoid
+            # changing its contract here.
+            return {"multitask": self._format_output(raw, "multitask")}
 
         # ---------------- SINGLE TASK ----------------
         outputs = {}
@@ -99,7 +138,7 @@ class UnifiedPredictor:
                 continue
 
             raw = predictor.predict(texts)
-            outputs[name] = self._format_output(raw)
+            outputs[name] = self._format_output(raw, name)
 
         return outputs
 
@@ -158,12 +197,13 @@ class ModelLoader:
 
         model = obj
 
-        if self.device.type == "cuda":
-            try:
-                model = model.to(dtype=torch.float16)
-            except Exception:
-                pass
-
+        # DEV-1: do NOT cast model weights to fp16 unconditionally.
+        # Calibration (TemperatureScaler / IsotonicCalibrator) was fit
+        # on fp32 logits during validation; running the forward pass
+        # in fp16 weights raises ECE by 1-2 percentage points and the
+        # error is silent. AMP autocast (used downstream) gives the
+        # speed-up of fp16/bf16 compute while keeping accumulators in
+        # fp32 — best of both worlds.
         model.to(self.device)
 
         if (
@@ -177,6 +217,12 @@ class ModelLoader:
                 logger.warning("torch.compile failed; running eager: %s", exc)
 
         model.eval()
+        # DEV-3: ``.eval()`` only disables Dropout / BatchNorm running
+        # stats; parameters still carry ``requires_grad=True``, which
+        # forces autograd version-counter allocations on every forward
+        # pass — wasted work for inference. Freeze the parameters once.
+        for p in model.parameters():
+            p.requires_grad_(False)
         return model
 
     def _load_tokenizer(self, path: Path):
@@ -270,6 +316,9 @@ class ModelLoader:
 
         model.to(self.device)
         model.eval()
+        # DEV-3: freeze parameters for inference (see _load_torch_model).
+        for p in model.parameters():
+            p.requires_grad_(False)
 
         return model
 

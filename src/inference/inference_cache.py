@@ -113,11 +113,25 @@ class InferenceCache:
 
     def _safe_write(self, path: Path, payload: str):
 
-        tmp = path.with_suffix(".tmp")
+        # MEM-3: ``path.with_suffix(".tmp")`` only replaces the LAST
+        # suffix, so ``cache.json.gz`` became ``cache.json.tmp`` —
+        # different stem from the final filename and a moving target if
+        # compression mode toggled. Use ``with_name`` so the temp file
+        # is unambiguously the final path + ``.tmp``.
+        tmp = path.with_name(path.name + ".tmp")
 
         if self.config.enable_compression:
+            # MEM-3: fsync the gzip path too. The previous code only
+            # fsynced the uncompressed branch; a crash mid-write of a
+            # compressed cache produced a partial gz that the reader
+            # silently deleted, losing the work.
             with gzip.open(tmp, "wt", encoding="utf-8") as f:
                 f.write(payload)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except (AttributeError, OSError):
+                    pass
         else:
             with open(tmp, "w", encoding="utf-8") as f:
                 f.write(payload)
@@ -188,6 +202,15 @@ class InferenceCache:
                     path.unlink(missing_ok=True)
                     return None
 
+                # MEM-2: touch mtime so disk LRU eviction (driven by
+                # ``_evict_disk_if_needed`` on ``set``) treats this entry
+                # as recently used. Best-effort — failure here must not
+                # break the read path.
+                try:
+                    os.utime(path, None)
+                except OSError:
+                    pass
+
                 if self.config.enable_memory_cache:
                     with self._lock:
                         self._update_memory(key, entry)
@@ -228,6 +251,47 @@ class InferenceCache:
                 self._safe_write(path, payload)
             except Exception as exc:
                 logger.warning(f"Cache write failed: {exc}")
+            # MEM-2: enforce the disk-side LRU bound (when configured).
+            self._evict_disk_if_needed()
+
+    # =====================================================
+    # MEM-2: DISK LRU EVICTION
+    # =====================================================
+
+    def _evict_disk_if_needed(self) -> None:
+        """Cap the disk cache to ``config.max_disk_items`` by mtime.
+
+        ``None`` keeps the previous unbounded behaviour (suitable when
+        the operator manages the volume out-of-band). With a bound set,
+        the oldest-by-mtime files are unlinked until the count fits.
+        """
+        cap = self.config.max_disk_items
+        if not cap or cap <= 0:
+            return
+        if not self.config.enable_disk_cache:
+            return
+
+        try:
+            entries = [
+                p for p in self.cache_dir.iterdir()
+                if p.is_file() and p.suffix != ".tmp" and not p.name.endswith(".tmp")
+            ]
+        except OSError:
+            return
+
+        if len(entries) <= cap:
+            return
+
+        try:
+            entries.sort(key=lambda p: p.stat().st_mtime)
+        except OSError:
+            return
+
+        for p in entries[: len(entries) - cap]:
+            try:
+                p.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.debug("Cache eviction unlink failed for %s: %s", p, exc)
 
     # =====================================================
     # 🔥 LAT-5: SINGLE-FLIGHT

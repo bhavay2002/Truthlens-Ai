@@ -547,3 +547,35 @@ Cross-checked every item from the v13 `src/features/` audit (`Pasted--TruthLens-
 **§3.5 — semantic encoder unavailable.** Same indicator pattern applied for symmetry: `SemanticFeatures.extract` emits `sem_available = 1.0` on the success path; `_empty()` (returned when no embedding is wired up or the encoder failed) emits `sem_available = 0.0`. The downstream head can now attenuate the 7-dim `sem_*` block on encoder-failure rows instead of treating an all-zero `sem_*` block as a legitimate signal.
 
 **Verification.** `Start application` restarts cleanly; FastAPI startup completes; `GET /` returns 200. No new errors / warnings in the boot log.
+
+## Apr 28 2026 — Inference-layer audit: POST-PROCESSING, MULTI-TASK, GPU/DEVICE, MEMORY/BATCHING
+
+Pre-condition fix: `portalocker` was imported by `src/utils/json_utils.py` but missing from the env, blocking the API at uvicorn boot. Installed it; FastAPI now starts cleanly and `GET /` returns 200.
+
+**Post-processing (`📊 PP-1..PP-4`).**
+- `PP-1` — `UnifiedPredictor._format_output` (in `src/inference/model_loader.py`) was always softmaxing logits, corrupting multilabel/binary heads. Added `_resolve_task_type(name)` (consults `task_metadata`, then the `TASK_CONFIG` proxy) and made `_format_output` task-aware: `softmax`/`argmax` for `multiclass`, `sigmoid + threshold` for `multilabel` and `binary`. Output now also carries `task_type`.
+- `PP-2` — `Postprocessor` gained `load_task_thresholds(path)` which reads `<model_dir>/thresholds.json` and merges into `config.task_thresholds`. `PredictionPipelineConfig` got `task_thresholds_path` / `task_thresholds`; the pipeline wires both into the postprocessor at construction. `predict_multitask` resolves the per-task threshold via `_resolve_threshold(task)` so each head's calibrated cutoff is applied (no more `0.5` everywhere).
+- `PP-3` — `Postprocessor.process` now requires an explicit `task_types` mapping and raises `ValueError` if it is missing and `KeyError` if a task is absent from the mapping. The previous silent `multiclass` fallback masked multilabel mis-routing; production tracebacks now point straight at the misconfigured task.
+- `PP-4` — `PredictionService._compute_uncertainty` now branches on `out["task_type"]`. Multilabel heads use the Bernoulli-sum entropy `-Σ_k [p_k log p_k + (1-p_k) log(1-p_k)]`, binary uses per-sample Bernoulli, multiclass uses categorical. Falls back to a row-sum heuristic when `task_type` is absent (legacy callers). The single-head HF engine in `inference_engine.py:predict_for_evaluation` now emits `task_type: "multiclass"` so the service's branch resolves deterministically.
+
+**Multi-task (`🧠 MT-3`).**
+- `MT-3` — `InferenceEngineConfig.calibrators` now accepts a single `Calibrator` **or** a `Mapping[str, Calibrator]`. `_resolve_calibrator(task)` is consulted at every calibration call site. The legacy single-calibrator-for-all-tasks path is preserved by passing a non-mapping. `MT-1` / `MT-2` are deferred — they overlap with the still-pending `CRIT-2` engine unification and will be addressed in that pass.
+
+**GPU / device (`🚀 DEV-1..DEV-4`).**
+- `DEV-1` — Removed the unconditional `model.half()` cast in `model_loader._load_torch_model` and removed `torch_dtype=...` from `from_pretrained` in `inference_engine`. Weight precision is the operator's call (env / config); inference now uses autocast for mixed precision.
+- `DEV-2` — Both `inference_pipeline._resolve_amp_dtype` and `inference_engine._resolve_amp_dtype_engine` read `TRUTHLENS_AMP_DTYPE` (default `bf16`, accepts `fp16`/`float16`/`bfloat16`/`fp32`/`float32`/`none`/`disabled`). The autocast block uses the resolved dtype, so the A100 path stays bf16 by default and CPU/old-GPU operators can opt into fp16 or full precision without code changes.
+- `DEV-3` — After load, both `_load_torch_model` and `load_multitask_model` call `model.eval()` and `model.requires_grad_(False)`. Inference runs no longer hold gradient buffers or accumulate autograd graph state.
+- `DEV-4` — `_apply_calibration` now returns CPU tensors for the `IsotonicRegression` path (sklearn doesn't accept CUDA arrays). The temperature-scaling path still runs on-device. `predict_for_evaluation` re-aligns `cal` to `logits.device` before `cat` so the on-device accumulation path (MEM-1, below) stays consistent.
+
+**Memory / batching (`🧮 MEM-1..MEM-4`).**
+- `MEM-1` — `InferenceEngineConfig.keep_outputs_on_device` (default `False`) controls whether `predict_for_evaluation` accumulates per-batch tensors on the GPU and transfers once at the end (long eval runs on big GPUs) or per-batch (default — bounds peak GPU memory at one batch).
+- `MEM-2` — `InferenceCache._evict_disk_if_needed()` enforces `config.max_disk_items` by mtime LRU on every `set()`. `get()` calls `os.utime(path, None)` to keep the LRU ordering accurate. `None` / `<=0` preserves the previous unbounded behaviour. Verified: 7 sets with `cap=3` → exactly 3 files remain.
+- `MEM-3` — `_safe_write` now uses `path.with_name(path.name + ".tmp")` (was `path.with_suffix(".tmp")`, which collided across `.json` and `.json.gz` modes and left a dangling temp on mode toggles) and `os.fsync`s the gzip branch too (was uncompressed-only). Verified: no `.tmp` files linger after a normal write.
+- `MEM-4` — Memory cache stores the raw value (already in place from earlier passes; verified during this audit).
+
+**Other.**
+- Bidirectional fix in `src/training/checkpointing.py:load_checkpoint` for the `_orig_mod.` prefix introduced by `torch.compile`: the wrapper is peeled from the model side **and** the prefix is stripped from the state-dict side before `load_state_dict`. Resume now works whether the checkpoint was saved with or without `torch.compile` enabled, regardless of the runtime setting.
+
+**Verification.** Standalone smoke tests pass: `PP-3` raises on missing `task_types`/missing entries; `PP-2` loads thresholds JSON; `MEM-2` evicts to cap; `MEM-3` leaves no `.tmp` files; `DEV-2` resolves both `bf16` and `fp16` env values to the right `torch.dtype`. `Start application` restarts cleanly: `Application startup complete`, `GET /` returns 200, no warnings.
+
+**Deferred (documented for next pass).** `MT-1` (engine selection / dispatch) and `MT-2` (per-task batch grouping) overlap with `CRIT-2` engine unification and will be addressed alongside it.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
@@ -10,9 +11,24 @@ import torch
 
 from src.aggregation.aggregation_pipeline import AggregationPipeline
 from src.config.task_config import TASK_CONFIG
-from src.inference.postprocessing import Postprocessor
+from src.inference.postprocessing import Postprocessor, PostprocessingConfig
 from src.explainability.orchestrator import ExplainabilityOrchestrator
 from src.graph.graph_pipeline import GraphPipeline, get_default_pipeline
+
+
+# DEV-2: training writes AMP dtype via TRUTHLENS_AMP_DTYPE; inference must
+# read the same knob. fp16 (the previous hardcoded default) has a narrower
+# dynamic range than bf16 — the unbalanced bias head will overflow for
+# some logits when the trainer used bf16. Map "bf16"/"fp16"/"fp32" to the
+# matching torch dtype; default to bf16 if env is unset and CUDA is
+# available, else fp16 (legacy CUDA-only behaviour).
+def _resolve_amp_dtype(default: str = "bf16") -> torch.dtype:
+    requested = (os.environ.get("TRUTHLENS_AMP_DTYPE") or default).lower()
+    if requested in ("bf16", "bfloat16"):
+        return torch.bfloat16
+    if requested in ("fp16", "float16", "half"):
+        return torch.float16
+    return torch.float32
 
 from src.monitoring.feature_logger import (
     log_request_latency,
@@ -33,6 +49,12 @@ logger = logging.getLogger(__name__)
 class PredictionPipelineConfig:
     device: str = "cpu"
     return_probabilities: bool = True
+    # PP-2: optional path to a JSON {task: float} of per-task thresholds
+    # produced by training's threshold optimiser. None falls back to 0.5.
+    task_thresholds_path: Optional[str] = None
+    # PP-2: explicit per-task threshold overrides (take precedence over
+    # the file). Useful for ad-hoc tuning at deploy time.
+    task_thresholds: Optional[Dict[str, float]] = None
 
 
 ExplainabilityLayer = ExplainabilityOrchestrator
@@ -66,7 +88,28 @@ class PredictionPipeline:
         self.explainability_layer = explainability_layer
         self.aggregation_pipeline = aggregation_pipeline or AggregationPipeline()
 
-        self.postprocessor = Postprocessor()
+        # PP-2: build a postprocessor whose ``task_thresholds`` is
+        # populated from (a) a JSON file emitted by training and (b)
+        # explicit overrides on the config — in that order so overrides
+        # win. Without this, every multilabel head silently used 0.5.
+        pp_config = PostprocessingConfig()
+        self.postprocessor = Postprocessor(pp_config)
+        if config.task_thresholds_path:
+            try:
+                self.postprocessor.load_task_thresholds(config.task_thresholds_path)
+            except Exception as exc:  # pragma: no cover
+                logger.warning(
+                    "Failed to load thresholds from %s: %s",
+                    config.task_thresholds_path, exc,
+                )
+        if config.task_thresholds:
+            existing = dict(self.postprocessor.config.task_thresholds or {})
+            existing.update(config.task_thresholds)
+            self.postprocessor.config.task_thresholds = existing
+
+        # DEV-2: cache the AMP dtype once so ``_forward_all`` does not
+        # re-read the env on every call.
+        self._amp_dtype = _resolve_amp_dtype()
 
         # 🔥 NEW — G-R1: share the process-wide singleton.
         self.graph_pipeline = get_default_pipeline()
@@ -87,8 +130,11 @@ class PredictionPipeline:
 
         outputs = {}
 
+        # DEV-2: dtype matches the training-time TRUTHLENS_AMP_DTYPE
+        # (default bf16). Hardcoded fp16 here would overflow tail-class
+        # logits trained under bf16.
         ctx = (
-            torch.autocast("cuda", dtype=torch.float16)
+            torch.autocast("cuda", dtype=self._amp_dtype)
             if self.device.type == "cuda"
             else nullcontext()
         )
@@ -142,6 +188,23 @@ class PredictionPipeline:
             logger.warning("No task type registered for %s; defaulting to multiclass", task)
             return "multiclass"
 
+    def _resolve_threshold(self, task: str) -> float:
+        """PP-2: per-task threshold lookup.
+
+        Order: postprocessor.config.task_thresholds → task registry's
+        configured threshold → 0.5 default.
+        """
+        thresholds = self.postprocessor.config.task_thresholds or {}
+        if task in thresholds:
+            return float(thresholds[task])
+        try:
+            registered = TASK_CONFIG[task].get("threshold")
+            if registered is not None:
+                return float(registered)
+        except (KeyError, TypeError):
+            pass
+        return self._MULTILABEL_THRESHOLD
+
     def predict_multitask(self, features: torch.Tensor) -> Dict[str, Any]:
 
         outputs = self._forward_all(features)
@@ -156,14 +219,15 @@ class PredictionPipeline:
                 logits = logits.unsqueeze(0)
 
             task_type = self._resolve_task_type(task)
+            threshold = self._resolve_threshold(task)
 
             if task_type == "multilabel":
                 probs = torch.sigmoid(logits)
-                preds = (probs >= self._MULTILABEL_THRESHOLD).int()
+                preds = (probs >= threshold).int()
             elif task_type == "binary":
                 probs = torch.sigmoid(logits)
                 if logits.shape[-1] == 1:
-                    preds = (probs >= self._MULTILABEL_THRESHOLD).int().squeeze(-1)
+                    preds = (probs >= threshold).int().squeeze(-1)
                 else:
                     preds = torch.argmax(probs, dim=-1)
             else:
@@ -175,6 +239,9 @@ class PredictionPipeline:
                 "logits": logits.detach().cpu().numpy(),
                 "probabilities": probs.detach().cpu().numpy(),
                 "predictions": preds.detach().cpu().numpy(),
+                # PP-4: surface task_type so downstream uncertainty
+                # computation can pick the correct entropy formula.
+                "task_type": task_type,
             }
 
         return results

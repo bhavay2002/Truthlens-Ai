@@ -287,14 +287,39 @@ class PredictionService:
                 continue
 
             probs = np.asarray(probs)
+            eps = 1e-12
 
-            if probs.ndim < 2:
-                # multilabel/binary single-label case — entropy is computed
-                # per-label rather than per-row.
-                entropy = -(probs * np.log(probs + 1e-12)
-                            + (1 - probs) * np.log(1 - probs + 1e-12))
+            # PP-4: pick the correct entropy formula by task type.
+            # Categorical entropy assumes rows sum to 1 (multiclass softmax).
+            # Multilabel heads are independent Bernoullis and need
+            # ``-Σ_k [p_k log p_k + (1-p_k) log(1-p_k)]``; using the
+            # categorical formula on multilabel probabilities gave a
+            # systematically wrong uncertainty signal.
+            task_type = out.get("task_type")
+            if task_type is None:
+                # Fallback inference: rows that don't sum to ~1 across the
+                # last axis are almost certainly multilabel sigmoids.
+                task_type = "multiclass"
+                if probs.ndim >= 2:
+                    row_sums = probs.sum(axis=-1)
+                    if not np.allclose(row_sums, 1.0, atol=1e-3):
+                        task_type = "multilabel"
+                else:
+                    task_type = "binary"
+
+            if task_type == "multilabel":
+                entropy = -np.sum(
+                    probs * np.log(probs + eps)
+                    + (1 - probs) * np.log(1 - probs + eps),
+                    axis=-1,
+                )
+            elif task_type == "binary":
+                # Per-sample Bernoulli entropy.
+                entropy = -(probs * np.log(probs + eps)
+                            + (1 - probs) * np.log(1 - probs + eps))
             else:
-                entropy = -np.sum(probs * np.log(probs + 1e-12), axis=-1)
+                # multiclass / categorical
+                entropy = -np.sum(probs * np.log(probs + eps), axis=-1)
 
             entropy = np.atleast_1d(entropy)
 

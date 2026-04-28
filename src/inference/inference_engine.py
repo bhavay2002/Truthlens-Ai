@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Union, Any
+from typing import Dict, List, Mapping, Optional, Union, Any
 
 import numpy as np
 import torch
@@ -11,6 +12,20 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 from src.models.calibration import IsotonicCalibrator, TemperatureScaler
 from src.inference.postprocessing import Postprocessor
+
+
+# DEV-2: AMP dtype must match training-time TRUTHLENS_AMP_DTYPE
+# (default bf16). Hardcoding fp16 caused tail-class logit overflow
+# for models trained with bf16. See inference_pipeline._resolve_amp_dtype
+# for the canonical implementation; duplicated here to avoid an import
+# cycle (pipeline imports from engine indirectly via prediction_service).
+def _resolve_amp_dtype_engine() -> torch.dtype:
+    requested = (os.environ.get("TRUTHLENS_AMP_DTYPE") or "bf16").lower()
+    if requested in ("bf16", "bfloat16"):
+        return torch.bfloat16
+    if requested in ("fp16", "float16", "half"):
+        return torch.float16
+    return torch.float32
 
 # 🔥 NEW IMPORTS
 # NOTE: PredictionService is imported lazily inside ``InferenceEngine.__init__``
@@ -53,6 +68,13 @@ class InferenceConfig:
     prediction_timeout: Optional[float] = None
     use_torch_compile: bool = False
 
+    # MEM-1: when True, accumulate per-batch logits/probs on the GPU and
+    # transfer to CPU once at the end of ``predict_for_evaluation``. This
+    # avoids per-batch host-buffer churn (the previous behaviour) on
+    # short-to-medium evaluation runs. For very large evaluation passes,
+    # leave at False to keep peak GPU memory bounded by one batch.
+    keep_outputs_on_device: bool = False
+
 
 # =========================================================
 # ENGINE
@@ -64,8 +86,16 @@ class InferenceEngine:
         self,
         config: InferenceConfig,
         *,
-        temperature_scaler: Optional[TemperatureScaler] = None,
-        isotonic_calibrator: Optional[IsotonicCalibrator] = None,
+        # MT-3: accept either a single calibrator (legacy single-task
+        # contract) OR a per-task mapping ``{task: calibrator}``. A
+        # multitask model needs one calibrator per head; the previous
+        # single-object slot couldn't represent that.
+        temperature_scaler: Optional[
+            Union[TemperatureScaler, Mapping[str, TemperatureScaler]]
+        ] = None,
+        isotonic_calibrator: Optional[
+            Union[IsotonicCalibrator, Mapping[str, IsotonicCalibrator]]
+        ] = None,
         postprocessor: Optional[Postprocessor] = None,
     ):
         self.config = config
@@ -91,7 +121,13 @@ class InferenceEngine:
         self.postprocessor = postprocessor or Postprocessor()
 
         self.use_amp = self.device.type == "cuda" and config.use_amp
-        self.amp_dtype = torch.float16 if self.device.type == "cuda" else torch.float32
+        # DEV-2: dtype follows TRUTHLENS_AMP_DTYPE (default bf16) — the
+        # same env the trainer reads. Hardcoding fp16 mismatched the
+        # trainer's bf16 default and overflowed unbalanced-head logits.
+        self.amp_dtype = (
+            _resolve_amp_dtype_engine() if self.device.type == "cuda"
+            else torch.float32
+        )
 
         self._load_model()
 
@@ -128,13 +164,22 @@ class InferenceEngine:
 
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast=True)
 
-        self.model = AutoModelForSequenceClassification.from_pretrained(
-            model_path,
-            torch_dtype=self.amp_dtype if self.device.type == "cuda" else None,
-        )
+        # DEV-1: load weights in fp32 even on CUDA. AMP autocast (used in
+        # ``_forward``) gives the speed/memory win of fp16/bf16 compute
+        # while keeping accumulators in fp32, which preserves the
+        # calibration that was fit on fp32 logits during validation.
+        self.model = AutoModelForSequenceClassification.from_pretrained(model_path)
 
         self.model.to(self.device)
         self.model.eval()
+
+        # DEV-3: freeze parameters once. ``.eval()`` only disables
+        # Dropout / BatchNorm running stats; parameters still default to
+        # ``requires_grad=True`` and pay autograd version-counter cost on
+        # every forward pass (relevant when callers use ``no_grad``
+        # rather than ``inference_mode``).
+        for p in self.model.parameters():
+            p.requires_grad_(False)
 
         self._load_label_map(model_path)
         self._warmup()
@@ -201,21 +246,36 @@ class InferenceEngine:
     # CALIBRATION
     # =====================================================
 
-    def _apply_calibration(self, logits, probs):
+    def _resolve_calibrator(self, slot, task: str):
+        """MT-3: pick the per-task calibrator from a Mapping, or return
+        the single-object calibrator unchanged. Returns None when no
+        calibrator is registered for the task.
+        """
+        if slot is None:
+            return None
+        # Treat any Mapping as per-task; sklearn calibrators don't
+        # implement the Mapping protocol, so this is unambiguous.
+        if isinstance(slot, Mapping):
+            return slot.get(task)
+        return slot
+
+    def _apply_calibration(self, logits, probs, *, task: Optional[str] = None):
         # CRIT-7: do not catch arbitrary exceptions silently. A broken
         # calibrator must surface as a real error during inference rather
         # than degrade to uncalibrated probabilities without any signal.
-        if self.temperature_scaler:
-            return self.temperature_scaler.predict_proba(logits)
+        task_name = task or self.DEFAULT_TASK_NAME
 
-        if self.isotonic_calibrator:
-            return torch.tensor(
-                self.isotonic_calibrator.predict_proba(
-                    probs.detach().cpu().numpy()
-                ),
-                device=probs.device,
-                dtype=probs.dtype,
-            )
+        temp = self._resolve_calibrator(self.temperature_scaler, task_name)
+        if temp is not None:
+            return temp.predict_proba(logits)
+
+        iso = self._resolve_calibrator(self.isotonic_calibrator, task_name)
+        if iso is not None:
+            # DEV-4: avoid the GPU→CPU→GPU→CPU ping-pong. The next
+            # operation in the engine is ``cal.detach().cpu()`` so the
+            # round-trip back to ``probs.device`` was pure waste.
+            cal_np = iso.predict_proba(probs.detach().cpu().numpy())
+            return torch.from_numpy(cal_np)
 
         return probs
 
@@ -244,6 +304,14 @@ class InferenceEngine:
         all_probs = []
         all_cal = []
 
+        # MEM-1: when ``keep_outputs_on_device`` is True, accumulate the
+        # per-batch tensors on the GPU and transfer to CPU once at the
+        # end. The previous code allocated a host buffer per batch via
+        # ``.cpu()`` inside the loop, fragmenting host memory on long
+        # eval runs. Keep the per-batch CPU path as the default so peak
+        # GPU memory stays bounded by one batch.
+        keep_on_device = bool(getattr(self.config, "keep_outputs_on_device", False))
+
         with torch.inference_mode():
             for batch in self._batchify(texts, self.config.batch_size):
 
@@ -251,13 +319,29 @@ class InferenceEngine:
                 probs = torch.softmax(logits, dim=-1)
                 cal = self._apply_calibration(logits, probs)
 
-                all_logits.append(logits.detach().cpu())
-                all_probs.append(probs.detach().cpu())
-                all_cal.append(cal.detach().cpu())
+                if keep_on_device:
+                    all_logits.append(logits.detach())
+                    all_probs.append(probs.detach())
+                    # Calibration may already have moved cal off-device
+                    # (DEV-4 isotonic path). Re-align to logits.device so
+                    # the final ``cat`` has consistent placement.
+                    cal_d = cal.detach()
+                    if cal_d.device != logits.device:
+                        cal_d = cal_d.to(logits.device)
+                    all_cal.append(cal_d)
+                else:
+                    all_logits.append(logits.detach().cpu())
+                    all_probs.append(probs.detach().cpu())
+                    all_cal.append(cal.detach().cpu())
 
         logits = torch.cat(all_logits)
         probs = torch.cat(all_probs)
         cal = torch.cat(all_cal)
+
+        if keep_on_device:
+            logits = logits.cpu()
+            probs = probs.cpu()
+            cal = cal.cpu()
 
         preds = np.argmax(cal.numpy(), axis=1)
 
@@ -266,6 +350,10 @@ class InferenceEngine:
             "probabilities": probs.numpy(),
             "calibrated_probabilities": cal.numpy(),
             "logits": logits.numpy(),
+            # PP-4: surface task_type so PredictionService can pick the
+            # correct entropy formula. The single-head HF engine is
+            # multiclass by construction.
+            "task_type": "multiclass",
         }
 
         # CRIT-3/8: keep the engine's single-task output consistent with
