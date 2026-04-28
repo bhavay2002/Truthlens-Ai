@@ -11,6 +11,7 @@ from src.analysis.feature_context import FeatureContext
 from src.analysis._text_features import (
     term_ratio,
     phrase_match_count,
+    cached_phrase_match_count,
     normalize_lexicon_terms,
 )
 from src.analysis.feature_schema import CONTEXT_OMISSION_KEYS, make_vector
@@ -85,7 +86,12 @@ class ContextOmissionDetector(BaseAnalyzer):
 
     def analyze(self, ctx: FeatureContext) -> Dict[str, float]:
 
-        if ctx.n_tokens == 0:
+        # Section 4: use safe accessor so the analyzer never reads
+        # `ctx.n_tokens` while it's still None (BaseAnalyzer normally
+        # warms it via ensure_tokens, but defend against direct callers).
+        n_tokens = ctx.safe_n_tokens()
+
+        if n_tokens == 0:
             return self._empty_features()
 
         features: Dict[str, float] = {}
@@ -93,20 +99,23 @@ class ContextOmissionDetector(BaseAnalyzer):
         # 🔥 shared spaCy doc
         doc = get_doc(ctx, task="ner")
 
+        token_counts = ctx.safe_counts()
+        text_lower = ctx.text_lower or ""
+
         # -----------------------------------------------------
         # TOKEN RATIOS
         # -----------------------------------------------------
 
         features["context_vague_reference_ratio"] = self._safe(
-            term_ratio(ctx.token_counts, ctx.n_tokens, self.VAGUE_REFERENCES)
+            term_ratio(token_counts, n_tokens, self.VAGUE_REFERENCES)
         )
 
         features["context_attribution_ratio"] = self._safe(
-            term_ratio(ctx.token_counts, ctx.n_tokens, self.ATTRIBUTION_MARKERS)
+            term_ratio(token_counts, n_tokens, self.ATTRIBUTION_MARKERS)
         )
 
         features["context_uncertainty_ratio"] = self._safe(
-            term_ratio(ctx.token_counts, ctx.n_tokens, self.UNCERTAINTY_MARKERS)
+            term_ratio(token_counts, n_tokens, self.UNCERTAINTY_MARKERS)
         )
 
         # -----------------------------------------------------
@@ -114,7 +123,7 @@ class ContextOmissionDetector(BaseAnalyzer):
         # -----------------------------------------------------
 
         features["context_evidence_ratio"] = self._phrase_ratio(
-            ctx.text_lower, ctx.n_tokens, self.evidence_phrases
+            ctx, n_tokens, self.evidence_phrases
         )
 
         # -----------------------------------------------------
@@ -122,7 +131,7 @@ class ContextOmissionDetector(BaseAnalyzer):
         # -----------------------------------------------------
 
         features["context_quote_ratio"] = self._quote_ratio(
-            ctx.text_lower, ctx.n_tokens
+            text_lower, n_tokens
         )
 
         # -----------------------------------------------------
@@ -147,10 +156,11 @@ class ContextOmissionDetector(BaseAnalyzer):
 
     # =========================================================
 
-    def _phrase_ratio(self, text_lower: str, n_tokens: int, phrases: set) -> float:
+    def _phrase_ratio(self, ctx: FeatureContext, n_tokens: int, phrases: set) -> float:
         if n_tokens <= 0:
             return 0.0
-        hits = phrase_match_count(text_lower, phrases)
+        # PERF-A2: shared per-ctx phrase-hit cache.
+        hits = cached_phrase_match_count(ctx, phrases)
         return self._safe(hits / (n_tokens + EPS))
 
     # =========================================================

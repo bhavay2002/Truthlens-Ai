@@ -13,6 +13,7 @@ from src.analysis.feature_schema import (
     make_vector,
     validate_features,
 )
+from src.analysis._text_features import safe_normalized_entropy
 
 logger = logging.getLogger(__name__)
 
@@ -279,25 +280,10 @@ class PropagandaPatternDetector(BaseAnalyzer):
 
     def _entropy(self, dist: Dict[str, float]) -> float:
 
-        values = np.array(list(dist.values()), dtype=np.float32)
-
-        total = float(values.sum())
-        if total < EPS:
-            return 0.0
-
-        probs = values / (total + EPS)
-
-        n = len(probs)
-        if n <= 1:
-            return 0.0
-
-        entropy = -float(np.sum(probs * np.log(probs + EPS)))
-        max_entropy = float(np.log(n))
-
-        if max_entropy < EPS:
-            return 0.0
-
-        return entropy / max_entropy
+        # NUM-A1: this detector's previously-local guarded entropy is now
+        # the shared `safe_normalized_entropy` helper. Behavior is
+        # identical (same n<=1 / max_entropy<EPS / sum<EPS guards).
+        return safe_normalized_entropy(dist.values())
 
     def _clip(self, features: Dict[str, float]) -> Dict[str, float]:
 

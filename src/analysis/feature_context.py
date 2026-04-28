@@ -180,6 +180,19 @@ class FeatureContext:
     def safe_counts(self) -> Counter:
         return self.token_counts or Counter()
 
+    # PERF-A1: cache `text.count(symbol)` once per (ctx, symbol). Several
+    # analyzers compute exclamation/question densities; before this, each
+    # one re-scanned the raw text per request. Stored on `shared` rather
+    # than as a slot field so we don't have to widen the dataclass slots.
+    def punct_count(self, symbol: str) -> int:
+        cache = self.shared.setdefault("punct_counts", {})
+        cached = cache.get(symbol)
+        if cached is not None:
+            return cached
+        value = (self.text or "").count(symbol)
+        cache[symbol] = value
+        return value
+
     # =========================================================
     # UTILITIES
     # =========================================================

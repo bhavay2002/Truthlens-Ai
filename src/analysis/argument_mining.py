@@ -10,6 +10,7 @@ from src.analysis.feature_context import FeatureContext
 from src.analysis._text_features import (
     term_ratio,
     phrase_match_count,
+    cached_phrase_match_count,
     normalize_lexicon_terms,
 )
 from src.analysis.feature_schema import ARGUMENT_MINING_KEYS, make_vector
@@ -82,15 +83,18 @@ class ArgumentMiningAnalyzer(BaseAnalyzer):
         #  Shared spaCy doc (CRITICAL optimization)
         doc = get_doc(ctx, task="syntax")
 
-        tokens = ctx.tokens or []
-        n_tokens = len(tokens)
+        # Section 4: BaseAnalyzer auto-calls ensure_tokens() in
+        # _validate_context, but use the safe accessors so a degraded
+        # context (or a future caller that bypasses BaseAnalyzer) still
+        # short-circuits cleanly instead of dividing by None.
+        n_tokens = ctx.safe_n_tokens()
 
         if n_tokens == 0:
             return self._empty_features()
 
-        token_counts = ctx.token_counts or {}
+        token_counts = ctx.safe_counts()
 
-        text_lower = ctx.text.lower()
+        text_lower = ctx.text_lower or ctx.text.lower()
 
         features: Dict[str, float] = {}
 
@@ -115,11 +119,11 @@ class ArgumentMiningAnalyzer(BaseAnalyzer):
         # -----------------------------------------------------
 
         features["argument_support_ratio"] = self._phrase_ratio(
-            text_lower, n_tokens, self.support_phrases
+            ctx, n_tokens, self.support_phrases
         )
 
         features["argument_rebuttal_ratio"] = self._phrase_ratio(
-            text_lower, n_tokens, self.rebuttal_phrases
+            ctx, n_tokens, self.rebuttal_phrases
         )
 
         # -----------------------------------------------------
@@ -144,7 +148,7 @@ class ArgumentMiningAnalyzer(BaseAnalyzer):
 
     def _phrase_ratio(
         self,
-        text_lower: str,
+        ctx: FeatureContext,
         n_tokens: int,
         phrases: set,
     ) -> float:
@@ -152,7 +156,8 @@ class ArgumentMiningAnalyzer(BaseAnalyzer):
         if n_tokens <= 0:
             return 0.0
 
-        hits = phrase_match_count(text_lower, phrases)
+        # PERF-A2: route through the shared per-ctx phrase-hit cache.
+        hits = cached_phrase_match_count(ctx, phrases)
 
         return self._safe_ratio(hits / (n_tokens + EPS))
 

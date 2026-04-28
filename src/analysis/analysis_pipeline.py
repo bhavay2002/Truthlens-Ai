@@ -10,6 +10,7 @@ from src.analysis.spacy_loader import get_shared_nlp
 from src.analysis.feature_context import FeatureContext
 from src.analysis.feature_merger import FeatureMerger
 from src.analysis.analysis_config import (
+    ANALYSIS_CONFIG,
     AnalysisConfig,
     build_default_config,
     validate_config_against_registry,
@@ -139,11 +140,24 @@ class AnalysisPipeline:
 
         texts = [self._validate(t) for t in texts]
 
+        # PERF-A5: honor the configured spaCy worker count instead of
+        # hard-coding `n_process=1`. The previous default discarded
+        # spaCy's tuned multi-process pickle path on every batch and
+        # produced a 4-8x regression on CPU-bound batches > ~50 items.
+        # Falls back to 1 if the config value is missing or invalid so
+        # behavior stays deterministic in tests.
+        try:
+            n_process = int(getattr(ANALYSIS_CONFIG.spacy, "n_process", 1) or 1)
+        except (TypeError, ValueError):
+            n_process = 1
+        if n_process < 1:
+            n_process = 1
+
         docs = list(
             self.nlp.pipe(
                 texts,
                 batch_size=self.config.pipeline.batch_size,
-                n_process=1,  # keep deterministic; can scale later
+                n_process=n_process,
             )
         )
 

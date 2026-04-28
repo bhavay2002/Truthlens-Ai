@@ -55,73 +55,64 @@ class EmotionTargetAnalyzer(BaseAnalyzer):
                 self.term_to_emotion[norm] = emotion
                 self.term_weights[norm] = weight
 
-        # Phrase matcher state. Built lazily against the NER task NLP's
-        # Vocab so it can be reused across all docs that come through
-        # `get_doc(ctx, "ner")` (they all share that single Vocab).
+        # PERF-A3 / CRIT-A6: build the PhraseMatcher eagerly in __init__
+        # against the canonical NER-task Vocab. Lazy initialization on
+        # the first call wasted the per-process build, leaked the import
+        # into the hot path, and was not thread-safe under concurrent
+        # requests. Building here is cheap (single-shot per process).
         self.matcher: Optional[PhraseMatcher] = None
-        self._matcher_vocab = None  # the Vocab the matcher was built against
-        self._matcher_initialized = False
+        self._matcher_vocab = None
         self.phrase_to_emotion: Dict[Tuple[str, ...], str] = {}
         self.phrase_weights: Dict[Tuple[str, ...], float] = {}
 
+        try:
+            from src.analysis.spacy_loader import get_task_nlp
+            nlp = get_task_nlp("ner")
+
+            self.matcher = PhraseMatcher(nlp.vocab, attr="LOWER")
+            self._matcher_vocab = nlp.vocab
+
+            patterns = []
+
+            for emotion, terms in EMOTION_TERMS.items():
+                weight = EMOTION_INTENSITY.get(emotion, DEFAULT_INTENSITY)
+
+                for term in terms:
+                    if " " in term or "_" in term:
+                        text = term.replace("_", " ")
+                        span_doc = nlp.make_doc(text)
+
+                        patterns.append(span_doc)
+
+                        key = tuple(t.lower_ for t in span_doc)
+                        self.phrase_to_emotion[key] = emotion
+                        self.phrase_weights[key] = weight
+
+            if patterns:
+                self.matcher.add("EMOTION_PHRASES", patterns)
+
+        except Exception:
+            # Never let a startup matcher build crash analyzer
+            # construction — fall back to token-only matching at runtime.
+            logger.exception(
+                "EmotionTargetAnalyzer: PhraseMatcher build failed; "
+                "token-only matching will be used"
+            )
+            self.matcher = None
+            self._matcher_vocab = None
+
         logger.info("EmotionTargetAnalyzer initialized")
-
-    # =========================================================
-    # MATCHER (LAZY INIT — CRITICAL)
-    # =========================================================
-
-    def _ensure_matcher(self):
-        """Build the PhraseMatcher against the canonical NER-task Vocab.
-
-        We deliberately do NOT take ``doc.vocab`` from the first call —
-        if some other code path passes a doc parsed by a different NLP
-        instance, the matcher's vocab would diverge from later docs and
-        silently match nothing (CRIT-A4 / F5). Instead we always tie
-        the matcher to ``get_task_nlp("ner").vocab`` and validate
-        per-call in :meth:`analyze`.
-        """
-
-        if self._matcher_initialized:
-            return
-
-        from src.analysis.spacy_loader import get_task_nlp
-        nlp = get_task_nlp("ner")
-
-        self.matcher = PhraseMatcher(nlp.vocab, attr="LOWER")
-        self._matcher_vocab = nlp.vocab
-
-        patterns = []
-
-        for emotion, terms in EMOTION_TERMS.items():
-            weight = EMOTION_INTENSITY.get(emotion, DEFAULT_INTENSITY)
-
-            for term in terms:
-                if " " in term or "_" in term:
-                    text = term.replace("_", " ")
-                    span_doc = nlp.make_doc(text)
-
-                    patterns.append(span_doc)
-
-                    key = tuple(t.lower_ for t in span_doc)
-                    self.phrase_to_emotion[key] = emotion
-                    self.phrase_weights[key] = weight
-
-        if patterns:
-            self.matcher.add("EMOTION_PHRASES", patterns)
-
-        self._matcher_initialized = True
 
     # =========================================================
 
     def analyze(self, ctx: FeatureContext) -> Dict[str, float]:
 
-        if ctx.n_tokens == 0:
+        # Section 4: defensive safe accessor.
+        if ctx.safe_n_tokens() == 0:
             return self._empty_features()
 
         # 🔥 shared spaCy doc
         doc = get_doc(ctx, task="ner")
-
-        self._ensure_matcher()
 
         entity_emotion_map: DefaultDict[str, float] = defaultdict(float)
         emotion_type_counter: DefaultDict[str, float] = defaultdict(float)

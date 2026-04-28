@@ -10,7 +10,9 @@ from src.analysis.feature_context import FeatureContext
 from src.analysis._text_features import (
     term_ratio,
     phrase_match_count,
+    cached_phrase_match_count,
     normalize_lexicon_terms,
+    safe_normalized_entropy,
 )
 from src.analysis.feature_schema import INFORMATION_DENSITY_KEYS, make_vector
 
@@ -135,11 +137,8 @@ class InformationDensityAnalyzer(BaseAnalyzer):
             lexicon,
         )
 
-        # phrase signal
-        phrase_hits = phrase_match_count(
-            ctx.text_lower or "",
-            lexicon,
-        )
+        # phrase signal — PERF-A2: shared per-ctx phrase-hit cache.
+        phrase_hits = cached_phrase_match_count(ctx, lexicon)
 
         phrase_score = phrase_hits / (n_tokens + EPS)
 
@@ -167,13 +166,8 @@ class InformationDensityAnalyzer(BaseAnalyzer):
 
     def _punctuation(self, ctx: FeatureContext) -> float:
 
-        text = ctx.text_lower or ""
-
-        # more precise counting (avoid double counting)
-        exclam = text.count("!")
-        ques = text.count("?")
-
-        count = exclam + ques
+        # PERF-A1: shared punctuation-count cache (paid once per ctx).
+        count = ctx.punct_count("!") + ctx.punct_count("?")
 
         return self._safe(count / (ctx.safe_n_tokens() + EPS))
 
@@ -194,17 +188,8 @@ class InformationDensityAnalyzer(BaseAnalyzer):
 
     def _entropy(self, dist: Dict[str, float]) -> float:
 
-        values = np.array(list(dist.values()), dtype=np.float32)
-
-        if values.sum() < EPS:
-            return 0.0
-
-        probs = values / (values.sum() + EPS)
-
-        entropy = -np.sum(probs * np.log(probs + EPS))
-        max_entropy = np.log(len(probs))
-
-        return self._safe(entropy / (max_entropy + EPS))
+        # NUM-A1: shared safe normalized entropy helper.
+        return self._safe(safe_normalized_entropy(dist.values()))
 
     # =========================================================
 

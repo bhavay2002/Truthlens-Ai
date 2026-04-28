@@ -9,6 +9,7 @@ from src.analysis.base_analyzer import BaseAnalyzer
 from src.analysis.feature_context import FeatureContext
 from src.analysis._text_features import (
     phrase_match_count,
+    cached_phrase_match_count,
     normalize_lexicon_terms,
 )
 from src.analysis.feature_schema import NARRATIVE_CONFLICT_KEYS, make_vector
@@ -154,10 +155,8 @@ class NarrativeConflictAnalyzer(BaseAnalyzer):
             if " " not in term
         )
 
-        phrase_hits = phrase_match_count(
-            ctx.text_lower or "",
-            lexicon
-        )
+        # PERF-A2: shared per-ctx phrase-hit cache.
+        phrase_hits = cached_phrase_match_count(ctx, lexicon)
 
         # 🔥 weighted fusion (prevents double counting)
         combined = (0.7 * token_hits + 0.3 * phrase_hits)
@@ -201,10 +200,10 @@ class NarrativeConflictAnalyzer(BaseAnalyzer):
 
     def _punctuation(self, ctx: FeatureContext, symbol: str) -> float:
 
-        text = ctx.text_lower or ""
-
-        # FIX: avoid double counting
-        count = text.count(symbol)
+        # PERF-A1: read from the shared per-ctx punctuation cache so
+        # `text.count(symbol)` is paid once per (ctx, symbol) regardless
+        # of how many analyzers ask for it.
+        count = ctx.punct_count(symbol)
 
         return count / (ctx.safe_n_tokens() + EPS)
 

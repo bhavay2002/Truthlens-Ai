@@ -230,14 +230,24 @@ class BiasProfileBuilder:
             mean, std = values.mean(), values.std()
             if std < EPS:
                 return data
-            norm = (values - mean) / (std + EPS)
+            # NUM-A4: previously emitted raw z-scores in (-inf, +inf),
+            # which were then floored to 0 by the downstream [0, 1] clip
+            # — making the lower half of the distribution silently
+            # collapse to zero. Map z-scores monotonically into (0, 1)
+            # via tanh so both tails are preserved before clipping.
+            z = (values - mean) / (std + EPS)
+            norm = 0.5 * (np.tanh(z) + 1.0)
 
         elif self.config.normalization_method == "robust":
             median = np.median(values)
             iqr = np.percentile(values, 75) - np.percentile(values, 25)
             if iqr < EPS:
                 return data
-            norm = (values - median) / (iqr + EPS)
+            # NUM-A3: same fix as zscore — previously this produced
+            # negative recentered scores that got floored to 0 by the
+            # [0, 1] clip. Squash with tanh into (0, 1) explicitly.
+            r = (values - median) / (iqr + EPS)
+            norm = 0.5 * (np.tanh(r) + 1.0)
 
         else:  # minmax
             min_v, max_v = values.min(), values.max()
@@ -253,15 +263,23 @@ class BiasProfileBuilder:
 
     def _global_normalize(self, profile: Dict[str, Any]) -> Dict[str, Any]:
 
-        values = []
+        # PERF-A6: collect the section value arrays once, concatenate,
+        # then derive global min/max in a single pass instead of
+        # re-walking each section dict. The per-section dicts are then
+        # rewritten via the existing min/scale.
+        section_values: Dict[str, np.ndarray] = {}
 
         for section in self.PROFILE_SECTIONS:
-            values.extend(profile.get(section, {}).values())
+            section_dict = profile.get(section, {})
+            if section_dict:
+                section_values[section] = np.fromiter(
+                    section_dict.values(), dtype=np.float32, count=len(section_dict)
+                )
 
-        if not values:
+        if not section_values:
             return profile
 
-        arr = np.array(values, dtype=np.float32)
+        arr = np.concatenate(list(section_values.values()))
         min_v, max_v = arr.min(), arr.max()
 
         if max_v - min_v < EPS:
@@ -270,9 +288,12 @@ class BiasProfileBuilder:
         scale = max_v - min_v + EPS
 
         for section in self.PROFILE_SECTIONS:
+            section_dict = profile.get(section, {})
+            if not section_dict:
+                continue
             profile[section] = {
                 k: float((v - min_v) / scale)
-                for k, v in profile[section].items()
+                for k, v in section_dict.items()
             }
 
         return profile
@@ -291,7 +312,13 @@ class BiasProfileBuilder:
         values = values - np.max(values)  # stability
         exp = np.exp(values)
 
-        probs = exp / (exp.sum() + EPS)
+        # NUM-A2: drop the `+ EPS` in the denominator. After the
+        # max-subtraction trick `exp` always contains at least one
+        # element equal to 1.0, so `exp.sum() >= 1.0 > 0` and the EPS
+        # only introduced an unnecessary downward bias on the
+        # probabilities (and broke the property that the result sums to
+        # exactly 1.0).
+        probs = exp / exp.sum()
 
         return dict(zip(data.keys(), probs.astype(float)))
 

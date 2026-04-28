@@ -9,7 +9,9 @@ from src.analysis.base_analyzer import BaseAnalyzer
 from src.analysis.feature_context import FeatureContext
 from src.analysis._text_features import (
     phrase_match_count,
+    cached_phrase_match_count,
     normalize_lexicon_terms,
+    safe_normalized_entropy,
 )
 from src.analysis.feature_schema import NARRATIVE_PROPAGATION_KEYS, make_vector
 
@@ -221,10 +223,8 @@ class NarrativePropagationAnalyzer(BaseAnalyzer):
             if " " not in t
         )
 
-        phrase_hits = phrase_match_count(
-            ctx.text_lower or "",
-            lexicon
-        )
+        # PERF-A2: shared per-ctx phrase-hit cache.
+        phrase_hits = cached_phrase_match_count(ctx, lexicon)
 
         # 🔥 weighted fusion
         combined = 0.7 * token_hits + 0.3 * phrase_hits
@@ -288,26 +288,17 @@ class NarrativePropagationAnalyzer(BaseAnalyzer):
 
     def _entropy(self, dist: Dict[str, float]) -> float:
 
-        values = np.array(list(dist.values()), dtype=np.float32)
-
-        if values.sum() < EPS:
-            return 0.0
-
-        probs = values / (values.sum() + EPS)
-
-        entropy = -np.sum(probs * np.log(probs + EPS))
-        max_entropy = np.log(len(probs))
-
-        return float(entropy / (max_entropy + EPS))
+        # NUM-A1: delegate to the shared, well-guarded helper so single-
+        # category distributions and zero-mass distributions return 0.0
+        # cleanly instead of dividing by ~EPS.
+        return safe_normalized_entropy(dist.values())
 
     # =========================================================
 
     def _punctuation(self, ctx: FeatureContext, symbol: str) -> float:
 
-        text = ctx.text_lower or ""
-
-        # FIX: no double counting
-        count = text.count(symbol)
+        # PERF-A1: shared punctuation-count cache.
+        count = ctx.punct_count(symbol)
 
         return count / (ctx.safe_n_tokens() + EPS)
 

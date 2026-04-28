@@ -9,6 +9,7 @@ from src.analysis.base_analyzer import BaseAnalyzer
 from src.analysis.feature_context import FeatureContext
 from src.analysis._text_features import (
     phrase_match_count,
+    cached_phrase_match_count,
     normalize_lexicon_terms,
 )
 from src.analysis.feature_schema import DISCOURSE_COHERENCE_KEYS, make_vector
@@ -57,7 +58,9 @@ class DiscourseCoherenceAnalyzer(BaseAnalyzer):
 
     def analyze(self, ctx: FeatureContext) -> Dict[str, float]:
 
-        if ctx.n_tokens == 0:
+        # Section 4: defensive safe accessor (BaseAnalyzer pre-warms,
+        # but we never want to compare None == 0).
+        if ctx.safe_n_tokens() == 0:
             return self._empty_features()
 
         # 🔥 shared spaCy doc
@@ -68,10 +71,15 @@ class DiscourseCoherenceAnalyzer(BaseAnalyzer):
             return self._empty_features()
 
         # -----------------------------------------------------
-        # SENTENCE TOKEN SETS
+        # SENTENCE TOKEN SETS  (PERF-A7)
         # -----------------------------------------------------
-
-        sent_tokens = [self._sentence_token_set(sent) for sent in sentences]
+        # Cache the per-sentence lemma sets on the shared dict. They're
+        # O(sentences * tokens) to allocate; reusing them across re-runs
+        # of this analyzer (and other future consumers) saves the work.
+        sent_tokens = ctx.shared.get("disc_sent_lemmas")
+        if sent_tokens is None:
+            sent_tokens = [self._sentence_token_set(sent) for sent in sentences]
+            ctx.shared["disc_sent_lemmas"] = sent_tokens
 
         # -----------------------------------------------------
         # LOCAL COHERENCE (adjacent similarity)
@@ -117,8 +125,8 @@ class DiscourseCoherenceAnalyzer(BaseAnalyzer):
         # -----------------------------------------------------
 
         features["discourse_transition_ratio"] = self._transition_ratio(
-            ctx.text_lower,
-            ctx.n_tokens
+            ctx,
+            ctx.safe_n_tokens(),
         )
 
         return features
@@ -177,12 +185,13 @@ class DiscourseCoherenceAnalyzer(BaseAnalyzer):
 
     # =========================================================
 
-    def _transition_ratio(self, text_lower: str, n_tokens: int) -> float:
+    def _transition_ratio(self, ctx: FeatureContext, n_tokens: int) -> float:
 
         if n_tokens <= 0:
             return 0.0
 
-        hits = phrase_match_count(text_lower, self.transition_phrases)
+        # PERF-A2: shared per-ctx phrase-hit cache.
+        hits = cached_phrase_match_count(ctx, self.transition_phrases)
 
         return self._safe(hits / (n_tokens + EPS))
 

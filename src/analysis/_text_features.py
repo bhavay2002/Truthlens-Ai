@@ -141,6 +141,50 @@ def phrase_match_count(
     return sum(1 for pattern in patterns if pattern.search(text_lower))
 
 
+# PERF-A2: shared per-context phrase-hit cache. Each analyzer holds a
+# stable reference to its own lexicon set, so `id(phrases)` is a safe and
+# cheap key. Repeated calls with the same lexicon during a single
+# request reuse the prior scan instead of re-running the regex sweep.
+def cached_phrase_match_count(
+    ctx: Any,
+    phrases: Collection[str],
+    *,
+    key: Any = None,
+    word_boundary: bool = True,
+) -> int:
+
+    if ctx is None or not phrases:
+        return phrase_match_count(
+            getattr(ctx, "text_lower", "") or "",
+            phrases,
+            word_boundary=word_boundary,
+        )
+
+    if key is None:
+        key = id(phrases)
+
+    shared = getattr(ctx, "shared", None)
+    if shared is None:
+        return phrase_match_count(
+            ctx.text_lower or "",
+            phrases,
+            word_boundary=word_boundary,
+        )
+
+    cache = shared.setdefault("phrase_hits", {})
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+
+    value = phrase_match_count(
+        ctx.text_lower or "",
+        phrases,
+        word_boundary=word_boundary,
+    )
+    cache[key] = value
+    return value
+
+
 def phrase_frequency(
     text_lower: str,
     phrases: Collection[str],
@@ -157,6 +201,39 @@ def phrase_frequency(
 # =========================================================
 # NORMALIZATION
 # =========================================================
+
+# NUM-A1: shared, well-guarded normalized-Shannon-entropy helper.
+# Promotes the n<=1 / max-entropy<EPS / sum<EPS guards from
+# propaganda_pattern_detector so every analyzer that wants a normalized
+# entropy gets the same numerically-stable behavior. Returns a value in
+# [0, 1] (or 0.0 for degenerate inputs).
+def safe_normalized_entropy(values: Iterable[float]) -> float:
+
+    import numpy as _np  # local import to keep module import light
+
+    arr = _np.asarray(list(values), dtype=_np.float32)
+
+    if arr.size == 0:
+        return 0.0
+
+    total = float(arr.sum())
+    if total < EPS:
+        return 0.0
+
+    probs = arr / total
+
+    n = arr.size
+    if n <= 1:
+        return 0.0
+
+    entropy = -float(_np.sum(probs * _np.log(probs + EPS)))
+    max_entropy = float(_np.log(n))
+
+    if max_entropy < EPS:
+        return 0.0
+
+    return entropy / max_entropy
+
 
 def normalize_lexicon_terms(terms: Collection[str]) -> set[str]:
     return {

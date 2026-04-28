@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import logging
 import re
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -43,6 +42,7 @@ except ImportError:  # pragma: no cover - optional dependency
         return "unknown"
 
 
+from src.analysis.analysis_config import ANALYSIS_CONFIG
 from src.analysis.spacy_loader import get_nlp
 
 
@@ -183,80 +183,82 @@ class PreprocessingPipeline:
 
     def _parallel_preprocess(self, texts: List[str]) -> List[PreprocessingResult]:
         """
-        Run preprocessing using parallel workers.
+        Batched preprocessing via spaCy's tuned multi-process pipeline.
 
-        Parameters
-        ----------
-        texts : List[str]
-
-        Returns
-        -------
-        List[PreprocessingResult]
+        PERF-A4: the previous implementation forked a ``ProcessPoolExecutor``
+        and re-loaded spaCy + transformers in every worker, which is
+        slower than a single-process ``nlp.pipe`` for any meaningful
+        batch size. Use ``nlp.pipe`` with the configured
+        ``ANALYSIS_CONFIG.spacy`` knobs so we get spaCy's optimized
+        pickle path (or a single-process pass when ``n_process == 1``)
+        and avoid double-loading the model.
         """
 
-        results: List[Optional[PreprocessingResult]] = [None] * len(texts)
+        if not texts:
+            return []
 
-        with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = {
-                executor.submit(PreprocessingPipeline._process_text_static, text): idx
-                for idx, text in enumerate(texts)
-            }
+        # Pre-normalize once per text — keeps the per-doc loop tight and
+        # produces the same cleaned strings the static worker used.
+        normalized = [self._normalize_text(t) for t in texts]
 
-            for future in as_completed(futures):
-                idx = futures[future]
+        languages: List[str] = []
+        for raw in texts:
+            try:
+                languages.append(detect(raw))
+            except LangDetectException:
+                languages.append("unknown")
 
-                try:
-                    results[idx] = future.result()
-                except Exception as exc:
-                    logger.exception(
-                        "Parallel preprocessing failed",
-                        extra={"index": idx},
-                    )
-                    raise RuntimeError("Parallel preprocessing failed") from exc
+        spacy_cfg = getattr(ANALYSIS_CONFIG, "spacy", None)
+        try:
+            batch_size = int(getattr(spacy_cfg, "batch_size", 32) or 32)
+        except (TypeError, ValueError):
+            batch_size = 32
+        try:
+            n_process = int(getattr(spacy_cfg, "n_process", 1) or 1)
+        except (TypeError, ValueError):
+            n_process = 1
+        if n_process < 1:
+            n_process = 1
 
-        # All entries in `results` are populated when we reach this point:
-        # any worker failure raises RuntimeError above before we return,
-        # so the `if res is not None` filter is dead code that would silently
-        # shorten the output list and break positional correspondence with the
-        # input `texts`.
-        return results  # type: ignore[return-value]
+        # Honor an explicit max_workers override (kept for backward
+        # compat) — but cap at the configured n_process so we don't
+        # oversubscribe cores beyond what the rest of the system expects.
+        if self.max_workers is not None:
+            try:
+                n_process = max(1, min(int(self.max_workers), n_process))
+            except (TypeError, ValueError):
+                pass
 
-    @staticmethod
-    def _process_text_static(text: str) -> PreprocessingResult:
-        """
-        Static helper used for parallel preprocessing.
-
-        A lightweight pipeline is instantiated per worker.
-        """
+        results: List[PreprocessingResult] = []
 
         try:
-            nlp = _get_nlp()
+            for normalized_text, language, doc in zip(
+                normalized,
+                languages,
+                self.nlp.pipe(
+                    normalized,
+                    batch_size=batch_size,
+                    n_process=n_process,
+                ),
+            ):
+                tokens = self._extract_tokens(doc)
+                lemmas = self._extract_lemmas(doc)
+                sentences = self._extract_sentences(doc)
 
-            normalized_text = text.strip()
-            normalized_text = re.sub(r"\s+", " ", normalized_text)
-            normalized_text = re.sub(r"[^\w\s\.\,\!\?\-']", "", normalized_text)
-
-            try:
-                language = detect(text)
-            except LangDetectException:
-                language = "unknown"
-
-            doc = nlp(normalized_text)
-
-            tokens = [t.text.lower() for t in doc if not t.is_space]
-            lemmas = [t.lemma_.lower() for t in doc if not t.is_space]
-            sentences = [s.text.strip() for s in doc.sents if s.text.strip()]
-
-            return PreprocessingResult(
-                normalized_text=normalized_text,
-                tokens=tokens,
-                lemmas=lemmas,
-                sentences=sentences,
-                language=language,
-            )
-
+                results.append(
+                    PreprocessingResult(
+                        normalized_text=normalized_text,
+                        tokens=tokens,
+                        lemmas=lemmas,
+                        sentences=sentences,
+                        language=language,
+                    )
+                )
         except Exception as exc:
-            raise RuntimeError("Worker preprocessing failed") from exc
+            logger.exception("Batch preprocessing failed")
+            raise RuntimeError("Parallel preprocessing failed") from exc
+
+        return results
 
     def _detect_language(self, text: str) -> str:
         """

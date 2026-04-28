@@ -10,7 +10,9 @@ from src.analysis.feature_context import FeatureContext
 from src.analysis._text_features import (
     term_ratio,
     phrase_match_count,
+    cached_phrase_match_count,
     normalize_lexicon_terms,
+    safe_normalized_entropy,
 )
 from src.analysis.feature_schema import NARRATIVE_TEMPORAL_KEYS, make_vector
 from src.analysis.spacy_loader import get_doc
@@ -85,10 +87,22 @@ class NarrativeTemporalAnalyzer(BaseAnalyzer):
         tense = self._tense_distribution(doc)
 
         # -----------------------------------------------------
-        # TEMPORAL CONTRAST
+        # TEMPORAL CONTRAST  (NUM-A5)
         # -----------------------------------------------------
-
-        contrast = float(np.std(list(dist.values())))
+        # `dist` is a probability distribution over `len(dist)` bins.
+        # The maximum possible std for an n-bin probability simplex is
+        # sqrt((n-1)/n^2) = sqrt(n-1)/n (achieved at a corner like
+        # [1, 0, ..., 0]). For n=3 that's ≈ 0.4714, which previously
+        # capped `temporal_contrast_score` at ~0.47 even though it was
+        # documented as a [0, 1] feature. Normalize to the simplex max.
+        dist_values = list(dist.values())
+        n_bins = len(dist_values)
+        contrast_raw = float(np.std(dist_values))
+        if n_bins > 1:
+            max_std = float(np.sqrt(n_bins - 1) / n_bins)
+            contrast = contrast_raw / (max_std + EPS)
+        else:
+            contrast = 0.0
 
         # -----------------------------------------------------
         # TEMPORAL INTENSITY
@@ -128,10 +142,8 @@ class NarrativeTemporalAnalyzer(BaseAnalyzer):
             lexicon,
         )
 
-        phrase_hits = phrase_match_count(
-            ctx.text_lower or "",
-            lexicon,
-        )
+        # PERF-A2: shared per-ctx phrase-hit cache.
+        phrase_hits = cached_phrase_match_count(ctx, lexicon)
 
         phrase_score = phrase_hits / (n_tokens + EPS)
 
@@ -192,17 +204,8 @@ class NarrativeTemporalAnalyzer(BaseAnalyzer):
 
     def _entropy(self, dist: Dict[str, float]) -> float:
 
-        values = np.array(list(dist.values()), dtype=np.float32)
-
-        if values.sum() < EPS:
-            return 0.0
-
-        probs = values / (values.sum() + EPS)
-
-        entropy = -np.sum(probs * np.log(probs + EPS))
-        max_entropy = np.log(len(probs))
-
-        return float(entropy / (max_entropy + EPS))
+        # NUM-A1: shared safe normalized entropy helper.
+        return safe_normalized_entropy(dist.values())
 
     # =========================================================
 
