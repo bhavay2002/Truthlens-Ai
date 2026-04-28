@@ -23,7 +23,7 @@ from typing import Dict, Any, Optional
 
 import pandas as pd
 
-from src.data_processing.data_contracts import get_contract
+from src.data_processing.data_contracts import get_contract, DEFAULT_MAX_LENGTH
 from src.data_processing.data_resolver import resolve_data_config
 from src.data_processing.data_loader import load_dataframe
 from src.data_processing.data_validator import validate_dataframe
@@ -70,7 +70,7 @@ class DataPipelineConfig:
         enable_label_analysis: bool = True,
         enable_cache: bool = True,
         force_rebuild: bool = False,
-        max_length: int = 512,
+        max_length: int = DEFAULT_MAX_LENGTH,
         return_offsets_mapping: bool = False,
         cleaning_config: Optional[DataCleaningConfig] = None,
         augmentation_config: Optional[AugmentationConfig] = None,

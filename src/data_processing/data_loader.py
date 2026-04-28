@@ -8,7 +8,6 @@ through.
 from __future__ import annotations
 
 import logging
-import hashlib
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
@@ -21,20 +20,20 @@ FALLBACK_ENCODING = "latin-1"
 
 
 # =========================================================
-# FILE HASHING (INTEGRITY)
-# =========================================================
-
-def compute_md5(path: Path) -> str:
-    h = hashlib.md5()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-# =========================================================
 # CORE LOADERS
 # =========================================================
+#
+# UNUSED-D2: ``compute_md5`` was removed. The cache layer now uses
+# ``data_cache._file_fingerprint`` which hashes full content via
+# SHA-256 for files ≤ 2 MB and head+tail for larger files (CRIT-D2).
+# MD5 was both weaker and unused outside a dead ``compute_hash=True``
+# branch in ``load_dataframe``.
+#
+# UNUSED-D3: ``load_csv_in_chunks`` was removed. Nothing in
+# ``run_data_pipeline`` (or anywhere else) consumed the chunk iterator;
+# pandas can stream chunks via ``pd.read_csv(..., chunksize=…)``
+# directly when a future >1 GB CSV path needs it. Keeping a thin
+# unexported wrapper just so it shows up in dir() is dead weight.
 
 def load_csv(
     path: Path,
@@ -111,7 +110,6 @@ def load_dataframe(
     *,
     usecols: Optional[List[str]] = None,
     dtype: Optional[Dict[str, Any]] = None,
-    compute_hash: bool = False,
 ) -> pd.DataFrame:
     path = Path(path)
     if not path.exists():
@@ -129,31 +127,8 @@ def load_dataframe(
     else:
         raise ValueError(f"Unsupported file format: {suffix}")
 
-    if compute_hash:
-        logger.info("MD5(%s) = %s", path.name, compute_md5(path))
-
     logger.info("Loaded %d rows × %d cols", len(df), len(df.columns))
     return df
-
-
-# =========================================================
-# CHUNKED LOADER (LARGE DATA)
-# =========================================================
-
-def load_csv_in_chunks(
-    path: Path,
-    *,
-    chunksize: int = 100_000,
-    usecols: Optional[List[str]] = None,
-    dtype: Optional[Dict[str, Any]] = None,
-):
-    common = dict(chunksize=chunksize, usecols=usecols, dtype=dtype, low_memory=False)
-    try:
-        reader = pd.read_csv(path, encoding=DEFAULT_ENCODING, **common)
-    except UnicodeDecodeError:
-        logger.warning("Encoding fallback for chunked read: %s", path)
-        reader = pd.read_csv(path, encoding=FALLBACK_ENCODING, **common)
-    yield from reader
 
 
 # =========================================================

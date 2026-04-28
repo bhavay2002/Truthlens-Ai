@@ -1,6 +1,18 @@
 # ==========================================================
 # TruthLens AI - Unified Data Pipeline Configuration
 # ==========================================================
+#
+# Audit pass v3 (April 2026) — orphan blocks removed:
+#   - dataset.unified_schema (CFG-D2: contracts table is the source
+#     of truth in src/data_processing/data_contracts.py)
+#   - balancing.* (CFG-D5: samplers use WeightedRandomSampler, not
+#     SMOTE/oversample/undersample)
+#   - augmentation.techniques.* (CFG-D4: TASK_OPS is hard-wired in
+#     data_augmentation.py — no per-technique toggles exist)
+#   - profiling.report_dir / output.* / eda.* (CFG-D7, CFG-D8: no
+#     code reads these)
+#
+# Only keys that are actually consumed by Python remain.
 
 project:
   name: TruthLens AI
@@ -13,42 +25,6 @@ project:
 # ==========================================================
 
 dataset:
-
-  unified_schema:
-
-    text_fields:
-      - title
-      - text
-
-    label_fields:
-
-      # classification heads
-      bias_label: bias_label
-      ideology_label: ideology_label
-      propaganda_label: propaganda_label
-
-      # narrative frame
-      frame: frame
-
-      # narrative roles
-      hero: hero
-      villain: villain
-      victim: victim
-
-      # narrative entities
-      hero_entities: hero_entities
-      villain_entities: villain_entities
-      victim_entities: victim_entities
-
-      # frame categories
-      RE: resolution
-      HI: human_interest
-      CO: conflict
-      MO: moral
-      EC: economic
-
-      # emotion labels (multi-label)
-      emotion_prefix: emotion_
 
   datasets:
 
@@ -99,37 +75,29 @@ validation:
 
 # ==========================================================
 # TEXT CLEANING
+#
+# Each key below maps 1:1 to a field on
+# ``DataCleaningConfig`` (see src/data_processing/data_cleaning.py).
+# CFG-D3 (audit v3): normalize_unicode, remove_emojis and
+# expand_contractions are now real fields with vectorized
+# implementations — they were silently ignored before.
 # ==========================================================
 
 cleaning:
 
   normalize_unicode: true
-  normalize_numbers: true
   remove_emojis: true
-  remove_urls: true
-  remove_html: true
   expand_contractions: true
+  strip_urls: true
+  strip_html: true
 
   lowercase: true
-  strip_whitespace: true
+  normalize_whitespace: true
 
-  min_word_count: 30
-
-# ==========================================================
-# CLASS BALANCING
-# ==========================================================
-
-balancing:
-
-  enabled: true
-  method: oversample
-
-  supported_methods:
-    - oversample
-    - undersample
-    - smote
-
-  random_state: 42
+  drop_duplicates: true
+  drop_empty_text: true
+  min_text_len: 3
+  max_text_len: 20000
 
 # ==========================================================
 # DATA AUGMENTATION
@@ -139,12 +107,6 @@ augmentation:
 
   enabled: true
   multiplier: 1.5
-
-  techniques:
-    synonym_replacement: true
-    random_swap: true
-    random_deletion: true
-    back_translation: false
 
 # ==========================================================
 # TRAIN / VALIDATION / TEST SPLIT
@@ -158,58 +120,6 @@ split:
 
   stratified: true
   random_state: 42
-
-# ==========================================================
-# DATA PROFILING
-# ==========================================================
-
-profiling:
-
-  enabled: true
-  report_dir: reports
-
-  save_json: true
-  save_markdown: true
-  save_html: true
-
-# ==========================================================
-# EXPLORATORY DATA ANALYSIS
-# ==========================================================
-
-eda:
-
-  enabled: true
-  figures_dir: reports/figures
-
-  top_words: 30
-  max_tfidf_features: 10000
-
-  ngrams:
-    - 1
-    - 2
-    - 3
-
-  plots:
-    label_distribution: true
-    text_length_distribution: true
-    tfidf_top_terms: true
-    emotion_distribution: true
-
-# ==========================================================
-# OUTPUT
-# ==========================================================
-
-output:
-
-  unified_dataset: data/processed/unified_dataset.csv
-
-  processed_data_dir: data/processed
-  splits_dir: data/splits
-  logs_dir: logs
-
-  save_formats:
-    - csv
-    - parquet
 
 # ==========================================================
 # REPRODUCIBILITY

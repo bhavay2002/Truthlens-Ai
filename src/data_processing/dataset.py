@@ -240,6 +240,25 @@ class MultiLabelDataset(BaseTextDataset):
             raise ValueError(
                 f"NaN values in multilabel columns {self.label_cols} — clean first."
             )
+
+        # EDGE-CASE (audit §9, "non-binary multilabel value e.g. 0.5"):
+        # ``data_validator._validate_multilabel`` rejects fractional
+        # values when ``enforce_binary_multilabel=True``, but ``MultiLabelDataset``
+        # historically stored whatever it was handed and let BCE consume
+        # it as a soft label — an inconsistency that depended on whether
+        # the validator ran in strict mode. Make the policy explicit:
+        # values in the closed [0, 1] interval are accepted (BCE-with-
+        # logits-loss handles them as soft targets); anything outside
+        # that range is a real bug and is rejected here regardless of
+        # validator strictness, so we never silently train on -1 / 1.5
+        # garbage.
+        if matrix.size and (matrix.min() < 0.0 or matrix.max() > 1.0):
+            bad = ((matrix < 0.0) | (matrix > 1.0)).sum()
+            raise ValueError(
+                f"Multilabel values outside [0, 1] in {self.label_cols} "
+                f"({bad} entries). Soft labels are supported, but values "
+                "must be in [0, 1] for BCE-with-logits loss."
+            )
         self._label_matrix = matrix
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:

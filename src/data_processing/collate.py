@@ -87,11 +87,31 @@ def build_collate_fn(
 # LEGACY (BERT-default pad id = 0)
 # =========================================================
 
+import warnings
+
+
+def _legacy_collate_warning(name: str) -> None:
+    # UNUSED-D4: surface the foot-gun. The legacy helpers default to
+    # ``pad_token_id=0`` which is the BERT/DeBERTa pad id — RoBERTa-family
+    # models use ``pad_token_id=1`` and silently train on garbage padding
+    # if these are ever wired to a RoBERTa loader. Fire a one-shot
+    # DeprecationWarning per process so callers migrate to
+    # ``build_collate_fn(pad_token_id=tokenizer.pad_token_id)``.
+    warnings.warn(
+        f"{name} is deprecated; use build_collate_fn(pad_token_id=tokenizer.pad_token_id). "
+        "The legacy default pad_token_id=0 is unsafe for RoBERTa-family tokenizers.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+
+
 def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Back-compat collate (pad_token_id=0). Prefer ``build_collate_fn``."""
+    _legacy_collate_warning("collate_fn")
     return _collate(batch, pad_token_id=0, safety_check=True)
 
 
 def fast_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Back-compat fast collate (no safety check, pad_token_id=0)."""
+    _legacy_collate_warning("fast_collate_fn")
     return _collate(batch, pad_token_id=0, safety_check=False)

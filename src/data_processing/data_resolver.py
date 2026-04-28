@@ -78,9 +78,9 @@ def resolve_path(
     return resolved
 
 
-def pretty_print_config(resolved: Dict[str, Dict[str, Path]]) -> None:
-    print("\nDATA CONFIG:")
-    for task, splits in resolved.items():
-        print(f"\n  [{task}]")
-        for split, path in splits.items():
-            print(f"    {split}: {path}")
+# NOTE: ``pretty_print_config`` was removed (UNUSED-D5 in audit pass v3).
+# It was a debug helper that called ``print`` (not the logger), had no
+# call-sites in production code, and confused readers into thinking it
+# was an officially-supported way to dump config. If you need to inspect
+# a resolved data config interactively, just ``logger.info(resolved)``
+# from a REPL — ``Path`` objects render cleanly under repr().

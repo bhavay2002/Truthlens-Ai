@@ -15,7 +15,7 @@ from typing import Any, Dict
 
 import pandas as pd
 
-from src.data_processing.data_contracts import get_contract
+from src.data_processing.data_contracts import get_contract, DEFAULT_MAX_LENGTH
 from src.data_processing.dataset import (
     ClassificationDataset,
     MultiLabelDataset,
@@ -30,9 +30,18 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class DatasetBuildConfig:
-    """Tunables that affect tokenization / cache key."""
+    """Tunables that affect tokenization / cache key.
 
-    max_length: int = 512
+    UNUSED-D1 (resolved): ``DatasetBuildConfig`` is now wired into
+    ``build_dataset`` / ``build_all_datasets`` via the optional
+    ``config=`` keyword. Loose ``max_length=…`` / ``log_truncation=…``
+    kwargs are kept for back-compat (they're still honoured when no
+    ``config`` is passed) but new callers should pass a single
+    ``DatasetBuildConfig`` instance so the cache-key extra reflects every
+    tokenization-relevant knob in one place.
+    """
+
+    max_length: int = DEFAULT_MAX_LENGTH
     return_offsets_mapping: bool = False
     log_truncation: bool = True
 
@@ -46,14 +55,24 @@ def build_dataset(
     task: str,
     df: pd.DataFrame,
     tokenizer: Any,
-    max_length: int = 512,
+    max_length: int = DEFAULT_MAX_LENGTH,
     return_offsets_mapping: bool = False,
     log_truncation: bool = True,
+    config: "DatasetBuildConfig | None" = None,
 ):
     """
     Build a dataset for ``task`` from ``df`` using the canonical task contract.
+
+    When ``config`` is provided its fields take precedence over the loose
+    ``max_length`` / ``return_offsets_mapping`` / ``log_truncation`` kwargs.
+    The loose kwargs are retained for back-compat with existing callers.
     """
     contract = get_contract(task)
+
+    if config is not None:
+        max_length = config.max_length
+        return_offsets_mapping = config.return_offsets_mapping
+        log_truncation = config.log_truncation
 
     logger.info(
         "Building dataset | task=%s | type=%s | rows=%d | max_length=%d",
@@ -100,15 +119,19 @@ def build_all_datasets(
     *,
     datasets: Dict[str, Dict[str, pd.DataFrame]],
     tokenizer: Any,
-    max_length: int = 512,
+    max_length: int = DEFAULT_MAX_LENGTH,
     return_offsets_mapping: bool = False,
     log_truncation: bool = True,
+    config: "DatasetBuildConfig | None" = None,
 ) -> Dict[str, Dict[str, Any]]:
     """
     Build datasets for every task / split.
 
     ``datasets`` shape:
         {"bias": {"train": df, "val": df, "test": df}, ...}
+
+    See ``build_dataset`` for the precedence rule between ``config`` and
+    the loose kwargs.
     """
     result: Dict[str, Dict[str, Any]] = {}
 
@@ -122,6 +145,7 @@ def build_all_datasets(
                 max_length=max_length,
                 return_offsets_mapping=return_offsets_mapping,
                 log_truncation=log_truncation,
+                config=config,
             )
 
     return result

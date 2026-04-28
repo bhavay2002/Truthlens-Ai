@@ -15,6 +15,20 @@ from typing import List, Dict, Optional
 
 
 # =========================================================
+# GLOBAL DEFAULTS  (CFG-D6 — single source of truth)
+#
+# ``DEFAULT_MAX_LENGTH`` was previously duplicated across
+# ``DataPipelineConfig.max_length``, ``DatasetBuildConfig.max_length``,
+# ``build_dataset(max_length=…)`` and ``build_all_datasets(max_length=…)``
+# — four literals that had to be kept in sync by hand. Centralising the
+# constant here means every downstream default reads from one place; an
+# experiment that flips it (e.g. to 256) only has to set it once.
+# =========================================================
+
+DEFAULT_MAX_LENGTH: int = 512
+
+
+# =========================================================
 # BASE CONTRACT
 # =========================================================
 

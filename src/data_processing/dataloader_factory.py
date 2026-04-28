@@ -32,8 +32,14 @@ logger = logging.getLogger(__name__)
 # =========================================================
 
 def _default_num_workers() -> int:
+    # GPU-D5: previously capped at ``min(4, cpu // 2)`` which left 12-core
+    # / 16-core training boxes massively underutilised on the data path
+    # (4 workers feeding a model that can soak 8+). Bump to ``min(8, cpu)``
+    # so the CPU side scales with the host. Callers that want the old
+    # conservative behaviour can still pin ``num_workers`` explicitly in
+    # config.yaml::data.num_workers.
     cpu = os.cpu_count() or 1
-    return max(0, min(4, cpu // 2))
+    return max(0, min(8, cpu))
 
 
 @dataclass
@@ -46,6 +52,41 @@ class DataLoaderConfig:
     persistent_workers: bool = True
     prefetch_factor: int = 4
     safety_check_collate: bool = True
+    # ``shuffle`` is honoured by the trainer-side ``create_trainer_fn`` /
+    # ``run_data_pipeline`` builders only when no sampler is in play
+    # (samplers and shuffle are mutually exclusive at the DataLoader API
+    # level). It exists here so ``config.yaml::data.shuffle`` round-trips
+    # cleanly without DataLoaderConfig rejecting it as an unknown key.
+    shuffle: bool = True
+
+    @classmethod
+    def from_yaml_data(cls, data_section: Any) -> "DataLoaderConfig":
+        """Build a ``DataLoaderConfig`` from ``config.yaml::data`` (CFG-D1).
+
+        Accepts either the dict that ``yaml.safe_load`` produces or the
+        attribute-style ``DataConfig`` object that ``config_loader``
+        returns. Unknown keys are dropped with a warning so a stale YAML
+        block (e.g. ``data.foo``) doesn't blow up training.
+        """
+        if data_section is None:
+            return cls()
+        if hasattr(data_section, "__dict__") and not isinstance(data_section, dict):
+            raw = {k: v for k, v in vars(data_section).items() if not k.startswith("_")}
+        elif isinstance(data_section, dict):
+            raw = dict(data_section)
+        else:
+            raise TypeError(
+                f"DataLoaderConfig.from_yaml_data expects dict / dataclass, got {type(data_section).__name__}"
+            )
+        valid = {f for f in cls.__dataclass_fields__}
+        unknown = set(raw) - valid
+        if unknown:
+            logger.warning(
+                "DataLoaderConfig.from_yaml_data: ignoring unknown config.yaml::data keys %s",
+                sorted(unknown),
+            )
+        kept = {k: raw[k] for k in raw if k in valid}
+        return cls(**kept)
 
     def resolved_num_workers(self) -> int:
         return _default_num_workers() if self.num_workers < 0 else self.num_workers
@@ -74,7 +115,10 @@ def build_dataloader(
     if split == "train" and config.use_sampler:
         sampler = build_sampler(task=task, df=df)
     elif split == "train":
-        shuffle = True
+        # CFG-D1: honour config.yaml::data.shuffle on the no-sampler train
+        # path. ``DataLoader`` rejects ``shuffle=True`` with a sampler,
+        # so the sampler branch above is exclusive.
+        shuffle = bool(config.shuffle)
 
     # collate with correct pad_token_id
     pad_id = (

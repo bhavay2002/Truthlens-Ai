@@ -18,6 +18,7 @@ from src.config.config_loader import load_config
 # =========================
 
 from src.data_processing.data_pipeline import run_data_pipeline, DataPipelineConfig
+from src.data_processing.dataloader_factory import DataLoaderConfig
 
 # =========================
 # TRAINING
@@ -108,11 +109,25 @@ def main():
         # 4. DATA PIPELINE
         # -------------------------------------------------
 
+        # CFG-D1: thread config.yaml::data.* through DataLoaderConfig so
+        # batch_size / num_workers / pin_memory / shuffle from the YAML
+        # actually reach build_dataloader. Previously DataLoaderConfig
+        # defaults won silently because nothing constructed one from the
+        # config. ``run_data_pipeline`` only uses ``dataloader_config``
+        # when ``build_dataloaders=True``, but constructing it here also
+        # ensures the same instance is forwarded to ``create_trainer_fn``
+        # via ``params`` below — keeping the data-side and trainer-side
+        # loaders in lockstep.
+        loader_cfg = DataLoaderConfig.from_yaml_data(config.data)
+
         datasets = run_data_pipeline(
             data_config=data_config,
             tokenizer=tokenizer,
             build_dataloaders=False,
-            config=DataPipelineConfig(enable_cache=True),
+            config=DataPipelineConfig(
+                enable_cache=True,
+                dataloader_config=loader_cfg,
+            ),
         )
 
         logger.info("✅ Data pipeline completed")
@@ -133,9 +148,14 @@ def main():
                 val_df=datasets[task]["val"],
                 params={
                     "lr": config.optimizer.lr,
-                    "batch_size": config.data.batch_size,
+                    "batch_size": loader_cfg.batch_size,
                     "weight_decay": config.optimizer.weight_decay,
                     "epochs": config.training.epochs,
+                    # CFG-D1: forward the same DataLoader knobs the data
+                    # pipeline used so the train/val loaders inside
+                    # create_trainer_fn don't fall back to defaults.
+                    "num_workers": loader_cfg.num_workers,
+                    "pin_memory": loader_cfg.pin_memory,
                 },
             )
 

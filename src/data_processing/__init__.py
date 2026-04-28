@@ -12,6 +12,7 @@ Public surface:
 from src.data_processing.data_contracts import (
     CONTRACTS,
     DataContract,
+    DEFAULT_MAX_LENGTH,
     get_contract,
     list_tasks,
     is_classification,
@@ -29,6 +30,7 @@ from src.data_processing.data_pipeline import (
 from src.data_processing.dataset_factory import (
     build_dataset,
     build_all_datasets,
+    DatasetBuildConfig,
     validate_dataset_compatibility,
 )
 
@@ -46,6 +48,7 @@ from src.data_processing.collate import (
 __all__ = [
     "CONTRACTS",
     "DataContract",
+    "DEFAULT_MAX_LENGTH",
     "get_contract",
     "list_tasks",
     "is_classification",
@@ -57,6 +60,7 @@ __all__ = [
     "DataPipelineConfig",
     "build_dataset",
     "build_all_datasets",
+    "DatasetBuildConfig",
     "validate_dataset_compatibility",
     "build_dataloader",
     "build_all_dataloaders",
