@@ -264,7 +264,7 @@ def compute_calibration(
     y_true: Iterable,
     task_type: str,
     *,
-    apply_temp_scaling: bool = True,
+    apply_temp_scaling: bool = False,
     temperature: Optional[float] = None,
     n_bins: int = 10,
     return_confidence_array: bool = False,
@@ -272,8 +272,13 @@ def compute_calibration(
     """Fit (or apply pre-fit) temperature scaling and compute calibration metrics.
 
     Pass ``temperature`` to use a previously fitted value (split fit/apply across
-    validation/test data). Otherwise the temperature is fitted on ``logits`` for
-    backward compatibility.
+    validation/test data). When ``apply_temp_scaling`` is opt-in ``True`` *and*
+    ``temperature`` is not provided, the temperature is fitted on ``logits`` —
+    which is the same data ECE/Brier are measured on, so the resulting numbers
+    are statistically biased. This is now logged at warning level.
+
+    CRIT E2: ``apply_temp_scaling`` defaults to ``False`` to make the fit-on-test
+    path explicit. Callers that want the previous behavior must opt in.
     """
     if logits is None:
         raise ValueError("logits required")
@@ -286,6 +291,13 @@ def compute_calibration(
         T = float(temperature)
         scaled = apply_temperature(logits_arr, T)
     elif apply_temp_scaling:
+        # CRIT E2: surface the leakage. Promote from debug to warning so
+        # operators see it whenever fit-on-test calibration sneaks back in.
+        logger.warning(
+            "Temperature being fitted on the same data calibration metrics "
+            "will be measured on; ECE/Brier will be optimistically biased. "
+            "Pass ``temperature`` (fitted on validation logits) to avoid this."
+        )
         try:
             T = fit_temperature(logits_arr, y_true_arr, task_type)
             scaled = apply_temperature(logits_arr, T)

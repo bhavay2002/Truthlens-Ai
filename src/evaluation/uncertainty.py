@@ -126,7 +126,12 @@ def mutual_information(prob_samples: Iterable) -> np.ndarray:
     )
 
     mi = entropy_mean - entropy_expected
-    denom = float(np.max(np.abs(mi)) + EPS)
+    # HIGH E11: normalize by ``log(K)`` so MI stays comparable across batches
+    # and deployments. Dividing by ``max(|mi|)`` (the previous behavior) made
+    # any cross-batch MI threshold meaningless because each batch was rescaled
+    # to the same [-1, 1] range regardless of the model's actual uncertainty.
+    n_classes = int(arr.shape[-1])
+    denom = float(np.log(max(n_classes, 2)))
     return mi / denom
 
 

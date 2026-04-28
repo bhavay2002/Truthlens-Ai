@@ -13,6 +13,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import numpy as np
 import torch
+from scipy.special import expit, softmax as scipy_softmax
 from transformers import AutoTokenizer
 
 from src.config.task_config import TASK_CONFIG, get_task_type
@@ -91,26 +92,32 @@ def _predict_model(
 # POSTPROCESS
 # =========================================================
 
-def _postprocess_logits(logits: np.ndarray, task_type: str):
+def _postprocess_logits(logits: np.ndarray, task_type: str, *, threshold: float = 0.5):
+    """Convert logits → ``(preds, probs)``.
+
+    HIGH E3: drop the hand-rolled softmax/sigmoid in favor of
+    ``scipy.special.softmax`` / ``expit`` (no torch round-trip in the hot path).
+    CRIT E7: accept ``threshold`` so binary/multilabel callers can apply a
+    fitted threshold instead of the hard-coded ``0.5``.
+    """
     arr = np.asarray(logits, dtype=float)
 
     if task_type == "multiclass":
-        probs = _softmax(arr)
+        probs = scipy_softmax(arr, axis=-1)
         preds = np.argmax(probs, axis=1)
         return preds.astype(int), probs
 
     if task_type == "binary":
         if arr.ndim == 2 and arr.shape[1] == 2:
-            probs_full = _softmax(arr)
-            probs = probs_full[:, 1]
+            probs = scipy_softmax(arr, axis=-1)[:, 1]
         else:
-            probs = _sigmoid(arr).reshape(-1)
-        preds = (probs >= 0.5).astype(int)
+            probs = expit(arr).reshape(-1)
+        preds = (probs >= threshold).astype(int)
         return preds, probs
 
     if task_type == "multilabel":
-        probs = _sigmoid(arr)
-        preds = (probs >= 0.5).astype(int)
+        probs = expit(arr)
+        preds = (probs >= threshold).astype(int)
         return preds, probs
 
     raise ValueError(f"Unknown task_type: {task_type}")
@@ -121,6 +128,13 @@ def _postprocess_logits(logits: np.ndarray, task_type: str):
 # =========================================================
 
 def _infer_task_type(y_true: np.ndarray, y_pred: np.ndarray) -> str:
+    """Best-effort inference used only when ``task`` is not provided.
+
+    CRIT E5: this heuristic is intrinsically unreliable — a 3-class slice that
+    happens to contain only labels {0, 1} flips to ``binary``. Callers that
+    know the task should always pass ``task`` (or explicitly resolve via
+    ``get_task_type``) so this fallback isn't exercised.
+    """
     if y_true.ndim == 2:
         return "multilabel"
     classes = set(np.unique(y_true).tolist()) | set(np.unique(y_pred).tolist())
@@ -218,10 +232,13 @@ def evaluate(
             y_proba=y_proba_arr,
         )
     else:
+        # CRIT E5: forward the authoritative ``task_type`` so the metrics layer
+        # doesn't fall back to its own ``{0, 1}``-based binary heuristic.
         metrics = compute_classification_metrics(
             y_true=y_true_arr,
             y_pred=y_pred_arr,
             y_proba=y_proba_arr,
+            task_type=task_type,
         )
 
     # =====================================================

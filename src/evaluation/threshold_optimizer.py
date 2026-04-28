@@ -108,25 +108,34 @@ def optimize_multilabel_thresholds(
     n_labels = y_true.shape[1]
 
     if strategy == "global":
+        # HIGH E9: vectorize the global multilabel sweep. The previous
+        # implementation called ``f1_score`` once per candidate threshold
+        # (T iterations × O(N·L) each) which dominated eval time on large
+        # multilabel sets. Build the (N, L, T) prediction tensor once and
+        # reduce TP/FP/FN along the sample axis.
         candidates = np.linspace(0.05, 0.95, 19)
-        best_t = 0.5
-        best_score = -1.0
+        # Shapes: probs (N, L), candidates (T,) -> preds (N, L, T)
+        preds = (probs[:, :, None] >= candidates[None, None, :]).astype(np.int8)
+        y_true_3d = y_true[:, :, None].astype(np.int8)
 
-        for t in candidates:
-            preds = (probs >= t).astype(int)
+        tp = (preds * y_true_3d).sum(axis=0)              # (L, T)
+        fp = (preds * (1 - y_true_3d)).sum(axis=0)         # (L, T)
+        fn = ((1 - preds) * y_true_3d).sum(axis=0)         # (L, T)
 
-            if metric == "f1":
-                score = f1_score(y_true, preds, average="macro", zero_division=0)
-            elif metric == "precision":
-                score = precision_score(y_true, preds, average="macro", zero_division=0)
-            else:
-                score = recall_score(y_true, preds, average="macro", zero_division=0)
+        if metric == "f1":
+            scores_per_label = (2 * tp) / (2 * tp + fp + fn + EPS)   # (L, T)
+        elif metric == "precision":
+            scores_per_label = tp / (tp + fp + EPS)                  # (L, T)
+        else:  # recall
+            scores_per_label = tp / (tp + fn + EPS)                  # (L, T)
 
-            if score > best_score:
-                best_score = float(score)
-                best_t = float(t)
-
-        return {"strategy": "global", "threshold": best_t, "score": best_score}
+        macro = scores_per_label.mean(axis=0)              # (T,)
+        best_idx = int(np.argmax(macro))
+        return {
+            "strategy": "global",
+            "threshold": float(candidates[best_idx]),
+            "score": float(macro[best_idx]),
+        }
 
     thresholds_out: list[float] = []
     scores_out: list[float] = []

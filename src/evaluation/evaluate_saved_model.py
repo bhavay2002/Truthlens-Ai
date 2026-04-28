@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 from src.config.task_config import TASK_CONFIG
-from src.evaluation.calibration import compute_calibration
+from src.evaluation.calibration import compute_calibration, fit_temperature
 from src.evaluation.evaluate_model import evaluate
 from src.evaluation.report_writer import save_report
 from src.evaluation.task_correlation import compute_task_correlation
@@ -116,7 +116,17 @@ def compute_all_calibration(
     labels: Dict[str, Any],
     *,
     tasks: Optional[list[str]] = None,
+    val_logits: Optional[Dict[str, Any]] = None,
+    val_labels: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    """Compute calibration metrics for each task.
+
+    CRIT E2: accept ``val_logits`` / ``val_labels`` and, when present, fit the
+    per-task temperature on the validation split before applying it to the
+    test logits. The previous implementation fitted T on the same logits ECE
+    was measured against, which produced optimistically biased calibration
+    numbers.
+    """
     if tasks is None:
         tasks = sorted(set(logits.keys()) & set(labels.keys()))
 
@@ -126,11 +136,29 @@ def compute_all_calibration(
             logger.debug("[CALIBRATION] skipping unknown task %s", task)
             continue
 
+        task_type = TASK_CONFIG[task]["type"]
+        # CRIT E2: try to fit temperature on validation, then apply on test.
+        fitted_T: Optional[float] = None
+        if val_logits is not None and val_labels is not None and task in val_logits and task in val_labels:
+            try:
+                fitted_T = fit_temperature(
+                    np.asarray(val_logits[task], dtype=float),
+                    np.asarray(val_labels[task]),
+                    task_type,
+                )
+            except Exception as exc:  # pragma: no cover
+                logger.warning("Validation T-fit failed for %s: %s", task, exc)
+                fitted_T = None
+
         try:
             out[task] = compute_calibration(
                 logits=np.asarray(logits[task]),
                 y_true=np.asarray(labels[task]),
-                task_type=TASK_CONFIG[task]["type"],
+                task_type=task_type,
+                temperature=fitted_T,
+                # Only fall back to fit-on-test when no validation T was fit
+                # (the warning inside compute_calibration will fire then).
+                apply_temp_scaling=(fitted_T is None),
             )
         except Exception as exc:  # pragma: no cover
             logger.warning("Calibration failed for %s: %s", task, exc)

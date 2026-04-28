@@ -33,8 +33,17 @@ def _make_serializable(obj: Any) -> Any:
         return [_make_serializable(v) for v in items]
 
     if isinstance(obj, np.ndarray):
+        # HIGH E14: preserve shape when truncating multi-dim arrays. The previous
+        # ``flatten()[:_MAX_LIST_LEN]`` collapsed e.g. a 100x100 confusion matrix
+        # into a length-10000 1D list, leaving consumers no way to reconstruct
+        # the original shape. Wrap the truncated payload with metadata instead.
         if obj.size > _MAX_LIST_LEN:
-            obj = obj.flatten()[:_MAX_LIST_LEN]
+            return {
+                "shape": list(obj.shape),
+                "dtype": str(obj.dtype),
+                "truncated": True,
+                "data": obj.flatten()[:_MAX_LIST_LEN].tolist(),
+            }
         return obj.tolist()
 
     if isinstance(obj, (np.integer,)):

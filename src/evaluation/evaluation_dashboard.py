@@ -82,14 +82,19 @@ def render_dataset_stats(task_data):
 def render_confusion(task_data):
 
     metrics = task_data.get("metrics", {})
-    confusion = metrics.get("confusion")
+    # HIGH E13: metrics_engine writes the matrix under the flat key
+    # ``confusion_matrix``, not under ``confusion.matrix``. The dashboard
+    # previously read the wrong key so the matrix never rendered.
+    confusion_matrix = metrics.get("confusion_matrix") or (
+        metrics.get("confusion", {}) if isinstance(metrics.get("confusion"), dict) else {}
+    ).get("matrix")
 
-    if not confusion:
+    if confusion_matrix is None:
         return
 
     st.subheader("Confusion Matrix")
 
-    matrix = np.array(confusion["matrix"])
+    matrix = np.array(confusion_matrix)
 
     fig, ax = plt.subplots()
     im = ax.imshow(matrix, cmap="Blues")

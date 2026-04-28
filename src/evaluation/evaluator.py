@@ -5,10 +5,15 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import numpy as np
 import torch
+from scipy.special import expit, softmax as scipy_softmax
 from transformers import AutoTokenizer
 
 from src.config.task_config import get_task_type
-from src.evaluation.calibration import compute_calibration
+from src.evaluation.calibration import (
+    apply_temperature,
+    compute_calibration,
+    fit_temperature,
+)
 from src.evaluation.error_analysis import ErrorAnalyzer
 from src.evaluation.metrics_engine import compute_metrics_from_preds
 from src.evaluation.prediction_collector import PredictionCollector
@@ -77,23 +82,28 @@ class Evaluator:
         return np.vstack(outputs)
 
     @staticmethod
-    def _postprocess(logits: np.ndarray, task_type: str):
+    def _postprocess(logits: np.ndarray, task_type: str, *, threshold: float = 0.5):
+        """Convert raw logits → ``(preds, probs)``.
+
+        HIGH E3: use ``scipy.special`` activations directly on the numpy
+        array, skipping the redundant numpy → torch → numpy round-trip.
+        CRIT E7: accept ``threshold`` so binary / multilabel callers can
+        apply a fitted operating point instead of the hard-coded ``0.5``.
+        """
         arr = np.asarray(logits, dtype=float)
-        logits_t = torch.tensor(arr, dtype=torch.float32)
 
         if task_type == "multiclass":
-            probs = torch.softmax(logits_t, dim=-1).numpy()
+            probs = scipy_softmax(arr, axis=-1)
             preds = np.argmax(probs, axis=1).astype(int)
         elif task_type == "binary":
-            if logits_t.ndim == 2 and logits_t.shape[-1] == 2:
-                probs_full = torch.softmax(logits_t, dim=-1).numpy()
-                probs = probs_full[:, 1]
+            if arr.ndim == 2 and arr.shape[-1] == 2:
+                probs = scipy_softmax(arr, axis=-1)[:, 1]
             else:
-                probs = torch.sigmoid(logits_t).numpy().reshape(-1)
-            preds = (probs >= 0.5).astype(int)
+                probs = expit(arr).reshape(-1)
+            preds = (probs >= threshold).astype(int)
         elif task_type == "multilabel":
-            probs = torch.sigmoid(logits_t).numpy()
-            preds = (probs >= 0.5).astype(int)
+            probs = expit(arr)
+            preds = (probs >= threshold).astype(int)
         else:
             raise ValueError(f"Unknown task_type: {task_type}")
 
@@ -115,15 +125,107 @@ class Evaluator:
         tokenizer: Optional[AutoTokenizer] = None,
         batch_size: int = 32,
         return_logits: bool = False,
+        # CRIT E1 + CRIT E2: validation-side data so calibration and
+        # threshold optimization are fitted on a held-out split and only
+        # applied to the test set passed in via y_true / y_pred / y_proba.
+        val_logits: Optional[Iterable] = None,
+        val_labels: Optional[Iterable] = None,
+        val_y_true: Optional[Iterable] = None,
+        val_y_proba: Optional[Iterable] = None,
     ) -> Dict[str, Any]:
         task_type = get_task_type(task)
         logits: Optional[np.ndarray] = None
+
+        # CRIT E1: fit temperature on validation logits *before* postprocessing
+        # the test logits, so the test-side preds/probs reflect the calibrated
+        # operating point (rather than re-using the same logits to fit ECE).
+        fitted_T: Optional[float] = None
+        val_logits_arr = (
+            np.asarray(val_logits, dtype=float) if val_logits is not None else None
+        )
+        val_labels_arr = (
+            np.asarray(val_labels) if val_labels is not None else None
+        )
+        if val_logits_arr is not None and val_labels_arr is not None:
+            try:
+                fitted_T = fit_temperature(
+                    val_logits_arr, val_labels_arr, task_type
+                )
+            except Exception as exc:
+                logger.warning("Validation T-fit failed: %s", exc)
+                fitted_T = None
+
+        # CRIT E1: fit per-task thresholds on validation probabilities, never
+        # on the same predictions metrics will be measured against.
+        val_y_true_arr = (
+            np.asarray(val_y_true) if val_y_true is not None else val_labels_arr
+        )
+        val_y_proba_arr = (
+            np.asarray(val_y_proba, dtype=float) if val_y_proba is not None else None
+        )
+        # Derive val probs from val logits when not supplied.
+        if (
+            val_y_proba_arr is None
+            and val_logits_arr is not None
+            and task_type in ("binary", "multilabel", "multiclass")
+        ):
+            try:
+                _, val_y_proba_arr = self._postprocess(val_logits_arr, task_type)
+            except Exception as exc:
+                logger.debug("Could not derive val probs from val logits: %s", exc)
+
+        fitted_thresholds: Optional[Dict[str, Any]] = None
+        if (
+            task_type in ("binary", "multilabel")
+            and val_y_true_arr is not None
+            and val_y_proba_arr is not None
+        ):
+            try:
+                fitted_thresholds = self.threshold_optimizer.optimize_from_arrays(
+                    y_true=val_y_true_arr,
+                    probs=val_y_proba_arr,
+                    task_type=task_type,
+                )
+            except AttributeError:
+                # Optimizer doesn't expose optimize_from_arrays — fall back to
+                # the legacy ``optimize(collected)`` path *on validation data*.
+                try:
+                    val_collected = self.collector.collect(
+                        y_true=val_y_true_arr,
+                        y_pred=(val_y_proba_arr >= 0.5).astype(int)
+                        if val_y_proba_arr.ndim <= 2
+                        else None,
+                        y_proba=val_y_proba_arr,
+                        logits=val_logits_arr,
+                        task=task,
+                        task_type=task_type,
+                    )
+                    fitted_thresholds = self.threshold_optimizer.optimize(val_collected)
+                except Exception as exc:  # pragma: no cover
+                    logger.warning("Threshold fit on val failed: %s", exc)
+            except Exception as exc:  # pragma: no cover
+                logger.warning("Threshold fit on val failed: %s", exc)
+
+        # Resolve per-task threshold for the test postprocess step.
+        op_threshold = 0.5
+        if isinstance(fitted_thresholds, dict):
+            t_val = fitted_thresholds.get("threshold")
+            if isinstance(t_val, (int, float)):
+                op_threshold = float(t_val)
 
         if model is not None:
             if texts is None or tokenizer is None:
                 raise ValueError("model mode requires texts + tokenizer")
             logits = self._batched_predict(model, texts, task, tokenizer, batch_size)
-            y_pred, y_proba = self._postprocess(logits, task_type)
+            # CRIT E1 / CRIT E2: scale test logits by validation-fitted T
+            # before deriving probs/preds so downstream metrics see the
+            # calibrated, operating-point-aware predictions.
+            scaled_logits = (
+                apply_temperature(logits, fitted_T) if fitted_T is not None else logits
+            )
+            y_pred, y_proba = self._postprocess(
+                scaled_logits, task_type, threshold=op_threshold
+            )
 
         y_true_arr = np.asarray(y_true)
         if y_true_arr.size == 0:
@@ -144,6 +246,9 @@ class Evaluator:
             task_type=task_type,
         )
 
+        # CRIT E5: forward the authoritative task_type so the metrics layer
+        # never silently misroutes a 3-class slice that happens to contain
+        # only labels {0, 1} into the binary code path.
         metrics = compute_metrics_from_preds(
             y_true=y_true_arr,
             y_pred=y_pred_arr,
@@ -154,8 +259,15 @@ class Evaluator:
         calibration: Dict[str, Any] = {}
         if logits is not None:
             try:
+                # CRIT E2: pass the validation-fitted temperature explicitly.
+                # ``apply_temp_scaling`` defaults to False, so without a fitted
+                # T the calibrator reports raw ECE/Brier instead of silently
+                # fitting on test data.
                 calibration = compute_calibration(
-                    logits=logits, y_true=y_true_arr, task_type=task_type
+                    logits=logits,
+                    y_true=y_true_arr,
+                    task_type=task_type,
+                    temperature=fitted_T,
                 )
             except Exception as exc:
                 logger.warning("Calibration failed: %s", exc)
@@ -166,12 +278,10 @@ class Evaluator:
             logger.warning("Error analysis failed: %s", exc)
             error_analysis = {}
 
-        thresholds = None
-        if y_proba_arr is not None:
-            try:
-                thresholds = self.threshold_optimizer.optimize(collected)
-            except Exception as exc:
-                logger.warning("Threshold optimization failed: %s", exc)
+        # CRIT E1: never fit thresholds on ``collected`` (that is the test
+        # split). Return the ones fitted on validation if provided; otherwise
+        # report no operating point so callers can detect the missing val data.
+        thresholds = fitted_thresholds
 
         if y_true_arr.ndim == 1:
             labels, counts = np.unique(y_true_arr, return_counts=True)
@@ -208,21 +318,35 @@ class Evaluator:
 
     @staticmethod
     def multitask(results: Dict[str, Dict[str, Any]]) -> Dict[str, float]:
+        """HIGH E7: roll up the *numeric union* of metrics across tasks.
+
+        The original implementation only summarized a hard-coded triple of
+        keys (``accuracy``, ``f1_macro``, ``f1_weighted``), so task-specific
+        metrics like ``roc_auc``, ``mcc``, ``balanced_accuracy``, ``log_loss``
+        were silently dropped from the multitask report. We now sample-weight
+        every numeric metric that appears on any task.
+        """
         if not results:
             return {}
 
         weights: Dict[str, float] = {}
+        metric_keys: set[str] = set()
         for task, result in results.items():
             stats = result.get("dataset_stats") or {}
             weights[task] = float(stats.get("num_samples", 1) or 1)
+            for k, v in (result.get("metrics") or {}).items():
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    metric_keys.add(k)
 
         summary: Dict[str, float] = {}
-        for metric in ("accuracy", "f1_macro", "f1_weighted"):
+        for metric in sorted(metric_keys):
             vals: List[float] = []
             wts: List[float] = []
             for task, result in results.items():
                 value = (result.get("metrics") or {}).get(metric)
-                if isinstance(value, (int, float)):
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    if not np.isfinite(float(value)):
+                        continue
                     vals.append(float(value))
                     wts.append(weights[task])
             if vals:

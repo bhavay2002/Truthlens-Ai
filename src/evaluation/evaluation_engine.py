@@ -72,7 +72,24 @@ class EvaluationEngine:
         if log_losses:
             return float(np.mean(log_losses))
 
-        # Fallback: 1 - aggregate accuracy (so lower is better for early stopping)
+        # CRIT E4: prefer 1 - balanced_accuracy. Raw accuracy collapses on
+        # imbalanced classes (a 95/5 binary task scores ~0.95 from a class-prior
+        # baseline) and silently locks early stopping onto a degenerate model.
+        if isinstance(agg.get("balanced_accuracy"), (int, float)):
+            return float(1.0 - agg["balanced_accuracy"])
+
+        balanced = [
+            float(m["balanced_accuracy"])
+            for k, m in metrics.items()
+            if k != "__aggregate__"
+            and isinstance(m, dict)
+            and isinstance(m.get("balanced_accuracy"), (int, float))
+        ]
+        if balanced:
+            return float(1.0 - np.mean(balanced))
+
+        # Last-resort fallback when balanced_accuracy is missing entirely
+        # (e.g. multilabel-only runs); kept for backwards compatibility.
         if isinstance(agg.get("accuracy"), (int, float)):
             return float(1.0 - agg["accuracy"])
 

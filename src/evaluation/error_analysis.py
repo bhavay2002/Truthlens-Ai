@@ -73,7 +73,11 @@ def analyze_binary_errors(
 
         if fn_idx.size:
             fn_conf = positive_proba[fn_idx]
-            fn_hard = fn_idx[_top_k_indices(1.0 - fn_conf, k=top_k, largest=True)]
+            # HIGH E12: ``largest=False`` on raw confidences picks the lowest
+            # P(class=1) directly. The previous ``largest=True`` on
+            # ``1.0 - fn_conf`` is mathematically equivalent but the float32
+            # subtraction occasionally re-orders ties under EPS rounding.
+            fn_hard = fn_idx[_top_k_indices(fn_conf, k=top_k, largest=False)]
             results["top_false_negatives"] = _build_samples(fn_hard, texts, positive_proba)
 
     return results

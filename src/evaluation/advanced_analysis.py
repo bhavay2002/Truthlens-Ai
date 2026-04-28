@@ -107,9 +107,16 @@ def postprocess_predictions(
         probs = torch.sigmoid(logits_tensor).numpy()
         confidence = probs if probs.ndim == 1 else np.max(probs, axis=1)
 
-        # 🔥 threshold override
+        # CRIT E7: apply the threshold override to the per-label probability
+        # tensor — not to ``confidence`` (which collapses ``np.max`` across
+        # labels in the multilabel case and makes the threshold compare
+        # against the wrong axis). Binary stays a 1-D vector; multilabel
+        # remains (N, L).
         if threshold is not None:
-            preds = (confidence >= threshold).astype(int)
+            if task_type == "multilabel" and probs.ndim == 2:
+                preds = (probs >= threshold).astype(int)
+            else:
+                preds = (confidence >= threshold).astype(int)
 
     return preds, probs, confidence
 

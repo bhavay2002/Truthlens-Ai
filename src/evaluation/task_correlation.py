@@ -67,13 +67,20 @@ def _extract_task_features(predictions: Dict[str, Any]) -> pd.DataFrame:
             if arr.ndim == 1:
                 features[task] = arr
             else:
-                for i in range(arr.shape[1]):
+                # HIGH E10: drop the last class column (K-1 dummy encoding).
+                # All K columns of a softmax sum to 1, so they are perfectly
+                # collinear — keeping all of them inflates mean correlation
+                # and corrupts ``correlation_statistics``.
+                n_keep = max(arr.shape[1] - 1, 1)
+                for i in range(n_keep):
                     features[f"{task}{_DELIM}class_{i}"] = arr[:, i]
 
         elif task_type == "multilabel":
             if arr.ndim == 1:
                 features[task] = arr
             else:
+                # Multilabel sigmoids are independent per label, so no
+                # collinearity adjustment is needed — keep every column.
                 for i in range(arr.shape[1]):
                     features[f"{task}{_DELIM}label_{i}"] = arr[:, i]
 

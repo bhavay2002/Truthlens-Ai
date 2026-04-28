@@ -93,6 +93,7 @@ def compute_classification_metrics(
     threshold: float = 0.5,
     confidence: Optional[Iterable] = None,
     labels: Optional[Iterable[int]] = None,
+    task_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Compute standard classification metrics.
 
@@ -109,7 +110,19 @@ def compute_classification_metrics(
     _check_shape_match(y_true_arr, y_pred_arr)
 
     unique_classes = np.unique(np.concatenate([y_true_arr, y_pred_arr]))
-    is_binary = unique_classes.size <= 2 and set(unique_classes.tolist()).issubset({0, 1})
+
+    # CRIT E5: trust the authoritative ``task_type`` instead of inferring binary
+    # from the label values. Pruned multiclass slices that happen to contain only
+    # {0, 1} previously misrouted to binary averaging and a single-class roc_auc.
+    if task_type == "binary":
+        is_binary = True
+    elif task_type in ("multiclass", "classification"):
+        is_binary = False
+    else:
+        is_binary = (
+            unique_classes.size <= 2
+            and set(unique_classes.tolist()).issubset({0, 1})
+        )
 
     chosen_average = average or ("binary" if is_binary else "macro")
 
@@ -184,10 +197,17 @@ def compute_classification_metrics(
         try:
             if is_binary:
                 positive_proba = _binary_proba_for_auc(proba_arr)
-                if positive_proba is not None and len(np.unique(y_true_arr)) > 1:
-                    metrics["roc_auc"] = float(
-                        roc_auc_score(y_true_arr, positive_proba)
-                    )
+                if positive_proba is not None:
+                    # METRIC CORRECTNESS: surface the single-class skip instead of
+                    # silently dropping the metric — masks dataset-level bugs.
+                    if len(np.unique(y_true_arr)) > 1:
+                        metrics["roc_auc"] = float(
+                            roc_auc_score(y_true_arr, positive_proba)
+                        )
+                    else:
+                        logger.warning(
+                            "roc_auc skipped: y_true has a single class"
+                        )
             else:
                 if proba_arr.ndim == 2 and len(np.unique(y_true_arr)) > 1:
                     metrics["roc_auc"] = float(
@@ -268,18 +288,26 @@ def compute_multilabel_metrics(
             )
 
         try:
-            proba_clipped = np.clip(proba_arr, EPS, 1.0 - EPS)
-            metrics["log_loss"] = float(
-                -np.mean(
-                    y_true_arr * np.log(proba_clipped)
-                    + (1 - y_true_arr) * np.log(1 - proba_clipped)
-                )
-            )
+            # CRIT E6: use sklearn ``log_loss`` per label and average so the
+            # multilabel value is on the same scale as the multiclass log_loss
+            # reported elsewhere. The hand-rolled element-wise BCE that lived
+            # here normalized over N*L instead of per-sample.
+            per_label_ll = [
+                log_loss(y_true_arr[:, i], proba_arr[:, i], labels=[0, 1])
+                for i in range(y_true_arr.shape[1])
+                if len(np.unique(y_true_arr[:, i])) > 1
+            ]
+            if per_label_ll:
+                metrics["log_loss"] = float(np.mean(per_label_ll))
         except ValueError as exc:
             logger.debug("multilabel log_loss skipped: %s", exc)
 
         try:
-            valid_labels = np.where(y_true_arr.sum(axis=0) > 0)[0]
+            # METRIC CORRECTNESS: drop both all-zero and all-one columns; AUC
+            # is undefined when a label has no negatives either.
+            col_sum = y_true_arr.sum(axis=0)
+            n_rows = y_true_arr.shape[0]
+            valid_labels = np.where((col_sum > 0) & (col_sum < n_rows))[0]
             if valid_labels.size:
                 metrics["roc_auc_macro"] = float(
                     roc_auc_score(
@@ -309,12 +337,15 @@ def compute_metrics_from_preds(
 ) -> Dict[str, Any]:
     """Route to the correct metric computer based on ``task_type``."""
     if task_type in ("binary", "multiclass", "classification"):
+        # CRIT E5: forward task_type so compute_classification_metrics doesn't
+        # have to re-infer binary vs. multiclass from the label range.
         return compute_classification_metrics(
             y_true,
             y_pred,
             y_proba=y_proba,
             average=average,
             threshold=threshold,
+            task_type=task_type,
         )
 
     if task_type == "multilabel":
@@ -345,6 +376,9 @@ class MetricsEngine:
 
     # The set of metrics that we average across tasks. Adding extras is safe
     # but we keep the list explicit so downstream consumers know what to expect.
+    # CRIT E3: ``log_loss`` is intentionally excluded — it lives on a different
+    # scale (``[0, ∞)``) than the bounded metrics here and gets a separate
+    # sample-weighted aggregator below.
     _AGG_KEYS = (
         "accuracy",
         "balanced_accuracy",
@@ -359,7 +393,6 @@ class MetricsEngine:
         "mcc",
         "roc_auc",
         "roc_auc_macro",
-        "log_loss",
     )
 
     def __init__(self, config: Optional[MetricsEngineConfig] = None):
@@ -403,6 +436,9 @@ class MetricsEngine:
         thresholds: Optional[Dict[str, float]] = None,
     ) -> Dict[str, Any]:
         results: Dict[str, Any] = {}
+        # CRIT E3: track per-task sample counts so the aggregator can weight
+        # log_loss instead of averaging arithmetically across uneven tasks.
+        sample_counts: Dict[str, int] = {}
 
         for task, data in predictions.items():
             if task not in task_types:
@@ -427,20 +463,30 @@ class MetricsEngine:
                     task_type=task_types[task],
                     threshold=threshold,
                 )
+                try:
+                    sample_counts[task] = int(np.asarray(data["y_true"]).shape[0])
+                except Exception:
+                    sample_counts[task] = 1
             except ValueError as exc:
                 logger.warning("Metrics failed for %s: %s", task, exc)
 
         if self.config.aggregate and results:
-            results["__aggregate__"] = self._aggregate(results)
+            results["__aggregate__"] = self._aggregate(results, sample_counts)
 
         return results
 
     # -----------------------------------------------------
-    # AGGREGATION (mean across tasks per metric)
+    # AGGREGATION (mean across tasks per bounded metric;
+    # sample-weighted for log_loss — CRIT E3)
     # -----------------------------------------------------
 
-    def _aggregate(self, per_task: Dict[str, Dict[str, Any]]) -> Dict[str, float]:
+    def _aggregate(
+        self,
+        per_task: Dict[str, Dict[str, Any]],
+        sample_counts: Optional[Dict[str, int]] = None,
+    ) -> Dict[str, float]:
         agg: Dict[str, float] = {}
+        sample_counts = sample_counts or {}
 
         for key in self._AGG_KEYS:
             values = [
@@ -452,6 +498,21 @@ class MetricsEngine:
 
             if values:
                 agg[key] = float(np.mean(values))
+
+        # CRIT E3: log_loss aggregated separately, weighted by per-task sample
+        # counts. Surfaced under ``log_loss`` so EvaluationEngine._extract_val_loss
+        # picks it up as a single early-stopping signal.
+        ll_vals: list[float] = []
+        ll_weights: list[float] = []
+        for task, metrics in per_task.items():
+            if not isinstance(metrics, dict):
+                continue
+            ll = metrics.get("log_loss")
+            if isinstance(ll, (int, float)) and np.isfinite(ll):
+                ll_vals.append(float(ll))
+                ll_weights.append(float(sample_counts.get(task, 1) or 1))
+        if ll_vals:
+            agg["log_loss"] = float(np.average(ll_vals, weights=ll_weights))
 
         agg["num_tasks"] = float(len(per_task))
         return agg

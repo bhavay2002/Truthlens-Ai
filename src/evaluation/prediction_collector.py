@@ -5,6 +5,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import numpy as np
 import torch
+from scipy.special import expit, softmax
 from transformers import AutoTokenizer
 
 from src.config.task_config import TASK_CONFIG, get_task_type
@@ -44,24 +45,26 @@ def _postprocess(logits: np.ndarray, task_type: str, *, threshold: float = 0.5):
 
     Notably handles the binary case where the head emits 2 logits (softmax over
     {0, 1}) versus a single logit (sigmoid).
+
+    HIGH E3: use ``scipy.special.softmax`` / ``expit`` directly on numpy to
+    skip the numpy → torch → numpy round-trip that this hot path used to do
+    on every batch.
     """
-    arr = np.asarray(logits)
-    logits_t = torch.tensor(arr, dtype=torch.float32)
+    arr = np.asarray(logits, dtype=float)
 
     if task_type == "multiclass":
-        probs = torch.softmax(logits_t, dim=-1).numpy()
+        probs = softmax(arr, axis=-1)
         preds = np.argmax(probs, axis=1).astype(int)
 
     elif task_type == "binary":
-        if logits_t.ndim == 2 and logits_t.shape[-1] == 2:
-            probs_full = torch.softmax(logits_t, dim=-1).numpy()
-            probs = probs_full[:, 1]
+        if arr.ndim == 2 and arr.shape[-1] == 2:
+            probs = softmax(arr, axis=-1)[:, 1]
         else:
-            probs = torch.sigmoid(logits_t).numpy().reshape(-1)
+            probs = expit(arr).reshape(-1)
         preds = (probs >= threshold).astype(int)
 
     elif task_type == "multilabel":
-        probs = torch.sigmoid(logits_t).numpy()
+        probs = expit(arr)
         preds = (probs >= threshold).astype(int)
 
     else:
@@ -202,12 +205,29 @@ def collect_all_tasks(
 # =========================================================
 
 def _normalize_label_dict(batch_labels: Any, tasks: List[str]) -> Dict[str, torch.Tensor]:
-    """Pull a ``{task: tensor}`` dict out of a batch's label payload."""
+    """Pull a ``{task: tensor}`` dict out of a batch's label payload.
+
+    HIGH E5: be tolerant of the common single-task tuple/tensor case. Many
+    DataLoaders return ``(input_ids, attention_mask, labels_tensor)`` and the
+    previous strict ``isinstance(dict)`` check raised TypeError on every batch.
+    When ``labels`` is a single tensor and the caller declared exactly one
+    task, treat it as that task's labels.
+    """
     if isinstance(batch_labels, dict):
         return {t: batch_labels[t] for t in tasks if t in batch_labels}
+
+    if isinstance(batch_labels, torch.Tensor) and len(tasks) == 1:
+        return {tasks[0]: batch_labels}
+
+    found_keys = (
+        sorted(batch_labels.keys())
+        if hasattr(batch_labels, "keys")
+        else type(batch_labels).__name__
+    )
     raise TypeError(
-        "DataLoader batches must yield a dict-like ``labels`` field for "
-        "multi-task evaluation"
+        "DataLoader batches must yield a dict-like ``labels`` field keyed by "
+        f"task (or a single tensor when only one task is selected). Found: "
+        f"{found_keys!r}"
     )
 
 

@@ -9,9 +9,13 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from src.config.task_config import TASK_CONFIG
-from src.evaluation.calibration import compute_calibration, fit_calibration
+from src.evaluation.calibration import (
+    apply_temperature,
+    compute_calibration,
+    fit_calibration,
+)
 from src.evaluation.error_analysis import error_analysis
-from src.evaluation.evaluate_model import evaluate
+from src.evaluation.evaluate_model import evaluate, _postprocess_logits
 from src.evaluation.pdf_report import generate_pdf_report
 from src.evaluation.prediction_collector import collect_all_tasks
 from src.evaluation.report_writer import save_report
@@ -47,44 +51,114 @@ def _collect_via_prediction_service(
     *,
     batch_size: int = 32,
 ) -> Dict[str, Dict[str, Any]]:
-    buffers: Dict[str, Dict[str, list]] = {
-        task: {"probabilities": [], "predictions": [], "logits": []}
-        for task in tasks
-    }
+    """Drive a PredictionService over ``texts`` and collect per-task outputs.
+
+    HIGH E6: pre-allocate typed numpy arrays from ``TASK_CONFIG[task]
+    ["num_labels"]`` instead of accumulating Python lists and calling
+    ``np.asarray`` on a potentially ragged structure (which silently produced
+    object-dtype arrays or raised). Each task gets ``probabilities``,
+    ``predictions`` and ``logits`` slots sized by task type.
+
+    HIGH E2: when ``predict_batch`` isn't available, still iterate the texts
+    in chunks of ``batch_size`` so behavior matches the batched path (memory
+    use, progress logging, and downstream slot indexing are all consistent).
+    """
+    n = len(texts)
+
+    # --- HIGH E6: pre-allocate typed slots per task ---------------------
+    out: Dict[str, Dict[str, Any]] = {}
+    task_meta: Dict[str, Dict[str, Any]] = {}
+    for task in tasks:
+        cfg = TASK_CONFIG.get(task) or {}
+        ttype = cfg.get("type", "binary")
+        nl = int(cfg.get("num_labels", 1) or 1)
+
+        if ttype == "binary":
+            proba_shape: tuple[int, ...] = (n,)
+            pred_shape: tuple[int, ...] = (n,)
+            logits_shape: tuple[int, ...] = (n, nl) if nl > 1 else (n,)
+        elif ttype == "multiclass":
+            proba_shape = (n, nl)
+            pred_shape = (n,)
+            logits_shape = (n, nl)
+        elif ttype == "multilabel":
+            proba_shape = (n, nl)
+            pred_shape = (n, nl)
+            logits_shape = (n, nl)
+        else:
+            proba_shape = (n,)
+            pred_shape = (n,)
+            logits_shape = (n,)
+
+        out[task] = {
+            "probabilities": np.zeros(proba_shape, dtype=np.float32),
+            "predictions": np.zeros(pred_shape, dtype=np.int32),
+            "logits": np.zeros(logits_shape, dtype=np.float32),
+        }
+        task_meta[task] = {
+            "type": ttype,
+            "logits_seen": False,
+            "pred_dtype_locked": False,
+        }
+
+    def _store(idx: int, result: Dict[str, Any]) -> None:
+        for task in tasks:
+            task_out = (result.get("tasks") or {}).get(task) or {}
+            probs = task_out.get("probabilities")
+            preds = task_out.get("predictions")
+            logits = task_out.get("logits")
+
+            if probs is not None:
+                arr = np.asarray(probs, dtype=np.float32)
+                target = out[task]["probabilities"]
+                # Reshape on first write if pre-allocated shape doesn't match
+                # (covers binary heads that emit (2,) instead of scalar).
+                if arr.shape != target[idx].shape:
+                    if arr.ndim == 1 and arr.size == 2 and target[idx].ndim == 0:
+                        arr = arr[1:2].reshape(target[idx].shape)
+                    elif target[idx].ndim == 0 and arr.size == 1:
+                        arr = arr.reshape(())
+                target[idx] = arr
+
+            if preds is not None:
+                p = np.asarray(preds)
+                target = out[task]["predictions"]
+                if p.shape != target[idx].shape:
+                    if target[idx].ndim == 0 and p.size == 1:
+                        p = p.reshape(())
+                target[idx] = p
+
+            if logits is not None:
+                la = np.asarray(logits, dtype=np.float32)
+                target = out[task]["logits"]
+                if la.shape != target[idx].shape:
+                    if target[idx].ndim == 0 and la.size == 1:
+                        la = la.reshape(())
+                target[idx] = la
+                task_meta[task]["logits_seen"] = True
 
     predict_batch = getattr(prediction_service, "predict_batch", None)
 
     if callable(predict_batch):
-        for i in range(0, len(texts), batch_size):
+        for i in range(0, n, batch_size):
             batch_results = predict_batch(texts[i: i + batch_size])
-            for result in batch_results:
-                for task in tasks:
-                    task_out = result["tasks"][task]
-                    buffers[task]["probabilities"].append(task_out["probabilities"])
-                    buffers[task]["predictions"].append(task_out["predictions"])
-                    buffers[task]["logits"].append(task_out.get("logits"))
+            for j, result in enumerate(batch_results):
+                _store(i + j, result)
     else:
-        for text in texts:
-            result = prediction_service.predict(text)
-            for task in tasks:
-                task_out = result["tasks"][task]
-                buffers[task]["probabilities"].append(task_out["probabilities"])
-                buffers[task]["predictions"].append(task_out["predictions"])
-                buffers[task]["logits"].append(task_out.get("logits"))
+        # HIGH E2: chunk the per-text fallback so memory use and behavior
+        # match the batched path. We still call ``predict`` once per text
+        # (no implicit batching is possible without a batch API), but
+        # iterate in deterministic ``batch_size`` slabs.
+        for i in range(0, n, batch_size):
+            chunk = texts[i: i + batch_size]
+            for j, text in enumerate(chunk):
+                _store(i + j, prediction_service.predict(text))
 
-    out: Dict[str, Dict[str, Any]] = {}
+    # Drop logits slots that were never populated.
     for task in tasks:
-        record: Dict[str, Any] = {}
-        for key, values in buffers[task].items():
-            if any(v is None for v in values):
-                # logits may be None when the service doesn't expose them.
-                if key == "logits" and all(v is None for v in values):
-                    continue
-            try:
-                record[key] = np.asarray(values)
-            except ValueError:
-                record[key] = values
-        out[task] = record
+        if not task_meta[task]["logits_seen"]:
+            out[task].pop("logits", None)
+
     return out
 
 
@@ -192,6 +266,32 @@ def run_evaluation_pipeline(
                     all_confidence[task] = np.asarray(cal["confidence"])
             except Exception as exc:
                 logger.warning("Calibration failed for %s: %s", task, exc)
+
+            # HIGH E8: when a validation-fit temperature exists, recompute
+            # probs/preds from the *scaled* logits and emit a parallel
+            # ``metrics_calibrated`` block alongside the raw metrics. This
+            # exposes the actual lift from temperature scaling — without it
+            # the calibration block updates ECE/Brier but downstream metrics
+            # still report the uncalibrated operating point.
+            T_fit = fitted_temperatures.get(task)
+            if T_fit is not None:
+                try:
+                    eval_result["metrics_raw"] = eval_result.get("metrics", {})
+                    scaled_logits = apply_temperature(logits, T_fit)
+                    cal_preds, cal_probs = _postprocess_logits(
+                        scaled_logits, TASK_CONFIG[task]["type"]
+                    )
+                    cal_eval = evaluate(
+                        y_true=y_true,
+                        y_pred=cal_preds,
+                        y_proba=cal_probs,
+                        task=task,
+                    )
+                    eval_result["metrics_calibrated"] = cal_eval.get("metrics", {})
+                except Exception as exc:
+                    logger.warning(
+                        "Calibrated metric recompute failed for %s: %s", task, exc
+                    )
 
         if enable_uncertainty:
             try:
