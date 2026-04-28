@@ -144,12 +144,19 @@ class ArticleAnalyzer:
             return {}
 
         try:
+            # REC-1: ``PredictionService.predict`` returns the basic
+            # ``{label, confidence, fake_probability}`` blob (and is
+            # cache-backed). It does NOT contain ``predictions`` /
+            # ``probabilities`` / ``logits`` arrays — those keys read as
+            # ``None`` previously, polluting the report. Surface the
+            # actual fields and keep the raw blob under ``raw_output``
+            # for downstream consumers.
             result = self.prediction_service.predict(text)
 
             return {
-                "predictions": result.get("predictions"),
-                "probabilities": result.get("probabilities"),
-                "logits": result.get("logits"),
+                "label": result.get("label"),
+                "confidence": result.get("confidence"),
+                "fake_probability": result.get("fake_probability"),
                 "raw_output": result,
             }
 
@@ -205,6 +212,12 @@ class ArticleAnalyzer:
         raw_pred = prediction_output.get("raw_output", {})
 
         # ---------------- FINAL REPORT ----------------
+        # REC-1: the previous report extracted ``graph`` /
+        # ``graph_explanation`` / ``drift`` / ``monitoring`` from
+        # ``raw_pred``, but ``PredictionService.predict`` never produces
+        # those keys — they were always ``None``. The graph features
+        # already live under ``graph_features``/``entity_graph`` above;
+        # drift and monitoring are surfaced by their own services.
         report = {
 
             "text": text,
@@ -230,18 +243,11 @@ class ArticleAnalyzer:
             "scores": scores,
             "aggregation": aggregation_output,
 
-            # Model outputs
-            "predictions": prediction_output.get("predictions"),
-            "probabilities": prediction_output.get("probabilities"),
-            "logits": prediction_output.get("logits"),
-
+            # Model outputs (basic prediction blob)
+            "label": prediction_output.get("label"),
+            "confidence": prediction_output.get("confidence"),
+            "fake_probability": prediction_output.get("fake_probability"),
             "prediction_raw": raw_pred,
-
-            # 🔥 NEW SYSTEM OUTPUTS
-            "graph": raw_pred.get("graph"),
-            "graph_explanation": raw_pred.get("graph_explanation"),
-            "drift": raw_pred.get("drift"),
-            "monitoring": raw_pred.get("monitoring"),
         }
 
         logger.info("Article analysis complete")

@@ -7,6 +7,10 @@ from __future__ import annotations
 import threading
 from typing import Any, Dict, List, Union
 
+from src.inference.constants import (
+    DEFAULT_MAX_LENGTH,
+    INFERENCE_CACHE_VERSION,
+)
 from src.inference.inference_engine import InferenceConfig, InferenceEngine
 from src.inference.prediction_service import PredictionService
 from src.inference.inference_logger import InferenceLogger
@@ -45,9 +49,15 @@ def _get_service() -> PredictionService:
             settings = load_settings()
             model_path = str(settings.model.path)
             device = str(getattr(settings.inference, "device", "auto"))
-            max_length = int(getattr(settings.model, "max_length", 512))
+            max_length = int(
+                getattr(settings.model, "max_length", DEFAULT_MAX_LENGTH)
+            )
+            # CFG-2: prefer the operator-supplied cache_version (lets a
+            # rollout migrate caches without a code change) and fall back
+            # to the package-level constant, NOT a divergent literal.
             cache_version = str(
-                getattr(settings.inference, "cache_version", "v2")
+                getattr(settings.inference, "cache_version",
+                        INFERENCE_CACHE_VERSION)
             )
 
             # ---------------- ENGINE ----------------
@@ -80,15 +90,19 @@ def _get_service() -> PredictionService:
             formatter = ResultFormatter()
 
             # ---------------- SERVICE ----------------
+            # UNUSED-FIX: ``InferenceMonitor`` was instantiated and
+            # attached to ``_service.monitor`` but never updated. Pass it
+            # via the ctor so PredictionService.predict* will call
+            # ``monitor.update(...)`` on every request.
             _service = PredictionService(
                 engine=engine,
                 cache=cache,
                 logger_=logger,
                 formatter=formatter,
+                monitor=monitor,
             )
 
             # attach optional components
-            _service.monitor = monitor
             _service.postprocessor = postprocessor
 
     return _service

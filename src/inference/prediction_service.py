@@ -12,6 +12,7 @@ import numpy as np
 from src.inference.inference_engine import InferenceEngine
 from src.inference.inference_logger import InferenceLogger
 from src.inference.inference_cache import InferenceCache, InferenceCacheConfig
+from src.inference.monitoring import InferenceMonitor
 from src.inference.report_generator import ReportGenerator
 from src.inference.result_formatter import ResultFormatter
 
@@ -32,6 +33,7 @@ class PredictionService:
         logger_: Optional[InferenceLogger] = None,
         report_generator: Optional[ReportGenerator] = None,
         formatter: Optional[ResultFormatter] = None,
+        monitor: Optional[InferenceMonitor] = None,
     ):
 
         self.engine = engine
@@ -43,8 +45,41 @@ class PredictionService:
         self.logger = logger_ or InferenceLogger()
         self.report_generator = report_generator or ReportGenerator()
         self.formatter = formatter or ResultFormatter()
+        # UNUSED-FIX: ``predict_api`` was building an ``InferenceMonitor``
+        # and attaching it to ``service.monitor`` but no code path ever
+        # called ``monitor.update(...)``. Hold it here so ``predict``,
+        # ``predict_full_batch`` and ``predict_full`` can record latency
+        # / outcome metrics every request.
+        self.monitor = monitor
 
         logger.info("PredictionService initialized")
+
+    # =====================================================
+    # MONITOR HELPERS
+    # =====================================================
+
+    def _record_monitor(
+        self,
+        *,
+        start_time: float,
+        confidence: Optional[float] = None,
+        probabilities: Optional[Any] = None,
+        error: bool = False,
+    ) -> None:
+        """Best-effort metric emission. Monitor failures must never
+        propagate into the request path — log and move on."""
+        if self.monitor is None:
+            return
+        try:
+            latency_ms = self.logger.stop_timer(start_time)
+            self.monitor.update(
+                latency_ms=latency_ms,
+                confidence=confidence,
+                probabilities=probabilities,
+                error=error,
+            )
+        except Exception as exc:  # pragma: no cover - never break inference
+            logger.debug("Monitor update failed: %s", exc)
 
     # =====================================================
     # CORE PREDICT
@@ -59,14 +94,25 @@ class PredictionService:
 
         def _compute() -> Dict[str, Any]:
             start = self.logger.start_timer()
-            outputs = self.engine.predict_for_evaluation([text])
-            preds = self._postprocess(outputs)
+            try:
+                outputs = self.engine.predict_for_evaluation([text])
+                preds = self._postprocess(outputs)
+            except Exception:
+                # UNUSED-FIX: emit a failure metric before re-raising so
+                # operators see error-rate spikes in the monitor instead
+                # of only in the application logs.
+                self._record_monitor(start_time=start, error=True)
+                raise
             self.logger.log_prediction(
                 start_time=start,
                 model_versions={},
                 feature_count=0,
                 predicted_label=preds.get("label"),
                 prediction_confidence=preds.get("confidence"),
+            )
+            self._record_monitor(
+                start_time=start,
+                confidence=preds.get("confidence"),
             )
             return preds
 
@@ -131,8 +177,12 @@ class PredictionService:
         # ---------------- BATCHED INFERENCE ----------------
         if pending_texts:
             start = self.logger.start_timer()
-            outputs = self.engine.predict_for_evaluation(pending_texts)
-            records = self._build_records_from_engine_output(outputs)
+            try:
+                outputs = self.engine.predict_for_evaluation(pending_texts)
+                records = self._build_records_from_engine_output(outputs)
+            except Exception:
+                self._record_monitor(start_time=start, error=True)
+                raise
 
             for slot, record in zip(pending_idx, records):
                 results[slot] = record
@@ -146,6 +196,13 @@ class PredictionService:
                 predicted_label=None,
                 prediction_confidence=None,
             )
+            # Record one monitor sample per item with the per-item
+            # confidence so latency averages are not skewed by batching.
+            for record in records:
+                self._record_monitor(
+                    start_time=start,
+                    confidence=record.get("confidence"),
+                )
 
         return [r if r is not None else {} for r in results]
 
@@ -200,19 +257,46 @@ class PredictionService:
     def predict_full(
         self,
         text: str,
+        *,
+        use_cache: bool = True,
     ) -> Dict[str, Any]:
 
-        outputs = self.engine.predict_for_evaluation([text])
+        # REC-2: ``predict()`` consults the cache, but ``predict_full``
+        # used to skip it entirely — every call re-ran the forward pass
+        # plus the (much heavier) report generation. Honour the same
+        # cache contract by namespacing the full-report blob under a
+        # distinct key so it does not collide with the basic-prediction
+        # entry written by ``predict()``.
+        cache_key = f"__full__::{text}" if text is not None else None
+        if use_cache and self.cache is not None and cache_key is not None:
+            cached = self.cache.get(cache_key)
+            if cached is not None:
+                return cached
 
-        # ---------------- UNCERTAINTY ----------------
-        uncertainty = self._compute_uncertainty(outputs)
+        start = self.logger.start_timer()
+        try:
+            outputs = self.engine.predict_for_evaluation([text])
 
-        # ---------------- REPORT ----------------
-        report = self.report_generator.generate_report(
-            article_text=text,
-            predictions=outputs,
-            uncertainty=uncertainty,
-        )
+            # ---------------- UNCERTAINTY ----------------
+            uncertainty = self._compute_uncertainty(outputs)
+
+            # ---------------- REPORT ----------------
+            report = self.report_generator.generate_report(
+                article_text=text,
+                predictions=outputs,
+                uncertainty=uncertainty,
+            )
+        except Exception:
+            self._record_monitor(start_time=start, error=True)
+            raise
+
+        self._record_monitor(start_time=start)
+
+        if use_cache and self.cache is not None and cache_key is not None:
+            try:
+                self.cache.set(cache_key, report)
+            except Exception as exc:  # pragma: no cover
+                logger.debug("Full-report cache set failed: %s", exc)
 
         return report
 

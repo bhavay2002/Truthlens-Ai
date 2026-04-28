@@ -579,3 +579,36 @@ Pre-condition fix: `portalocker` was imported by `src/utils/json_utils.py` but m
 **Verification.** Standalone smoke tests pass: `PP-3` raises on missing `task_types`/missing entries; `PP-2` loads thresholds JSON; `MEM-2` evicts to cap; `MEM-3` leaves no `.tmp` files; `DEV-2` resolves both `bf16` and `fp16` env values to the right `torch.dtype`. `Start application` restarts cleanly: `Application startup complete`, `GET /` returns 200, no warnings.
 
 **Deferred (documented for next pass).** `MT-1` (engine selection / dispatch) and `MT-2` (per-task batch grouping) overlap with `CRIT-2` engine unification and will be addressed alongside it.
+
+## Apr 28 2026 — Inference-layer audit: RECOMPUTATION, DEAD CODE, CONFIG, EDGE CASES
+
+Closed the four remaining categories from the inference-layer audit. No public API change; behaviour change is "fail loudly" (REC-4, EDGE) and "share defaults" (CFG-2/4/5/6/7).
+
+**New module — `src/inference/constants.py`.** Single source of truth for values that previously diverged across modules: `INFERENCE_CACHE_VERSION` (was `"v1"` in `InferenceCacheConfig`, `"v2"` in `predict_api`), `DEFAULT_INFERENCE_BATCH_SIZE` (was `16`/`32`/`32` in three places), `DEFAULT_MAX_LENGTH`, `REPORT_VERSION` (was a hardcoded `"v3"` in `report_generator`).
+
+**Recomputation (`REC-1..4`).**
+- `REC-1` — `ArticleAnalyzer._run_prediction` previously read `predictions` / `probabilities` / `logits` / `graph` / `graph_explanation` / `drift` / `monitoring` from the cache-backed `predict()` blob, but `predict()` only returns `{label, confidence, fake_probability}`. Every one of those keys was always `None`, polluting the report. Now surfaces the actual fields and drops the four bogus keys from the analyzer report (graph features already live under `graph_features` / `entity_graph`; drift / monitoring belong to their own services).
+- `REC-2` — `PredictionService.predict_full(text)` now consults the cache (key `"__full__::<text>"` to avoid collision with the basic-blob key written by `predict()`) and writes the full report back on success. Was previously the only public entry that re-ran the whole pipeline (forward + uncertainty + report-gen) on every call.
+- `REC-3` — Tokenizer was constructed twice on every cold start (once in `InferenceEngine._load_model`, once in `ModelLoader._load_tokenizer`). Added a process-wide `_TOKENIZER_CACHE` keyed by resolved path in `model_loader.py` and exposed `get_cached_tokenizer(path)`; both call sites route through it. `use_fast=True` HF tokenizers are stateless for inference, so sharing is safe.
+- `REC-4` — `ReportGenerator.generate_report` silently re-ran `AggregationPipeline` whenever `analysis["aggregation"]` was missing but a `profile` was provided. Now raises `ValueError` with a clear remediation message: callers must pre-aggregate. Empty-profile case still returns an empty `aggregation` dict for backwards compatibility.
+
+**Dead / unused (`UNUSED-FIX`).**
+- `predict_api` was constructing an `InferenceMonitor` and attaching it to `service.monitor`, but no code path ever called `monitor.update(...)`. `PredictionService.__init__` now accepts `monitor=` (passed by `predict_api`), and `_record_monitor(...)` is invoked from `predict`, `predict_full_batch`, and `predict_full` on both success (with `confidence`) and error (`error=True`). Monitor failures are caught and logged so they can never break the request path.
+- `InferenceConfig.return_logits` / `return_probabilities` flags existed but were ignored; `predict_for_evaluation` always emitted both arrays. The flags are now honoured in the per-task output dict (`calibrated_probabilities` is gated with `probabilities` since it's a derivative of the same family). `InferenceEngine.predict()` now raises a clean `RuntimeError` when `return_probabilities=False` instead of crashing later with a confusing `KeyError`. The internal postprocessor wiring was switched to the local `logits` / `cal` tensors (rather than reading back from `task_output[...]`) so the postprocessor still runs even when both flags are off.
+
+**Config (`CFG-2/4/5/6/7`).**
+- `CFG-2` — `cache_version` divergence closed by routing both `InferenceCacheConfig` (default) and `predict_api` (operator-overridable, falls back to constant) through `INFERENCE_CACHE_VERSION`.
+- `CFG-4` — `PredictionPipelineConfig.device` default changed from `"cpu"` to `"auto"`; the pipeline `__init__` resolves `"auto"` → `"cuda" if cuda_available else "cpu"` before constructing `torch.device(...)` (which would otherwise raise on `"auto"`).
+- `CFG-5` — `InferenceConfig.batch_size` and `BatchInferenceConfig.batch_size` both default to `DEFAULT_INFERENCE_BATCH_SIZE` from the constants module.
+- `CFG-6` — `report_version="v3"` literal in `report_generator` replaced with `REPORT_VERSION` constant.
+- `CFG-7` — `InferenceConfigLoader._validate_config`'s asymmetric handling of `batch_size` (`REQUIRED_FIELDS` asserted type but tolerated absence) was made explicit with a rationale comment, and a backstop now injects `DEFAULT_INFERENCE_BATCH_SIZE` when the YAML omits the key entirely so the loader is in lockstep with the engine's dataclass default.
+
+**Edge cases (in `inference_engine._forward` / `_load_label_map`).**
+- Truncation is now surfaced. Before tokenising, a no-truncation length probe runs; if any input exceeds `max_length`, a single `WARN` is logged with the count, ratio, and longest length so operators see when a confidence was computed over a silently truncated tail.
+- Inputs with `attention_mask.sum() < 3` (emoji-only, stray punctuation) emit a per-item `WARN`. Distributions over near-empty inputs are usually degenerate; this surfaces "why is this confidence uniform?" without changing behaviour.
+- Non-finite logits (NaN / Inf) raise a `RuntimeError` rather than poisoning every downstream operation (softmax, calibration, argmax, entropy). Better to fail than emit a silently broken prediction.
+- Missing `label_map.json` now logs a `WARN` (was a silent skip). The skip itself is correct (numeric labels work), but the warning explains why `fake_probability` is `None` for every prediction — this was the most-asked support question on cold starts of a new model.
+
+**Verification.** `Start application` restarts cleanly; `Application startup complete`; `GET /` returns 200. Smoke import tests pass for all six edited modules; `PredictionService.__init__` exposes the `monitor` kwarg; `InferenceCacheConfig().cache_version == "v2"`; `PredictionPipelineConfig().device == "auto"`; `InferenceConfig.batch_size == 32` and `BatchInferenceConfig.batch_size == 32` both resolve through the constant.
+
+**Still deferred (architectural, out of scope for this audit pass):** `MT-1`/`MT-2` engine unification, `DriftDetector` endpoint wiring, `run_inference.py` multitask migration, `_flatten`/`_worker` dedup, `enable_full_pipeline` re-evaluation. These are tracked for the engine-unification pass.

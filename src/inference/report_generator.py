@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 
 from src.aggregation.aggregation_pipeline import AggregationPipeline
 from src.explainability.explanation_report_generator import ExplanationReportGenerator
+from src.inference.constants import REPORT_VERSION
 from src.utils import create_folder, save_json, timestamp
 
 logger = logging.getLogger(__name__)
@@ -102,18 +103,23 @@ class ReportGenerator:
 
         aggregation = analysis.get("aggregation")
 
+        # REC-4: previously, when the caller passed a ``profile`` but no
+        # ``aggregation``, this method silently re-ran the aggregation
+        # pipeline on the report-generation hot path — duplicating work
+        # the upstream analyzer had already done. Aggregation is now
+        # mandatory: callers (``ArticleAnalyzer.analyze``, batch jobs,
+        # etc.) must compute it once and pass it in. Re-aggregating here
+        # would also bypass any analyzer-level caching/feature-flags.
         if not aggregation:
-            profile = analysis.get("profile")
-            if isinstance(profile, dict):
-                try:
-                    aggregation = self.aggregation_pipeline.run(
-                        profile,
-                        text=article_text,
-                        analysis_modules=analysis.get("analysis_modules"),
-                    )
-                except Exception as e:
-                    logger.warning("Aggregation failed: %s", e)
-                    aggregation = {}
+            if isinstance(analysis.get("profile"), dict):
+                raise ValueError(
+                    "ReportGenerator.generate_report: 'profile' was provided "
+                    "without 'aggregation'. Recomputing aggregation here is "
+                    "unsafe (duplicates upstream work and ignores caller "
+                    "config). Run AggregationPipeline upstream and pass the "
+                    "result via analysis['aggregation']."
+                )
+            aggregation = {}
 
         # =====================================================
         # 🔥 NEW EXTRACTION BLOCK
@@ -186,7 +192,9 @@ class ReportGenerator:
         # =====================================================
 
         report["metadata"] = {
-            "report_version": "v3",  # 🔥 upgraded
+            # CFG-6: read from the constants module so the version bumps
+            # in exactly one place when the report schema changes.
+            "report_version": REPORT_VERSION,
             "generated_at": summary.analyzed_at,
             "tasks": list(predictions.keys()) if predictions else [],
         }

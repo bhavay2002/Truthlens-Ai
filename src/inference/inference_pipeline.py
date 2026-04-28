@@ -47,7 +47,11 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class PredictionPipelineConfig:
-    device: str = "cpu"
+    # CFG-4: previously defaulted to "cpu", which silently masked GPU
+    # availability whenever a caller forgot to pass ``device``. "auto"
+    # mirrors every other inference entry point (engine, loader,
+    # predict_api) so a single GPU box uses the GPU by default.
+    device: str = "auto"
     return_probabilities: bool = True
     # PP-2: optional path to a JSON {task: float} of per-task thresholds
     # produced by training's threshold optimiser. None falls back to 0.5.
@@ -78,7 +82,12 @@ class PredictionPipeline:
     ) -> None:
 
         self.config = config
-        self.device = torch.device(config.device)
+        # CFG-4: resolve "auto" → "cuda" if available, else "cpu". Without
+        # this, ``torch.device("auto")`` would raise.
+        resolved = config.device
+        if resolved == "auto":
+            resolved = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = torch.device(resolved)
 
         self.bias_model = bias_model
         self.ideology_model = ideology_model

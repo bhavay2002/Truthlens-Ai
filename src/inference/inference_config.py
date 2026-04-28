@@ -14,6 +14,7 @@ import torch
 # different ``InferenceConfig`` of the same name. The loader now returns
 # the engine's dataclass directly.
 from src.inference.inference_engine import InferenceConfig
+from src.inference.constants import DEFAULT_INFERENCE_BATCH_SIZE
 
 logger = logging.getLogger(__name__)
 
@@ -86,20 +87,31 @@ class InferenceConfigLoader:
 
     def _validate_config(self, config: Dict[str, Any]):
 
+        # CFG-7: ``REQUIRED_FIELDS`` previously asserted *type* but
+        # tolerated *absence* (``if field not in config: continue``),
+        # so a missing ``batch_size`` would silently fall through to
+        # the engine's dataclass default. Either the field is
+        # required (then enforce presence too) or it is optional
+        # (then drop it from REQUIRED_FIELDS). We pick the latter:
+        # the engine default ``DEFAULT_INFERENCE_BATCH_SIZE`` is the
+        # right answer when YAML does not override, but we keep the
+        # type/range checks for whatever IS present.
         for field, expected_type in self.REQUIRED_FIELDS.items():
-
             if field not in config:
                 continue
-
             if not isinstance(config[field], expected_type):
                 raise TypeError(
                     f"{field} must be {expected_type.__name__}"
                 )
 
-        # SAFE ACCESS
         batch_size = config.get("batch_size")
         if batch_size is not None and batch_size <= 0:
             raise ValueError("batch_size must be > 0")
+        # Backstop for callers that deleted the key entirely from YAML
+        # but expect the loader to inject a sane default. Keeps the
+        # source-of-truth aligned with the engine's dataclass default.
+        if batch_size is None:
+            config["batch_size"] = DEFAULT_INFERENCE_BATCH_SIZE
 
         device = config.get("device")
         if device is not None and device not in {"cpu", "cuda", "auto"}:

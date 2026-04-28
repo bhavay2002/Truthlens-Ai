@@ -14,6 +14,8 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
+from src.inference.constants import INFERENCE_CACHE_VERSION
+
 logger = logging.getLogger(__name__)
 
 
@@ -30,8 +32,11 @@ class InferenceCacheConfig:
     max_memory_items: int = 1024
     max_disk_items: Optional[int] = None
 
-    # 🔥 NEW
-    cache_version: str = "v1"
+    # CFG-2: previously defaulted to "v1" while ``predict_api`` defaulted
+    # to "v2" — every entry point built a divergent cache namespace.
+    # Both now share ``INFERENCE_CACHE_VERSION`` so the cache is one
+    # logical pool keyed by a single bumpable constant.
+    cache_version: str = INFERENCE_CACHE_VERSION
     enable_compression: bool = True
 
 

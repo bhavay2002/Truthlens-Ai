@@ -4,12 +4,40 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 from typing import Any, Dict, Optional, List
 
 import joblib
 import torch
 import numpy as np
 from transformers import AutoTokenizer
+
+
+# REC-3: process-wide tokenizer cache. The same tokenizer was being
+# materialised twice — once in ``InferenceEngine._load_model`` and once
+# in ``ModelLoader._load_tokenizer`` — paying the (non-trivial) HF
+# vocabulary read cost twice on every cold start. Keying by the
+# resolved path lets every entry point share one fast-tokenizer
+# instance per artifact directory; ``use_fast=True`` tokenizers are
+# stateless and thread-safe for inference.
+_TOKENIZER_CACHE: Dict[str, Any] = {}
+_TOKENIZER_LOCK: Lock = Lock()
+
+
+def get_cached_tokenizer(path: Path | str):
+    """Return a cached fast tokenizer for ``path`` (loading once)."""
+    if path is None:
+        return None
+    key = str(Path(path).resolve())
+    with _TOKENIZER_LOCK:
+        cached = _TOKENIZER_CACHE.get(key)
+        if cached is not None:
+            return cached
+        if not Path(key).exists():
+            return None
+        tok = AutoTokenizer.from_pretrained(key, use_fast=True)
+        _TOKENIZER_CACHE[key] = tok
+        return tok
 
 from src.models.config import ModelConfigLoader, MultiTaskModelConfig
 from src.models.metadata.model_metadata import ModelMetadata
@@ -226,11 +254,10 @@ class ModelLoader:
         return model
 
     def _load_tokenizer(self, path: Path):
-
-        if not path.exists():
-            return None
-
-        return AutoTokenizer.from_pretrained(path, use_fast=True)
+        # REC-3: route through the process-wide cache so a second
+        # ``ModelLoader`` (or ``InferenceEngine``) for the same artifact
+        # path reuses the same tokenizer instance.
+        return get_cached_tokenizer(path)
 
     def _load_joblib(self, path: Path):
         return joblib.load(path) if path.exists() else None

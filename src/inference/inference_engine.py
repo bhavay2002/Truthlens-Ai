@@ -8,9 +8,14 @@ from typing import Dict, List, Mapping, Optional, Union, Any
 
 import numpy as np
 import torch
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from transformers import AutoModelForSequenceClassification
 
 from src.models.calibration import IsotonicCalibrator, TemperatureScaler
+from src.inference.constants import (
+    DEFAULT_INFERENCE_BATCH_SIZE,
+    DEFAULT_MAX_LENGTH,
+)
+from src.inference.model_loader import get_cached_tokenizer
 from src.inference.postprocessing import Postprocessor
 
 
@@ -51,8 +56,11 @@ class InferenceConfig:
     model_path: str
     tokenizer_path: Optional[str] = None
     device: str = "auto"
-    max_length: int = 512
-    batch_size: int = 16
+    # CFG-5: pull tokenizer/batch defaults from a single constants
+    # module rather than re-declaring magic numbers in three places
+    # (engine, batch engine, loader).
+    max_length: int = DEFAULT_MAX_LENGTH
+    batch_size: int = DEFAULT_INFERENCE_BATCH_SIZE
     return_probabilities: bool = True
     return_logits: bool = True
     use_amp: bool = True
@@ -162,7 +170,13 @@ class InferenceEngine:
 
         tokenizer_path = self.config.tokenizer_path or self.config.model_path
 
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast=True)
+        # REC-3: share one tokenizer instance per artifact path across
+        # the engine, ``ModelLoader`` and any other entry point.
+        self.tokenizer = get_cached_tokenizer(tokenizer_path)
+        if self.tokenizer is None:
+            raise FileNotFoundError(
+                f"Tokenizer not found at {tokenizer_path}"
+            )
 
         # DEV-1: load weights in fp32 even on CUDA. AMP autocast (used in
         # ``_forward``) gives the speed/memory win of fp16/bf16 compute
@@ -186,9 +200,19 @@ class InferenceEngine:
 
     def _load_label_map(self, path: Path):
         file = path / "label_map.json"
-        if file.exists():
-            raw = load_json(file)
-            self.label_map = {int(k): v for k, v in raw.items()}
+        if not file.exists():
+            # EDGE: missing label_map silently disabled the legacy
+            # ``fake_probability`` path (CRIT-4) and produced numeric
+            # ``label`` values without any human-readable name. Warn so
+            # operators notice the artifact is incomplete.
+            logger.warning(
+                "label_map.json not found at %s — predictions will use "
+                "raw class indices and 'fake_probability' will be None.",
+                file,
+            )
+            return
+        raw = load_json(file)
+        self.label_map = {int(k): v for k, v in raw.items()}
 
     def _warmup(self):
         """Single forward pass with a representative input.
@@ -225,6 +249,35 @@ class InferenceEngine:
 
     def _forward(self, batch):
 
+        # EDGE: surface truncation. Without a length probe, an article
+        # 3× ``max_length`` looks identical to one that fits — the
+        # downstream ``confidence`` is then computed over a silently
+        # truncated tail. Probe with ``return_length=True`` so we can
+        # warn (once per oversize batch) before truncation drops tokens.
+        try:
+            probe = self.tokenizer(
+                batch,
+                add_special_tokens=True,
+                padding=False,
+                truncation=False,
+                return_length=True,
+                return_attention_mask=False,
+                return_token_type_ids=False,
+            )
+            probe_lengths = probe.get("length") or []
+            n_truncated = sum(
+                1 for L in probe_lengths if L > self.config.max_length
+            )
+            if n_truncated:
+                max_len = max(probe_lengths) if probe_lengths else 0
+                logger.warning(
+                    "Truncating %d/%d input(s) > max_length=%d "
+                    "(longest=%d tokens).",
+                    n_truncated, len(batch), self.config.max_length, max_len,
+                )
+        except Exception as exc:  # pragma: no cover - best-effort probe
+            logger.debug("Truncation probe skipped: %s", exc)
+
         encoded = self.tokenizer(
             batch,
             padding=True,
@@ -232,6 +285,21 @@ class InferenceEngine:
             max_length=self.config.max_length,
             return_tensors="pt",
         )
+
+        # EDGE: very short inputs (< 3 real tokens after tokenisation,
+        # e.g. emoji-only or stray punctuation) often produce
+        # near-degenerate softmax distributions. Emit a single WARN per
+        # such item so callers can see why confidences look uniform.
+        attn = encoded.get("attention_mask")
+        if attn is not None:
+            real_token_counts = attn.sum(dim=-1).tolist()
+            for i, n in enumerate(real_token_counts):
+                if int(n) < 3:
+                    logger.warning(
+                        "Input %d has only %d real tokens after tokenisation; "
+                        "predictions are likely unreliable.", i, int(n),
+                    )
+
         encoded = {k: v.to(self.device, non_blocking=True) for k, v in encoded.items()}
 
         if self.use_amp:
@@ -239,6 +307,16 @@ class InferenceEngine:
                 logits = self.model(**encoded).logits
         else:
             logits = self.model(**encoded).logits
+
+        # EDGE: a NaN/Inf logit poisons every downstream operation
+        # (softmax, calibration, argmax, entropy). Fail loudly here
+        # rather than emit a silently-broken prediction.
+        if not torch.isfinite(logits).all():
+            n_bad = int((~torch.isfinite(logits)).sum().item())
+            raise RuntimeError(
+                f"Model produced {n_bad} non-finite logit value(s). "
+                "Refusing to return a degraded prediction."
+            )
 
         return logits
 
@@ -345,25 +423,35 @@ class InferenceEngine:
 
         preds = np.argmax(cal.numpy(), axis=1)
 
-        task_output = {
+        # UNUSED-FIX: honor ``return_logits`` / ``return_probabilities``.
+        # Both flags existed on ``InferenceConfig`` but no code path
+        # actually consulted them, so callers asking for a slim payload
+        # (e.g. low-bandwidth API responses) still got the heavy arrays.
+        # ``calibrated_probabilities`` is gated on ``return_probabilities``
+        # since it is a derivative of the same family.
+        task_output: Dict[str, Any] = {
             "predictions": preds,
-            "probabilities": probs.numpy(),
-            "calibrated_probabilities": cal.numpy(),
-            "logits": logits.numpy(),
             # PP-4: surface task_type so PredictionService can pick the
             # correct entropy formula. The single-head HF engine is
             # multiclass by construction.
             "task_type": "multiclass",
         }
+        if self.config.return_probabilities:
+            task_output["probabilities"] = probs.numpy()
+            task_output["calibrated_probabilities"] = cal.numpy()
+        if self.config.return_logits:
+            task_output["logits"] = logits.numpy()
 
         # CRIT-3/8: keep the engine's single-task output consistent with
-        # the postprocessor's per-task contract. Calibrated probabilities
-        # have already been computed above so we feed them in directly.
+        # the postprocessor's per-task contract. Always use the local
+        # ``logits`` / ``cal`` tensors (rather than ``task_output[...]``)
+        # so this still works when ``return_logits`` /
+        # ``return_probabilities`` strip those fields from the payload.
         try:
             postprocessed = self.postprocessor.process(
                 {self.DEFAULT_TASK_NAME: {
-                    "logits": task_output["logits"],
-                    "probabilities": task_output["calibrated_probabilities"],
+                    "logits": logits.numpy(),
+                    "probabilities": cal.numpy(),
                 }},
                 task_types={self.DEFAULT_TASK_NAME: "multiclass"},
             )
@@ -412,8 +500,17 @@ class InferenceEngine:
         outputs = self.predict_for_evaluation(texts)
 
         task_out = outputs[self.DEFAULT_TASK_NAME]
-        probs_arr = task_out["probabilities"]
-        preds_arr = task_out["predictions"]
+        probs_arr = task_out.get("probabilities")
+        preds_arr = task_out.get("predictions")
+        if probs_arr is None:
+            # UNUSED-FIX: ``predict()`` returns a per-item ``confidence``
+            # so it cannot run without ``probabilities``. If the caller
+            # turned the flag off, surface that fact instead of crashing
+            # with a confusing KeyError later.
+            raise RuntimeError(
+                "InferenceEngine.predict requires return_probabilities=True; "
+                "use predict_for_evaluation for a logits-only payload."
+            )
 
         # CRIT-4: ``fake_probability`` is only meaningful when the model's
         # label map is the legacy binary {0: real, 1: fake} contract. For

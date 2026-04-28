@@ -13,6 +13,7 @@ from tqdm import tqdm
 import torch
 import numpy as np
 
+from src.inference.constants import DEFAULT_INFERENCE_BATCH_SIZE
 from src.inference.model_loader import ModelLoader
 from src.inference.feature_preparer import (
     FeaturePreparer,
@@ -51,7 +52,9 @@ class BatchInferenceConfig:
     dataset_path: str
     text_column: str = "text"
     output_path: str = "batch_predictions.json"
-    batch_size: int = 32
+    # CFG-5: keep the default in lockstep with the engine's
+    # ``InferenceConfig.batch_size`` via the shared constant.
+    batch_size: int = DEFAULT_INFERENCE_BATCH_SIZE
     models_dir: str = "models"
     num_workers: int = 0
     # LAT-6: opt-in for torch.compile, propagated to ModelLoader.
