@@ -49,17 +49,63 @@ def _resolve_model(model: str) -> str:
     return "en"
 
 
-def _maybe_enable_gpu():
-    if not ENABLE_GPU:
+# Section 6: GPU initialization must happen exactly once, BEFORE any
+# spaCy model is loaded. The previous version called `_maybe_enable_gpu`
+# from inside `get_nlp` after the cache check, which meant:
+#   1. The first cache hit raced GPU init on cold start.
+#   2. Every subsequent cache miss paid the cost of `prefer_gpu()` again.
+# Now we run it exactly once at module import via a sentinel.
+_GPU_INIT_DONE = False
+_GPU_INIT_LOCK = threading.Lock()
+
+
+def _maybe_enable_gpu() -> None:
+    global _GPU_INIT_DONE
+    if _GPU_INIT_DONE:
         return
 
+    with _GPU_INIT_LOCK:
+        if _GPU_INIT_DONE:
+            return
+
+        _GPU_INIT_DONE = True
+
+        if not ENABLE_GPU:
+            return
+
+        try:
+            if spacy.prefer_gpu():
+                logger.info("[spaCy] GPU enabled")
+            else:
+                logger.warning("[spaCy] GPU requested but not available")
+        except Exception as e:
+            logger.warning("[spaCy] GPU init failed: %s", e)
+
+
+def _configure_torch_threads_for_multiprocess() -> None:
+    """Section 6: avoid CPU oversubscription under spaCy multiprocessing.
+
+    When ``nlp.pipe(..., n_process=N>1)`` is used, spaCy forks N worker
+    processes. If torch is installed and left at its default thread
+    count (= number of CPU cores), each worker spawns a thread pool of
+    that size, producing N x cores threads competing for the same CPUs.
+    Pin torch to a single intra-op thread per worker so the total
+    parallelism stays bounded by ``n_process`` (matching numpy's
+    behavior under our default BLAS configuration).
+
+    Best-effort: torch may not be installed, and `set_num_threads` may
+    fail if torch is already in use. Either case is non-fatal.
+    """
     try:
-        if spacy.prefer_gpu():
-            logger.info("[spaCy] GPU enabled")
-        else:
-            logger.warning("[spaCy] GPU requested but not available")
-    except Exception as e:
-        logger.warning("[spaCy] GPU init failed: %s", e)
+        import torch  # type: ignore
+        torch.set_num_threads(1)
+    except Exception:
+        pass
+
+
+# Run GPU bootstrap exactly once at import time so the very first
+# `get_nlp` call sees a fully initialized GPU state.
+_maybe_enable_gpu()
 
 
 def _validate_pipeline(nlp: Language, disable: Tuple[str, ...]) -> None:
@@ -93,7 +139,6 @@ def get_nlp(
             return _CACHE[key]
 
         resolved_model = _resolve_model(model)
-        _maybe_enable_gpu()
 
         logger.info(
             "[spaCy] Loading | model=%s | disable=%s",
@@ -199,6 +244,12 @@ def process_docs_stream(
         raise ValueError("n_process must be >= 1")
 
     nlp = get_task_nlp(task)
+
+    # Section 6: pin torch to a single thread per worker process when
+    # spaCy is about to fork. No-op for n_process=1 (single-process
+    # path keeps torch's default threading).
+    if n_process > 1:
+        _configure_torch_threads_for_multiprocess()
 
     logger.debug(
         "[spaCy] Stream | task=%s | batch=%d | proc=%d",

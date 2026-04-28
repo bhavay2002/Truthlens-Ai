@@ -6,7 +6,10 @@ from typing import Dict, List, Any, Optional
 
 from spacy.tokens import Doc
 
-from src.analysis.spacy_loader import get_shared_nlp
+from src.analysis.spacy_loader import (
+    get_shared_nlp,
+    _configure_torch_threads_for_multiprocess,
+)
 from src.analysis.feature_context import FeatureContext
 from src.analysis.feature_merger import FeatureMerger
 from src.analysis.analysis_config import (
@@ -153,6 +156,11 @@ class AnalysisPipeline:
         if n_process < 1:
             n_process = 1
 
+        # Section 6: prevent torch thread oversubscription when spaCy
+        # forks worker processes. No-op when n_process == 1.
+        if n_process > 1:
+            _configure_torch_threads_for_multiprocess()
+
         docs = list(
             self.nlp.pipe(
                 texts,
@@ -260,9 +268,20 @@ class AnalysisPipeline:
         if not text:
             raise ValueError("Empty text")
 
-        if len(text) > self.config.global_config.max_text_length:
+        # Section 9: cap the configured max_text_length at the loaded
+        # spaCy model's `nlp.max_length`. The default config limit
+        # (100K) is well under the loader's 2M ceiling, but a custom
+        # AnalysisConfig (or a future loader change) could otherwise
+        # let an oversized string reach `nlp(...)`, which raises an
+        # opaque `E088` from spaCy. Truncating here gives a single,
+        # consistent failure mode.
+        cfg_limit = self.config.global_config.max_text_length
+        spacy_limit = getattr(self.nlp, "max_length", cfg_limit) or cfg_limit
+        effective_limit = min(cfg_limit, spacy_limit)
+
+        if len(text) > effective_limit:
             if self.config.global_config.truncate_text:
-                text = text[: self.config.global_config.max_text_length]
+                text = text[:effective_limit]
             else:
                 raise ValueError("Text too long")
 

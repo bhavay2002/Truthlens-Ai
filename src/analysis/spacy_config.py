@@ -32,12 +32,22 @@ DEFAULT_N_PROCESS = 1
 # components that should be DISABLED for that task. Keeping pipelines lean
 # avoids unnecessary work when an analyzer only needs lemmas or entities.
 #
-# Tasks used in the codebase: "syntax" (default, needs tagger/parser/lemmatizer
-# for POS / DEP / lemma access) and "ner" (needs NER pipe + lemmatizer).
+# Tasks used in the codebase:
+#   - "syntax": default; analyzers need POS / DEP / lemma. Disable NER
+#     because no syntax-task analyzer reads `ent_type_`/`ent_iob_`.
+#   - "ner": entity-driven analyzers; need ents + lemma. The dependency
+#     parser is the heaviest component and is unused, so disable it.
+#     Keep the tagger because spaCy's NER backs off to POS features.
+#   - "fast": tokenizer-only fallback used by the shared "fast" mode.
+#
+# Section 6: previously every entry was an empty tuple, which made
+# `get_task_nlp(task)` load the full pipeline regardless of task and
+# negated the whole point of the map (15-30% wasted CPU per analyzer
+# that only needs lemmas or only needs entities).
 
 DEFAULT_TASK_DISABLE_MAP: Dict[str, Tuple[str, ...]] = {
-    "syntax": (),
-    "ner": (),
+    "syntax": ("ner",),
+    "ner": ("parser",),
     "fast": ("ner", "tagger", "parser", "attribute_ruler", "lemmatizer"),
 }
 

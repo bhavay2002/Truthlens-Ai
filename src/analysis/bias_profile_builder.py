@@ -406,6 +406,22 @@ class BiasProfileBuilder:
 # =========================================================
 
 def bias_profile_vector(profile: Dict[str, Any]) -> np.ndarray:
+    # Section 7: this helper has no in-tree callers (only a stale
+    # comment reference in feature_schema.py). It also encodes a
+    # questionable mapping (`narrative` → "framing" schema) that is
+    # almost certainly a bug for any external caller. Kept to avoid
+    # breaking any downstream import, but emit a DeprecationWarning so
+    # the few-or-zero remaining callers surface themselves. Prefer
+    # `FeatureMerger.to_vector` or `FullAnalysisOutput.to_vector` for
+    # serializing analysis output.
+    import warnings
+    warnings.warn(
+        "bias_profile_vector is deprecated and slated for removal; "
+        "use FullAnalysisOutput.to_vector or FeatureMerger.to_vector "
+        "instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
     sections = {
         "bias": "framing",
