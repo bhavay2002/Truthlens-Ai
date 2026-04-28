@@ -53,7 +53,16 @@ def per_group_metrics(
     groups: Iterable,
     *,
     positive_label: int = 1,
+    task_type: Optional[str] = None,
 ) -> Dict[str, Dict[str, float]]:
+    """Per-group classification metrics.
+
+    Section 10: accept an explicit ``task_type`` and drop the ``{0, 1}``
+    heuristic. The previous code routed any group whose labels happened to
+    fall in ``{0, 1}`` through binary averaging — so a 3-class slice that
+    happened to contain only labels 0 and 1 silently flipped its average
+    rule. Callers that know the task should always pass ``task_type``.
+    """
     y, p, g = _validate(y_true, y_pred, groups)
     unique_groups = np.unique(g)
 
@@ -66,24 +75,30 @@ def per_group_metrics(
         y_g = y[mask]
         p_g = p[mask]
 
+        # Section 10: prefer the authoritative task_type; only fall back to
+        # the legacy {0, 1} heuristic when no caller hint is provided.
+        if task_type == "binary":
+            use_binary = True
+        elif task_type in ("multiclass", "multilabel"):
+            use_binary = False
+        else:
+            use_binary = set(np.unique(y_g)).issubset({0, 1})
+
+        if use_binary:
+            prec = precision_score(y_g, p_g, average="binary", pos_label=positive_label, zero_division=0)
+            rec = recall_score(y_g, p_g, average="binary", pos_label=positive_label, zero_division=0)
+            f1v = f1_score(y_g, p_g, average="binary", pos_label=positive_label, zero_division=0)
+        else:
+            prec = precision_score(y_g, p_g, average="macro", zero_division=0)
+            rec = recall_score(y_g, p_g, average="macro", zero_division=0)
+            f1v = f1_score(y_g, p_g, average="macro", zero_division=0)
+
         out[str(group)] = {
             "n": int(mask.sum()),
             "accuracy": float(accuracy_score(y_g, p_g)),
-            "precision": float(
-                precision_score(y_g, p_g, average="binary", pos_label=positive_label, zero_division=0)
-                if set(np.unique(y_g)).issubset({0, 1})
-                else precision_score(y_g, p_g, average="macro", zero_division=0)
-            ),
-            "recall": float(
-                recall_score(y_g, p_g, average="binary", pos_label=positive_label, zero_division=0)
-                if set(np.unique(y_g)).issubset({0, 1})
-                else recall_score(y_g, p_g, average="macro", zero_division=0)
-            ),
-            "f1": float(
-                f1_score(y_g, p_g, average="binary", pos_label=positive_label, zero_division=0)
-                if set(np.unique(y_g)).issubset({0, 1})
-                else f1_score(y_g, p_g, average="macro", zero_division=0)
-            ),
+            "precision": float(prec),
+            "recall": float(rec),
+            "f1": float(f1v),
             "positive_rate": float(np.mean(p_g == positive_label)),
         }
 
@@ -192,6 +207,7 @@ def fairness_report(
     *,
     positive_label: int = 1,
     group_name: Optional[str] = None,
+    task_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Compute a full fairness report for a single sensitive attribute."""
     try:
@@ -202,7 +218,12 @@ def fairness_report(
 
     return {
         "attribute": group_name,
-        "per_group_metrics": per_group_metrics(y, p, g, positive_label=positive_label),
+        "task_type": task_type,
+        # Section 10: forward ``task_type`` so per_group_metrics doesn't fall
+        # back to the {0, 1} heuristic that misroutes pruned multiclass slices.
+        "per_group_metrics": per_group_metrics(
+            y, p, g, positive_label=positive_label, task_type=task_type
+        ),
         "demographic_parity": demographic_parity(p, g, positive_label=positive_label),
         "equal_opportunity": equal_opportunity(y, p, g, positive_label=positive_label),
         "equalized_odds": equalized_odds(y, p, g, positive_label=positive_label),
@@ -215,6 +236,7 @@ def fairness_report_multi(
     sensitive_attributes: Dict[str, Iterable],
     *,
     positive_label: int = 1,
+    task_type: Optional[str] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Run :func:`fairness_report` for each sensitive attribute provided."""
     return {
@@ -224,12 +246,66 @@ def fairness_report_multi(
             groups=values,
             positive_label=positive_label,
             group_name=name,
+            task_type=task_type,
         )
         for name, values in sensitive_attributes.items()
     }
 
 
+# =========================================================
+# BOOTSTRAP CI HELPER — Section 10
+# =========================================================
+
+def bootstrap_metric_ci(
+    y_true: Iterable,
+    y_pred: Iterable,
+    metric_fn,
+    *,
+    n_bootstrap: int = 200,
+    alpha: float = 0.05,
+    seed: int = 0,
+) -> Dict[str, float]:
+    """Percentile bootstrap confidence interval for a single scalar metric.
+
+    Section 10: fairness gaps reported as point estimates (e.g. "TPR diff =
+    0.04") were being treated as deterministic by downstream alerting. This
+    helper resamples ``y_true`` / ``y_pred`` indices with replacement and
+    returns the lower / upper bounds at the requested ``alpha`` so the
+    pipeline can emit "0.04 [-0.01, 0.09]" style intervals instead.
+    """
+    y = np.asarray(y_true)
+    p = np.asarray(y_pred)
+    if y.shape[0] != p.shape[0] or y.shape[0] == 0:
+        raise ValueError("y_true and y_pred must be non-empty and same length")
+
+    rng = np.random.default_rng(seed)
+    n = y.shape[0]
+    samples: List[float] = []
+    for _ in range(int(n_bootstrap)):
+        idx = rng.integers(0, n, size=n)
+        try:
+            value = float(metric_fn(y[idx], p[idx]))
+        except Exception:
+            continue
+        if np.isfinite(value):
+            samples.append(value)
+
+    if not samples:
+        return {"point": float("nan"), "low": float("nan"), "high": float("nan"), "n": 0}
+
+    arr = np.asarray(samples, dtype=float)
+    low = float(np.quantile(arr, alpha / 2.0))
+    high = float(np.quantile(arr, 1.0 - alpha / 2.0))
+    return {
+        "point": float(np.mean(arr)),
+        "low": low,
+        "high": high,
+        "n": int(arr.size),
+    }
+
+
 __all__ = [
+    "bootstrap_metric_ci",
     "demographic_parity",
     "equal_opportunity",
     "equalized_odds",

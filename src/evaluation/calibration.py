@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from scipy.special import expit, softmax as scipy_softmax
+from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import LogisticRegression
 
 from src.evaluation.reliability_diagram import ReliabilityDiagram
 # CFG6: ``TemperatureScaler`` now lives in ``src.models.calibration``.
@@ -41,17 +44,22 @@ def _validate_inputs(y_true, probs) -> Tuple[np.ndarray, np.ndarray]:
 # =========================================================
 
 def softmax(x: np.ndarray) -> np.ndarray:
+    """Numerically-stable softmax. Section 8: defer to :mod:`scipy.special`
+    so this module shares the same implementation as ``evaluate_model`` /
+    ``prediction_collector`` instead of carrying a hand-rolled version that
+    can drift on edge cases (e.g. ``-inf`` columns)."""
     x = np.asarray(x, dtype=float)
     if x.ndim == 1:
         x = x.reshape(-1, 1)
-    x = x - np.max(x, axis=1, keepdims=True)
-    e = np.exp(x)
-    return e / (np.sum(e, axis=1, keepdims=True) + EPS)
+    return scipy_softmax(x, axis=1)
 
 
 def sigmoid(x: np.ndarray) -> np.ndarray:
-    x = np.asarray(x, dtype=float)
-    return 1.0 / (1.0 + np.exp(-x))
+    """Section 8: use :func:`scipy.special.expit` instead of ``1/(1+exp(-x))``.
+    The hand-rolled form overflows to ``inf`` for large negative inputs and
+    silently produces zeros for small positive inputs, which corrupts both
+    calibration metrics and ECE binning."""
+    return expit(np.asarray(x, dtype=float))
 
 
 # =========================================================
@@ -97,11 +105,20 @@ def fit_temperature(
     model = TemperatureScaler()
     optimizer = optim.LBFGS([model.temperature], lr=0.01, max_iter=max_iter)
 
+    # Section 9: clamp ``T`` inside the LBFGS closure. Without the in-place
+    # clamp LBFGS occasionally walks the parameter to a value <= 0 between
+    # steps, which makes ``model(logits)`` produce NaNs and either crashes
+    # the loss or silently locks the optimizer at a degenerate point.
+    def _clamp_T() -> None:
+        with torch.no_grad():
+            model.temperature.data.clamp_(min=1e-3)
+
     if task_type == "multiclass":
         loss_fn = nn.CrossEntropyLoss()
         labels_long = labels_t.long()
 
         def closure():
+            _clamp_T()
             optimizer.zero_grad()
             loss = loss_fn(model(logits_t), labels_long)
             loss.backward()
@@ -112,6 +129,7 @@ def fit_temperature(
         labels_float = labels_t.float()
 
         def closure():
+            _clamp_T()
             optimizer.zero_grad()
             scaled = model(logits_t).reshape(-1)
             loss = loss_fn(scaled, labels_float.reshape(-1))
@@ -123,6 +141,7 @@ def fit_temperature(
         labels_float = labels_t.float()
 
         def closure():
+            _clamp_T()
             optimizer.zero_grad()
             scaled = model(logits_t)
             loss = loss_fn(scaled, labels_float)
@@ -133,6 +152,7 @@ def fit_temperature(
         raise ValueError(f"Unsupported task_type for temperature scaling: {task_type}")
 
     optimizer.step(closure)
+    _clamp_T()
 
     T = float(model.temperature.detach().cpu().item())
     if not np.isfinite(T) or T <= 0:
@@ -201,6 +221,12 @@ def expected_calibration_error(
     bin_ids = np.clip(np.digitize(confidence, bins) - 1, 0, n_bins - 1)
 
     counts = np.bincount(bin_ids, minlength=n_bins).astype(float)
+    # Section 8: refuse to invent an ECE when no samples landed in any bin.
+    # The previous ``max(counts.sum(), 1.0)`` clamp returned 0.0 silently and
+    # made empty calibration sets look perfectly calibrated.
+    if counts.sum() == 0:
+        raise ValueError("expected_calibration_error: empty input (no samples binned)")
+
     sum_acc = np.bincount(bin_ids, weights=correct, minlength=n_bins)
     sum_conf = np.bincount(bin_ids, weights=confidence, minlength=n_bins)
 
@@ -208,7 +234,7 @@ def expected_calibration_error(
     bin_acc = sum_acc / safe
     bin_conf = sum_conf / safe
 
-    ece = float(np.sum(counts / max(counts.sum(), 1.0) * np.abs(bin_acc - bin_conf)))
+    ece = float(np.sum(counts / counts.sum() * np.abs(bin_acc - bin_conf)))
     return ece
 
 
@@ -367,8 +393,130 @@ def fit_calibration(
     return fit_temperature(np.asarray(val_logits, dtype=float), np.asarray(val_y_true), task_type)
 
 
+# =========================================================
+# VECTOR TEMPERATURE (per-label T for multilabel) — Section 9
+# =========================================================
+
+class VectorTemperatureScaler:
+    """One temperature per multilabel column.
+
+    Section 9: a single scalar T over an N-label sigmoid head squeezes very
+    different per-label calibration regimes through one knob, which both
+    misses easy wins and re-distorts already-calibrated columns. Fitting one
+    T per label restores the per-column degrees of freedom while staying
+    in the same fit-on-val / apply-on-test contract as ``fit_temperature``.
+    """
+
+    def __init__(self, max_iter: int = 50):
+        self.max_iter = int(max_iter)
+        self.temperatures_: Optional[np.ndarray] = None  # shape (L,)
+
+    def fit(self, logits: np.ndarray, labels: np.ndarray) -> "VectorTemperatureScaler":
+        logits_arr = np.asarray(logits, dtype=float)
+        labels_arr = np.asarray(labels)
+        if logits_arr.ndim != 2 or labels_arr.ndim != 2:
+            raise ValueError("VectorTemperatureScaler expects 2D logits/labels (N, L)")
+        if logits_arr.shape != labels_arr.shape:
+            raise ValueError(
+                f"shape mismatch: logits {logits_arr.shape} vs labels {labels_arr.shape}"
+            )
+
+        n_labels = logits_arr.shape[1]
+        out = np.ones(n_labels, dtype=float)
+        for i in range(n_labels):
+            col_logits = logits_arr[:, i]
+            col_labels = labels_arr[:, i]
+            # Per-label single-T fit reuses the binary path so the clamp /
+            # LBFGS contract is identical to the global temperature fit.
+            try:
+                out[i] = float(fit_temperature(col_logits, col_labels, "binary"))
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("Per-label T-fit failed for label %d: %s", i, exc)
+                out[i] = 1.0
+        self.temperatures_ = out
+        return self
+
+    def transform(self, logits: np.ndarray) -> np.ndarray:
+        if self.temperatures_ is None:
+            raise RuntimeError("VectorTemperatureScaler must be fit before transform")
+        arr = np.asarray(logits, dtype=float)
+        if arr.shape[1] != self.temperatures_.shape[0]:
+            raise ValueError(
+                f"logits last dim {arr.shape[1]} != fitted T length {self.temperatures_.shape[0]}"
+            )
+        denom = np.clip(self.temperatures_, EPS, None)
+        return arr / denom[None, :]
+
+
+# =========================================================
+# PLATT + ISOTONIC BASELINES — Section 9
+# =========================================================
+
+class PlattCalibrator:
+    """Logistic-regression (Platt) calibration on top of a binary score.
+
+    Section 9: temperature scaling is a strict subset of Platt (it can only
+    rescale, not shift). On binary heads with a prior shift this baseline
+    reliably outperforms scalar T, so we expose it as an alternative the
+    pipeline can pick when a fitted T leaves significant ECE on the table.
+    """
+
+    def __init__(self) -> None:
+        self.model_: Optional[LogisticRegression] = None
+
+    def fit(self, scores: np.ndarray, labels: np.ndarray) -> "PlattCalibrator":
+        s = np.asarray(scores, dtype=float).reshape(-1, 1)
+        y = np.asarray(labels).reshape(-1).astype(int)
+        if len(np.unique(y)) < 2:
+            logger.warning("PlattCalibrator: single-class fit; identity calibrator used")
+            self.model_ = None
+            return self
+        self.model_ = LogisticRegression(solver="lbfgs", max_iter=200)
+        self.model_.fit(s, y)
+        return self
+
+    def transform(self, scores: np.ndarray) -> np.ndarray:
+        s = np.asarray(scores, dtype=float).reshape(-1, 1)
+        if self.model_ is None:
+            return expit(s.reshape(-1))
+        return self.model_.predict_proba(s)[:, 1]
+
+
+class IsotonicCalibrator:
+    """Non-parametric isotonic-regression calibration (binary).
+
+    Section 9: as a baseline alongside Platt, isotonic captures any monotone
+    distortion (S-curves, plateaus) without assuming a sigmoid shape. It
+    should be preferred to Platt when the validation set is large enough
+    (>~1k samples) to avoid overfitting the step function.
+    """
+
+    def __init__(self) -> None:
+        self.model_: Optional[IsotonicRegression] = None
+
+    def fit(self, scores: np.ndarray, labels: np.ndarray) -> "IsotonicCalibrator":
+        s = np.asarray(scores, dtype=float).reshape(-1)
+        y = np.asarray(labels).reshape(-1).astype(int)
+        if len(np.unique(y)) < 2:
+            logger.warning("IsotonicCalibrator: single-class fit; identity used")
+            self.model_ = None
+            return self
+        self.model_ = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
+        self.model_.fit(s, y)
+        return self
+
+    def transform(self, scores: np.ndarray) -> np.ndarray:
+        s = np.asarray(scores, dtype=float).reshape(-1)
+        if self.model_ is None:
+            return s
+        return self.model_.transform(s)
+
+
 __all__ = [
+    "IsotonicCalibrator",
+    "PlattCalibrator",
     "TemperatureScaler",
+    "VectorTemperatureScaler",
     "apply_temperature",
     "brier_score",
     "classwise_ece",

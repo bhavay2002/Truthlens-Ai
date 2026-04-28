@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional
 
@@ -38,7 +39,15 @@ def _winsorize(df: pd.DataFrame, lower: float = 0.01, upper: float = 0.99) -> pd
 # TASK FEATURE EXTRACTION
 # =========================================================
 
+@lru_cache(maxsize=8)
 def _resolve_task_type(task: str) -> Optional[str]:
+    """Cache the per-task type lookup.
+
+    Section 7: ``_extract_task_features`` calls this once per column, which
+    for a 6-task / multilabel report adds up to dozens of dict lookups per
+    correlation pass. Cap at 8 entries — the project has ~6 tasks, so we
+    never evict in practice.
+    """
     if task in TASK_CONFIG:
         return TASK_CONFIG[task]["type"]
     try:

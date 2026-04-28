@@ -92,7 +92,10 @@ def multilabel_uncertainty(probs: Iterable) -> Dict[str, np.ndarray]:
     )
 
     # Per-sample confidence under multilabel = max(p, 1-p) per label, then mean.
-    per_label_conf = np.maximum(arr, 1.0 - arr)
+    # Section 8: clip ``per_label_conf`` to the same ``[EPS, 1-EPS]`` window
+    # as ``label_entropy`` above so log/conf statistics computed downstream
+    # don't see 0.0 / 1.0 sneaking in for one but not the other.
+    per_label_conf = np.clip(np.maximum(arr, 1.0 - arr), EPS, 1.0 - EPS)
 
     return {
         "label_entropy": label_entropy,
@@ -150,7 +153,11 @@ def energy_score(logits: Iterable) -> np.ndarray:
     logsumexp = np.log(np.sum(np.exp(stabilized), axis=1) + EPS) + max_logits.squeeze()
     energy = -logsumexp
 
-    std = float(np.std(energy)) or 1.0
+    # Section 8: explicit ``> EPS`` guard. The previous ``or 1.0`` fired only
+    # for the exact value ``0.0`` and let tiny floating-point ``std`` values
+    # produce huge z-scores. Treat anything below EPS as effectively zero.
+    raw_std = float(np.std(energy))
+    std = raw_std if raw_std > EPS else 1.0
     return (energy - float(np.mean(energy))) / std
 
 

@@ -178,23 +178,87 @@ def collect_all_tasks(
     max_length: int = 512,
     device: Optional[torch.device] = None,
 ) -> Dict[str, Dict[str, Any]]:
+    """Run inference for several tasks while sharing the encoder pass.
+
+    Section 7: the previous implementation called :func:`collect_predictions`
+    once per task, which re-tokenized the texts and re-ran the RoBERTa
+    encoder for every task — six tasks meant six full encoder passes per
+    batch. We now tokenize + run the encoder a single time per batch and
+    fan out across the per-task heads. Falls back to the per-task path if
+    the model doesn't expose a head-only forward (``forward_heads`` /
+    ``encode``), so older checkpoints keep working.
+    """
     selected_tasks = tasks or list(TASK_CONFIG.keys())
     device = device or get_device()
 
-    results: Dict[str, Dict[str, Any]] = {}
+    encode_fn = getattr(model, "encode", None)
+    head_fn = getattr(model, "forward_heads", None)
 
-    logger.info("[COLLECT] multi-task start (%d tasks)", len(selected_tasks))
-
-    for task in selected_tasks:
-        results[task] = collect_predictions(
-            model=model,
-            texts=texts,
-            task=task,
-            tokenizer=tokenizer,
-            batch_size=batch_size,
-            max_length=max_length,
-            device=device,
+    if not (callable(encode_fn) and callable(head_fn)):
+        # Fall back to the per-task path on older models.
+        results: Dict[str, Dict[str, Any]] = {}
+        logger.info(
+            "[COLLECT] multi-task start (%d tasks, fallback per-task)",
+            len(selected_tasks),
         )
+        for task in selected_tasks:
+            results[task] = collect_predictions(
+                model=model,
+                texts=texts,
+                task=task,
+                tokenizer=tokenizer,
+                batch_size=batch_size,
+                max_length=max_length,
+                device=device,
+            )
+        logger.info("[COLLECT] multi-task done")
+        return results
+
+    model.to(device)
+    model.eval()
+
+    n = len(texts)
+    logits_buf: Dict[str, List[np.ndarray]] = {t: [] for t in selected_tasks}
+
+    logger.info(
+        "[COLLECT] multi-task start (%d tasks, shared encoder)",
+        len(selected_tasks),
+    )
+
+    with torch.no_grad():
+        for i in range(0, n, batch_size):
+            batch_texts = texts[i: i + batch_size]
+            encoded = _tokenize(tokenizer, batch_texts, max_length)
+            encoded = move_batch(encoded, device)
+
+            with autocast_context():
+                hidden = encode_fn(
+                    input_ids=encoded["input_ids"],
+                    attention_mask=encoded["attention_mask"],
+                )
+                for task in selected_tasks:
+                    head_out = head_fn(hidden, task=task)
+                    logits = (
+                        head_out["logits"]
+                        if isinstance(head_out, dict)
+                        else head_out
+                    )
+                    logits_buf[task].append(logits.detach().cpu().numpy())
+
+    results = {}
+    for task in selected_tasks:
+        if not logits_buf[task]:
+            continue
+        task_type = TASK_CONFIG[task]["type"]
+        logits_arr = np.vstack(logits_buf[task])
+        preds, probs = _postprocess(logits_arr, task_type)
+        results[task] = {
+            "task": task,
+            "task_type": task_type,
+            "logits": logits_arr,
+            "probabilities": probs,
+            "predictions": preds,
+        }
 
     logger.info("[COLLECT] multi-task done")
     return results

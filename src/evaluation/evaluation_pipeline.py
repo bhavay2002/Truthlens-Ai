@@ -16,6 +16,7 @@ from src.evaluation.calibration import (
 )
 from src.evaluation.error_analysis import error_analysis
 from src.evaluation.evaluate_model import evaluate, _postprocess_logits
+from src.evaluation.fairness import fairness_report_multi
 from src.evaluation.pdf_report import generate_pdf_report
 from src.evaluation.prediction_collector import collect_all_tasks
 from src.evaluation.report_writer import save_report
@@ -182,6 +183,7 @@ def run_evaluation_pipeline(
     enable_correlation: bool = True,
     val_logits: Optional[Dict[str, np.ndarray]] = None,
     val_labels: Optional[Dict[str, np.ndarray]] = None,
+    sensitive_attributes: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Run the full evaluation pipeline.
 
@@ -330,11 +332,64 @@ def run_evaluation_pipeline(
         except Exception as exc:
             logger.warning("Correlation failed: %s", exc)
 
+    # Section 10: per-task fairness slicing. ``sensitive_attributes`` is
+    # ``{task: {attr_name: values}}``. Only emit a fairness block for tasks
+    # the caller actually supplied attributes for so we don't pollute reports
+    # with empty slices.
+    if sensitive_attributes:
+        fairness_block: Dict[str, Any] = {}
+        for task, attr_map in sensitive_attributes.items():
+            if task not in report["tasks"] or not attr_map:
+                continue
+            task_preds = predictions.get(task, {})
+            preds_arr = np.asarray(
+                task_preds.get("predictions", task_preds.get("y_pred"))
+            )
+            try:
+                y_true_arr = np.asarray(labels[task])
+            except KeyError:
+                continue
+            try:
+                fairness_block[task] = fairness_report_multi(
+                    y_true=y_true_arr,
+                    y_pred=preds_arr,
+                    sensitive_attributes=attr_map,
+                    task_type=TASK_CONFIG[task]["type"],
+                )
+            except Exception as exc:
+                logger.warning("Fairness failed for %s: %s", task, exc)
+        if fairness_block:
+            report["fairness"] = fairness_block
+
+    # Section 5/4: NaN/Inf guard. A single non-finite value here used to
+    # propagate into the JSON report and crash matplotlib downstream.
+    # Track per-task f1 to surface ``worst_task_f1`` in the summary.
     summary: Dict[str, float] = {}
+    f1_per_task: Dict[str, float] = {}
     for task, data in report["tasks"].items():
         for k, v in (data.get("metrics") or {}).items():
-            if isinstance(v, (int, float)):
-                summary[f"{task}_{k}"] = float(v)
+            if not isinstance(v, (int, float)):
+                continue
+            fv = float(v)
+            if not np.isfinite(fv):
+                logger.warning(
+                    "Non-finite metric %s_%s=%r; coercing to 0.0", task, k, v
+                )
+                fv = 0.0
+            summary[f"{task}_{k}"] = fv
+            if k in ("f1", "f1_macro") and task not in f1_per_task:
+                f1_per_task[task] = fv
+
+    if f1_per_task:
+        worst_task = min(f1_per_task, key=f1_per_task.get)
+        summary["worst_task_f1"] = float(f1_per_task[worst_task])
+        summary["worst_task_f1_name"] = worst_task  # type: ignore[assignment]
+        best = float(max(f1_per_task.values()))
+        worst = float(f1_per_task[worst_task])
+        summary["f1_imbalance_index"] = (
+            float(np.clip((best - worst) / best, 0.0, 1.0)) if best > 0 else 0.0
+        )
+
     report["summary"] = summary
 
     if output_path:

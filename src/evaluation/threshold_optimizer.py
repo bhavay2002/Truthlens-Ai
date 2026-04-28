@@ -11,11 +11,29 @@ from sklearn.metrics import (
     recall_score,
 )
 
-from src.config.task_config import get_task_type
+from src.config.task_config import TASK_CONFIG, get_task_type
 
 logger = logging.getLogger(__name__)
 
 EPS = 1e-12
+
+
+# =========================================================
+# DEFAULT THRESHOLD LOOKUP (Section 5)
+# =========================================================
+
+def default_threshold(task: Optional[str], fallback: float = 0.5) -> float:
+    """Return the per-task default threshold from ``TASK_CONFIG`` when present.
+
+    Section 5: callers were hard-coding ``0.5`` even when the task config
+    declared a tuned operating point. Centralize the lookup so the binary /
+    multilabel decision rule honors ``TASK_CONFIG[task]["threshold"]``.
+    """
+    if task and task in TASK_CONFIG:
+        cfg_threshold = TASK_CONFIG[task].get("threshold")
+        if isinstance(cfg_threshold, (int, float)):
+            return float(cfg_threshold)
+    return float(fallback)
 
 
 # =========================================================
@@ -27,7 +45,15 @@ def optimize_binary_threshold(
     probs: Iterable,
     *,
     metric: Literal["f1", "precision", "recall"] = "f1",
-) -> Dict[str, float]:
+) -> Dict[str, Any]:
+    """Sweep the PR curve for the threshold that maximizes ``metric``.
+
+    Section 5: when the slice contains a single class the previous code
+    returned ``threshold=0.5, score=0`` silently — making downstream
+    consumers think a tuned threshold was found. We now flag those cases
+    with ``valid=False`` and ``reason`` so the calling pipeline can keep
+    using the default operating point instead of the spurious 0.5.
+    """
     y_true = np.asarray(y_true).astype(int).reshape(-1)
     probs = np.asarray(probs, dtype=float).reshape(-1)
 
@@ -35,7 +61,13 @@ def optimize_binary_threshold(
         raise ValueError("y_true and probs must have the same length")
 
     if len(np.unique(y_true)) < 2:
-        return {"threshold": 0.5, "score": 0.0, "metric": metric}
+        return {
+            "threshold": 0.5,
+            "score": 0.0,
+            "metric": metric,
+            "valid": False,
+            "reason": "single_class",
+        }
 
     precision, recall, thresholds = precision_recall_curve(y_true, probs)
 
@@ -53,13 +85,101 @@ def optimize_binary_threshold(
         raise ValueError(f"Unsupported metric: {metric}")
 
     if scores.size == 0:
-        return {"threshold": 0.5, "score": 0.0, "metric": metric}
+        return {
+            "threshold": 0.5,
+            "score": 0.0,
+            "metric": metric,
+            "valid": False,
+            "reason": "empty_pr_curve",
+        }
 
     best_idx = int(np.argmax(scores))
     best_t = float(thresholds[best_idx])
     best_score = float(scores[best_idx])
 
-    return {"threshold": best_t, "score": best_score, "metric": metric}
+    return {
+        "threshold": best_t,
+        "score": best_score,
+        "metric": metric,
+        "valid": True,
+    }
+
+
+# =========================================================
+# CONSTRAINED OPTIMIZATION (precision floor / recall floor)
+# =========================================================
+
+def optimize_constrained(
+    y_true: Iterable,
+    probs: Iterable,
+    *,
+    min_precision: Optional[float] = None,
+    min_recall: Optional[float] = None,
+    objective: Literal["recall", "precision", "f1"] = "recall",
+) -> Dict[str, Any]:
+    """Pick the threshold that maximizes ``objective`` subject to a constraint.
+
+    Section 5: production deployments often need "best recall while precision
+    stays above 0.8" (or vice-versa). The classic F1 sweep can't express that
+    constraint, so callers either over-flagged or hand-tuned. This helper
+    returns the constrained-optimal threshold and reports whether the
+    constraint was satisfiable on the supplied curve.
+    """
+    y_true = np.asarray(y_true).astype(int).reshape(-1)
+    probs = np.asarray(probs, dtype=float).reshape(-1)
+
+    if y_true.shape != probs.shape:
+        raise ValueError("y_true and probs must have the same length")
+
+    if len(np.unique(y_true)) < 2:
+        return {
+            "threshold": 0.5,
+            "valid": False,
+            "reason": "single_class",
+        }
+
+    precision, recall, thresholds = precision_recall_curve(y_true, probs)
+    precision = precision[:-1]
+    recall = recall[:-1]
+
+    if precision.size == 0:
+        return {"threshold": 0.5, "valid": False, "reason": "empty_pr_curve"}
+
+    mask = np.ones_like(precision, dtype=bool)
+    if min_precision is not None:
+        mask &= precision >= float(min_precision)
+    if min_recall is not None:
+        mask &= recall >= float(min_recall)
+
+    if not mask.any():
+        return {
+            "threshold": 0.5,
+            "valid": False,
+            "reason": "constraint_unsatisfiable",
+            "min_precision": min_precision,
+            "min_recall": min_recall,
+        }
+
+    if objective == "recall":
+        scores = recall
+    elif objective == "precision":
+        scores = precision
+    else:  # f1
+        scores = 2 * precision * recall / (precision + recall + EPS)
+
+    masked_scores = np.where(mask, scores, -np.inf)
+    best_idx = int(np.argmax(masked_scores))
+
+    return {
+        "threshold": float(thresholds[best_idx]),
+        "score": float(scores[best_idx]),
+        "precision": float(precision[best_idx]),
+        "recall": float(recall[best_idx]),
+        "objective": objective,
+        "min_precision": min_precision,
+        "min_recall": min_recall,
+        "valid": True,
+    }
 
 
 # =========================================================
@@ -68,9 +188,21 @@ def optimize_binary_threshold(
 
 def _score_per_label(
     y_label: np.ndarray, p_label: np.ndarray, metric: str
-) -> Dict[str, float]:
+) -> Dict[str, Any]:
+    """Optimize threshold for a single multilabel column.
+
+    Section 5: mirror :func:`optimize_binary_threshold` and tag the silent
+    "single class in this column" fallback with ``valid=False`` so the
+    multilabel aggregator can distinguish a real F1=0 result from a column
+    that simply had no positives in the slice.
+    """
     if len(np.unique(y_label)) < 2:
-        return {"threshold": 0.5, "score": 0.0}
+        return {
+            "threshold": 0.5,
+            "score": 0.0,
+            "valid": False,
+            "reason": "single_class",
+        }
 
     precision, recall, thresholds = precision_recall_curve(y_label, p_label)
     precision = precision[:-1]
@@ -86,10 +218,19 @@ def _score_per_label(
         raise ValueError(f"Unsupported metric: {metric}")
 
     if scores.size == 0:
-        return {"threshold": 0.5, "score": 0.0}
+        return {
+            "threshold": 0.5,
+            "score": 0.0,
+            "valid": False,
+            "reason": "empty_pr_curve",
+        }
 
     best_idx = int(np.argmax(scores))
-    return {"threshold": float(thresholds[best_idx]), "score": float(scores[best_idx])}
+    return {
+        "threshold": float(thresholds[best_idx]),
+        "score": float(scores[best_idx]),
+        "valid": True,
+    }
 
 
 def optimize_multilabel_thresholds(
@@ -224,7 +365,9 @@ class ThresholdOptimizer:
 
 __all__ = [
     "ThresholdOptimizer",
+    "default_threshold",
     "optimize_binary_threshold",
+    "optimize_constrained",
     "optimize_multilabel_thresholds",
     "optimize_thresholds",
 ]

@@ -488,15 +488,25 @@ class MetricsEngine:
         agg: Dict[str, float] = {}
         sample_counts = sample_counts or {}
 
+        # Section 4: weight every bounded metric by per-task sample count.
+        # Plain ``np.mean`` lets a 50-sample edge task swing the aggregate
+        # the same as a 50,000-sample core task. Falling back to uniform
+        # weights when no counts are available preserves the previous
+        # behavior for callers that didn't track sizes.
         for key in self._AGG_KEYS:
-            values = [
-                float(metrics[key])
-                for metrics in per_task.values()
+            pairs = [
+                (float(metrics[key]), float(sample_counts.get(task, 1) or 1))
+                for task, metrics in per_task.items()
                 if isinstance(metrics, dict)
                 and isinstance(metrics.get(key), (int, float))
+                and np.isfinite(metrics[key])
             ]
-
-            if values:
+            if not pairs:
+                continue
+            values, weights = zip(*pairs)
+            if any(w > 0 for w in weights):
+                agg[key] = float(np.average(values, weights=weights))
+            else:
                 agg[key] = float(np.mean(values))
 
         # CRIT E3: log_loss aggregated separately, weighted by per-task sample
@@ -513,6 +523,34 @@ class MetricsEngine:
                 ll_weights.append(float(sample_counts.get(task, 1) or 1))
         if ll_vals:
             agg["log_loss"] = float(np.average(ll_vals, weights=ll_weights))
+
+        # Section 4: ``worst_task_f1`` and ``f1_imbalance_index`` surface
+        # cross-task disparity that a mean alone hides. The imbalance index
+        # is ``(max - min) / max`` clamped to ``[0, 1]``; 0 means perfectly
+        # balanced, 1 means at least one task is at zero F1.
+        f1_vals: list[float] = []
+        f1_tasks: list[str] = []
+        for task, metrics in per_task.items():
+            if not isinstance(metrics, dict):
+                continue
+            f1 = metrics.get("f1")
+            if not isinstance(f1, (int, float)) or not np.isfinite(f1):
+                f1 = metrics.get("f1_macro")
+            if isinstance(f1, (int, float)) and np.isfinite(f1):
+                f1_vals.append(float(f1))
+                f1_tasks.append(task)
+        if f1_vals:
+            worst_idx = int(np.argmin(f1_vals))
+            best = float(np.max(f1_vals))
+            worst = float(f1_vals[worst_idx])
+            agg["worst_task_f1"] = worst
+            agg["worst_task_f1_name"] = f1_tasks[worst_idx]  # type: ignore[assignment]
+            if best > 0:
+                agg["f1_imbalance_index"] = float(
+                    np.clip((best - worst) / best, 0.0, 1.0)
+                )
+            else:
+                agg["f1_imbalance_index"] = 0.0
 
         agg["num_tasks"] = float(len(per_task))
         return agg

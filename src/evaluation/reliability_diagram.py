@@ -92,6 +92,14 @@ def _multilabel_reliability(y_true, probs, n_bins):
 # =========================================================
 
 def _plot_curve(bin_data, title="Reliability Diagram", save_path=None):
+    # Section 7: skip the matplotlib figure construction entirely when there
+    # is nowhere to save the result. The previous code paid the full
+    # ``plt.subplots`` + ``ax.plot`` + ``plt.close`` cost on every reliability
+    # call (one per task, sometimes per-class) regardless of whether the
+    # figure was wanted, which dominated headless eval runs.
+    if not save_path:
+        return None
+
     fig, ax = plt.subplots()
     ax.plot([0, 1], [0, 1], linestyle="--", label="Perfect")
     ax.plot(bin_data["confidence"], bin_data["accuracy"], marker="o", label="Model")
@@ -103,8 +111,7 @@ def _plot_curve(bin_data, title="Reliability Diagram", save_path=None):
     ax.legend()
 
     try:
-        if save_path:
-            fig.savefig(save_path, bbox_inches="tight")
+        fig.savefig(save_path, bbox_inches="tight")
     finally:
         plt.close(fig)
 
