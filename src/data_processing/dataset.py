@@ -222,6 +222,7 @@ class MultiLabelDataset(BaseTextDataset):
         *,
         label_cols: List[str],
         task_name: str,
+        valid_label_indices: Optional[List[int]] = None,
         **kwargs,
     ):
         super().__init__(df, tokenizer, **kwargs)
@@ -232,8 +233,34 @@ class MultiLabelDataset(BaseTextDataset):
                 f"Missing multilabel columns {missing} (have: {list(df.columns)})"
             )
 
-        self.label_cols = list(label_cols)
+        # Preserve the contract's full column list so downstream code
+        # that wants to map (sliced position) → (original column name)
+        # — e.g. logging, metrics naming, prediction-time lookup —
+        # can still do so even after degenerate columns are dropped.
+        self.original_label_cols = list(label_cols)
+        if valid_label_indices is None:
+            self.label_cols = list(label_cols)
+            self.valid_label_indices: List[int] = list(range(len(label_cols)))
+        else:
+            n = len(label_cols)
+            kept = sorted({int(i) for i in valid_label_indices})
+            for i in kept:
+                if not (0 <= i < n):
+                    raise ValueError(
+                        f"valid_label_indices out of range for {n} columns: {i}"
+                    )
+            self.valid_label_indices = kept
+            self.label_cols = [label_cols[i] for i in kept]
         self.task_name = task_name
+
+        if not self.label_cols:
+            # All columns degenerate. Refuse to build a dataset with
+            # zero label width rather than silently producing a model
+            # head that learns nothing.
+            raise ValueError(
+                f"{task_name}: no usable multilabel columns after filtering "
+                f"(original={list(label_cols)}, kept_indices={self.valid_label_indices})"
+            )
 
         matrix = df[self.label_cols].to_numpy(dtype=np.float32)
         if np.isnan(matrix).any():

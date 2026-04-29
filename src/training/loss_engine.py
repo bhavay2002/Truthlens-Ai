@@ -33,6 +33,12 @@ class LossEngineConfig:
     use_focal: Optional[Dict[str, bool]] = None
     focal_gamma: Optional[Dict[str, float]] = None
 
+    # Per-task surviving multilabel column indices (computed once on the
+    # train split). Threaded through to ``TaskLossConfig`` so the router
+    # slices the model's full-width logits down to match the reduced
+    # label tensor produced by ``MultiLabelDataset(valid_label_indices=…)``.
+    valid_label_indices: Optional[Dict[str, list]] = None
+
     # CFG-5: ``normalization`` selects the reduction strategy used when
     # combining per-task losses inside ``MultiTaskLoss``:
     #
@@ -88,9 +94,11 @@ class LossEngine:
         pw_map = config.pos_weights or {}
         focal_map = config.use_focal or {}
         gamma_map = config.focal_gamma or {}
+        valid_idx_map = config.valid_label_indices or {}
 
         for task, task_type in config.task_types.items():
             weight = (config.task_weights or {}).get(task, 1.0)
+            valid_idx = valid_idx_map.get(task)
 
             task_configs[task] = TaskLossConfig(
                 task_type=task_type,
@@ -100,6 +108,9 @@ class LossEngine:
                 pos_weight=pw_map.get(task),
                 use_focal=bool(focal_map.get(task, False)),
                 focal_gamma=float(gamma_map.get(task, 2.0)),
+                valid_label_indices=(
+                    [int(i) for i in valid_idx] if valid_idx else None
+                ),
             )
 
         # -------------------------------------------------

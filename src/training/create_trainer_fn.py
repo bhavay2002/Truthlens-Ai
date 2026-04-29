@@ -99,17 +99,76 @@ def create_trainer_fn(
     tokenizer = params["tokenizer"]
     max_length = int(params.get("max_length", 512))
 
+    # =====================================================
+    # LOSS-BALANCING PLAN (computed from train split only)
+    #
+    # This must happen BEFORE ``build_dataset`` so we can pass
+    # ``valid_label_indices`` into both the train and val datasets.
+    # The plan is the single source of truth for:
+    #   * which multilabel columns survive (degenerate ones dropped),
+    #   * the per-task class_weights / pos_weight tensors,
+    #   * whether to swap CE → FocalLoss for severe imbalance.
+    # If anything goes wrong here we fall back to "no plan", which
+    # reproduces the old unweighted, full-width behaviour exactly.
+    # =====================================================
+
+    task_type = get_task_type(task)
+    contract = get_contract(task)
+
+    plan = None
+    valid_label_indices: Optional[list] = None
+    try:
+        balancer_cfg = LossBalancerConfig(
+            **(params.get("loss_balancer_config") or {})
+        )
+        plan = plan_for_dataframe(
+            train_df,
+            label_columns=list(contract.label_columns),
+            task_type=task_type,
+            num_classes=get_output_dim(task),
+            config=balancer_cfg,
+        )
+        if task_type == "multilabel" and plan.valid_label_indices is not None:
+            valid_label_indices = list(plan.valid_label_indices)
+            if plan.dropped_label_indices:
+                dropped_names = [
+                    contract.label_columns[i]
+                    for i in plan.dropped_label_indices
+                    if 0 <= i < len(contract.label_columns)
+                ]
+                logger.warning(
+                    "task=%s: dropping %d single-class multilabel column(s) "
+                    "from training: %s",
+                    task, len(plan.dropped_label_indices), dropped_names,
+                )
+        logger.info(
+            "Loss-balancing plan | task=%s type=%s max_ratio=%.3f "
+            "class_weights=%s pos_weight=%s focal=%s notes=%s",
+            task, plan.task_type, plan.max_ratio,
+            plan.class_weights is not None,
+            plan.pos_weight is not None,
+            plan.use_focal, plan.notes,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Loss-balancing plan unavailable for task=%s (%s); "
+            "falling back to unweighted loss / full-width labels.",
+            task, exc,
+        )
+
     train_dataset = build_dataset(
         task=task,
         df=train_df,
         tokenizer=tokenizer,
         max_length=max_length,
+        valid_label_indices=valid_label_indices,
     )
     val_dataset = build_dataset(
         task=task,
         df=val_df,
         tokenizer=tokenizer,
         max_length=max_length,
+        valid_label_indices=valid_label_indices,
     )
 
     loader_cfg = DataLoaderConfig(
@@ -205,31 +264,18 @@ def create_trainer_fn(
     # LOSS ENGINE (DYNAMIC )
     # =====================================================
 
-    task_type = get_task_type(task)
-
-    # LOSS-LVL-3: third layer of the imbalance strategy. The first two
-    # layers (TaskScheduler + data-level samplers) only control HOW
-    # OFTEN each class is shown; loss-level balancing controls HOW MUCH
-    # each one moves the gradient. We compute the plan from the train
-    # split *labels only* so it's cheap and deterministic, and so a
-    # broken/missing label column degrades to "no extra weighting"
-    # rather than crashing the trainer.
+    # The loss-balancing ``plan`` was computed earlier (before
+    # ``build_dataset``) so the same source of truth drives both
+    # column dropping and loss-level balancing. Translate it into the
+    # per-task maps that ``LossEngineConfig`` expects. ``plan`` may
+    # be ``None`` if the planner crashed — in that case every map
+    # stays empty and the engine falls back to plain unweighted loss.
     class_weights_map: Dict[str, Any] = {}
     pos_weights_map: Dict[str, Any] = {}
     use_focal_map: Dict[str, bool] = {}
     focal_gamma_map: Dict[str, float] = {}
-    try:
-        contract = get_contract(task)
-        balancer_cfg = LossBalancerConfig(
-            **(params.get("loss_balancer_config") or {})
-        )
-        plan = plan_for_dataframe(
-            train_df,
-            label_columns=list(contract.label_columns),
-            task_type=task_type,
-            num_classes=get_output_dim(task),
-            config=balancer_cfg,
-        )
+    valid_idx_map: Dict[str, list] = {}
+    if plan is not None:
         if plan.class_weights is not None:
             class_weights_map[task] = plan.class_weights
         if plan.pos_weight is not None:
@@ -237,23 +283,10 @@ def create_trainer_fn(
         if plan.use_focal:
             use_focal_map[task] = True
             focal_gamma_map[task] = plan.focal_gamma
-        logger.info(
-            "Loss-balancing plan | task=%s type=%s max_ratio=%.3f "
-            "class_weights=%s pos_weight=%s focal=%s notes=%s",
-            task,
-            plan.task_type,
-            plan.max_ratio,
-            plan.class_weights is not None,
-            plan.pos_weight is not None,
-            plan.use_focal,
-            plan.notes,
-        )
-    except Exception as exc:
-        logger.warning(
-            "Loss-balancing plan unavailable for task=%s (%s); "
-            "falling back to unweighted loss.",
-            task, exc,
-        )
+    if valid_label_indices is not None:
+        # Only meaningful for multilabel; it's harmless to thread for
+        # other task types but the router only reads it on that path.
+        valid_idx_map[task] = list(valid_label_indices)
 
     loss_engine = LossEngine(
         LossEngineConfig(
@@ -265,6 +298,7 @@ def create_trainer_fn(
             pos_weights=pos_weights_map or None,
             use_focal=use_focal_map or None,
             focal_gamma=focal_gamma_map or None,
+            valid_label_indices=valid_idx_map or None,
         )
     )
 

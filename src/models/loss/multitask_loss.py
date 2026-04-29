@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple, Iterable
+from typing import Dict, List, Optional, Tuple, Iterable
 
 import torch
 import torch.nn as nn
@@ -72,6 +72,17 @@ class TaskLossConfig:
     # so gradients keep flowing from the hard, rare ones.
     use_focal: bool = False
     focal_gamma: float = 2.0
+
+    # ── Multilabel column filtering ──────────────────────────────────
+    # When the dataset has dropped degenerate columns (see
+    # ``utils.label_cleaning.remove_single_class_columns``), the
+    # labels tensor has shape ``(B, K)`` while the model head still
+    # outputs ``(B, C)`` with ``C >= K``. ``TaskLossRouter`` slices
+    # the logits down to ``valid_label_indices`` before computing BCE
+    # so the unused output neurons receive zero gradient and don't
+    # corrupt the encoder. Leave as ``None`` to keep the original
+    # full-width behaviour.
+    valid_label_indices: Optional[List[int]] = None
 
     def __post_init__(self) -> None:
         # Canonical form: drop underscores, lowercase.

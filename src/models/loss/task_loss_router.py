@@ -170,6 +170,25 @@ class TaskLossRouter:
 
         labels = labels.float()
 
+        # When the dataset has dropped degenerate columns (all-0 or all-1
+        # in the train split), the model head still emits the full-width
+        # logits — slice them down to the surviving columns so they match
+        # the reduced labels and the (already-reduced) ``pos_weight``
+        # tensor inside ``loss_fn``. The dropped logit columns receive
+        # zero gradient and therefore stop poisoning the shared encoder.
+        valid_idx = cfg.valid_label_indices
+        if valid_idx is not None and len(valid_idx) != logits.shape[-1]:
+            if logits.shape[-1] < max(valid_idx) + 1:
+                raise ValueError(
+                    f"{task}: valid_label_indices reference column "
+                    f"{max(valid_idx)} but logits have width "
+                    f"{logits.shape[-1]}"
+                )
+            idx_t = torch.as_tensor(
+                valid_idx, dtype=torch.long, device=logits.device
+            )
+            logits = logits.index_select(-1, idx_t)
+
         if logits.shape != labels.shape:
             raise ValueError(
                 f"{task}: shape mismatch {logits.shape} vs {labels.shape}"

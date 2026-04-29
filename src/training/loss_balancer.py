@@ -138,13 +138,25 @@ def _multilabel_plan(
 
     binary = (labels > 0).astype(np.float32)
     pos = binary.sum(axis=0)
-    neg = n_rows - pos
     pos_ratio = pos / max(n_rows, 1)
 
+    # Single source of truth for "is this column degenerate?". The
+    # ``label_cleaning`` helper is the same one the dataset factory
+    # uses to drop columns at materialisation time, so the planner's
+    # idea of "valid" and the dataset's idea of "valid" can never
+    # silently diverge — a misalignment that would produce a
+    # ``logits[..., K] vs labels[..., K']`` shape error at the first
+    # batch.
+    from src.utils.label_cleaning import (
+        remove_single_class_columns,
+        valid_indices_from_mask,
+    )
+
+    _, base_mask = remove_single_class_columns(binary, min_pos=1, min_neg=1)
     min_ratio = float(config.multilabel_min_pos_ratio)
-    valid = (pos > 0) & (neg > 0) & (pos_ratio >= min_ratio)
-    valid_idx = [int(i) for i, v in enumerate(valid) if bool(v)]
-    dropped_idx = [int(i) for i, v in enumerate(valid) if not bool(v)]
+    valid = base_mask & (pos_ratio >= min_ratio)
+    valid_idx = valid_indices_from_mask(valid)
+    dropped_idx = [i for i in range(n_cols) if i not in set(valid_idx)]
 
     if not valid_idx:
         return LossBalancingPlan(

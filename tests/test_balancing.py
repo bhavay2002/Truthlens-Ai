@@ -4,6 +4,8 @@ Three-layer imbalance strategy tests.
     Layer 1: TaskScheduler            — between-task imbalance
     Layer 2: data-level (oversampling, samplers)
     Layer 3: loss-level balancing     — class weights, pos_weight, focal
+
+Plus: emotion / multilabel degenerate-column dropping.
 """
 
 from __future__ import annotations
@@ -30,6 +32,10 @@ from src.training.loss_engine import LossEngine, LossEngineConfig
 from src.data_processing.class_balance import (
     analyze_classification,
     analyze_multilabel,
+)
+from src.utils.label_cleaning import (
+    remove_single_class_columns,
+    valid_indices_from_mask,
 )
 
 
@@ -332,3 +338,189 @@ class TestLossEngineWithBalancing:
         loss_fn = engine.loss_module.router.loss_functions["bias"]
         assert isinstance(loss_fn, torch.nn.CrossEntropyLoss)
         assert loss_fn.weight is None
+
+
+# =========================================================
+# EMOTION / MULTILABEL — DEGENERATE COLUMN DROPPING
+# =========================================================
+
+class TestRemoveSingleClassColumns:
+    def test_drops_all_zero_and_all_one_columns(self):
+        labels = np.array(
+            [
+                [0, 1, 1, 0],
+                [0, 0, 1, 1],
+                [0, 1, 1, 0],
+                [0, 0, 1, 1],
+            ]
+        )
+        # col 0 all-zero, col 2 all-one → both must be dropped.
+        filtered, mask = remove_single_class_columns(labels)
+        assert mask.tolist() == [False, True, False, True]
+        assert filtered.shape == (4, 2)
+
+    def test_keeps_balanced_columns_unchanged(self):
+        labels = np.array([[0, 1], [1, 0], [0, 1], [1, 0]])
+        filtered, mask = remove_single_class_columns(labels)
+        assert mask.tolist() == [True, True]
+        assert filtered.shape == labels.shape
+        assert (filtered == labels).all()
+
+    def test_min_pos_neg_thresholds(self):
+        # Col 1 has exactly 1 positive — drops if min_pos=2.
+        labels = np.array([[0, 1], [0, 0], [0, 0], [0, 0]])
+        _, mask = remove_single_class_columns(labels, min_pos=1)
+        assert mask.tolist() == [False, True]
+        _, mask2 = remove_single_class_columns(labels, min_pos=2)
+        assert mask2.tolist() == [False, False]
+
+    def test_one_dim_input_treated_as_single_column(self):
+        # Pure 0s → dropped.
+        _, mask = remove_single_class_columns(np.array([0, 0, 0]))
+        assert mask.tolist() == [False]
+
+    def test_empty_input_returns_empty_mask(self):
+        labels = np.zeros((0, 5))
+        filtered, mask = remove_single_class_columns(labels)
+        assert filtered.shape == (0, 5)
+        assert mask.tolist() == [False] * 5
+
+    def test_valid_indices_from_mask(self):
+        mask = np.array([False, True, False, True, True])
+        assert valid_indices_from_mask(mask) == [1, 3, 4]
+
+
+class TestMultiLabelDatasetFiltering:
+    def _make_df(self):
+        return pd.DataFrame({
+            "text": ["a", "b", "c", "d"] * 5,
+            "emotion_0": [0] * 20,             # all-zero (degenerate)
+            "emotion_1": [1, 0] * 10,          # balanced
+            "emotion_2": [1] * 20,             # all-one (degenerate)
+            "emotion_3": [1, 1, 0, 0] * 5,     # balanced
+        })
+
+    def _fake_tokenizer(self):
+        # Minimal tokenizer stub: BaseTextDataset only needs a callable
+        # that returns input_ids/attention_mask lists. Use a HF tokenizer
+        # if available; otherwise skip — the project's main test deps
+        # already pull HF in.
+        from transformers import AutoTokenizer
+        return AutoTokenizer.from_pretrained("hf-internal-testing/tiny-random-bert")
+
+    def test_dataset_drops_degenerate_columns(self):
+        from src.data_processing.dataset import MultiLabelDataset
+        tok = self._fake_tokenizer()
+        df = self._make_df()
+        ds = MultiLabelDataset(
+            df=df,
+            tokenizer=tok,
+            label_cols=["emotion_0", "emotion_1", "emotion_2", "emotion_3"],
+            task_name="emotion",
+            text_col="text",
+            valid_label_indices=[1, 3],
+            max_length=8,
+        )
+        assert ds.label_cols == ["emotion_1", "emotion_3"]
+        assert ds.original_label_cols == [
+            "emotion_0", "emotion_1", "emotion_2", "emotion_3"
+        ]
+        item = ds[0]
+        assert item["labels"].shape == (2,)
+
+    def test_dataset_without_indices_keeps_all_columns(self):
+        from src.data_processing.dataset import MultiLabelDataset
+        tok = self._fake_tokenizer()
+        df = self._make_df()
+        ds = MultiLabelDataset(
+            df=df,
+            tokenizer=tok,
+            label_cols=["emotion_0", "emotion_1", "emotion_2", "emotion_3"],
+            task_name="emotion",
+            text_col="text",
+            max_length=8,
+        )
+        assert ds.label_cols == [
+            "emotion_0", "emotion_1", "emotion_2", "emotion_3"
+        ]
+        assert ds[0]["labels"].shape == (4,)
+
+    def test_dataset_rejects_all_columns_dropped(self):
+        from src.data_processing.dataset import MultiLabelDataset
+        tok = self._fake_tokenizer()
+        df = self._make_df()
+        with pytest.raises(ValueError, match="no usable multilabel columns"):
+            MultiLabelDataset(
+                df=df,
+                tokenizer=tok,
+                label_cols=["emotion_0", "emotion_1"],
+                task_name="emotion",
+                text_col="text",
+                valid_label_indices=[],
+                max_length=8,
+            )
+
+
+class TestLossEngineSlicesLogits:
+    """End-to-end: model emits full-width logits, dataset gives reduced
+    labels — the router must slice logits to match before BCE."""
+
+    def test_logits_are_sliced_to_valid_indices(self):
+        # Plan from a 4-column df: only cols 1 and 3 are valid.
+        df = pd.DataFrame({
+            "A": [0] * 50,             # all-zero → dropped
+            "B": [1, 0] * 25,          # balanced → kept
+            "C": [1] * 50,             # all-one  → dropped
+            "D": [1, 1, 0, 0] * 12 + [1, 1],  # balanced → kept
+        })
+        plan = plan_for_dataframe(
+            df,
+            label_columns=["A", "B", "C", "D"],
+            task_type="multilabel",
+        )
+        assert plan.valid_label_indices == [1, 3]
+
+        engine = LossEngine(
+            LossEngineConfig(
+                task_types={"emotion": "multilabel"},
+                pos_weights={"emotion": plan.pos_weight},
+                valid_label_indices={"emotion": plan.valid_label_indices},
+            )
+        )
+
+        torch.manual_seed(0)
+        # Model still emits 4-wide logits; dataset gives 2-wide labels.
+        logits = torch.randn(8, 4, requires_grad=True)
+        labels = torch.tensor(
+            [[1.0, 0.0]] * 4 + [[0.0, 1.0]] * 4, dtype=torch.float32
+        )
+
+        outputs = {"task_logits": {"emotion": logits}}
+        batch = {"labels": {"emotion": labels}}
+        total_loss, _ = engine.compute(outputs, batch)
+
+        assert torch.isfinite(total_loss)
+        total_loss.backward()
+        # Dropped logit columns (A=0, C=2) must have ZERO gradient — that's
+        # the whole point: dead heads stop poisoning the encoder.
+        assert torch.all(logits.grad[:, 0] == 0)
+        assert torch.all(logits.grad[:, 2] == 0)
+        # Surviving columns must have NON-zero gradient.
+        assert logits.grad[:, 1].abs().sum() > 0
+        assert logits.grad[:, 3].abs().sum() > 0
+
+    def test_full_width_when_no_indices_provided(self):
+        engine = LossEngine(
+            LossEngineConfig(task_types={"emotion": "multilabel"})
+        )
+        logits = torch.randn(4, 5, requires_grad=True)
+        labels = torch.zeros(4, 5)
+        labels[:, 2] = 1.0
+        outputs = {"task_logits": {"emotion": logits}}
+        batch = {"labels": {"emotion": labels}}
+        loss, _ = engine.compute(outputs, batch)
+        assert torch.isfinite(loss)
+        loss.backward()
+        # Every column gets gradient when nothing is filtered.
+        for c in range(5):
+            assert logits.grad[:, c].abs().sum() > 0
