@@ -11,6 +11,7 @@ from src.models.loss.task_loss_router import TaskLossRouter
 from src.models.loss.loss_normalizer import EMALossNormalizer
 from src.models.loss.coverage_tracker import EMACoverageTracker
 from src.models.loss.base_balancer import BaseBalancer
+from src.training.loss_functions import FocalLoss
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,22 @@ class TaskLossConfig:
     weight: float = 1.0
     ignore_index: int = -100
     pos_weight: Optional[torch.Tensor] = None
+
+    # ── Loss-level balancing (LOSS-LVL-3) ────────────────────────────
+    # ``class_weights`` is the multiclass analogue of ``pos_weight``:
+    # a per-class scalar tensor that scales each class's contribution
+    # to ``CrossEntropyLoss``. Set it from
+    # ``training.loss_balancer.plan_for_labels`` so the rare classes
+    # contribute a gradient signal that is not drowned out by the
+    # majority class. ``None`` keeps the unweighted CE baseline.
+    class_weights: Optional[torch.Tensor] = None
+    # When the dominant class exceeds the focal threshold (~0.9), even
+    # class weights are not enough — flip ``use_focal=True`` to switch
+    # the multiclass head to ``FocalLoss(weight=class_weights)``. The
+    # ``(1 - p_t)^gamma`` factor down-weights the easy majority samples
+    # so gradients keep flowing from the hard, rare ones.
+    use_focal: bool = False
+    focal_gamma: float = 2.0
 
     def __post_init__(self) -> None:
         # Canonical form: drop underscores, lowercase.
@@ -122,9 +139,27 @@ class MultiTaskLoss(nn.Module):
         for name, cfg in task_configs.items():
 
             if cfg.task_type == "multiclass":
-                loss_functions[name] = nn.CrossEntropyLoss(
-                    ignore_index=cfg.ignore_index
-                )
+                # LOSS-LVL-3: pick the right loss for the observed
+                # class distribution. ``use_focal`` is set upstream by
+                # ``training.loss_balancer`` when the dominant class
+                # exceeds the focal threshold; ``class_weights`` is set
+                # whenever the distribution is imbalanced enough to
+                # warrant inverse-frequency reweighting. Both fall back
+                # to vanilla CE when neither is set, matching the prior
+                # behaviour exactly on balanced data.
+                cw = cfg.class_weights
+                if cfg.use_focal:
+                    loss_functions[name] = FocalLoss(
+                        gamma=cfg.focal_gamma,
+                        weight=cw,
+                        ignore_index=cfg.ignore_index,
+                        reduction="mean",
+                    )
+                else:
+                    loss_functions[name] = nn.CrossEntropyLoss(
+                        weight=cw,
+                        ignore_index=cfg.ignore_index,
+                    )
 
             elif cfg.task_type in {"binary", "multilabel"}:
                 loss_functions[name] = nn.BCEWithLogitsLoss(

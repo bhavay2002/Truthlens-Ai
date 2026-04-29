@@ -22,6 +22,17 @@ class LossEngineConfig:
     task_weights: Optional[Dict[str, float]] = None
     ignore_index: int = -100
 
+    # LOSS-LVL-3: per-task loss-level balancing inputs, threaded straight
+    # through to ``TaskLossConfig``. ``create_trainer_fn`` builds these
+    # from the training-set label distribution via
+    # ``training.loss_balancer.plan_for_dataframe`` before instantiating
+    # the engine. Leaving them empty preserves the original unweighted
+    # behaviour exactly.
+    class_weights: Optional[Dict[str, "torch.Tensor"]] = None
+    pos_weights: Optional[Dict[str, "torch.Tensor"]] = None
+    use_focal: Optional[Dict[str, bool]] = None
+    focal_gamma: Optional[Dict[str, float]] = None
+
     # CFG-5: ``normalization`` selects the reduction strategy used when
     # combining per-task losses inside ``MultiTaskLoss``:
     #
@@ -73,6 +84,11 @@ class LossEngine:
         # silently shrink the configured per-task weight.
         ga = max(1, int(getattr(config, "gradient_accumulation_steps", 1)))
 
+        cw_map = config.class_weights or {}
+        pw_map = config.pos_weights or {}
+        focal_map = config.use_focal or {}
+        gamma_map = config.focal_gamma or {}
+
         for task, task_type in config.task_types.items():
             weight = (config.task_weights or {}).get(task, 1.0)
 
@@ -80,6 +96,10 @@ class LossEngine:
                 task_type=task_type,
                 weight=float(weight) * float(ga),
                 ignore_index=config.ignore_index,
+                class_weights=cw_map.get(task),
+                pos_weight=pw_map.get(task),
+                use_focal=bool(focal_map.get(task, False)),
+                focal_gamma=float(gamma_map.get(task, 2.0)),
             )
 
         # -------------------------------------------------

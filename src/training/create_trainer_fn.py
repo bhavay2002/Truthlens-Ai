@@ -17,10 +17,12 @@ from .monitor_engine import MonitoringEngine
 from .experiment_tracker import ExperimentTracker
 from .task_scheduler import TaskScheduler
 from .loss_engine import LossEngine, LossEngineConfig
+from .loss_balancer import LossBalancerConfig, plan_for_dataframe
 from .evaluation_engine import EvaluationEngine, EvaluationConfig
 from .trainer import Trainer
 
-from src.config.task_config import get_task_type
+from src.config.task_config import get_task_type, get_output_dim
+from src.data_processing.data_contracts import get_contract
 from src.utils.seed_utils import set_seed
 
 logger = logging.getLogger(__name__)
@@ -205,12 +207,64 @@ def create_trainer_fn(
 
     task_type = get_task_type(task)
 
+    # LOSS-LVL-3: third layer of the imbalance strategy. The first two
+    # layers (TaskScheduler + data-level samplers) only control HOW
+    # OFTEN each class is shown; loss-level balancing controls HOW MUCH
+    # each one moves the gradient. We compute the plan from the train
+    # split *labels only* so it's cheap and deterministic, and so a
+    # broken/missing label column degrades to "no extra weighting"
+    # rather than crashing the trainer.
+    class_weights_map: Dict[str, Any] = {}
+    pos_weights_map: Dict[str, Any] = {}
+    use_focal_map: Dict[str, bool] = {}
+    focal_gamma_map: Dict[str, float] = {}
+    try:
+        contract = get_contract(task)
+        balancer_cfg = LossBalancerConfig(
+            **(params.get("loss_balancer_config") or {})
+        )
+        plan = plan_for_dataframe(
+            train_df,
+            label_columns=list(contract.label_columns),
+            task_type=task_type,
+            num_classes=get_output_dim(task),
+            config=balancer_cfg,
+        )
+        if plan.class_weights is not None:
+            class_weights_map[task] = plan.class_weights
+        if plan.pos_weight is not None:
+            pos_weights_map[task] = plan.pos_weight
+        if plan.use_focal:
+            use_focal_map[task] = True
+            focal_gamma_map[task] = plan.focal_gamma
+        logger.info(
+            "Loss-balancing plan | task=%s type=%s max_ratio=%.3f "
+            "class_weights=%s pos_weight=%s focal=%s notes=%s",
+            task,
+            plan.task_type,
+            plan.max_ratio,
+            plan.class_weights is not None,
+            plan.pos_weight is not None,
+            plan.use_focal,
+            plan.notes,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Loss-balancing plan unavailable for task=%s (%s); "
+            "falling back to unweighted loss.",
+            task, exc,
+        )
+
     loss_engine = LossEngine(
         LossEngineConfig(
             task_types={task: task_type},
             # LOSS-3: pre-scale static weights by grad_accum so the
             # downstream loss/grad_accum division doesn't shrink them.
             gradient_accumulation_steps=grad_accum,
+            class_weights=class_weights_map or None,
+            pos_weights=pos_weights_map or None,
+            use_focal=use_focal_map or None,
+            focal_gamma=focal_gamma_map or None,
         )
     )
 
