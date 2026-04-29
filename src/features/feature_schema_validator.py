@@ -7,12 +7,11 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Set, Tuple
 
 import numpy as np
+from src.features.base.numerics import EPS
 
 logger = logging.getLogger(__name__)
 
 FeatureVector = Dict[str, float]
-EPS = 1e-8
-
 
 @dataclass
 class FeatureSchemaValidator:

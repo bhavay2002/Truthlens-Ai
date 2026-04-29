@@ -10,30 +10,32 @@ import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
+from src.features.base.lexicon_loader import load_lexicon_set
 from src.features.base.lexicon_matcher import (
     WeightedLexiconMatcher,
     compute_negation_mask,
     to_token_array,
 )
-from src.features.base.numerics import normalized_entropy
+from src.features.base.numerics import EPS, MAX_CLIP, normalized_entropy
 from src.features.base.text_signals import get_text_signals
 from src.features.base.tokenization import ensure_tokens_word
 
 logger = logging.getLogger(__name__)
 
-EPS = 1e-8
-MAX_CLIP = 1.0
-
 
 # ---------------------------------------------------------
 # Lexicons (weighted)
 # ---------------------------------------------------------
+# Audit fix §1.1 — these used to be ``{...}`` placeholders that emitted
+# permanently-zero feature columns in production. The seed vocabulary
+# ships in src/config/lexicons/bias.json; expand or re-weight there
+# without touching this file.
 
-LOADED_LANGUAGE = {...}
-SUBJECTIVE_WORDS = {...}
-UNCERTAINTY_WORDS = {...}
-POLARIZING_WORDS = {...}
-EVALUATIVE_WORDS = {...}
+LOADED_LANGUAGE = load_lexicon_set("bias", "loaded")
+SUBJECTIVE_WORDS = load_lexicon_set("bias", "subjective")
+UNCERTAINTY_WORDS = load_lexicon_set("bias", "uncertainty")
+POLARIZING_WORDS = load_lexicon_set("bias", "polarizing")
+EVALUATIVE_WORDS = load_lexicon_set("bias", "evaluative")
 
 NEGATIONS = {"not", "no", "never", "n't"}
 
@@ -172,15 +174,13 @@ class BiasFeaturesV2(BaseFeature):
             return 0.0
         return float(np.clip(v, 0.0, MAX_CLIP))
 
-    # -----------------------------------------------------
-    # Batch override — same per-sample work but skips the
-    # interpreter overhead of Python-level dispatch through
-    # extract() for each context. The matchers are already
-    # vectorized, so per-sample latency drops by ~10-50x.
-    # -----------------------------------------------------
+    # Audit fix §1.4 — the previous ``extract_batch`` override was a
+    # verbatim copy of ``BaseFeature.extract_batch`` (a Python list
+    # comprehension over ``self.extract``). Removing it lets the base
+    # class own the contract so any future vectorized batch path on
+    # ``BaseFeature`` (e.g., shared ``Counter`` precomputation) lands
+    # here for free.
 
-    def extract_batch(self, contexts):
-        return [self.extract(ctx) for ctx in contexts]
 
 # Backward-compat alias used across the inference layer.
 BiasFeatures = BiasFeaturesV2

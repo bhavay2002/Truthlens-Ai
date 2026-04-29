@@ -1,9 +1,6 @@
-# src/features/argument_structure_features.py
-
 from __future__ import annotations
 
 import logging
-from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, Set
 
@@ -11,13 +8,10 @@ import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
-from src.features.base.numerics import normalized_entropy
-from src.features.base.tokenization import ensure_tokens_word
+from src.features.base.numerics import EPS, MAX_CLIP, normalized_entropy
+from src.features.base.tokenization import ensure_tokens_word, ensure_tokens_word_counter
 
 logger = logging.getLogger(__name__)
-
-EPS = 1e-8
-MAX_CLIP = 1.0
 
 
 # ---------------------------------------------------------
@@ -50,15 +44,16 @@ class ArgumentStructureFeatures(BaseFeature):
 
         text = context.text.strip()
         if not text:
-            return {}
+            return self._empty()
 
         tokens = ensure_tokens_word(context, text)
         n = len(tokens)
 
         if n == 0:
-            return {}
+            return self._empty()
 
-        counter = Counter(tokens)
+        # Audit fix §2.5 — share the per-context Counter cache.
+        counter = ensure_tokens_word_counter(context)
 
         def ratio(lexicon: Set[str]) -> float:
             return sum(counter.get(w, 0) for w in lexicon) / (n + EPS)
@@ -116,17 +111,32 @@ class ArgumentStructureFeatures(BaseFeature):
         # OUTPUT
         # -------------------------
 
+        # §10.1 — keys renamed to match feature_schema.ARGUMENT_FEATURES so
+        # partition_feature_sections() routes them to the "discourse" head.
         return {
-            "arg_claim": self._safe(dist["claim"]),
-            "arg_premise": self._safe(dist["premise"]),
-            "arg_evidence": self._safe(dist["evidence"]),
-            "arg_counter": self._safe(dist["counter"]),
+            "argument_claim_ratio":              self._safe(dist["claim"]),
+            "argument_premise_ratio":            self._safe(dist["premise"]),
+            "argument_evidence_ratio":           self._safe(dist["evidence"]),
+            "argument_counterargument_ratio":    self._safe(dist["counter"]),
+            # intensity → structure_density; balance → structure_diversity;
+            # entropy dropped (not in schema).
+            "argument_structure_density":        self._safe(intensity),
+            "argument_structure_diversity":      self._safe(balance),
+            "argument_rhetorical_question_ratio": self._safe(rhetorical),
+        }
 
-            "arg_intensity": self._safe(intensity),
-            "arg_entropy": self._safe(entropy),
-            "arg_balance": self._safe(balance),
+    # -----------------------------------------------------
 
-            "arg_rhetorical": self._safe(rhetorical),
+    def _empty(self) -> Dict[str, float]:
+        # §11.1 — consistent fixed-key zero dict for empty / zero-token inputs.
+        return {
+            "argument_claim_ratio":              0.0,
+            "argument_premise_ratio":            0.0,
+            "argument_evidence_ratio":           0.0,
+            "argument_counterargument_ratio":    0.0,
+            "argument_structure_density":        0.0,
+            "argument_structure_diversity":      0.0,
+            "argument_rhetorical_question_ratio": 0.0,
         }
 
     # -----------------------------------------------------

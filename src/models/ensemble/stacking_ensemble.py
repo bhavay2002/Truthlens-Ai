@@ -64,8 +64,15 @@ class StackingEnsembleModel(nn.Module):
 
         logits_list: List[torch.Tensor] = []
 
+        # P2.2: do NOT move ``model`` onto ``self.device`` inside the
+        # forward loop — every base model is already a child of this
+        # ``nn.Module`` (registered via ``nn.ModuleList``) and the
+        # ``self.to(self.device)`` call in ``__init__`` placed it
+        # there. Re-issuing ``.to(self.device)`` per batch is at best a
+        # no-op and at worst forces a synchronous device probe + tensor
+        # walk on every step. Inputs are expected to already be on the
+        # device by the caller convention used elsewhere in the model.
         for model in self.base_models:
-            model = model.to(self.device)
             output = model(*args, **kwargs)
             logits = extract_logits(output)
             logits_list.append(logits)

@@ -39,7 +39,17 @@ class EncoderConfig:
     use_amp: bool = True
     amp_dtype: str = "bf16"  # fp16 | bf16
 
-    use_compile: bool = False
+    # P2.1: ``use_compile`` is now tri-state.
+    #
+    #   • ``True``  — always wrap the encoder with ``torch.compile``.
+    #   • ``False`` — never wrap (explicit opt-out).
+    #   • ``None``  — auto-detect (default): enable on CUDA, disable on
+    #     CPU. The auto-on default brings the 30–50 % step-time
+    #     speed-up that ``torch.compile`` delivers on every supported
+    #     GPU without forcing every config to mention it explicitly.
+    #     CPU runs stay opt-in because the compile overhead does not
+    #     pay back on small CPU workloads.
+    use_compile: Optional[bool] = None
     compile_mode: str = "default"
 
     init_from_config_only: bool = False

@@ -154,9 +154,12 @@ class ClassificationHead(nn.Module):
             # peaked, because each subdominant ``log(eps)`` contributes
             # a fixed bias. ``log_softmax`` avoids the EPS entirely
             # AND amortises the second softmax pass.
+            # A6.2: ``confidence`` comes from ``log_probs.max().exp()``
+            # — equivalent to ``probs.max()`` but without the second
+            # softmax/max pass over the same tensor.
             log_probs = F.log_softmax(logits, dim=-1)
             probs = log_probs.exp()
-            confidence = torch.max(probs, dim=-1).values
+            confidence = log_probs.max(dim=-1).values.exp()
             entropy = -(probs * log_probs).sum(dim=-1)
             output["probabilities"] = probs
             output["confidence"] = confidence

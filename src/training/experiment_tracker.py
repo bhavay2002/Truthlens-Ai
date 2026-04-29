@@ -132,8 +132,17 @@ class ExperimentTracker:
         if not self._is_main():
             return
 
-        step = step if step is not None else self._step
-        self._step = step + 1
+        # N-HIGH-3: Previously this UNCONDITIONALLY did ``self._step = step + 1``,
+        # which meant any caller that explicitly passed ``step=`` (Trainer
+        # passes ``self.global_step`` for both train and eval) was silently
+        # OVERWRITING the internal step counter — so any later
+        # ``log_metrics(...)`` without an explicit step started counting
+        # from the caller's last value (often a huge gap or even a step
+        # that went BACKWARDS, which MLflow rejects). Only auto-advance the
+        # internal counter when the caller did NOT supply a step.
+        if step is None:
+            step = self._step
+            self._step += 1
 
         metrics = self._flatten(metrics, prefix)
 

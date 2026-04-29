@@ -6,3 +6,15 @@ id = "QT81Asbk2sOIiiW8lbdVM"
 uri = "file://reports/audits/AUDIT_2026-04-21.md"
 type = "text"
 title = "TruthLens Deep ML Audit — 2026-04-21"
+
+[[outputs]]
+id = "PBOjwQoR2e5BpVLcfJDJp"
+uri = "file://aggregation.md"
+type = "text"
+title = "aggregation.md — src/aggregation Technical Documentation"
+
+[[outputs]]
+id = "CXms0GdSa_EJSN6aS-ROz"
+uri = "file://values_define.md"
+type = "text"
+title = "values_define.md — TruthLens config values resolved from project"

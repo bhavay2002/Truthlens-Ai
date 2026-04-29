@@ -1,43 +1,49 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, asdict
-from typing import Dict, Any, Optional
+import math
+from typing import Dict, Any, Optional, Mapping
 
 import numpy as np
+
+# CFG-AG-1: pull the canonical group definitions from
+# `aggregation_config` so the calculator and the weight manager can
+# never disagree on which keys belong to which group.
+from .aggregation_config import WEIGHT_GROUPS
 
 logger = logging.getLogger(__name__)
 EPS = 1e-12
 
 
 # =========================================================
-# DEFAULT WEIGHTS (normalised per group)
+# CONTRACT
 # =========================================================
 
-@dataclass(slots=True)
-class ScoreWeights:
-    bias: float = 0.40
-    emotion: float = 0.30
-    narrative: float = 0.20
-    analysis_influence_manipulation: float = 0.10
+# CRIT-AG-3: the calculator's composite formulas reference these
+# section names. They are now declared in one place and validated at
+# `compute_scores` time so missing sections become a debug log line
+# instead of a silent zero in the final score.
+REQUIRED_SECTIONS = (
+    "bias", "emotion", "narrative",
+    "discourse", "graph", "ideology", "analysis",
+)
 
-    discourse: float = 0.55
-    graph: float = 0.35
-    analysis_influence_credibility: float = 0.10
-    credibility_bias_penalty: float = 0.20
-
-    final_credibility: float = 0.5
-    final_manipulation: float = 0.3
-    final_ideology: float = 0.2
+_MANIPULATION_KEYS = WEIGHT_GROUPS["manipulation"]
+_CREDIBILITY_KEYS  = WEIGHT_GROUPS["credibility"]
+_FINAL_KEYS        = WEIGHT_GROUPS["final"]
 
 
-# =========================================================
-# WEIGHT GROUPS (must sum to 1 within each group)
-# =========================================================
-
-_MANIPULATION_KEYS = ("bias", "emotion", "narrative", "analysis_influence_manipulation")
-_CREDIBILITY_KEYS  = ("discourse", "graph", "analysis_influence_credibility")
-_FINAL_KEYS        = ("final_credibility", "final_manipulation", "final_ideology")
+# CRIT-AG-4: the previous code looked up `graph_centrality_mean` which
+# is never produced by any upstream component. Accept the actual keys
+# emitted by `src/graph/graph_analysis.py` and `feature_mapper`.
+_GRAPH_SIGNAL_KEYS = (
+    "centrality_mean",
+    "graph_density",
+    "avg_centrality",
+    "consistency",
+    "graph_consistency",
+    "graph_centrality_mean",
+)
 
 
 def _renorm_group(weights: Dict[str, float], keys) -> None:
@@ -56,77 +62,103 @@ class TruthLensScoreCalculator:
     def __init__(
         self,
         *,
-        weights: Optional[Dict[str, float]] = None,
-        uncertainty_penalty: float = 0.2,
+        graph_influence_cap: float = 0.1,
+        explanation_blend: float = 0.5,
     ):
-        self._base_weights: Dict[str, float] = asdict(ScoreWeights()) if weights is None else weights
-        self.uncertainty_penalty = float(np.clip(uncertainty_penalty, 0.0, 1.0))
+        # WGT-AG-2: previously hardcoded inside `compute_scores` (0.1
+        # for graph contribution, 0.5 for explanation blend). They are
+        # now constructor-injected so they can be wired through
+        # `AggregationConfig.fusion`.
+        self.graph_influence_cap = float(np.clip(graph_influence_cap, 0.0, 1.0))
+        self.explanation_blend = float(np.clip(explanation_blend, 0.0, 1.0))
 
     # =====================================================
-    # MAIN — accepts optional adaptive weights from WeightManager
+    # MAIN
     # =====================================================
 
     def compute_scores(
         self,
         profile: Dict[str, Any],
         *,
+        weights: Mapping[str, float],
+        explanation_scores: Optional[Dict[str, float]] = None,
+        # The following are accepted for backwards-compat with callers
+        # that still pass them, but they are NOT applied here — see
+        # CRIT-AG-7. The same modulation now happens exactly once,
+        # inside `WeightManager.get_adaptive_weights`.
         confidence: Optional[Dict[str, float]] = None,
         entropy: Optional[Dict[str, float]] = None,
-        explanation_scores: Optional[Dict[str, float]] = None,
-        weights: Optional[Dict[str, float]] = None,
     ) -> Dict[str, Any]:
 
-        # Use adaptive weights if provided, otherwise fall back to base
-        w = dict(self._base_weights)
-        if weights:
-            w.update(weights)
-            _renorm_group(w, _MANIPULATION_KEYS)
-            _renorm_group(w, _CREDIBILITY_KEYS)
-            _renorm_group(w, _FINAL_KEYS)
+        # WGT-AG-3: weights are mandatory — there is no longer a second
+        # source of truth (the deleted `ScoreWeights` dataclass) that
+        # could silently disagree with `WeightManager.DEFAULT_WEIGHTS`.
+        if not weights:
+            raise ValueError(
+                "TruthLensScoreCalculator.compute_scores requires "
+                "explicit `weights` (typically WeightManager output)"
+            )
+
+        w = dict(weights)
+        _renorm_group(w, _MANIPULATION_KEYS)
+        _renorm_group(w, _CREDIBILITY_KEYS)
+        _renorm_group(w, _FINAL_KEYS)
+
+        # CRIT-AG-3: surface missing sections as a debug log rather
+        # than failing — the calculator stays robust but the absence
+        # is no longer invisible to the operator.
+        missing = [s for s in REQUIRED_SECTIONS if s not in profile]
+        if missing:
+            logger.debug(
+                "[TruthLensScoreCalculator] missing sections: %s",
+                missing,
+            )
+
+        # CRIT-AG-4: aggregate any of the recognised graph keys instead
+        # of demanding a single string that no upstream component
+        # produces.
+        graph_section = (
+            profile.get("graph", {})
+            if isinstance(profile.get("graph"), dict) else {}
+        )
+        graph_vals = []
+        for k in _GRAPH_SIGNAL_KEYS:
+            v = graph_section.get(k)
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
+                graph_vals.append(float(v))
+        graph_signal = float(
+            np.clip(sum(graph_vals) / len(graph_vals), 0.0, 1.0)
+        ) if graph_vals else 0.0
 
         section_scores: Dict[str, float] = {}
         section_debug: Dict[str, Any] = {}
-
-        # Extract graph signal once (vectorized lookup)
-        graph_signal = float(
-            profile.get("graph", {}).get("graph_centrality_mean", 0.0)
-        )
 
         for section, data in profile.items():
 
             base_val = self._aggregate(data)
 
-            # graph cross-signal (capped at 0.1 contribution)
-            val = base_val + 0.1 * graph_signal
+            val = base_val + self.graph_influence_cap * graph_signal
 
             debug_info: Dict[str, Any] = {
                 "base": base_val,
                 "graph_signal": graph_signal,
-                "graph_influence": 0.1 * graph_signal,
+                "graph_influence": self.graph_influence_cap * graph_signal,
             }
 
-            # confidence scaling
-            if confidence and section in confidence:
-                conf = float(np.clip(confidence[section], 0.0, 1.0))
-                val *= conf
-                debug_info["confidence"] = conf
+            # CRIT-AG-7: confidence + entropy are NOT re-applied to the
+            # value here. They are already baked into `weights` by
+            # `WeightManager.get_adaptive_weights`. Doubling them
+            # caused (e.g. conf=0.5, ent=0.5) sections to be attenuated
+            # by ~0.11 instead of ~0.5, ranking-distorting the output.
 
-            # uncertainty penalty (guard against NaN entropy)
-            if entropy and section in entropy:
-                raw_ent = entropy[section]
-                if not np.isfinite(raw_ent):
-                    raw_ent = 0.0
-                ent = float(np.clip(raw_ent, 0.0, 1.0))
-                penalty = float(np.clip(1.0 - self.uncertainty_penalty * ent, 0.0, 1.0))
-                val *= penalty
-                debug_info["entropy"] = ent
-                debug_info["uncertainty_penalty"] = penalty
-
-            # explanation alignment (equal blend)
             if explanation_scores and section in explanation_scores:
-                exp_score = float(np.clip(explanation_scores[section], 0.0, 1.0))
-                val = 0.5 * val + 0.5 * exp_score
-                debug_info["explanation_score"] = exp_score
+                exp_val = explanation_scores[section]
+                if isinstance(exp_val, (int, float)) and math.isfinite(exp_val):
+                    exp_score = float(np.clip(exp_val, 0.0, 1.0))
+                    blend = self.explanation_blend
+                    val = (1.0 - blend) * val + blend * exp_score
+                    debug_info["explanation_score"] = exp_score
+                    debug_info["explanation_blend"] = blend
 
             final_val = float(np.clip(val, 0.0, 1.0))
             section_scores[section] = final_val
@@ -138,7 +170,9 @@ class TruthLensScoreCalculator:
 
         manipulation = self._manipulation(section_scores, w)
         credibility  = self._credibility(section_scores, w)
-        final_score  = self._final(credibility, manipulation, section_scores.get("ideology", 0.0), w)
+        final_score  = self._final(
+            credibility, manipulation, section_scores.get("ideology", 0.0), w
+        )
 
         return {
             "section_scores": section_scores,
@@ -147,8 +181,6 @@ class TruthLensScoreCalculator:
             "final_score": final_score,
             "debug": {
                 "inputs": profile,
-                "confidence": confidence,
-                "entropy": entropy,
                 "explanation_scores": explanation_scores,
                 "graph_signal": graph_signal,
                 "section_breakdown": section_debug,
@@ -157,24 +189,35 @@ class TruthLensScoreCalculator:
         }
 
     # =====================================================
-    # AGGREGATION — vectorized mean over finite values
+    # AGGREGATION
     # =====================================================
 
-    def _aggregate(self, section_data: Any) -> float:
+    @staticmethod
+    def _aggregate(section_data: Any) -> float:
 
         if not isinstance(section_data, dict):
             return 0.0
 
-        vals = np.array(
-            [v for v in section_data.values()
-             if isinstance(v, (int, float)) and np.isfinite(v)],
-            dtype=np.float64,
-        )
+        # PERF-AG-3: avoid the np.array constructor overhead that
+        # dominated this hot path for the typical 1-3 element vectors.
+        # Using `math.fsum` keeps the running-sum precision on par
+        # with numpy.mean for these sizes.
+        vals = [
+            float(v) for v in section_data.values()
+            if isinstance(v, (int, float))
+            and not isinstance(v, bool)
+            and math.isfinite(v)
+        ]
 
-        if vals.size == 0:
+        if not vals:
             return 0.0
 
-        return float(np.clip(np.mean(vals), 0.0, 1.0))
+        mean = math.fsum(vals) / len(vals)
+        if mean < 0.0:
+            return 0.0
+        if mean > 1.0:
+            return 1.0
+        return mean
 
     # =====================================================
     # COMPONENT SCORES
@@ -195,7 +238,12 @@ class TruthLensScoreCalculator:
             w.get("graph", 0.0) * s.get("graph", 0.0) +
             w.get("analysis_influence_credibility", 0.0) * s.get("analysis", 0.0)
         )
-        penalty = float(np.clip(w.get("credibility_bias_penalty", 0.2) * s.get("bias", 0.0), 0.0, 1.0))
+        # WGT-AG-1: credibility_bias_penalty is a scalar multiplier in
+        # [0, 1] — clipping is enforced by WeightManager._clip_scalar_keys.
+        penalty = float(np.clip(
+            w.get("credibility_bias_penalty", 0.2) * s.get("bias", 0.0),
+            0.0, 1.0,
+        ))
         return float(np.clip(positive * (1.0 - penalty), 0.0, 1.0))
 
     def _final(self, c: float, m: float, i: float, w: Dict[str, float]) -> float:

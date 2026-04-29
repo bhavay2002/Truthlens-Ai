@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -190,6 +190,19 @@ class GraphOutput(BaseModel):
     # ``GraphOutput(...)`` call). Now first-class fields.
     entity_metrics: Optional[Dict[str, float]] = None
     narrative_metrics: Optional[Dict[str, float]] = None
+
+    # G-C6: per-mention character spans + tokenizer discriminator.
+    # ``GraphPipeline._run_with_doc`` already populates ``entity_spans``,
+    # ``narrative_spans`` and ``narrative_tokenizer`` on the result
+    # dict (so the API / explainer can highlight node IDs back into
+    # source text), but ``GraphOutput`` was declared with
+    # ``extra="forbid"`` and did not list the keys — meaning any
+    # consumer that typed its input as ``GraphOutput`` could not read
+    # them, and constructing ``GraphOutput`` *with* them would raise
+    # ``ValidationError``. They flow through the typed envelope now.
+    entity_spans: Optional[List[Dict[str, Any]]] = None
+    narrative_spans: Optional[List[Dict[str, Any]]] = None
+    narrative_tokenizer: Optional[str] = None
 
     # embeddings
     embeddings: Optional[GraphEmbeddingModel] = None

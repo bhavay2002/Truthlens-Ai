@@ -14,6 +14,8 @@ from src.features.base.feature_registry import register_feature
 from src.features.base.lexicon_matcher import LexiconMatcher, to_token_array
 from src.features.base.tokenization import ensure_tokens_word, tokenize_words
 
+from src.features.base.numerics import EPS, MAX_CLIP
+
 from src.features.emotion.emotion_schema import (
     EMOTION_LABELS,
     WORD_TO_EMOTION,
@@ -21,25 +23,15 @@ from src.features.emotion.emotion_schema import (
 
 logger = logging.getLogger(__name__)
 
-EPS = 1e-8
-MAX_CLIP = 1.0
-
 
 # ------------------------------------------------------------
-# Sentence splitter
+# Sentence splitter — audit fix §4
 # ------------------------------------------------------------
-# Audit fix §11 — the previous extractor used ``re.findall(r"\b\w+\b",
-# text.lower())`` which silently dropped Unicode letters in cp1252 /
-# narrow locales (``café`` -> ``caf``). The canonical
-# :func:`tokenize_words` helper uses the Unicode-aware pattern.
-
-# We still split on terminal punctuation; the regex itself is ASCII-only
-# (``.!?``) which is correct for sentence boundaries.
-_SENT_SPLIT_RE = re.compile(r"[.!?]+")
-
-
-def _split_sentences(text: str) -> List[str]:
-    return [s.strip() for s in _SENT_SPLIT_RE.split(text) if s.strip()]
+# The local ``_SENT_SPLIT_RE`` / ``_split_sentences`` pair was duplicated
+# across syntactic / graph / trajectory extractors and they had subtly
+# different boundary behaviour. The canonical splitter now lives in
+# ``src.features.base.segmentation`` and is shared by all four sites.
+from src.features.base.segmentation import split_sentences as _split_sentences  # noqa: E402
 
 
 # ------------------------------------------------------------
@@ -135,7 +127,15 @@ class EmotionTrajectoryFeatures(BaseFeature):
 
         vectors = self._segment_vectors(context)
 
-        if len(vectors) == 1:
+        # §11.6 — track whether we had only one sentence BEFORE duplicating.
+        # When the document is a single sentence the slope / volatility /
+        # shift_mean are all trivially zero (identical vector duplicated).
+        # Emitting ``emotion_traj_single_sentence=1.0`` lets the downstream
+        # model attenuate the trajectory signal on those rows instead of
+        # learning a spurious "single-sentence document" pattern from the
+        # bimodal cliff in the other columns.
+        single_sentence = len(vectors) == 1
+        if single_sentence:
             vectors.append(vectors[0])
 
         mat = np.stack(vectors)  # shape: (T, E)
@@ -206,6 +206,10 @@ class EmotionTrajectoryFeatures(BaseFeature):
             # advanced signals
             "emotion_traj_shift_mean": self._safe(shift_mean),
             "emotion_traj_entropy_mean": self._safe(entropy_mean),
+
+            # §11.6 — availability indicator: 1.0 when the document was a
+            # single sentence (trajectory stats are degenerate in that case).
+            "emotion_traj_single_sentence": 1.0 if single_sentence else 0.0,
         }
 
     # -----------------------------------------------------
@@ -220,6 +224,8 @@ class EmotionTrajectoryFeatures(BaseFeature):
             "emotion_traj_range": 0.0,
             "emotion_traj_shift_mean": 0.0,
             "emotion_traj_entropy_mean": 0.0,
+            # §11.6 — availability indicator (1.0 = degenerate / unavailable).
+            "emotion_traj_single_sentence": 1.0,
         }
 
     def _safe(self, v: float) -> float:

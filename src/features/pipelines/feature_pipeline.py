@@ -23,11 +23,16 @@ logger = logging.getLogger(__name__)
 # =========================================================
 
 _TEXT_PREFIXES = (
+    # Legacy schema names (embedding_*, vocabulary_*, etc.)
     "embedding_", "vocabulary_", "hapax_", "token_",
     "unique_token_", "type_token_", "avg_token_", "max_token_",
     "repetition_", "sentence_", "avg_sentence_",
     "noun_", "verb_", "adjective_", "adverb_",
     "punctuation_", "lexical_", "average_word_",
+    # §10.1 — actual prefixes emitted by the current text-layer extractors.
+    # Without these, lex_/tok_/sem_/syn_ features fell through to "other"
+    # and the text multi-task head received zero signal every request.
+    "lex_", "tok_", "sem_", "syn_",
 )
 
 
@@ -166,15 +171,49 @@ class FeaturePipeline:
                 if isinstance(v, (int, float)):
                     features[k] = float(v)
 
-            # Entity metrics
-            for k, v in graph_output.get("entity_graph_metrics", {}).items():
+            # G-K1: ``GraphAnalyzer.compute_graph_metrics`` already
+            # prefixes every key with ``graph_`` (``graph_density``,
+            # ``graph_centralization``, ...). Re-prefixing here with
+            # ``graph_pipeline_entity_`` produced the double-prefixed
+            # ``graph_pipeline_entity_graph_density`` while
+            # ``feature_schema.GRAPH_PIPELINE_FEATURES`` declares the
+            # single-prefix form ``graph_pipeline_entity_density`` —
+            # the schema slots silently filled with the validator's
+            # zero ``fill_value`` on every request. Strip the inner
+            # ``graph_`` stem before joining so producer and schema
+            # actually meet.
+            entity_metrics = graph_output.get("entity_graph_metrics", {}) or {}
+            for k, v in entity_metrics.items():
                 if isinstance(v, (int, float)):
-                    features[f"graph_pipeline_entity_{k}"] = float(v)
+                    clean_k = k[6:] if k.startswith("graph_") else k
+                    features[f"graph_pipeline_entity_{clean_k}"] = float(v)
 
-            # Narrative metrics
-            for k, v in graph_output.get("narrative_graph_metrics", {}).items():
+            # Narrative metrics — same fix as above.
+            narrative_metrics = (
+                graph_output.get("narrative_graph_metrics", {}) or {}
+            )
+            for k, v in narrative_metrics.items():
                 if isinstance(v, (int, float)):
-                    features[f"graph_pipeline_narrative_{k}"] = float(v)
+                    clean_k = k[6:] if k.startswith("graph_") else k
+                    features[f"graph_pipeline_narrative_{clean_k}"] = float(v)
+
+            # G-K1: schema-required slots that aren't a 1:1 rename of
+            # an analyzer key. ``narrative_flow`` is the mean edge
+            # weight reported by the narrative builder, and
+            # ``narrative_coherence`` is the local clustering of the
+            # canonicalised narrative graph (high local clustering
+            # means the keyword network is densely connected → a
+            # coherent narrative). Both were declared in the schema
+            # but never emitted by the producer prior to this fix.
+            graph_features_dict = graph_output.get("graph_features", {}) or {}
+            if "narrative_graph_flow_strength" in graph_features_dict:
+                features["graph_pipeline_narrative_flow"] = float(
+                    graph_features_dict["narrative_graph_flow_strength"]
+                )
+            if "graph_clustering" in narrative_metrics:
+                features["graph_pipeline_narrative_coherence"] = float(
+                    narrative_metrics["graph_clustering"]
+                )
 
         except Exception as e:
             # Audit fix #1.8 — broken graph pipeline used to log at

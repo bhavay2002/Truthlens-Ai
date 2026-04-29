@@ -128,12 +128,27 @@ def spectral_eigen_embedding(
 
     n = A.shape[0]
 
+    # G-S7: previously the dense path returned the top-k by *signed*
+    # value (``np.sort(...)[::-1]``) while the sparse path used
+    # ``which="LA"`` (largest algebraic). Both pick "largest signed"
+    # — which silently disagrees with conventional spectral-embedding
+    # semantics (top-k by magnitude) for narrative graphs whose
+    # adjacency matrices have negative eigenvalues. Unify both
+    # branches on largest-magnitude (``LM``) so the embedding feature
+    # is consistent across the dense / sparse threshold and consistent
+    # with what callers expect from a "spectral embedding".
+    def _top_k_by_magnitude(values: np.ndarray, k: int) -> np.ndarray:
+        if values.size == 0:
+            return values
+        order = np.argsort(np.abs(values))[::-1]
+        return values[order[:k]]
+
     # ARPACK requires ``k < n``. For tiny graphs the dense path is
     # actually faster and avoids the ``k = n`` corner case entirely.
     if n <= 32 or dim >= n:
         try:
             eigenvalues = np.linalg.eigvalsh(A.toarray())
-            eigenvalues = np.sort(eigenvalues)[::-1]
+            eigenvalues = _top_k_by_magnitude(eigenvalues, dim)
         except np.linalg.LinAlgError:
             logger.warning("Dense eigen decomposition failed (n=%d)", n)
             return np.zeros(dim, dtype=np.float32)
@@ -144,15 +159,15 @@ def spectral_eigen_embedding(
             eigenvalues = eigsh(
                 A.astype(np.float64),
                 k=k,
-                which="LA",
+                which="LM",
                 return_eigenvectors=False,
             )
-            eigenvalues = np.sort(eigenvalues)[::-1]
+            eigenvalues = _top_k_by_magnitude(eigenvalues, dim)
         except Exception as exc:
             logger.warning("Sparse eigen decomposition failed (n=%d): %s", n, exc)
             try:
                 eigenvalues = np.linalg.eigvalsh(A.toarray())
-                eigenvalues = np.sort(eigenvalues)[::-1]
+                eigenvalues = _top_k_by_magnitude(eigenvalues, dim)
             except np.linalg.LinAlgError:
                 return np.zeros(dim, dtype=np.float32)
 
@@ -267,31 +282,42 @@ class GraphEmbeddingGenerator:
             return np.zeros(self.config.embedding_dim, dtype=np.float32)
 
         nodes = list(G.nodes())
-        walks = []
+        n_nodes = len(nodes)
+        vocab = {n: i for i, n in enumerate(nodes)}
+
+        # G-R3: previously called ``np.random.choice`` which uses the
+        # global numpy RNG, so two consecutive calls on the same graph
+        # returned different embeddings — breaking
+        # ``batch_feature_pipeline._build_cache_key``'s assumption of
+        # deterministic features per ``(text, config_fingerprint)``
+        # pair. Seed a *local* generator from the sorted node tuple so
+        # the same graph topology always yields the same walks across
+        # processes / runs without disturbing global RNG state.
+        seed = hash(tuple(sorted(nodes))) & 0xFFFFFFFF
+        rng = np.random.default_rng(seed)
+
+        # G-P5: previously allocated an N×N dense float64 transition
+        # matrix and computed ``np.mean(mat, axis=0)`` at the end —
+        # i.e. column sums divided by N. The matrix grew O(N²) memory
+        # for every entity graph (a 5k-node article ≈ 200 MB) yet
+        # only the column sums were ever read. Accumulate column
+        # sums (= "incoming" walk landings) directly in a 1D vector
+        # so the runtime is O(num_walks · walk_length · |V|) memory
+        # instead of O(|V|²).
+        incoming = np.zeros(n_nodes, dtype=np.float64)
 
         for _ in range(self.config.num_walks):
             for node in nodes:
-                walk = [node]
                 current = node
 
                 for _ in range(self.config.walk_length - 1):
                     neighbors = list(G.neighbors(current))
                     if not neighbors:
                         break
-                    current = np.random.choice(neighbors)
-                    walk.append(current)
+                    current = rng.choice(neighbors)
+                    incoming[vocab[current]] += 1.0
 
-                walks.append(walk)
-
-        vocab = {n: i for i, n in enumerate(nodes)}
-        mat = np.zeros((len(nodes), len(nodes)))
-
-        for walk in walks:
-            for i in range(len(walk) - 1):
-                a, b = walk[i], walk[i + 1]
-                mat[vocab[a], vocab[b]] += 1
-
-        vec = np.mean(mat, axis=0)
+        vec = incoming / float(n_nodes)
 
         if vec.size < self.config.embedding_dim:
             vec = np.pad(vec, (0, self.config.embedding_dim - vec.size))
@@ -370,14 +396,23 @@ class GraphEmbeddingGenerator:
             raise ValueError(f"Unknown embedding type: {etype}")
 
         # -------------------------
-        #  TEMPORAL ADAPTATION
-        # -------------------------
-        vec = self._apply_temporal_weight(vec, temporal_features)
-
-        # -------------------------
         # NORMALIZE + FIXED LENGTH (G-E1)
         # -------------------------
         vec = self._normalize(vec)
+
+        # -------------------------
+        #  TEMPORAL ADAPTATION
+        # -------------------------
+        # G-S6: apply temporal scaling *after* normalisation. The
+        # previous order multiplied the raw vector by ``1 + drift``
+        # and then ran an L2 normalise, which divides the scale right
+        # back out — the embedding was bit-identical regardless of
+        # the temporal context. Scaling post-normalisation keeps the
+        # vector's *direction* intact while its norm now encodes
+        # narrative drift, so downstream models (and the explainer)
+        # actually see the temporal signal that this layer is
+        # supposed to inject.
+        vec = self._apply_temporal_weight(vec, temporal_features)
 
         if vec.size < target_dim:
             vec = np.pad(vec, (0, target_dim - vec.size))

@@ -90,6 +90,28 @@ class AttentionRollout:
         attention = attention / attention.sum(dim=-1, keepdim=True).clamp_min(EPS)
         return attention
 
+    @staticmethod
+    def _stack_add_residual_normalize(
+        attentions_per_layer: List[torch.Tensor],
+    ) -> torch.Tensor:
+        """PERF-4: stack the per-layer head-averaged attentions and apply
+        the residual + row-normalisation in a single fused vectorised
+        pass instead of a Python ``for layer in attentions`` loop. On a
+        12-layer transformer this collapses 24 small kernel launches into
+        2 large ones.
+        """
+        stacked = torch.stack(attentions_per_layer, dim=0)
+        if stacked.dtype in (torch.float16, torch.bfloat16):
+            stacked = stacked.to(torch.float32)
+
+        seq_len = stacked.shape[-1]
+        identity = torch.eye(
+            seq_len, device=stacked.device, dtype=stacked.dtype
+        )
+        stacked = stacked + identity  # broadcast over the layer dim
+        denom = stacked.sum(dim=-1, keepdim=True).clamp_min(EPS)
+        return stacked / denom
+
     # =====================================================
     # MAIN (FINAL)
     # =====================================================
@@ -111,21 +133,31 @@ class AttentionRollout:
         try:
             with torch.no_grad():
 
-                processed: List[torch.Tensor] = []
+                # PERF-4: head-aggregate every layer first, then stack and
+                # apply residual + normalise in a single vectorised op.
+                head_avg = [
+                    self._aggregate_heads(layer_attention, sample_index)
+                    for layer_attention in attentions
+                ]
+                processed_stack = self._stack_add_residual_normalize(head_avg)
 
-                for i, layer_attention in enumerate(attentions):
+                if layer_weights:
+                    n = min(len(layer_weights), processed_stack.shape[0])
+                    weights = torch.ones(
+                        processed_stack.shape[0],
+                        device=processed_stack.device,
+                        dtype=processed_stack.dtype,
+                    )
+                    weights[:n] = torch.tensor(
+                        [float(w) for w in layer_weights[:n]],
+                        device=processed_stack.device,
+                        dtype=processed_stack.dtype,
+                    )
+                    processed_stack = processed_stack * weights.view(-1, 1, 1)
 
-                    attn = self._aggregate_heads(layer_attention, sample_index)
-
-                    if attn.dtype in (torch.float16, torch.bfloat16):
-                        attn = attn.to(torch.float32)
-
-                    attn = self._add_residual(attn)
-
-                    if layer_weights and i < len(layer_weights):
-                        attn = attn * float(layer_weights[i])
-
-                    processed.append(attn)
+                processed: List[torch.Tensor] = list(
+                    processed_stack.unbind(dim=0)
+                )
 
                 rollout = torch.linalg.multi_dot(processed[::-1])
 

@@ -135,9 +135,19 @@ class FeatureFusion:
                 )
                 batch_outputs = list(batch_outputs[:n]) + [{}] * max(0, n - len(batch_outputs))
 
+            # Audit fix §1.5 — emit a per-extractor ``<name>_extracted``
+            # indicator so the model can mask zero-fills caused by a
+            # silent extractor failure (or by an empty input). The
+            # codebase already uses this pattern for ``sem_available``
+            # and ``syn_spacy_available``; this generalises it to every
+            # extractor so a downstream feature drop is observable.
+            indicator_key = f"{feature.name}_extracted"
             for i, output in enumerate(batch_outputs):
                 if isinstance(output, dict) and output:
                     per_context[i].append(output)
+                    per_context[i].append({indicator_key: 1.0})
+                else:
+                    per_context[i].append({indicator_key: 0.0})
 
         results = []
         for outputs in per_context:

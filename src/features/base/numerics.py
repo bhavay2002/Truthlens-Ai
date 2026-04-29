@@ -24,6 +24,14 @@ bins, matching the information-theoretic convention.
 
 from __future__ import annotations
 
+# Audit fix §3.1 — single source of truth for the two epsilons that used
+# to be redeclared as module constants in 25+ files. Importing from here
+# means a calibration sweep has exactly one place to touch.
+
+EPS = 1e-8
+MAX_CLIP = 1.0
+
+
 from typing import Sequence, Union
 
 import numpy as np

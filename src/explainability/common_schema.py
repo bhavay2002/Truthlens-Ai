@@ -16,7 +16,9 @@ class TokenImportance(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     token: str
-    importance: float = Field(..., ge=0.0, le=1.0)
+    # CRIT-5: drop ge/le bounds — explainers may legitimately produce signed
+    # attributions or values outside [0,1]. Only finiteness is enforced.
+    importance: float
 
     @field_validator("token")
     @classmethod
@@ -53,29 +55,29 @@ class ExplanationOutput(BaseModel):
     entropy: Optional[float] = None
     raw: Optional[Any] = None
 
+    # CRIT-9: distinguish faithful (model-derived) explanations from
+    # heuristic / lexicon-only signals. Defaults to True; heuristic
+    # explainers (e.g. propaganda) must explicitly set it False so the
+    # aggregator can gate inclusion by policy.
+    faithful: bool = True
+
     # -------------------------
-    # VALIDATION
+    # VALIDATION (CRIT-5: pass-through, no re-normalization)
     # -------------------------
 
-    @field_validator("importance", mode="before")
+    @field_validator("importance")
     @classmethod
-    def normalize_importance(cls, v):
+    def validate_importance_finite(cls, v):
+        """CRIT-5: pass-through validator. Only checks finiteness — does NOT
+        re-normalize. Callers are responsible for calibration so that
+        ``importance[i]`` and ``structured[i].importance`` remain in sync.
+        """
         if not v:
             return v
-        arr = np.array(v, dtype=float)
-
-        if np.any(~np.isfinite(arr)):
+        arr = np.asarray(v, dtype=float)
+        if not np.all(np.isfinite(arr)):
             raise ValueError("importance must be finite")
-
-        arr = np.abs(arr)
-        total = float(np.sum(arr))
-
-        if total <= 0:
-            return [0.0] * len(arr)
-
-        arr = arr / (total + EPS)
-
-        return arr.tolist()
+        return [float(x) for x in arr]
 
     @field_validator("structured")
     @classmethod
@@ -88,6 +90,18 @@ class ExplanationOutput(BaseModel):
 
         if len(v) != len(tokens):
             raise ValueError("structured must align with tokens")
+
+        # CRIT-5: enforce that the flat ``importance`` list and the
+        # per-token ``structured`` list agree. Drift between the two
+        # representations was the root cause of cross-module disagreements.
+        for s, i in zip(v, importance):
+            if not math.isfinite(s.importance):
+                raise ValueError("structured importance must be finite")
+            if abs(s.importance - float(i)) > 1e-6:
+                raise ValueError(
+                    "structured importance must equal flat importance "
+                    f"(got {s.importance!r} vs {i!r})"
+                )
 
         return v
 
@@ -102,12 +116,19 @@ class AggregatedExplanation(BaseModel):
     tokens: List[str]
     final_token_importance: List[float]
 
-    structured: List[TokenImportance]  # 🔥 NEW
+    structured: List[TokenImportance]
 
     method_weights: Dict[str, float]
 
     confidence_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     agreement_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+
+    # CRIT-11 plumbing: the aggregator may carry the original text and
+    # per-token character offsets so downstream faithfulness metrics can
+    # ablate at the input-text level rather than re-tokenising a joined
+    # string. Optional for backward compatibility.
+    text: Optional[str] = None
+    offsets: Optional[List[List[int]]] = None
 
     @field_validator("final_token_importance")
     @classmethod
@@ -156,24 +177,42 @@ class ExplanationMetricsOutput(BaseModel):
 
 
 # =========================================================
-# FINAL OUTPUT
+# FINAL OUTPUT  (CRIT-6 / CRIT-7: single source of truth)
 # =========================================================
 
 class ExplainabilityResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    """Canonical explainability result.
+
+    CRIT-6 / CRIT-7: this is the *single* ExplainabilityResult schema.
+    ``src.explainability.explainability_pipeline.ExplainabilityResult``
+    re-exports this class. ``model_explainer.py`` has been removed.
+    """
+
+    # ``extra="ignore"`` so callers can pass extra orchestrator fields
+    # without exploding while still validating the documented contract.
+    model_config = ConfigDict(extra="ignore")
 
     prediction: Dict[str, Any]
 
-    shap_explanation: Optional[ExplanationOutput] = None
-    lime_explanation: Optional[ExplanationOutput] = None
-    attention_explanation: Optional[ExplanationOutput] = None
-    propaganda_explanation: Optional[ExplanationOutput] = None
+    shap_explanation: Optional[Any] = None
+    lime_explanation: Optional[Any] = None
+    attention_explanation: Optional[Any] = None
+    propaganda_explanation: Optional[Any] = None
 
-    aggregated_explanation: Optional[AggregatedExplanation] = None
+    # heuristic / model-side explainers
+    bias_explanation: Optional[Any] = None
+    emotion_explanation: Optional[Any] = None
 
-    consistency: Optional[ConsistencyMetrics] = None
-    metrics: Optional[ExplanationMetricsOutput] = None
+    aggregated_explanation: Optional[Any] = None
+
+    consistency_metrics: Optional[Dict[str, float]] = None
+    explanation_metrics: Optional[Dict[str, Any]] = None
+
+    monitoring: Optional[Dict[str, Any]] = None
 
     explanation_quality_score: Optional[float] = Field(default=None, ge=0.0, le=1.0)
 
-    metadata: Dict[str, Any]
+    # FAITH-6: surface which sub-explainers failed so consumers can react.
+    module_failures: List[str] = Field(default_factory=list)
+
+    metadata: Optional[Dict[str, Any]] = None

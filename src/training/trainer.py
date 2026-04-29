@@ -33,16 +33,16 @@ class Trainer:
 
     def __init__(
         self,
-        config_path: str,
-        model: torch.nn.Module,
-        train_loader: DataLoader,
-        val_loader: Optional[DataLoader],
-        training_step: TrainingStep,
-        evaluator: EvaluationEngine,
+        config_path: Optional[str] = None,
+        model: torch.nn.Module = None,
+        train_loader: DataLoader = None,
+        val_loader: Optional[DataLoader] = None,
+        training_step: TrainingStep = None,
+        evaluator: EvaluationEngine = None,
         checkpoint: Optional[CheckpointEngine] = None,
         distributed: Optional[DistributedEngine] = None,
         tracker: Optional[ExperimentTracker] = None,
-        monitor_metric: str = "val_loss",
+        monitor_metric: Optional[str] = None,
         maximize_metric: bool = False,
         params_override: Optional[Dict[str, Any]] = None,
         setup_config: Optional[TrainingSetupConfig] = None,
@@ -52,10 +52,41 @@ class Trainer:
 
         # -------------------------------------------------
         # CONFIG
+        #
+        # N-LOW-4: ``config_path`` is now optional. The previous required
+        # argument forced every caller (Optuna trials, unit tests,
+        # ad-hoc smoke tests) to invent a YAML path even when they had
+        # no need for the multitask config — and an empty string would
+        # cascade into a confusing ``FileNotFoundError`` deep inside
+        # ``ModelConfigLoader``. Skip the load when no path is supplied
+        # and let downstream code detect ``self.cfg is None`` if it
+        # actually needs config-derived defaults.
         # -------------------------------------------------
-        self.cfg = ModelConfigLoader.load_multitask_config(config_path)
+        if config_path:
+            self.cfg = ModelConfigLoader.load_multitask_config(config_path)
+        else:
+            self.cfg = None
 
         self.model = model
+
+        # EDGE-3: an empty train_loader (dataset shorter than batch_size
+        # with ``drop_last=True``) used to silently no-op every epoch
+        # and finish with ``global_step=0``, masking misconfigured data
+        # pipelines.  Surface the misconfiguration loudly at construction.
+        if train_loader is None:
+            raise ValueError("Trainer requires a non-None train_loader")
+        try:
+            n_batches = len(train_loader)
+        except TypeError:
+            # iterable-style loaders don't support len(); skip the check
+            n_batches = None
+        if n_batches is not None and n_batches == 0:
+            raise ValueError(
+                "train_loader is empty (0 batches). Likely cause: "
+                "dataset shorter than batch_size with drop_last=True, "
+                "or a filter that excluded every row."
+            )
+
         self.train_loader = train_loader
         self.val_loader = val_loader
 
@@ -65,6 +96,22 @@ class Trainer:
         self.distributed = distributed
         self.tracker = tracker
 
+        # N-MED-5: ``monitor_metric`` previously hardcoded its default to
+        # ``"val_loss"`` regardless of task type — silently producing a
+        # KeyError-shaped no-op (early stopping never triggers, best
+        # checkpoint never saved) when the evaluator emitted, e.g.,
+        # ``accuracy`` / ``micro_f1`` for classification heads. Resolve
+        # the default lazily (``None`` → ``val_loss``) and warn loudly so
+        # the user notices that they should set it explicitly per task.
+        if monitor_metric is None:
+            logger.warning(
+                "N-MED-5: Trainer.monitor_metric defaulting to 'val_loss'. "
+                "If your task is classification (multiclass / multilabel / "
+                "binary), pass monitor_metric='accuracy' (or 'micro_f1') "
+                "and maximize_metric=True so early stopping and best-"
+                "checkpoint selection work."
+            )
+            monitor_metric = "val_loss"
         self.monitor_metric = monitor_metric
         self.maximize_metric = maximize_metric
 
@@ -115,14 +162,19 @@ class Trainer:
         # the YAML config otherwise.)
         # -------------------------------------------------
         params_override = params_override or {}
-        self.epochs = int(
-            params_override.get("epochs", self.cfg.training.num_epochs)
+        # N-LOW-4: when ``config_path`` was omitted there is no ``self.cfg``,
+        # so fall back to sane defaults rather than dereferencing ``None``.
+        cfg_epochs = (
+            self.cfg.training.num_epochs if self.cfg is not None else 1
         )
+        cfg_patience = (
+            self.cfg.training.early_stopping_patience
+            if self.cfg is not None
+            else 3
+        )
+        self.epochs = int(params_override.get("epochs", cfg_epochs))
         self.early_patience = int(
-            params_override.get(
-                "early_stopping_patience",
-                self.cfg.training.early_stopping_patience,
-            )
+            params_override.get("early_stopping_patience", cfg_patience)
         )
 
         self.global_step = 0
@@ -170,7 +222,9 @@ class Trainer:
         # -------------------------------------------------
         # LOG CONFIG
         # -------------------------------------------------
-        if self.tracker and self._is_main():
+        # N-LOW-4: ``asdict(self.cfg)`` would crash when the optional
+        # config_path was not supplied; only log when we actually loaded one.
+        if self.tracker and self._is_main() and self.cfg is not None:
             self.tracker.log_params(asdict(self.cfg))
 
         logger.info("Trainer initialized (PRODUCTION-GRADE)")
@@ -181,61 +235,80 @@ class Trainer:
 
     def train(self):
 
-        # 🔥 SANITY CHECK (CRITICAL)
-        if self.setup_cfg.run_sanity_check:
-            self._run_sanity_check()
+        # N-LOW-6: Wrap the whole training body in try/finally so the
+        # tracker run is finalised and the distributed process group is
+        # destroyed EVEN if training raises (sanity-check failure,
+        # OOM during forward, KeyboardInterrupt, ...). Previously a
+        # mid-training exception left:
+        #   - the MLflow run hanging (so the next run picked up the
+        #     orphaned active-run handle and silently logged into it),
+        #   - the W&B process unfinalised (no upload, dropped artifacts),
+        #   - the NCCL/GLOO process group alive (next run's
+        #     init_process_group raised "already initialized").
+        try:
 
-        for epoch in range(self.epochs):
+            # 🔥 SANITY CHECK (CRITICAL)
+            if self.setup_cfg.run_sanity_check:
+                self._run_sanity_check()
 
-            self._epoch = epoch
+            for epoch in range(self.epochs):
 
-            if self._is_main():
-                logger.info("Epoch %d/%d", epoch + 1, self.epochs)
+                self._epoch = epoch
 
-            # DDP sampler sync
-            if self.distributed and self.distributed.initialized:
-                if hasattr(self.train_loader.sampler, "set_epoch"):
-                    self.train_loader.sampler.set_epoch(epoch)
+                if self._is_main():
+                    logger.info("Epoch %d/%d", epoch + 1, self.epochs)
 
-            self._train_epoch()
-
-            # -------------------------
-            # VALIDATION
-            # -------------------------
-            if self.val_loader:
-
+                # DDP sampler sync
                 if self.distributed and self.distributed.initialized:
-                    self.distributed.barrier()
+                    if hasattr(self.train_loader.sampler, "set_epoch"):
+                        self.train_loader.sampler.set_epoch(epoch)
 
-                val_metrics = self.evaluate()
+                self._train_epoch()
 
-                metric_value = val_metrics.get(self.monitor_metric)
+                # -------------------------
+                # VALIDATION
+                # -------------------------
+                if self.val_loader:
 
-                if metric_value is not None:
-                    self._update_early_stopping(metric_value)
+                    if self.distributed and self.distributed.initialized:
+                        self.distributed.barrier()
 
-                # LOGGING
-                if self.tracker and self._is_main():
-                    self.tracker.log_metrics(val_metrics, step=self.global_step)
+                    val_metrics = self.evaluate()
 
-                # CHECKPOINT
-                if self.checkpoint and self._is_main():
-                    self._save_checkpoint(val_metrics)
+                    metric_value = val_metrics.get(self.monitor_metric)
 
-                # EARLY STOP
-                if self.no_improve_epochs >= self.early_patience:
-                    if self._is_main():
-                        logger.warning("Early stopping triggered")
-                    break
+                    if metric_value is not None:
+                        self._update_early_stopping(metric_value)
 
-        # -------------------------------------------------
-        # CLEANUP
-        # -------------------------------------------------
-        if self.tracker and self._is_main():
-            self.tracker.finish()
+                    # LOGGING
+                    if self.tracker and self._is_main():
+                        self.tracker.log_metrics(val_metrics, step=self.global_step)
 
-        if self.distributed:
-            self.distributed.cleanup()
+                    # CHECKPOINT
+                    if self.checkpoint and self._is_main():
+                        self._save_checkpoint(val_metrics)
+
+                    # EARLY STOP
+                    if self.no_improve_epochs >= self.early_patience:
+                        if self._is_main():
+                            logger.warning("Early stopping triggered")
+                        break
+
+        finally:
+            # -------------------------------------------------
+            # CLEANUP — runs even on exception (N-LOW-6)
+            # -------------------------------------------------
+            if self.tracker and self._is_main():
+                try:
+                    self.tracker.finish()
+                except Exception:
+                    logger.exception("Tracker finalisation failed")
+
+            if self.distributed:
+                try:
+                    self.distributed.cleanup()
+                except Exception:
+                    logger.exception("Distributed cleanup failed")
 
     # =====================================================
     # TRAIN EPOCH

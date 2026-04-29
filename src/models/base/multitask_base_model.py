@@ -77,7 +77,14 @@ class MultiTaskBaseModel(BaseModel):
         task_list = [active_task] if active_task else list(self.task_heads.keys())
 
         outputs: Dict[str, Any] = {"tasks": {}}
-        total_loss: Optional[torch.Tensor] = None
+        # A4.1: collect per-task losses in a list and reduce ONCE via
+        # ``torch.stack(...).sum()`` instead of the previous ternary
+        # ``loss if total_loss is None else total_loss + loss``. The
+        # ternary allocated a fresh tensor and pushed an autograd node
+        # per task, deepening the backward graph by N levels for an
+        # N-task model. The single-shot reduce is also clearer about
+        # the active-task vs multi-task split below.
+        per_task_losses: list[torch.Tensor] = []
 
         for name in task_list:
 
@@ -110,10 +117,15 @@ class MultiTaskBaseModel(BaseModel):
                         probs * log_p + (1.0 - probs) * log_1mp
                     ).mean(dim=-1)
                 else:
+                    # A6.2: derive ``preds`` / ``confidence`` from
+                    # ``logits`` / ``log_probs`` directly — softmax is
+                    # monotone so ``argmax(logits) == argmax(probs)``,
+                    # and ``log_probs.max().exp()`` equals
+                    # ``probs.max()`` without recomputing softmax.
                     log_probs = F.log_softmax(logits, dim=-1)
                     probs = log_probs.exp()
-                    preds = torch.argmax(probs, dim=-1)
-                    confidence = probs.max(dim=-1).values
+                    preds = torch.argmax(logits, dim=-1)
+                    confidence = log_probs.max(dim=-1).values.exp()
                     entropy = -(probs * log_probs).sum(dim=-1)
 
                 task_out["probabilities"] = probs
@@ -135,17 +147,24 @@ class MultiTaskBaseModel(BaseModel):
                 loss = loss_fn(logits, target)
                 task_out["loss"] = loss
 
-                total_loss = loss if active_task else (
-                    loss if total_loss is None else total_loss + loss
-                )
+                # A4.1: append; final reduce happens once, outside the loop.
+                per_task_losses.append(loss)
 
             outputs["tasks"][name] = task_out
 
         if active_task:
             outputs.update(outputs["tasks"][active_task])
 
-        if total_loss is not None:
-            outputs["loss"] = total_loss
+        # A4.1: explicit active-task vs multi-task split. In active-task
+        # mode there is at most ONE entry in ``per_task_losses``, so we
+        # promote it directly. In multi-task mode we ``stack().sum()``
+        # to collapse all per-task losses with a single allocation and a
+        # single autograd node.
+        if per_task_losses:
+            if active_task:
+                outputs["loss"] = per_task_losses[0]
+            else:
+                outputs["loss"] = torch.stack(per_task_losses).sum()
 
         if return_features:
             outputs["shared_features"] = shared

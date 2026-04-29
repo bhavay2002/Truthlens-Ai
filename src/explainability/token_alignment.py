@@ -12,6 +12,10 @@ SPECIAL_TOKENS = {
 
 EPS = 1e-12
 
+# RoBERTa / GPT-2 BPE uses U+0120 (Ġ) as a word-boundary prefix.
+# Tokens that start with Ġ begin a new word; all others are continuations.
+_BPE_BOUNDARY = "\u0120"  # Ġ
+
 
 def align_tokens(
     tokens: Sequence[str],
@@ -34,14 +38,18 @@ def align_tokens(
     if len(tokens) != len(scores):
         raise ValueError("tokens and scores must match in length")
 
-    if tokenizer_type not in {"wordpiece", "sentencepiece"}:
+    if tokenizer_type not in {"wordpiece", "sentencepiece", "bpe"}:
         raise ValueError("invalid tokenizer_type")
 
     if aggregation not in {"mean", "sum", "max"}:
         raise ValueError("invalid aggregation")
 
     if len(tokens) == 0:
-        return [] if not return_structured else {"tokens": [], "importance": []}
+        if return_structured:
+            return {"tokens": [], "importance": []}
+        if return_variance:
+            return [], [], []
+        return [], []
 
     # ==================================================
     # AGG FUNCTION
@@ -108,7 +116,7 @@ def align_tokens(
             vals = [score]
 
         # ---------------- SENTENCEPIECE ----------------
-        else:
+        elif tokenizer_type == "sentencepiece":
 
             if token.startswith("▁"):
                 if parts:
@@ -121,6 +129,25 @@ def align_tokens(
                 vals = [score]
 
             else:
+                parts.append(token)
+                vals.append(score)
+
+        # ---------------- RoBERTa / GPT-2 BPE (Ġ) ----------------
+        else:  # tokenizer_type == "bpe"
+
+            if token.startswith(_BPE_BOUNDARY):
+                # Ġ prefix → this token starts a new word.
+                if parts:
+                    val, var = agg(vals)
+                    merged_tokens.append("".join(parts))
+                    merged_scores.append(val)
+                    merged_variance.append(var)
+
+                parts = [token[len(_BPE_BOUNDARY):]]  # strip the Ġ
+                vals = [score]
+
+            else:
+                # No prefix → continuation of the current word.
                 parts.append(token)
                 vals.append(score)
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Any
+from typing import Any, Dict, Iterable, Optional
 
 import torch
  
@@ -29,6 +29,22 @@ class TaskOutput:
             predictions=self._safe_detach(self.predictions),
             loss=self._safe_detach(self.loss),
         )
+
+    def detach_(self) -> "TaskOutput":
+        # P2.4: in-place detach. The fluent ``detach()`` returns a new
+        # ``TaskOutput`` and a new tensor for every field, which doubles
+        # transient memory while the autograd graph is still being torn
+        # down. The vast majority of callers only need to break the
+        # graph in place before serialising or storing outputs across
+        # batches; for them ``detach_()`` avoids the extra allocations.
+        self.logits = self.logits.detach()
+        if isinstance(self.probabilities, torch.Tensor):
+            self.probabilities = self.probabilities.detach()
+        if isinstance(self.predictions, torch.Tensor):
+            self.predictions = self.predictions.detach()
+        if isinstance(self.loss, torch.Tensor):
+            self.loss = self.loss.detach()
+        return self
 
     def to(self, device: torch.device) -> "TaskOutput":
         return TaskOutput(
@@ -64,35 +80,67 @@ class MultiTaskOutput:
     # =====================================================
 
     @classmethod
-    def from_model_outputs(cls, outputs: Dict[str, Any]) -> "MultiTaskOutput":
+    def from_model_outputs(
+        cls,
+        outputs: Dict[str, Any],
+        *,
+        task_names: Optional[Iterable[str]] = None,
+    ) -> "MultiTaskOutput":
+        """Adapt a model's raw forward dict into a :class:`MultiTaskOutput`.
+
+        A3.7 — the previous "any dict-with-'logits' key counts as a task"
+        fallback was a footgun: a stray entry like ``outputs["debug"] =
+        {"logits": ...}`` would be interpreted as a task and pollute the
+        loss / metrics surface. We now require either a ``task_logits``
+        dict (the canonical fast path) or an explicit ``task_names``
+        whitelist supplied by the caller (typically
+        ``model.get_task_names()``). Legacy auto-discovery is gone.
+        """
 
         if isinstance(outputs.get("multitask_output"), MultiTaskOutput):
             return outputs["multitask_output"]
 
         multitask = cls()
 
-        # FAST PATH (preferred)
+        # FAST PATH — single source of truth.
         if "task_logits" in outputs:
-            for task, logits in outputs["task_logits"].items():
-                multitask.tasks[task] = TaskOutput(logits=logits)
+            task_logits = outputs["task_logits"]
+            for task, logits in task_logits.items():
+                payload = outputs.get(task) if isinstance(outputs.get(task), dict) else {}
+                multitask.tasks[task] = TaskOutput(
+                    logits=logits,
+                    probabilities=payload.get("probabilities"),
+                    predictions=payload.get("predictions"),
+                    loss=payload.get("loss"),
+                )
 
-        # FALLBACK (legacy)
-        else:
-            for task_name, payload in outputs.items():
-
+        # WHITELIST PATH — caller knows the task names.
+        elif task_names is not None:
+            for task_name in task_names:
+                payload = outputs.get(task_name)
                 if not isinstance(payload, dict):
-                    continue
-
+                    raise KeyError(
+                        f"Task {task_name!r} not present in model outputs "
+                        f"(have: {sorted(k for k in outputs if isinstance(k, str))})"
+                    )
                 logits = payload.get("logits")
                 if not isinstance(logits, torch.Tensor):
-                    continue
-
+                    raise TypeError(
+                        f"Task {task_name!r}: 'logits' missing or not a Tensor"
+                    )
                 multitask.tasks[task_name] = TaskOutput(
                     logits=logits,
                     probabilities=payload.get("probabilities"),
                     predictions=payload.get("predictions"),
                     loss=payload.get("loss"),
                 )
+        else:
+            raise RuntimeError(
+                "from_model_outputs requires either 'task_logits' in the "
+                "model output dict or an explicit task_names= whitelist "
+                "(typically model.get_task_names()). Auto-discovery has "
+                "been removed (A3.7)."
+            )
 
         multitask.loss = outputs.get("loss")
         multitask.task_losses = outputs.get("task_losses")
@@ -157,6 +205,20 @@ class MultiTaskOutput:
             } if self.task_losses else None,
             metadata=self.metadata,
         )
+
+    def detach_(self) -> "MultiTaskOutput":
+        # P2.4: in-place detach across the whole multi-task output.
+        # See ``TaskOutput.detach_`` — same rationale, applied
+        # recursively. Returns ``self`` for fluent chaining.
+        for task_output in self.tasks.values():
+            task_output.detach_()
+        if isinstance(self.loss, torch.Tensor):
+            self.loss = self.loss.detach()
+        if self.task_losses:
+            for k, v in list(self.task_losses.items()):
+                if isinstance(v, torch.Tensor):
+                    self.task_losses[k] = v.detach()
+        return self
 
     # =====================================================
     # SERIALIZATION

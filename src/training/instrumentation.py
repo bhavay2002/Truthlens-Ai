@@ -4,6 +4,7 @@ from __future__ import annotations
  
 import math
 import os
+import statistics
 import time
 from collections import deque, defaultdict, Counter
 from typing import Any, Dict, Iterable, Optional, Tuple
@@ -37,6 +38,8 @@ class LossTracker:
         self.eps = eps
         self.ema = {t: 0.0 for t in tasks}
         self.steps = {t: 0 for t in tasks}
+        # N-CRIT-2: per-task non-finite counter — surfaced for AutoDebugEngine.
+        self._nan_counter: Dict[str, int] = {}
 
     def update(self, losses: Dict[str, Any]) -> Dict[str, float]:
         out = {}
@@ -44,8 +47,23 @@ class LossTracker:
         for t, v in losses.items():
             val = _to_float(v)
 
+            # N-CRIT-2: Previously this raised ``RuntimeError`` on a single
+            # non-finite per-task loss, which crashed the WHOLE training
+            # step (including every other task that was healthy) and bypassed
+            # the ``skip_nan_loss`` policy in TrainingStep.  The contract is
+            # to track losses, not to police them; surface the failure via
+            # an internal counter so AutoDebugEngine still classifies the
+            # event as ``nan_loss`` downstream, then skip the EMA update for
+            # this task so the EMA isn't poisoned by NaN/Inf.
             if not _is_finite(val):
-                raise RuntimeError(f"Non-finite loss: {t}")
+                self._nan_counter[t] = self._nan_counter.get(t, 0) + 1
+                # Carry forward the previous bias-corrected value so the
+                # consumer sees a stable signal instead of a missing key.
+                prev = self.ema.get(t, 0.0)
+                steps = self.steps.get(t, 0)
+                bias = 1 - (1 - self.alpha) ** steps if steps > 0 else self.eps
+                out[t] = prev / (bias + self.eps)
+                continue
 
             self.steps[t] = self.steps.get(t, 0) + 1
 
@@ -76,8 +94,13 @@ class LossStats:
             h = self.history[t]
             h.append(val)
 
-            mean = sum(h) / len(h)
-            var = float(torch.tensor(list(h)).var(unbiased=True).item()) if len(h) > 1 else 0.0
+            # N-MED-1: previously this allocated a fresh ``torch.tensor`` per
+            # task per step (and on CUDA, that's a host→device sync) just to
+            # compute a sample variance over a Python deque of ~50 floats.
+            # ``statistics`` is implemented in C and stays on the host —
+            # measurably faster and free of accidental GPU traffic.
+            mean = statistics.fmean(h)
+            var = statistics.variance(h) if len(h) > 1 else 0.0
 
             out[t] = {"mean": mean, "var": var}
 

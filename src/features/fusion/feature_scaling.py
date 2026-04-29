@@ -275,6 +275,193 @@ FeatureScaler = FeatureScalingPipeline
 
 
 # =========================================================
+# PER-SECTION SCALER  (§10.4 multi-task scaling fix)
+# =========================================================
+
+class FeatureSectionScaler:
+    """Maintains one :class:`FeatureScalingPipeline` per feature section.
+
+    §10.4 — A single scaler fitted across all features mis-scales sections
+    whose value ranges differ by orders of magnitude (e.g. raw log-magnitude
+    token counts vs. normalised [0, 1] lexicon ratios).  This wrapper splits
+    each sample dict by section using :func:`partition_feature_sections`,
+    fits an independent scaler per section, and reassembles the scaled dicts
+    before returning.  Unknown keys (section "other") fall through to a
+    single catch-all scaler.
+
+    Parameters
+    ----------
+    method : str
+        Scaling method forwarded to every :class:`FeatureScalingPipeline`
+        (``"standard"``, ``"minmax"``, or ``"robust"``).
+    clip : tuple or None
+        Optional ``(low, high)`` clip forwarded to every child scaler.
+    """
+
+    def __init__(
+        self,
+        method: str = "standard",
+        clip: Optional[Tuple[float, float]] = None,
+    ) -> None:
+        self.method = method
+        self.clip = clip
+        self._scalers: Dict[str, "FeatureScalingPipeline"] = {}
+        self.fitted_: bool = False
+
+    # ------------------------------------------------------------------
+
+    def _split_by_section(
+        self, features: Sequence[Dict[str, float]]
+    ) -> Dict[str, List[Dict[str, float]]]:
+        """Return ``{section: [per-sample dict, ...]}`` for all samples."""
+        # Import here to avoid circular import at module load time.
+        from src.features.pipelines.feature_pipeline import partition_feature_sections
+
+        section_samples: Dict[str, List[Dict[str, float]]] = {}
+        for fd in features:
+            sections = partition_feature_sections(fd)
+            for sec, sec_dict in sections.items():
+                section_samples.setdefault(sec, []).append(sec_dict)
+        return section_samples
+
+    # ------------------------------------------------------------------
+
+    def fit(
+        self, features: Sequence[Dict[str, float]]
+    ) -> "FeatureSectionScaler":
+        if not features:
+            raise ValueError("FeatureSectionScaler.fit: empty feature list")
+
+        section_samples = self._split_by_section(features)
+        self._scalers = {}
+
+        for sec, samples in section_samples.items():
+            # Skip sections where every sample dict is empty (no features
+            # for that section in this dataset).
+            if not any(samples):
+                continue
+            scaler = FeatureScalingPipeline(method=self.method, clip=self.clip)
+            try:
+                scaler.fit(samples)
+                self._scalers[sec] = scaler
+            except Exception as exc:
+                logger.warning(
+                    "FeatureSectionScaler: skipping section %r — fit failed: %s",
+                    sec, exc,
+                )
+
+        self.fitted_ = True
+        logger.info(
+            "FeatureSectionScaler fitted | method=%s sections=%d samples=%d",
+            self.method, len(self._scalers), len(features),
+        )
+        return self
+
+    # ------------------------------------------------------------------
+
+    def transform(
+        self, features: Sequence[Dict[str, float]]
+    ) -> List[Dict[str, float]]:
+        if not self.fitted_:
+            raise RuntimeError(
+                "FeatureSectionScaler.transform: call fit() first."
+            )
+
+        from src.features.pipelines.feature_pipeline import partition_feature_sections
+
+        out: List[Dict[str, float]] = []
+        for fd in features:
+            sections = partition_feature_sections(fd)
+            merged: Dict[str, float] = {}
+            for sec, sec_dict in sections.items():
+                if not sec_dict:
+                    continue
+                scaler = self._scalers.get(sec)
+                if scaler is None:
+                    # Section unseen at fit time — pass through unscaled.
+                    merged.update(sec_dict)
+                else:
+                    scaled_list = scaler.transform([sec_dict])
+                    if scaled_list:
+                        merged.update(scaled_list[0])
+            out.append(merged)
+        return out
+
+    # ------------------------------------------------------------------
+
+    def fit_transform(
+        self, features: Sequence[Dict[str, float]]
+    ) -> List[Dict[str, float]]:
+        self.fit(features)
+        return self.transform(features)
+
+    # ------------------------------------------------------------------
+
+    def save(self, path: str) -> None:
+        if not self.fitted_:
+            raise RuntimeError("Cannot save unfitted FeatureSectionScaler")
+
+        import json as _json
+
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        payload = {
+            "method": self.method,
+            "clip": list(self.clip) if self.clip is not None else None,
+            "sections": {},
+        }
+        for sec, scaler in self._scalers.items():
+            payload["sections"][sec] = {
+                "feature_names": scaler.feature_names_,
+                "stats": scaler.stats_,
+            }
+        with open(path, "w", encoding="utf-8") as f:
+            _json.dump(payload, f, indent=2)
+        logger.info(
+            "FeatureSectionScaler saved | path=%s sections=%d",
+            path, len(self._scalers),
+        )
+
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def load(cls, path: str) -> "FeatureSectionScaler":
+        import json as _json
+
+        with open(path, "r", encoding="utf-8") as f:
+            payload = _json.load(f)
+
+        obj = cls(
+            method=payload.get("method", "standard"),
+            clip=tuple(payload["clip"]) if payload.get("clip") else None,
+        )
+        for sec, sec_data in payload.get("sections", {}).items():
+            scaler = FeatureScalingPipeline(method=obj.method, clip=obj.clip)
+            scaler.feature_names_ = list(sec_data.get("feature_names", []))
+            scaler.stats_ = dict(sec_data.get("stats", {}))
+            scaler.fitted_ = bool(scaler.feature_names_ and scaler.stats_)
+            if scaler.fitted_:
+                obj._scalers[sec] = scaler
+
+        obj.fitted_ = bool(obj._scalers)
+        if not obj.fitted_:
+            raise RuntimeError(
+                f"FeatureSectionScaler.load: no valid sections in {path}"
+            )
+        logger.info(
+            "FeatureSectionScaler loaded | path=%s sections=%d",
+            path, len(obj._scalers),
+        )
+        return obj
+
+    def __repr__(self) -> str:
+        n = len(self._scalers) if self.fitted_ else 0
+        return (
+            f"FeatureSectionScaler(method={self.method!r}, "
+            f"fitted={self.fitted_}, sections={n})"
+        )
+
+
+# =========================================================
 # DEPRECATION SHIM  —  HybridTruthLensModel moved to
 #   src.models.architectures.hybrid_truthlens_model
 # =========================================================

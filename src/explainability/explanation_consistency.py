@@ -72,7 +72,17 @@ class ExplanationConsistency:
 
     @staticmethod
     def _spearman(a, b):
-        return float(np.corrcoef(np.argsort(a), np.argsort(b))[0, 1])
+        # CRIT-10: Spearman requires *ranks*, not the indices that would
+        # sort the array. ``np.argsort(np.argsort(x))`` produces the rank
+        # of each element. The previous implementation correlated
+        # permutation indices, which yields a number in [-1, 1] but has
+        # no statistical interpretation.
+        ra = np.argsort(np.argsort(np.asarray(a))).astype(float)
+        rb = np.argsort(np.argsort(np.asarray(b))).astype(float)
+        if np.std(ra) < 1e-12 or np.std(rb) < 1e-12:
+            return 0.0
+        c = np.corrcoef(ra, rb)[0, 1]
+        return 0.0 if not np.isfinite(c) else float(c)
 
     @staticmethod
     def _cosine(a, b):
@@ -120,25 +130,30 @@ class ExplanationConsistency:
     # =====================================================
 
     def _token_consistency(self, sources: Dict[str, Dict[str, float]]):
-
+        """REC-4: vectorised implementation — replaces the per-token Python
+        loop with a single ``np.nanstd`` over a [n_sources, n_tokens]
+        matrix. Missing entries are represented as NaN so that the std is
+        computed only over the sources that actually carry each token.
+        """
         tokens = sorted(set().union(*[set(s.keys()) for s in sources.values()]))
 
-        token_scores = {}
+        if not tokens:
+            return {}
 
-        for t in tokens:
+        names = list(sources.keys())
+        token_idx = {t: i for i, t in enumerate(tokens)}
 
-            vals = [src[t] for src in sources.values() if t in src]
+        mat = np.full((len(names), len(tokens)), np.nan, dtype=float)
+        for row, name in enumerate(names):
+            for t, v in sources[name].items():
+                if t in token_idx:
+                    mat[row, token_idx[t]] = v
 
-            if len(vals) < 2:
-                token_scores[t] = 0.0
-                continue
+        present_count = np.sum(~np.isnan(mat), axis=0)
+        stds = np.where(present_count >= 2, np.nanstd(mat, axis=0), np.nan)
+        scores = np.where(~np.isnan(stds), np.clip(1.0 - stds, 0.0, 1.0), 0.0)
 
-            vals = np.array(vals)
-
-            score = 1.0 - float(np.std(vals))
-            token_scores[t] = float(np.clip(score, 0.0, 1.0))
-
-        return token_scores
+        return dict(zip(tokens, scores.tolist()))
 
     # =====================================================
     # MAIN

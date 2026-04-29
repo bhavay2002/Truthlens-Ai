@@ -7,12 +7,22 @@ from typing import List, Tuple, Optional
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 
+from src.features.base.tokenization import tokenize_words
+
 logger = logging.getLogger(__name__)
 
 
 # =========================================================
 # CORE ENGINE
 # =========================================================
+# Audit fix §5.3 — sklearn's default ``token_pattern=r"(?u)\b\w\w+\b"``
+# silently drops single-character tokens, contractions (``don't`` ->
+# ``don``, ``t``) and accented characters. Every other extractor in
+# this codebase reads ``ensure_tokens_word`` from the per-context
+# cache, which uses the canonical Unicode-aware ``tokenize_words``
+# helper. Aligning the two avoids the (otherwise silent) divergence
+# between the TF-IDF vocabulary and the rest of the lexical/semantic
+# feature universe.
 
 @dataclass
 class TfidfEngineering:
@@ -25,6 +35,20 @@ class TfidfEngineering:
 
     # -----------------------------------------------------
 
+    def _build_vectorizer(self) -> TfidfVectorizer:
+        return TfidfVectorizer(
+            max_features=self.max_features,
+            lowercase=self.lowercase,
+            # Audit §5.3 — drive the vocabulary off ``tokenize_words``
+            # so TF-IDF matches the lexical / bias / propaganda
+            # extractors. ``token_pattern=None`` disables sklearn's
+            # default regex (required when a tokenizer callable is
+            # supplied, otherwise sklearn warns and ignores the
+            # tokenizer).
+            tokenizer=tokenize_words,
+            token_pattern=None,
+        )
+
     def fit(self, texts: List[str]) -> None:
         """
         Fit TF-IDF vectorizer.
@@ -33,10 +57,7 @@ class TfidfEngineering:
         if not texts:
             raise ValueError("Texts cannot be empty")
 
-        self.vectorizer = TfidfVectorizer(
-            max_features=self.max_features,
-            lowercase=self.lowercase,
-        )
+        self.vectorizer = self._build_vectorizer()
 
         self.vectorizer.fit(texts)
 
@@ -158,9 +179,17 @@ def tfidf_matrix(
 ) -> Tuple:
     """
     Return raw TF-IDF matrix (for ML models).
+
+    Uses the same ``tokenize_words`` helper as :class:`TfidfEngineering`
+    (audit §5.3) so the matrix vocabulary is consistent with every
+    other extractor in ``src/features/``.
     """
 
-    vectorizer = TfidfVectorizer(max_features=max_features)
+    vectorizer = TfidfVectorizer(
+        max_features=max_features,
+        tokenizer=tokenize_words,
+        token_pattern=None,
+    )
 
     matrix = vectorizer.fit_transform(texts)
 

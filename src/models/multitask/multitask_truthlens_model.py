@@ -31,6 +31,8 @@ from typing import Any, Dict, List, Optional
 import torch
 import torch.nn as nn
 
+from src.models.base.base_model import BaseModel
+
 logger = logging.getLogger(__name__)
 
 
@@ -140,8 +142,16 @@ class MultiTaskTruthLensConfig:
 # MULTI-TASK TRUTHLENS MODEL
 # =========================================================
 
-class MultiTaskTruthLensModel(nn.Module):
-    """Shared-encoder, multi-headed TruthLens model."""
+class MultiTaskTruthLensModel(BaseModel):
+    """Shared-encoder, multi-headed TruthLens model.
+
+    A3.5: inherits :class:`BaseModel` (not bare ``nn.Module``) so the
+    multi-task model gets the same calibration-aware checkpoint helpers,
+    cached ``device`` property and lazy ``attach_module`` discipline as
+    every other production model in this codebase. Without that, the G4
+    calibration-vs-base-weights split was silently bypassed for the
+    flagship multi-task model.
+    """
 
     # -----------------------------------------------------
     # Class-level metadata used by downstream label-helper code
@@ -232,7 +242,6 @@ class MultiTaskTruthLensModel(nn.Module):
         # TASK HEADS
         # -------------------------------------------------
         outputs: Dict[str, Any] = {}
-        task_logits: Dict[str, torch.Tensor] = {}
 
         for task_name, head in self.task_heads.items():
             try:
@@ -242,35 +251,39 @@ class MultiTaskTruthLensModel(nn.Module):
                     f"Head '{task_name}' forward failed: {e}"
                 ) from e
 
-            # Task heads (ClassificationHead / MultiLabelHead) return a
-            # dict containing at least a "logits" tensor; keep that
-            # contract explicit so accidental tensor-only heads fail
-            # loudly instead of polluting the per-task output keys.
-            if isinstance(head_output, dict):
-                if "logits" not in head_output:
-                    raise RuntimeError(
-                        f"Head '{task_name}' returned a dict without "
-                        f"'logits' (keys={list(head_output)})"
-                    )
-                logits = head_output["logits"]
-                outputs[task_name] = head_output
-
-            elif torch.is_tensor(head_output):
-                logits = head_output
-                outputs[task_name] = {"logits": head_output}
-
-            else:
+            # A3.4: dict-only contract. Task heads must return a dict
+            # with at least ``logits`` — see :class:`BaseHead`. The
+            # previous tensor-fallback branch silently accepted broken
+            # heads and only crashed deep inside calibration. Kept
+            # behind two explicit checks so the failure mode names the
+            # offending task.
+            if not isinstance(head_output, dict):
                 raise TypeError(
-                    f"Head '{task_name}' must return a Tensor or dict "
-                    f"with 'logits' (got {type(head_output).__name__})"
+                    f"Head '{task_name}' must return a dict (got "
+                    f"{type(head_output).__name__}); see "
+                    f"src.models.heads.base_head.BaseHead."
+                )
+            if "logits" not in head_output:
+                raise RuntimeError(
+                    f"Head '{task_name}' dict missing 'logits' "
+                    f"(keys={list(head_output)})"
                 )
 
-            task_logits[task_name] = logits
+            outputs[task_name] = head_output
 
         # -------------------------------------------------
-        # OUTPUT
+        # OUTPUT — A3.6: per-task entries are the source of truth.
+        # ``task_logits`` was previously a parallel dict that was
+        # populated alongside the per-task entries; downstream code
+        # could mutate one and silently de-sync the other. We now
+        # expose ``task_logits`` as a *thin view* computed from the
+        # per-task entries on demand. The training pipeline still
+        # reads ``outputs["task_logits"]`` (back-compat) but the data
+        # has a single owner.
         # -------------------------------------------------
-        outputs["task_logits"] = task_logits
+        outputs["task_logits"] = {
+            name: outputs[name]["logits"] for name in self.task_heads.keys()
+        }
         return outputs
 
     # =====================================================
@@ -279,35 +292,49 @@ class MultiTaskTruthLensModel(nn.Module):
 
     @staticmethod
     def _extract_pooled(encoder_outputs: Any) -> torch.Tensor:
-        """Best-effort pooled embedding extraction.
+        """Strict pooled-embedding extraction (A6.1).
 
-        Supports both raw ``dict`` outputs (e.g. our ``TransformerEncoder``
-        wrapper, which returns ``{"pooled_output": ..., "last_hidden_state": ...}``)
-        and HuggingFace-style ``ModelOutput`` objects.
+        Supports both raw ``dict`` outputs (our ``TransformerEncoder``
+        wrapper returns ``{"pooled_output": ..., "sequence_output":
+        ...}``) and HuggingFace-style ``ModelOutput`` objects.
+
+        A6.1 — the previous implementation silently fell back to
+        ``hidden[:, 0]`` (CLS-token slice) whenever the encoder did not
+        publish a pooled output. That hid two real bugs:
+
+          * a wrapper that *should* have produced a pooled output but
+            forgot to do so (a regression in the encoder), and
+          * a wrapper whose pooling strategy is something other than
+            CLS (e.g. mean / attention) — falling back to CLS produced
+            silently wrong embeddings.
+
+        We now require an explicit pooled output. The callers that
+        previously relied on the implicit CLS fallback should
+        construct their encoder with ``pooling="cls"`` so the
+        pooled-output channel is populated by the encoder itself.
         """
 
+        # NB: ``a or b`` evaluates ``bool(a)``, which on a multi-element
+        # tensor raises ``RuntimeError("Boolean value of Tensor with
+        # more than one value is ambiguous")``. The keys must be probed
+        # one at a time via explicit ``is None`` checks.
         if isinstance(encoder_outputs, dict):
-            pooled = (
-                encoder_outputs.get("pooled_output")
-                or encoder_outputs.get("pooler_output")
-            )
-            hidden = encoder_outputs.get("last_hidden_state")
+            pooled = encoder_outputs.get("pooled_output")
+            if pooled is None:
+                pooled = encoder_outputs.get("pooler_output")
         else:
-            pooled = (
-                getattr(encoder_outputs, "pooled_output", None)
-                or getattr(encoder_outputs, "pooler_output", None)
-            )
-            hidden = getattr(encoder_outputs, "last_hidden_state", None)
+            pooled = getattr(encoder_outputs, "pooled_output", None)
+            if pooled is None:
+                pooled = getattr(encoder_outputs, "pooler_output", None)
 
         if pooled is None:
-            if hidden is None:
-                raise RuntimeError(
-                    "Encoder did not return a pooled embedding or "
-                    "`last_hidden_state`; cannot feed task heads."
-                )
-            # Fall back to the [CLS] token for models like RoBERTa that
-            # do not expose a dedicated pooler.
-            pooled = hidden[:, 0]
+            raise RuntimeError(
+                "Encoder did not return a pooled embedding "
+                "(`pooled_output` / `pooler_output`); cannot feed task "
+                "heads. Construct the encoder with an explicit pooling "
+                "strategy (e.g. ``pooling=\"cls\"``) so the pooled "
+                "channel is populated."
+            )
 
         return pooled
 

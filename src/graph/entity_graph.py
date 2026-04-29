@@ -119,6 +119,66 @@ class EntityGraphBuilder:
     # GRAPH BUILD (🔥 WEIGHTED + SPAN-AWARE)
     # =====================================================
 
+    # G-D1: factored helper so the pipeline's batched ``run_batch``
+    # path (which has already parsed the document via ``nlp.pipe``) can
+    # build the entity graph from a pre-parsed ``Doc`` without paying
+    # the ``self.nlp(text)`` cost a second time. Keeping the per-doc
+    # graph-building logic in one place avoids the prior drift between
+    # ``EntityGraphBuilder.build_graph_with_spans`` and the inline
+    # ``GraphPipeline._entity_graph_from_doc`` re-implementation.
+    def build_graph_with_doc(
+        self,
+        doc: Doc,
+    ) -> Dict[str, Any]:
+        """Build the weighted entity graph from a pre-parsed spaCy ``Doc``.
+
+        Returns the same shape as :meth:`build_graph_with_spans` —
+        ``{"graph": Dict[str, Dict[str, float]], "spans": List[...]}``
+        — so callers can swap one for the other without a translation
+        layer.
+        """
+
+        graph: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+        spans: List[Dict[str, Any]] = []
+
+        for s_idx, sent in enumerate(doc.sents):
+
+            seen: Set[str] = set()
+            ents: List[str] = []
+
+            for ent in sent.ents:
+                key = ent.text.lower().strip()
+                if not key:
+                    continue
+
+                spans.append(
+                    {
+                        "entity": key,
+                        "raw_text": ent.text,
+                        "start_char": int(ent.start_char),
+                        "end_char": int(ent.end_char),
+                        "sentence_index": s_idx,
+                        "label": getattr(ent, "label_", "") or "",
+                    }
+                )
+
+                if key not in seen:
+                    ents.append(key)
+                    seen.add(key)
+
+            for i, a in enumerate(ents):
+                for b in ents[i + 1:]:
+                    # Single-direction co-occurrence; symmetrised by
+                    # ``canonicalize_weighted`` below.
+                    graph[a][b] += 1.0
+
+        from src.graph.graph_analysis import canonicalize_weighted
+
+        return {
+            "graph": canonicalize_weighted(graph),
+            "spans": spans,
+        }
+
     def build_graph_with_spans(self, text: str) -> Dict[str, Any]:
         """Build the entity graph **and** return per-mention char spans.
 
@@ -157,60 +217,9 @@ class EntityGraphBuilder:
         if not isinstance(text, str) or not text.strip():
             raise ValueError("Invalid text")
 
-        doc: Doc = self.nlp(text)
-
-        graph: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
-        spans: List[Dict[str, Any]] = []
-
-        for s_idx, sent in enumerate(doc.sents):
-
-            seen: Set[str] = set()
-            ents: List[str] = []
-
-            for ent in sent.ents:
-                key = ent.text.lower().strip()
-                if not key:
-                    continue
-
-                # G-T1: record every mention (not just the first per
-                # sentence) so an explainer can highlight all spans
-                # collapsed under the same node id.
-                spans.append(
-                    {
-                        "entity": key,
-                        "raw_text": ent.text,
-                        "start_char": int(ent.start_char),
-                        "end_char": int(ent.end_char),
-                        "sentence_index": s_idx,
-                        "label": getattr(ent, "label_", "") or "",
-                    }
-                )
-
-                if key not in seen:
-                    ents.append(key)
-                    seen.add(key)
-
-            for i, a in enumerate(ents):
-                for b in ents[i + 1:]:
-
-                    # 🔥 weighted co-occurrence (single direction —
-                    # symmetrisation happens in ``canonicalize_weighted``).
-                    graph[a][b] += 1.0
-
-        # G-C5 / G-S2: previously called ``normalize_graph`` then
-        # ``to_undirected`` which both downcast to ``Dict[str, List[str]]``,
-        # silently throwing away every co-occurrence weight just computed
-        # above (and ``to_undirected`` itself summed the two directions
-        # for an inflated 4× weight per co-occurrence). The canonical
-        # form symmetrises via ``max(...)`` so re-canonicalising never
-        # amplifies a value — invariant: ``out[u][v] == out[v][u]`` and
-        # equals the original single-direction count.
-        from src.graph.graph_analysis import canonicalize_weighted
-
-        return {
-            "graph": canonicalize_weighted(graph),
-            "spans": spans,
-        }
+        # G-D1: delegate to the doc-only variant so the per-doc graph
+        # building logic lives in exactly one place.
+        return self.build_graph_with_doc(self.nlp(text))
 
     def build_graph(self, text: str) -> Dict[str, Dict[str, float]]:
         """Backward-compatible entrypoint — returns just the graph dict.

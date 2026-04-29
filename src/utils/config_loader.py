@@ -180,6 +180,25 @@ _DEFAULT_NUM_LABELS = {
 }
 
 
+def _resolve_num_labels(name: str, task_type: str, provided: Optional[int]) -> int:
+    """Return ``provided`` when set, else fall back to a per-type default
+    and log a loud warning. Per-task class counts are dataset-specific
+    (bias=2, ideology=3, propaganda=2, narrative=3, narrative_frame=5,
+    emotion=20) so guessing from ``task_type`` alone is brittle —
+    callers that hit this path almost always have a config bug.
+    """
+    if provided is not None:
+        return int(provided)
+
+    fallback = _DEFAULT_NUM_LABELS.get(task_type, 2)
+    logger.warning(
+        "Task '%s' missing explicit num_labels; falling back to %d "
+        "for type='%s'. Add num_labels to config.yaml to silence this.",
+        name, fallback, task_type,
+    )
+    return fallback
+
+
 def _normalize_encoder(model_cfg: Any) -> Dict[str, Any]:
     """Accept either ``encoder: "name"`` or ``encoder: {name: ...}``."""
     if not isinstance(model_cfg, dict):
@@ -202,7 +221,7 @@ def _normalize_task(name: str, cfg: Any) -> Dict[str, Any]:
         task_type = cfg
         return {
             "type": task_type,
-            "num_labels": _DEFAULT_NUM_LABELS.get(task_type, 2),
+            "num_labels": _resolve_num_labels(name, task_type, None),
             "dataset": {
                 "train_path": f"data/{name}/train.csv",
                 "validation_path": None,
@@ -211,7 +230,9 @@ def _normalize_task(name: str, cfg: Any) -> Dict[str, Any]:
         }
     if isinstance(cfg, dict):
         out = dict(cfg)
-        out.setdefault("num_labels", _DEFAULT_NUM_LABELS.get(out.get("type", ""), 2))
+        out["num_labels"] = _resolve_num_labels(
+            name, out.get("type", ""), out.get("num_labels"),
+        )
         out.setdefault(
             "dataset",
             {

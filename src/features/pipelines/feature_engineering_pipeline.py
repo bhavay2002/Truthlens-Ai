@@ -65,7 +65,30 @@ class FeatureEngineeringPipeline:
             features = self.validator.validate_batch(features)
 
         # -------------------------------------------------
-        # 3. FEATURE STATISTICS
+        # 3.  FEATURE PRUNING
+        # -------------------------------------------------
+        # Audit fix §1.12 — pruning now runs BEFORE statistics. The
+        # previous order (extract → validate → stats → prune → scale)
+        # paid the full O(N²) correlation cost in ``FeatureStatistics``
+        # on the un-pruned column set, only to throw 30-40 % of those
+        # columns away in the very next step. Pruning first means stats
+        # describe the post-prune matrix that the model will actually
+        # train on, and the correlation work is bounded by the kept
+        # column count.
+        if self.pruner:
+            try:
+                if fit:
+                    self.pruner.fit(features)
+                    logger.info("Feature pruner fitted")
+
+                features = self.pruner.transform(features)
+
+            except Exception as e:
+                logger.exception("Feature pruning failed: %s", e)
+                raise
+
+        # -------------------------------------------------
+        # 4. FEATURE STATISTICS (post-prune)
         # -------------------------------------------------
         if self.stats_enabled and features:
             try:
@@ -96,21 +119,6 @@ class FeatureEngineeringPipeline:
 
             except Exception as e:
                 logger.warning("Statistics failed: %s", e)
-
-        # -------------------------------------------------
-        # 4.  FEATURE PRUNING (NEW)
-        # -------------------------------------------------
-        if self.pruner:
-            try:
-                if fit:
-                    self.pruner.fit(features)
-                    logger.info("Feature pruner fitted")
-
-                features = self.pruner.transform(features)
-
-            except Exception as e:
-                logger.exception("Feature pruning failed: %s", e)
-                raise
 
         # -------------------------------------------------
         # 5. SCALING

@@ -314,3 +314,31 @@ def build_default_registry() -> "AnalyzerRegistry":
     reg.register("source", SourceAttributionAnalyzer(), order=14)
 
     return reg
+
+
+# =========================================================
+# DEFAULT REGISTRY SINGLETON  (GPU-5, v13/v14 audit)
+# =========================================================
+# Each call to ``build_default_registry()`` constructs ~14 analyzer
+# objects (some of which load lexicon files / spaCy components /
+# Pydantic configs). Previously every ``TruthLensPipeline.__init__``
+# rebuilt the registry from scratch, which dominated cold-start time
+# for short-lived processes (e.g., per-request workers, the API's
+# fallback path). Mirror the ``get_default_pipeline()`` pattern from
+# ``src/graph/graph_pipeline.py`` (G-R1) and cache a single
+# process-wide instance.
+
+_DEFAULT_REGISTRY: Optional["AnalyzerRegistry"] = None
+
+
+def get_default_registry() -> "AnalyzerRegistry":
+    """Return a process-wide ``AnalyzerRegistry`` singleton.
+
+    Lazy-built on first call, then memoised. Callers that need a
+    fresh, isolated registry (e.g., tests that mutate it) should
+    keep calling :func:`build_default_registry` directly.
+    """
+    global _DEFAULT_REGISTRY
+    if _DEFAULT_REGISTRY is None:
+        _DEFAULT_REGISTRY = build_default_registry()
+    return _DEFAULT_REGISTRY

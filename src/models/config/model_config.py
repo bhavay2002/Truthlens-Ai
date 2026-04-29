@@ -63,6 +63,15 @@ class TaskConfig:
     task_type: str = "multi_class"
     regression: Optional[RegressionConfig] = None
     use_label_smoothing: bool = False
+    # A3.1: per-task loss weight on the canonical YAML-driven config
+    # surface. Previously per-task weights only existed on the
+    # convenience ``MultiTaskTruthLensConfig`` (one float per known
+    # task), which (a) couldn't express a weight for tasks added by
+    # the YAML pipeline and (b) silently defaulted everything to 1.0.
+    # The convenience config still carries its named ``*_weight``
+    # fields for back-compat, but ``TaskConfig.loss_weight`` is now
+    # the authoritative source of truth.
+    loss_weight: float = 1.0
 
 
 # =========================================================
@@ -188,6 +197,8 @@ class ModelConfigLoader:
                 task_type=task_data.get("task_type", "multi_class"),
                 regression=regression_cfg,
                 use_label_smoothing=task_data.get("use_label_smoothing", False),
+                # A3.1: pick up the optional ``loss_weight`` from YAML.
+                loss_weight=float(task_data.get("loss_weight", 1.0)),
             )
 
         return tasks_cfg

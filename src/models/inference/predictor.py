@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Dict, Any, Optional, List
 
 import numpy as np
@@ -18,6 +19,23 @@ logger = logging.getLogger(__name__)
 DEFAULT_FAKE_INDEX = 1
 FAKE_LABEL_CANDIDATES = {"fake", "false", "misleading"}
 _FAKE_HEAD_KEYS = ("fake_logits", "fakenews_logits", "misinformation_logits")
+
+
+# GPU-3 (v13/v14 audit): honour the same TRUTHLENS_AMP_DTYPE env var
+# that ``PredictionPipeline`` already reads. Previously this Predictor
+# hard-selected bf16 vs fp16 from ``torch.cuda.is_bf16_supported()`` and
+# ignored the operator's choice entirely — long articles ran in
+# whatever-the-card-supported even when the operator explicitly picked
+# fp32 for numerical-stability debugging or fp16 to match the trained
+# checkpoint. The helper mirrors ``inference_pipeline._resolve_amp_dtype``
+# so both orchestrators interpret the env var identically.
+def _resolve_amp_dtype_from_env(default: str = "bf16") -> torch.dtype:
+    requested = (os.environ.get("TRUTHLENS_AMP_DTYPE") or default).lower()
+    if requested in ("bf16", "bfloat16"):
+        return torch.bfloat16
+    if requested in ("fp16", "float16", "half"):
+        return torch.float16
+    return torch.float32
 
 
 # =========================================================
@@ -135,7 +153,13 @@ class Predictor:
         use_amp = self.device.type == "cuda"
 
         if use_amp:
-            dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+            # GPU-3: env-driven dtype. Falls back to bf16 if the env
+            # var is unset (matches PredictionPipeline default); a
+            # bf16 request on a card without bf16 support is silently
+            # demoted to fp16 to avoid an autocast crash.
+            dtype = _resolve_amp_dtype_from_env()
+            if dtype is torch.bfloat16 and not torch.cuda.is_bf16_supported():
+                dtype = torch.float16
             with torch.autocast(device_type="cuda", dtype=dtype):
                 return self.model(**batch)
 

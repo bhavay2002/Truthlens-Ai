@@ -29,13 +29,26 @@ def _to_numpy(x: ArrayLike) -> np.ndarray:
 
 
 def _to_output(arr: np.ndarray, like: ArrayLike):
+    # GPU-AG-4: preserve the *input* tensor's dtype and device so we
+    # don't accidentally promote a fp16/bf16 tensor (e.g. when running
+    # under autocast) to fp32 silently. The previous implementation
+    # always returned float32, which mixed dtypes downstream and
+    # produced autocast warnings or implicit casts.
     if TORCH_AVAILABLE and isinstance(like, torch.Tensor):
-        return torch.from_numpy(arr).to(like.device)
+        return torch.from_numpy(arr.astype(np.float32, copy=False)).to(
+            device=like.device,
+            dtype=like.dtype,
+        )
     return arr
 
 
 def _clip01(x):
     return np.clip(x, 0.0, 1.0)
+
+
+def _clip_to_range(x, feature_range):
+    a, b = feature_range
+    return np.clip(x, a, b)
 
 
 # =========================================================
@@ -134,7 +147,10 @@ class ScoreNormalizer:
             raise ValueError(f"Unsupported method: {self.method}")
 
         if self.clip:
-            result = _clip01(result)
+            # NORM-AG-3: respect feature_range — previously clip() always
+            # truncated to [0, 1] regardless of the configured range,
+            # silently dropping the negative half of e.g. (-1, 1).
+            result = _clip_to_range(result, self.feature_range)
 
         return _to_output(result.astype(np.float32), values)
 

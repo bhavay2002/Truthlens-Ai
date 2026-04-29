@@ -105,8 +105,10 @@ def autocast_context():
     return nullcontext()
 
 
-def get_grad_scaler(enabled: bool = True) -> torch.cuda.amp.GradScaler:
-    return torch.cuda.amp.GradScaler(enabled=enabled and torch.cuda.is_available())
+def get_grad_scaler(enabled: bool = True) -> torch.amp.GradScaler:
+    # GPU/TORCH FIX: torch.cuda.amp.GradScaler is deprecated since PyTorch 2.3.
+    # Use the device-type-aware torch.amp.GradScaler API instead.
+    return torch.amp.GradScaler("cuda", enabled=enabled and torch.cuda.is_available())
 
 
 # =========================================================

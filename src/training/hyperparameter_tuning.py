@@ -8,6 +8,10 @@ import optuna
 import pandas as pd
 
 from src.training.cross_validation import cross_validate_task
+from src.training.experiment_tracker import (
+    ExperimentTracker,
+    ExperimentTrackerConfig,
+)
 from src.utils.seed_utils import set_seed
 from src.config.task_config import get_task_type
 
@@ -16,79 +20,31 @@ logger = logging.getLogger(__name__)
 
 # =========================================================
 # TRACKING
+#
+# N-LOW-5: Previously this module shipped its OWN ``init_tracking`` /
+# ``finalize_tracking`` / ``log_trial`` functions that talked to MLflow
+# and W&B directly. That duplicated everything ``ExperimentTracker``
+# already does (rank guards, distributed safety, error swallowing,
+# config / metric flattening) and meant Optuna runs were the only
+# pipeline that BYPASSED the tracker's distributed-safe ``_safe`` /
+# ``_is_main`` paths — leading to duplicate logs in DDP runs and
+# dropped metrics in MLflow when the run wasn't yet started.
+#
+# Route Optuna through ``ExperimentTracker(group=...)`` so the trial
+# runs share an experiment group and inherit all of the tracker's
+# safety and reproducibility guarantees.
 # =========================================================
 
-def init_tracking(task: str) -> Dict[str, Any]:
 
-    tracking: Dict[str, Any] = {
-        "mlflow": None,
-        "wandb": None,
-    }
-
-    # MLflow
-    try:
-        import mlflow
-
-        mlflow.set_experiment(f"TruthLens_{task}")
-        mlflow.start_run(run_name=f"{task}_{int(time.time())}")
-        tracking["mlflow"] = mlflow
-    except Exception as e:
-        logger.warning("MLflow init failed: %s", e)
-
-    # W&B
-    try:
-        import wandb
-
-        wandb.init(project="TruthLens", name=task)
-        tracking["wandb"] = wandb
-    except Exception as e:
-        logger.warning("W&B init failed: %s", e)
-
-    return tracking
-
-
-def finalize_tracking(tracking: Dict[str, Any]):
-
-    if tracking.get("mlflow"):
-        try:
-            tracking["mlflow"].end_run()
-        except Exception:
-            pass
-
-    if tracking.get("wandb"):
-        try:
-            tracking["wandb"].finish()
-        except Exception:
-            pass
-
-
-def log_trial(
-    tracking: Dict[str, Any],
-    trial_id: int,
-    params: Dict[str, Any],
-    metrics: Dict[str, Any],
-) -> None:
-
-    payload = {
-        "trial": trial_id,
-        **params,
-        **metrics,
-    }
-
-    # MLflow
-    if tracking.get("mlflow"):
-        for k, v in payload.items():
-            try:
-                tracking["mlflow"].log_metric(k, float(v))
-            except Exception:
-                continue
-
-    # W&B
-    if tracking.get("wandb"):
-        try:
-            tracking["wandb"].log(payload)
-        except Exception:
-            pass
+def _build_tracker(task: str, backend: str = "none") -> ExperimentTracker:
+    config = ExperimentTrackerConfig(
+        backend=backend,
+        project_name="TruthLens",
+        run_name=f"{task}_{int(time.time())}",
+        group=f"tune_{task}",
+        tags={"task": task, "phase": "tuning"},
+    )
+    return ExperimentTracker(config)
 
 
 # =========================================================
@@ -101,8 +57,19 @@ def build_objective(
     df: pd.DataFrame,
     create_trainer_fn: Callable,
     multi_objective: bool,
-    tracking: Dict[str, Any],
+    tracker: ExperimentTracker,
+    base_params: Optional[Dict[str, Any]] = None,
 ):
+
+    # N-HIGH-1: Previously the objective constructed ``params`` from ONLY
+    # the four trial-suggested keys (lr, batch_size, epochs, weight_decay)
+    # and passed that to ``cross_validate_task`` → ``create_trainer_fn``.
+    # That silently DROPPED every other config key the caller had set
+    # (gradient_accumulation_steps, max_grad_norm, monitor_metric,
+    # log_every_steps, scheduler config, ...).  ``base_params`` is the
+    # carrier for those caller-defined defaults; the trial suggestions
+    # OVERRIDE them per-trial.
+    base_params = dict(base_params or {})
 
     def objective(trial: optuna.Trial):
 
@@ -115,12 +82,17 @@ def build_objective(
         # -------------------------
         # SEARCH SPACE
         # -------------------------
-        params = {
+        trial_params = {
             "lr": trial.suggest_float("lr", 1e-6, 5e-4, log=True),
             "batch_size": trial.suggest_categorical("batch_size", [8, 16, 32]),
             "epochs": trial.suggest_int("epochs", 2, 6),
             "weight_decay": trial.suggest_float("weight_decay", 0.0, 0.1),
         }
+
+        # N-HIGH-1: trial values WIN over base_params (so a tunable key
+        # always reflects the latest suggestion), but every non-tuned
+        # caller default flows through unchanged.
+        params = {**base_params, **trial_params}
 
         start = time.time()
 
@@ -153,17 +125,16 @@ def build_objective(
             raise optuna.TrialPruned()
 
         # -------------------------
-        # LOGGING
+        # LOGGING (via ExperimentTracker — N-LOW-5)
         # -------------------------
-        log_trial(
-            tracking,
-            trial.number,
-            params,
+        tracker.log_params({f"trial/{k}": v for k, v in trial_params.items()})
+        tracker.log_metrics(
             {
-                "score": score,
-                "std": std,
-                "time": duration,
+                "trial/score": score,
+                "trial/std": std,
+                "trial/time": duration,
             },
+            step=trial.number,
         )
 
         return (score, -std) if multi_objective else score
@@ -238,9 +209,11 @@ def tune_task(
     multi_objective: bool = False,
     n_jobs: int = 1,
     storage: Optional[str] = None,
+    base_params: Optional[Dict[str, Any]] = None,
+    tracker_backend: str = "none",
 ):
 
-    tracking = init_tracking(task)
+    tracker = _build_tracker(task, backend=tracker_backend)
 
     study = create_study(
         multi_objective=multi_objective,
@@ -253,7 +226,8 @@ def tune_task(
         df=df,
         create_trainer_fn=create_trainer_fn,
         multi_objective=multi_objective,
-        tracking=tracking,
+        tracker=tracker,
+        base_params=base_params,
     )
 
     logger.info(
@@ -269,7 +243,7 @@ def tune_task(
             n_jobs=n_jobs,
         )
     finally:
-        finalize_tracking(tracking)
+        tracker.finish()
 
     # -------------------------
     # RESULTS
@@ -303,13 +277,15 @@ def tune_all_tasks(
     multi_objective: bool = False,
     n_jobs: int = 1,
     storage: Optional[str] = None,
+    base_params: Optional[Dict[str, Any]] = None,
+    tracker_backend: str = "none",
 ):
 
     results: Dict[str, Any] = {}
 
     for task, df in datasets.items():
 
-        logger.info("🚀 Tuning task: %s", task)
+        logger.info("Tuning task: %s", task)
 
         results[task] = tune_task(
             task=task,
@@ -319,6 +295,8 @@ def tune_all_tasks(
             multi_objective=multi_objective,
             n_jobs=n_jobs,
             storage=storage,
+            base_params=base_params,
+            tracker_backend=tracker_backend,
         )
 
     return results

@@ -90,21 +90,29 @@ def _log_device(device: torch.device):
 def get_autocast(config: TrainingSetupConfig):
     """
     Return autocast context manager.
+
+    N-LOW-1: ``torch.cuda.amp.autocast`` and ``torch.cpu.amp.autocast`` were
+    deprecated in PyTorch 2.3 in favour of the device-type-aware
+    ``torch.amp.autocast(device_type, ...)``. Switching ahead of removal in
+    PyTorch 2.6+ avoids a ``DeprecationWarning`` per training step.
     """
 
     if not config.use_amp or not torch.cuda.is_available():
-        return torch.cpu.amp.autocast(enabled=False)
+        return torch.amp.autocast("cpu", enabled=False)
 
     dtype = torch.bfloat16 if config.amp_dtype == "bf16" else torch.float16
 
-    return torch.cuda.amp.autocast(dtype=dtype)
+    return torch.amp.autocast("cuda", dtype=dtype)
 
 
-def create_grad_scaler(config: TrainingSetupConfig) -> torch.cuda.amp.GradScaler:
+def create_grad_scaler(config: TrainingSetupConfig) -> "torch.amp.GradScaler":
     """
     Create AMP scaler.
+
+    N-LOW-1: ``torch.cuda.amp.GradScaler`` was deprecated in PyTorch 2.3 in
+    favour of ``torch.amp.GradScaler("cuda", ...)``.
     """
-    return torch.cuda.amp.GradScaler(enabled=config.use_amp)
+    return torch.amp.GradScaler("cuda", enabled=config.use_amp)
 
 
 # =========================================================
@@ -195,14 +203,14 @@ def move_to_device(batch: Any, device: torch.device) -> Any:
 
 
 def _compute_grad_norm(model: torch.nn.Module) -> float:
-    total_norm = 0.0
-
-    for p in model.parameters():
-        if p.grad is not None:
-            param_norm = p.grad.data.norm(2)
-            total_norm += param_norm.item() ** 2
-
-    return total_norm ** 0.5
+    # N-LOW-8: route through ``training_utils.compute_grad_norm`` instead
+    # of a near-identical local copy. Four call sites (training_setup,
+    # monitor_engine, instrumentation.GradTracker, training_utils) all
+    # implemented the same L2 reduction with subtle differences (.data
+    # vs no .data, .item() per param vs sum then sqrt, etc.); consolidating
+    # ensures one canonical implementation under test.
+    from src.training.training_utils import compute_grad_norm
+    return compute_grad_norm(model)
 
 
 # =========================================================
@@ -212,6 +220,15 @@ def _compute_grad_norm(model: torch.nn.Module) -> float:
 def optimize_model(model: torch.nn.Module) -> torch.nn.Module:
     """
     Apply optional performance optimizations.
+
+    N-LOW-3: ORDERING CONTRACT — ``optimize_model`` MUST be called BEFORE
+    ``DistributedEngine.wrap_model``.  ``torch.compile`` walks the model's
+    module tree and rewrites forward methods; running it on a DDP-wrapped
+    model breaks the rewrite (DDP's ``forward`` interposition prevents
+    Dynamo from seeing the underlying module) and produces no speedup.
+    The Trainer enforces this order: ``optimize_model`` runs in
+    ``__init__`` before ``self.distributed.wrap_model(self.model)`` is
+    called. Callers using these helpers directly must do the same.
     """
 
     # PERF-3: ``torch.compile`` adds Dynamo tracing overhead with no payoff

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from functools import lru_cache
 from typing import Dict, Optional, Tuple, Iterable, Iterator, Any
 
 import spacy
@@ -38,9 +39,16 @@ TASK_DISABLE_MAP = ANALYSIS_CONFIG.spacy.task_disable_map
 # INTERNAL HELPERS
 # =========================================================
 
+@lru_cache(maxsize=None)
 def _resolve_model(model: str) -> str:
     """
     Resolve model with safe fallback.
+
+    VOCAB-1 follow-up: memoised so the warning is emitted exactly once
+    per missing model name and ``is_package`` (which hits the package
+    metadata DB) is not paid on every ``get_nlp`` call. ``get_nlp`` now
+    invokes this on every entry, including cache hits, in order to
+    decide whether to normalise the cache key for the blank fallback.
     """
     if is_package(model):
         return model
@@ -129,7 +137,30 @@ def get_nlp(
 ) -> Language:
 
     disable_tuple = tuple(disable or ())
-    key: _CacheKey = (model, disable_tuple)
+
+    # VOCAB-1: when the requested model is missing and we fall back to a
+    # blank ``en`` pipeline, the ``disable`` tuple is meaningless (the
+    # blank pipeline has no pipes to disable). Keying the cache by the
+    # original ``(model, disable)`` pair would mint a fresh
+    # ``spacy.blank("en")`` for every distinct disable variant, and each
+    # blank pipeline owns its own ``Vocab``. Downstream components such
+    # as ``EmotionTargetAnalyzer`` build a ``PhraseMatcher`` from one
+    # Vocab in ``__init__`` and then receive ``Doc`` objects backed by a
+    # different Vocab at request time, producing the
+    # ``doc.vocab does not match PhraseMatcher vocab`` warning and
+    # silently degrading every entity-aware analyzer. We resolve the
+    # model first and, when the fallback fires, normalise the cache key
+    # so all callers share one blank pipeline (one Vocab).
+    resolved_model = _resolve_model(model)
+
+    if resolved_model == "en":
+        # Blank pipeline has no pipes — disable is irrelevant. Share one
+        # instance across the whole process.
+        key: _CacheKey = ("en", ())
+        effective_disable: Tuple[str, ...] = ()
+    else:
+        key = (resolved_model, disable_tuple)
+        effective_disable = disable_tuple
 
     if key in _CACHE:
         return _CACHE[key]
@@ -138,26 +169,24 @@ def get_nlp(
         if key in _CACHE:
             return _CACHE[key]
 
-        resolved_model = _resolve_model(model)
-
         logger.info(
             "[spaCy] Loading | model=%s | disable=%s",
             resolved_model,
-            disable_tuple,
+            effective_disable,
         )
 
         try:
             if resolved_model == "en":
                 nlp = spacy.blank("en")
             else:
-                nlp = spacy.load(resolved_model, disable=list(disable_tuple))
+                nlp = spacy.load(resolved_model, disable=list(effective_disable))
         except Exception as e:
             logger.exception("[spaCy] Load failed")
             raise RuntimeError(f"Failed to load spaCy model: {model}") from e
 
         nlp.max_length = 2_000_000
 
-        _validate_pipeline(nlp, disable_tuple)
+        _validate_pipeline(nlp, effective_disable)
 
         _CACHE[key] = nlp
         return nlp

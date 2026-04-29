@@ -111,14 +111,25 @@ class FeatureReport:
 
         corr_matrix, keys = stats.compute_correlation_matrix(features)
 
-        high_corr_pairs = []
-
-        for i in range(len(keys)):
-            for j in range(i + 1, len(keys)):
-                if abs(corr_matrix[i, j]) > 0.95:
-                    high_corr_pairs.append(
-                        (keys[i], keys[j], float(corr_matrix[i, j]))
-                    )
+        # Audit fix §1.8 + §2.6 — the previous ``for i: for j: if abs >
+        # 0.95`` Python-level loop ran ~31k iterations per report on the
+        # ~250-feature schema. ``np.triu_indices`` does the same scan in
+        # one C call; ``np.where`` filters the upper-triangle in-place.
+        high_corr_pairs: List[Tuple[str, str, float]] = []
+        n_keys = len(keys)
+        if n_keys > 1 and corr_matrix.size:
+            iu, ju = np.triu_indices(n_keys, k=1)
+            vals = corr_matrix[iu, ju]
+            mask = np.abs(vals) > 0.95
+            if mask.any():
+                keys_arr = np.asarray(keys, dtype=object)
+                hit_i = iu[mask]
+                hit_j = ju[mask]
+                hit_v = vals[mask]
+                high_corr_pairs = [
+                    (str(keys_arr[a]), str(keys_arr[b]), float(v))
+                    for a, b, v in zip(hit_i, hit_j, hit_v)
+                ]
 
         # -------------------------------------------------
         # FINAL REPORT

@@ -44,18 +44,46 @@ class BaseModel(nn.Module, ABC):
 
     @property
     def device(self) -> torch.device:
+        # A3.3: cached fast path. ``set_device`` keeps ``self._device``
+        # authoritative; we used to walk ``next(self.parameters())`` on
+        # every access, which constructs a fresh generator and shows
+        # up in profiles for short-batch encoder forwards. Only fall
+        # back to a parameter walk when ``_device`` was never set
+        # (defensive — the constructor seeds it to ``cpu``).
+        if self._device is not None:
+            return self._device
 
-        try:
-            return next(self.parameters()).device
-        except StopIteration:
-            pass
+        for p in self.parameters():
+            return p.device
 
-        try:
-            return next(self.buffers()).device
-        except StopIteration:
-            pass
+        for b in self.buffers():
+            return b.device
 
-        return self._device
+        return torch.device("cpu")
+
+    # -----------------------------------------------------
+    # LAZY-MODULE DEVICE SYNC  (A5.3)
+    # -----------------------------------------------------
+
+    def attach_module(self, name: str, module: nn.Module) -> None:
+        """Register ``module`` and migrate it to the model's device.
+
+        ``set_device`` only moves modules that exist at call time. Any
+        sub-module created later (a temperature scalar added by
+        :class:`TemperatureScaler`, a freshly attached LoRA adapter,
+        any post-hoc auxiliary head) silently sits on CPU, producing
+        a ``RuntimeError`` deep in the next forward pass. Use this
+        helper instead of ``self.add_module`` / direct attribute
+        assignment to keep placement consistent.
+        """
+        if not isinstance(name, str) or not name:
+            raise ValueError("name must be a non-empty string")
+        if not isinstance(module, nn.Module):
+            raise TypeError("module must be nn.Module")
+
+        if self._device is not None:
+            module.to(self._device)
+        self.add_module(name, module)
 
     # =====================================================
     # PARAMS
@@ -193,10 +221,18 @@ class BaseModel(nn.Module, ABC):
         if not path.exists():
             raise FileNotFoundError(path)
 
+        # C1.3: ``weights_only=True`` is the only safe deserialiser for
+        # untrusted .pt files. Checkpoints written by this module are
+        # plain dicts of tensors plus pickle-safe scalars (``epoch``,
+        # ``step``, ``metadata``), so the safer path covers every key
+        # we actually emit. Loading with ``weights_only=False`` would
+        # execute arbitrary code from the pickle stream — unacceptable
+        # for any code path that may consume a checkpoint downloaded
+        # from object storage or sent across a network.
         checkpoint = torch.load(
             path,
             map_location=map_location,
-            weights_only=False,
+            weights_only=True,
         )
 
         load_result = self.load_state_dict(

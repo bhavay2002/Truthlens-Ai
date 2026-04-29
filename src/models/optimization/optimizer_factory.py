@@ -41,14 +41,29 @@ def build_parameter_groups(
             {"params": [...], "weight_decay": wd},
             {"params": [...], "weight_decay": 0.0},
         ]
+
+    A6.4 — also excludes anything the model marks as a *calibration*
+    parameter (e.g. the post-hoc temperature scalar). Calibration
+    parameters are fit on a held-out validation set by a dedicated
+    optimiser via ``BaseModel.get_calibration_parameters``; folding
+    them into the main training optimiser would (a) drift them every
+    train step and (b) double-update them whenever the calibration
+    pass also runs. The check is opt-in via duck-typing — non-BaseModel
+    callers (plain ``nn.Module``) get the same decay split as before.
     """
 
     decay_params = []
     no_decay_params = []
 
+    is_calib = getattr(model, "_is_calibration_parameter_name", None)
+
     for name, param in model.named_parameters():
 
         if not param.requires_grad:
+            continue
+
+        # A6.4: the calibration optimiser owns these — skip them here.
+        if callable(is_calib) and is_calib(name):
             continue
 
         if any(nd in name for nd in no_decay_keywords):
@@ -102,12 +117,22 @@ def create_optimizer(
 
     logger.info(f"[OPTIMIZER] Using {optimizer_type}")
 
+    # C1.4: Every optimiser branch must honour ``weight_decay``. When
+    # ``use_param_groups=True`` the per-group ``weight_decay`` already
+    # comes from ``build_parameter_groups`` and the optimiser-level
+    # default is harmless. But when ``use_param_groups=False`` (or
+    # ``custom_params`` is provided), only the optimiser-level
+    # ``weight_decay`` argument applies — and previously AdamW / Adam
+    # / RMSprop / Adagrad all silently fell back to ``0`` instead of
+    # the value the caller asked for. That is a correctness bug:
+    # users believing they trained with WD=0.01 actually got WD=0.
     if optimizer_type == "adamw":
         return AdamW(
             params,
             lr=learning_rate,
             betas=betas,
             eps=eps,
+            weight_decay=weight_decay,
         )
 
     elif optimizer_type == "adam":
@@ -116,6 +141,7 @@ def create_optimizer(
             lr=learning_rate,
             betas=betas,
             eps=eps,
+            weight_decay=weight_decay,
         )
 
     elif optimizer_type == "sgd":
@@ -131,12 +157,14 @@ def create_optimizer(
             params,
             lr=learning_rate,
             momentum=momentum,
+            weight_decay=weight_decay,
         )
 
     elif optimizer_type == "adagrad":
         return Adagrad(
             params,
             lr=learning_rate,
+            weight_decay=weight_decay,
         )
 
     else:

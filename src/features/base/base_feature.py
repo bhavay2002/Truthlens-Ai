@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, List
 
@@ -10,6 +12,49 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 EPS = 1e-8
+
+
+# =========================================================
+# BOUNDED PER-CONTEXT CACHE  (audit fix §7.5)
+# =========================================================
+# ``FeatureContext.cache`` was previously an unbounded ``dict``. Long
+# batches with many adapters would accumulate one entry per (sample,
+# analyzer) pair on the same context object — and analyzers are free
+# to drop arbitrary nested debug blobs in there. The bound below caps
+# the per-context dict at ``_FEATURE_CONTEXT_CACHE_SIZE`` entries with
+# LRU eviction. The class subclasses ``OrderedDict`` (and therefore
+# ``dict``) so existing call sites that do ``ctx.cache.setdefault(...)``,
+# ``ctx.cache["foo"]``, or ``isinstance(ctx.cache, dict)`` continue to
+# work unchanged.
+
+_FEATURE_CONTEXT_CACHE_SIZE = max(
+    16,
+    int(os.environ.get("TRUTHLENS_CONTEXT_CACHE_SIZE", "256") or 256),
+)
+
+
+class _BoundedContextCache(OrderedDict):
+    """LRU-bounded ``dict`` substitute for ``FeatureContext.cache``."""
+
+    __slots__ = ("_cap",)
+
+    def __init__(self, *args, cap: Optional[int] = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._cap = cap if cap is not None else _FEATURE_CONTEXT_CACHE_SIZE
+
+    def __setitem__(self, key, value):
+        if key in self:
+            # Refresh recency on overwrite without growing.
+            super().__delitem__(key)
+        super().__setitem__(key, value)
+        # Evict oldest until under cap.
+        while len(self) > self._cap:
+            oldest = next(iter(self))
+            super().__delitem__(oldest)
+
+
+def _new_context_cache() -> _BoundedContextCache:
+    return _BoundedContextCache()
 
 
 # =========================================================
@@ -56,7 +101,11 @@ class FeatureContext:
     # -----------------------------------
     # CACHES
     # -----------------------------------
-    cache: Dict[str, Any] = field(default_factory=dict)
+    # Bounded LRU per-context cache (audit fix §7.5). Subclasses
+    # ``OrderedDict`` so callers that touch ``ctx.cache`` as a plain
+    # dict (``setdefault``, ``ctx.cache["k"]``, ``isinstance(..., dict)``)
+    # keep working.
+    cache: Dict[str, Any] = field(default_factory=_new_context_cache)
 
     # 🔥 NEW: shared cache across batch (critical for performance)
     shared: Optional[Dict[str, Any]] = None

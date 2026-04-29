@@ -120,6 +120,15 @@ class TaskScheduler:
         return self.rng.choices(self.tasks, weights=weights, k=1)[0]
 
     def _adaptive(self) -> str:
+        # N-LOW-7: CONVENTION — this is a "focus on the hard tasks" sampler.
+        # The softmax is taken DIRECTLY over the raw EMA losses (no negation),
+        # which means HIGHER loss → HIGHER selection probability.  The
+        # rationale is that a task whose loss is still high is one where
+        # the joint encoder still has room to learn; up-weighting it spends
+        # more gradient steps on the head that matters most.  The opposite
+        # convention ("sample easier tasks more often") would negate
+        # ``scores`` here.  Keep this comment in sync with ``_decide_action``
+        # / GradNorm if the policy ever flips.
         scores = [self._ema_losses[t] for t in self.tasks]
 
         # softmax with temperature

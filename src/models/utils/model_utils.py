@@ -71,11 +71,22 @@ def load_model(
     try:
         if path.suffix in {".pt", ".pth"}:
 
-            device_obj = torch.device(
-                device or ("cuda" if torch.cuda.is_available() else "cpu")
-            )
+            # A5.1: centralised detection so CUDA / MPS / CPU fallback
+            # is identical across the codebase.
+            from src.models._device import detect_device
 
-            checkpoint = torch.load(path, map_location=device_obj)
+            device_obj = detect_device(device)
+
+            # C1.3: ``weights_only=True`` forbids arbitrary pickle code
+            # execution at load time. ``save_model`` above only writes a
+            # dict of {"state_dict": <tensors>, "metadata": <plain
+            # python>}, both of which round-trip safely through the
+            # restricted unpickler.
+            checkpoint = torch.load(
+                path,
+                map_location=device_obj,
+                weights_only=True,
+            )
 
             if model_class is None:
                 return checkpoint

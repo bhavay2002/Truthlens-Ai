@@ -10,13 +10,10 @@ import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
-from src.features.base.numerics import normalized_entropy
+from src.features.base.numerics import EPS, MAX_CLIP, normalized_entropy
 from src.features.base.tokenization import ensure_tokens_word
 
 logger = logging.getLogger(__name__)
-
-EPS = 1e-8
-MAX_CLIP = 1.0
 
 
 # ---------------------------------------------------------
@@ -73,16 +70,16 @@ class LexicalFeatures(BaseFeature):
 
         entropy = normalized_entropy(probs)
 
-        # Audit fix §4.2 — publish the canonical token-frequency entropy
-        # to the per-batch shared cache. Any other extractor that wants
-        # a "lexical diversity" signal can read it from
-        # ``ctx.shared["lex_entropy"]`` instead of recomputing the same
-        # Shannon sum on the same token list. Falls back to ctx.cache
-        # for the single-sample inference path.
-        _shared = getattr(context, "shared", None)
-        _bucket = _shared if isinstance(_shared, dict) else getattr(context, "cache", None)
-        if isinstance(_bucket, dict):
-            _bucket["lex_entropy"] = float(entropy)
+        # §10.3 — write to ctx.cache (per-sample) not ctx.shared (batch-wide).
+        # The original code used ctx.shared when running in a batch, which is
+        # a single dict shared across ALL samples in the batch.  Writing
+        # "lex_entropy" there meant sample-N's value silently overwrote
+        # sample-0's before any downstream extractor in sample-0's context
+        # could read it — a cross-sample leakage bug.  ctx.cache is always
+        # per-sample and is the correct bucket for derived per-sample values.
+        _cache = getattr(context, "cache", None)
+        if isinstance(_cache, dict):
+            _cache["lex_entropy"] = float(entropy)
 
         # -------------------------
         # SIMPSON DIVERSITY

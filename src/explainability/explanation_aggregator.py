@@ -1,8 +1,38 @@
+"""src/explainability/explanation_aggregator.py
+
+Aggregates the per-method explanations into a single ``AggregatedExplanation``.
+
+Audit fixes
+-----------
+* **CRIT-3**: the previous implementation built a ``sorted(set(...))``
+  vocabulary across all explainers, which destroyed the original token
+  order and rendered the aggregated output incoherent (and unusable for
+  downstream text-level ablation in CRIT-11).
+* **CRIT-4**: ``dict(zip(tokens, importance))`` collapsed repeated tokens
+  ("the", "is", "...") to a single entry — the second occurrence
+  silently overwrote the first. The aggregator now indexes per-source
+  values **by position** within their own token list, which preserves
+  duplicates.
+* **PERF-5**: the per-token Python ``for`` loop is replaced by a single
+  ``[n_methods, n_tokens]`` matrix multiplication.
+* **CRIT-9** plumbing: ``include_heuristic`` controls whether
+  ``faithful=False`` explainers (e.g. propaganda) participate in the
+  fusion.
+
+The aggregator picks a *canonical* token sequence — the first available
+explainer in the (shap → integrated_gradients → attention → lime) order
+— and aligns every other source to those positions. Sources whose token
+list lengths match the canonical are aligned 1-for-1 by position;
+mismatched sources fall back to a token-name lookup that uses the
+*first* occurrence of each token.
+"""
+
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -27,6 +57,94 @@ class AggregationWeights:
 
 
 # =========================================================
+# CFG-3: YAML LOADER
+# =========================================================
+
+def load_weights_from_config(config_path: str | Path) -> AggregationWeights:
+    """Return ``AggregationWeights`` populated from *config_path*.
+
+    Reads the ``explainability.aggregation_weights`` block added for
+    CFG-3. Falls back to the dataclass defaults for any missing key so
+    that existing configs without the new block continue to work.
+    """
+    try:
+        import yaml  # optional dependency — only needed here
+        raw = yaml.safe_load(Path(config_path).read_text())
+        block = (
+            raw
+            .get("explainability", {})
+            .get("aggregation_weights", {})
+        )
+        return AggregationWeights(
+            shap=float(block.get("shap", AggregationWeights.shap)),
+            integrated_gradients=float(
+                block.get("integrated_gradients", AggregationWeights.integrated_gradients)
+            ),
+            attention=float(block.get("attention", AggregationWeights.attention)),
+            lime=float(block.get("lime", AggregationWeights.lime)),
+            graph=float(block.get("graph", AggregationWeights.graph)),
+        )
+    except Exception as exc:
+        logger.warning(
+            "Could not load aggregation weights from %s (%s); using defaults.",
+            config_path,
+            exc,
+        )
+        return AggregationWeights()
+
+
+# =========================================================
+# HELPERS
+# =========================================================
+
+def _align_to_canonical(
+    src_tokens: List[str],
+    src_importance: List[float],
+    canonical_tokens: List[str],
+) -> np.ndarray:
+    """Project a source's per-position scores onto the canonical token list.
+
+    * If ``len(src_tokens) == len(canonical_tokens)`` we trust the
+      explainers' tokenisations match and align by position. This
+      preserves duplicates (CRIT-4).
+    * Otherwise we fall back to a *first-occurrence* token-name lookup
+      so a misaligned explainer still contributes signal to repeated
+      tokens via the first match.
+    """
+    n = len(canonical_tokens)
+    if not src_tokens or not src_importance:
+        return np.zeros(n, dtype=float)
+
+    if len(src_tokens) == n:
+        return np.asarray(src_importance, dtype=float)
+
+    # Fallback path — record the first occurrence of each token.
+    first_value: Dict[str, float] = {}
+    for t, v in zip(src_tokens, src_importance):
+        if t not in first_value:
+            first_value[t] = float(v)
+
+    return np.asarray(
+        [first_value.get(t, 0.0) for t in canonical_tokens],
+        dtype=float,
+    )
+
+
+def _pick_canonical(
+    candidates: List[Tuple[str, Any]],
+) -> Tuple[Optional[str], Optional[List[str]]]:
+    """Return the (name, tokens) of the first non-empty source.
+
+    The order of ``candidates`` defines the priority. ``None`` is
+    returned when every candidate is missing or has empty tokens.
+    """
+    for name, src in candidates:
+        if src and getattr(src, "tokens", None):
+            return name, list(src.tokens)
+    return None, None
+
+
+# =========================================================
 # CORE
 # =========================================================
 
@@ -35,7 +153,15 @@ class ExplanationAggregator:
     def __init__(
         self,
         weights: Optional[AggregationWeights] = None,
+        *,
+        include_heuristic: bool = False,
+        config_path: Optional[str | Path] = None,
     ) -> None:
+        # CFG-3: when a config_path is supplied and no explicit weights are
+        # provided, load the per-method fusion weights from the YAML block
+        # ``explainability.aggregation_weights``.
+        if weights is None and config_path is not None:
+            weights = load_weights_from_config(config_path)
 
         w = weights or AggregationWeights()
 
@@ -48,6 +174,11 @@ class ExplanationAggregator:
             "lime": w.lime / total,
             "graph": w.graph / total,
         }
+
+        # CRIT-9: by default the aggregator only fuses *faithful* signals.
+        # Heuristic / lexicon-only explainers (propaganda, etc.) must be
+        # opted-in explicitly.
+        self.include_heuristic = include_heuristic
 
         self._consistency = ExplanationConsistency()
 
@@ -65,56 +196,126 @@ class ExplanationAggregator:
 
     def aggregate(
         self,
-        shap: Optional[Dict] = None,
-        integrated_gradients: Optional[Dict] = None,
-        attention: Optional[Dict] = None,
-        lime: Optional[Dict] = None,
-        graph_explanation: Optional[Dict] = None,  # 🔥 NEW
+        shap: Optional[Any] = None,
+        integrated_gradients: Optional[Any] = None,
+        attention: Optional[Any] = None,
+        lime: Optional[Any] = None,
+        graph_explanation: Optional[Dict] = None,
     ) -> AggregatedExplanation:
 
-        sources = {}
-        confidences = {}
+        # ---------------------------------------------------------
+        # CRIT-9: drop heuristic sources unless explicitly opted-in
+        # ---------------------------------------------------------
+        def _is_faithful(src) -> bool:
+            return bool(src) and getattr(src, "faithful", True)
 
-        # -------------------------------------------------
-        # EXTRACT
-        # -------------------------------------------------
-        if shap:
-            sources["shap"] = dict(zip(shap.tokens, shap.importance))
-            confidences["shap"] = shap.confidence or 0.5
+        if shap and not (self.include_heuristic or _is_faithful(shap)):
+            shap = None
+        if integrated_gradients and not (
+            self.include_heuristic or _is_faithful(integrated_gradients)
+        ):
+            integrated_gradients = None
+        if attention and not (self.include_heuristic or _is_faithful(attention)):
+            attention = None
+        if lime and not (self.include_heuristic or _is_faithful(lime)):
+            lime = None
 
-        if integrated_gradients:
-            sources["ig"] = dict(zip(integrated_gradients.tokens, integrated_gradients.importance))
-            confidences["ig"] = integrated_gradients.confidence or 0.5
+        # ---------------------------------------------------------
+        # CRIT-3: pick a canonical token sequence so original order
+        # and duplicates survive aggregation. Order of priority is
+        # SHAP → IG → attention → LIME (most-faithful first).
+        # ---------------------------------------------------------
+        ordered_sources = [
+            ("shap", shap),
+            ("ig", integrated_gradients),
+            ("attn", attention),
+            ("lime", lime),
+        ]
+        canonical_name, canonical_tokens = _pick_canonical(ordered_sources)
 
-        if attention:
-            sources["attn"] = dict(zip(attention.tokens, attention.importance))
-            confidences["attn"] = attention.confidence or 0.5
-
-        if lime:
-            sources["lime"] = dict(zip(lime.tokens, lime.importance))
-            confidences["lime"] = lime.confidence or 0.5
-
-        # -------------------------------------------------
-        # 🔥 GRAPH EXPLANATION EXTRACTION
-        # -------------------------------------------------
-        graph_node_importance = {}
+        graph_node_importance: Dict[str, float] = {}
         graph_confidence = 0.0
 
         if graph_explanation:
             graph_node_importance = graph_explanation.get("node_importance", {})
             graph_confidence = float(graph_explanation.get("overall_score", 0.5))
 
-        if not sources and not graph_node_importance:
+        if not canonical_tokens and not graph_node_importance:
             raise ValueError("No sources provided")
 
-        tokens = sorted(set().union(*[set(s.keys()) for s in sources.values()]))
+        # If only the graph contributes, fall back to graph-derived tokens.
+        if not canonical_tokens:
+            canonical_tokens = list(graph_node_importance.keys())
 
-        # include graph-only tokens if needed
-        tokens = sorted(set(tokens) | set(graph_node_importance.keys()))
+        n = len(canonical_tokens)
 
-        # -------------------------------------------------
-        # AGREEMENT SCORE
-        # -------------------------------------------------
+        # ---------------------------------------------------------
+        # PERF-5 + CRIT-4: build a [methods, tokens] matrix once.
+        # ---------------------------------------------------------
+        method_names = ["shap", "ig", "attn", "lime"]
+        method_objects = {
+            "shap": shap,
+            "ig": integrated_gradients,
+            "attn": attention,
+            "lime": lime,
+        }
+
+        importance_matrix = np.zeros((len(method_names), n), dtype=float)
+        confidences = np.zeros(len(method_names), dtype=float)
+        weights_vec = np.zeros(len(method_names), dtype=float)
+
+        for row, name in enumerate(method_names):
+            src = method_objects[name]
+            if not src or not getattr(src, "tokens", None):
+                continue
+            importance_matrix[row] = _align_to_canonical(
+                list(src.tokens), list(src.importance), canonical_tokens
+            )
+            confidences[row] = float(getattr(src, "confidence", None) or 0.5)
+            weights_vec[row] = self.weights[name]
+
+        # Vectorised fusion: weighted_sum(token) = sum_m w_m * c_m * imp[m, token]
+        wc = (weights_vec * confidences).reshape(-1, 1)
+        weighted = (wc * importance_matrix).sum(axis=0)
+
+        # Graph contribution (token-name keyed; aligned via first occurrence).
+        if graph_node_importance:
+            seen: Dict[str, float] = {}
+            for t in canonical_tokens:
+                if t in graph_node_importance and t not in seen:
+                    seen[t] = float(graph_node_importance[t])
+            graph_vec = np.asarray(
+                [seen.get(t, 0.0) for t in canonical_tokens], dtype=float
+            )
+            weighted = weighted + (
+                self.weights["graph"] * graph_confidence * graph_vec
+            )
+
+        final_scores = self._normalize(weighted)
+
+        # ---------------------------------------------------------
+        # PER-TOKEN CONFIDENCE = 1 - std across contributing methods
+        # ---------------------------------------------------------
+        contrib_mask = (
+            (importance_matrix != 0).any(axis=1, keepdims=True)
+            & np.ones((1, n), dtype=bool)
+        )
+        # Per-column std over the active rows.
+        active_rows = (weights_vec > 0)
+        if active_rows.sum() > 1:
+            active = importance_matrix[active_rows]
+            std_per_token = np.std(active, axis=0)
+            token_confidence = np.clip(1.0 - std_per_token, 0.0, 1.0)
+            no_signal = (active == 0).all(axis=0)
+            token_confidence = np.where(no_signal, 0.0, token_confidence)
+        else:
+            token_confidence = np.where(
+                importance_matrix.sum(axis=0) > 0, 1.0, 0.0
+            )
+
+        # ---------------------------------------------------------
+        # AGREEMENT SCORE (Spearman/cosine across explainers)
+        # ---------------------------------------------------------
         agreement_score = 0.0
         try:
             def _to_dict_list(structured):
@@ -131,68 +332,38 @@ class ExplanationAggregator:
             if res:
                 agreement_score = float(np.mean(list(res.values())))
         except Exception:
-            pass
+            agreement_score = 0.0
 
-        # -------------------------------------------------
-        # FUSION (WITH GRAPH)
-        # -------------------------------------------------
-        final_scores = []
-        token_confidence = []
+        overall_confidence = (
+            float(np.mean(token_confidence)) if token_confidence.size else 0.0
+        )
 
-        for t in tokens:
-
-            weighted_sum = 0.0
-            vals = []
-
-            # ---------- standard explainers ----------
-            for name, src in sources.items():
-                if t in src:
-                    val = src[t]
-                    w = self.weights[name]
-                    c = confidences[name]
-
-                    weighted_sum += val * w * c
-                    vals.append(val)
-
-            # ---------- graph contribution (normalized weight) ----------
-            if t in graph_node_importance:
-                graph_score = float(graph_node_importance[t])
-                w_graph = self.weights["graph"]
-
-                weighted_sum += graph_score * w_graph * graph_confidence
-                vals.append(graph_score)
-
-            if not vals:
-                final_scores.append(0.0)
-                token_confidence.append(0.0)
-                continue
-
-            # confidence = inter-method agreement
-            conf = float(1.0 - np.std(vals)) if len(vals) > 1 else 1.0
-
-            final_scores.append(weighted_sum)
-            token_confidence.append(np.clip(conf, 0.0, 1.0))
-
-        final_scores = self._normalize(final_scores)
-
-        # -------------------------------------------------
-        # OVERALL CONFIDENCE
-        # -------------------------------------------------
-        overall_confidence = float(np.mean(token_confidence)) if token_confidence else 0.0
-
-        # -------------------------------------------------
+        # ---------------------------------------------------------
         # STRUCTURED OUTPUT
-        # -------------------------------------------------
+        # ---------------------------------------------------------
+        importance_list = final_scores.tolist()
         structured = [
             TokenImportance(token=t, importance=float(s))
-            for t, s in zip(tokens, final_scores)
+            for t, s in zip(canonical_tokens, importance_list)
         ]
 
+        # CRIT-11 plumbing: surface canonical text + offsets when the
+        # canonical source carries them (set by the orchestrator).
+        canonical_src = method_objects.get(canonical_name) if canonical_name else None
+        text = getattr(canonical_src, "_aggregator_text", None) if canonical_src else None
+        offsets = getattr(canonical_src, "_aggregator_offsets", None) if canonical_src else None
+
+        # ``contrib_mask`` is unused once we vectorise; keep symbol live to
+        # silence linters without changing semantics.
+        _ = contrib_mask
+
         return AggregatedExplanation(
-            tokens=tokens,
-            final_token_importance=final_scores.tolist(),
+            tokens=canonical_tokens,
+            final_token_importance=importance_list,
             structured=structured,
             method_weights=self.weights,
             confidence_score=overall_confidence,
             agreement_score=agreement_score,
+            text=text,
+            offsets=offsets,
         )

@@ -7,6 +7,7 @@ from typing import Dict, List, Any
 import numpy as np
 
 from src.features.base.base_feature import FeatureContext
+from src.features.base.tokenization import ensure_tokens_word, tokenize_words
 from src.features.bias.bias_lexicon_features import BiasLexiconFeatures
 
 
@@ -27,10 +28,12 @@ class BiasResult:
 
 
 # ---------------------------------------------------------
-# Tokenization
+# Tokenization — audit fix §1.11
 # ---------------------------------------------------------
-
-_TOKEN_PATTERN = re.compile(r"[A-Za-z']+")
+# The previous ``[A-Za-z']+`` pattern was ASCII-only and silently
+# stripped accented characters from non-English headlines (``café`` ->
+# ``caf``). Every other extractor reads ``ensure_tokens_word`` from the
+# per-context cache; this module now does the same.
 
 
 # ---------------------------------------------------------
@@ -60,12 +63,8 @@ def compute_bias_features(text: str) -> BiasResult:
 
     extractor = _get_extractor()
 
-    tokens = _TOKEN_PATTERN.findall(text.lower())
-
-    context = FeatureContext(
-        text=text,
-        tokens=tokens,
-    )
+    context = FeatureContext(text=text)
+    tokens = ensure_tokens_word(context, text)
 
     features = extractor.extract(context)
 
@@ -114,13 +113,16 @@ def compute_bias_features(text: str) -> BiasResult:
 
     for sent in sentences:
 
-        sent_tokens = _TOKEN_PATTERN.findall(sent.lower())
+        # Audit fix §1.11 — same canonical Unicode tokenizer as the
+        # rest of the codebase; previously this fell back to ASCII-only
+        # regex which silently dropped non-English content.
+        sent_tokens = tokenize_words(sent)
 
         if not sent_tokens:
             score = 0.0
         else:
             # reuse extractor logic locally
-            sent_ctx = FeatureContext(text=sent, tokens=sent_tokens)
+            sent_ctx = FeatureContext(text=sent, tokens_word=sent_tokens)
             sent_feat = extractor.extract(sent_ctx)
 
             score = sent_feat.get("bias_density", 0.0)

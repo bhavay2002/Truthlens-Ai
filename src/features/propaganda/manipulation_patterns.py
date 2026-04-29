@@ -11,29 +11,27 @@ import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
-from src.features.base.numerics import normalized_entropy
+from src.features.base.lexicon_loader import load_lexicon_set
+from src.features.base.numerics import EPS, MAX_CLIP, normalized_entropy
 from src.features.base.text_signals import get_text_signals
-from src.features.base.tokenization import ensure_tokens_word
+from src.features.base.tokenization import ensure_tokens_word, ensure_tokens_word_counter
 
 logger = logging.getLogger(__name__)
 
-EPS = 1e-8
-MAX_CLIP = 1.0
-
 
 # ---------------------------------------------------------
-# Lexicons (same as yours)
+# Lexicons — audit fix §1.1, see src/config/lexicons/manipulation.json.
 # ---------------------------------------------------------
 
-URGENCY_TERMS = {...}
-FEAR_TERMS = {...}
-BLAME_TERMS = {...}
-SCAPEGOAT_TERMS = {...}
-ABSOLUTE_TERMS = {...}
-CONSPIRACY_TERMS = {...}
-FALSE_DILEMMA_TERMS = {...}
-EXAGGERATION_TERMS = {...}
-INTENSIFIERS = {...}
+URGENCY_TERMS = load_lexicon_set("manipulation", "urgency")
+FEAR_TERMS = load_lexicon_set("manipulation", "fear")
+BLAME_TERMS = load_lexicon_set("manipulation", "blame")
+SCAPEGOAT_TERMS = load_lexicon_set("manipulation", "scapegoat")
+ABSOLUTE_TERMS = load_lexicon_set("manipulation", "absolute")
+CONSPIRACY_TERMS = load_lexicon_set("manipulation", "conspiracy")
+FALSE_DILEMMA_TERMS = load_lexicon_set("manipulation", "false_dilemma")
+EXAGGERATION_TERMS = load_lexicon_set("manipulation", "exaggeration")
+INTENSIFIERS = load_lexicon_set("manipulation", "intensifiers")
 
 
 # ---------------------------------------------------------
@@ -62,15 +60,16 @@ class ManipulationPatterns(BaseFeature):
 
         text = context.text.strip()
         if not text:
-            return {}
+            return self._empty()
 
         tokens = ensure_tokens_word(context, text)
         n = len(tokens)
 
         if n == 0:
-            return {}
+            return self._empty()
 
-        counter = Counter(tokens)
+        # Audit fix §2.5 — share the per-context Counter cache.
+        counter = ensure_tokens_word_counter(context)
 
         raw = {
             "urgency": _ratio(counter, URGENCY_TERMS, n),
@@ -153,6 +152,25 @@ class ManipulationPatterns(BaseFeature):
         }
 
     # -----------------------------------------------------
+
+    def _empty(self) -> Dict[str, float]:
+        # §11.1 — consistent fixed-key zero dict for empty / zero-token inputs.
+        return {
+            "manipulation_urgency":      0.0,
+            "manipulation_fear":         0.0,
+            "manipulation_blame":        0.0,
+            "manipulation_scapegoat":    0.0,
+            "manipulation_absolute":     0.0,
+            "manipulation_conspiracy":   0.0,
+            "manipulation_false_dilemma": 0.0,
+            "manipulation_exaggeration": 0.0,
+            "manipulation_intensifier":  0.0,
+            "manipulation_intensity":    0.0,
+            "manipulation_entropy":      0.0,
+            "manipulation_diversity":    0.0,
+            "manipulation_rhetoric":     0.0,
+            "manipulation_caps_emphasis": 0.0,
+        }
 
     def _safe(self, v: float) -> float:
         if not np.isfinite(v):

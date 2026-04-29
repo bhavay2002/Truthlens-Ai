@@ -87,8 +87,8 @@ CONTRACTS: Dict[str, DataContract] = {
     # MULTI-LABEL TASKS
     # -----------------------------------------------------
 
-    "frame": DataContract(
-        task="frame",
+    "narrative_frame": DataContract(
+        task="narrative_frame",
         task_type="multilabel",
         text_column="text",
         label_columns=["CO", "EC", "HI", "MO", "RE"],

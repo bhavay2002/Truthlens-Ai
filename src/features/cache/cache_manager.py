@@ -15,6 +15,23 @@ from typing import Callable, Dict, List, Optional
 from src.features.base.base_feature import FeatureContext
 from src.features.cache.feature_cache import FeatureCache, CACHE_VERSION
 
+
+# Audit fix §1.10 — deterministic ``json.dumps(default=...)`` for the
+# ad-hoc Python types we see in cache-key metadata. Sets and frozensets
+# get sorted (key=str) so two requests with the same logical content
+# produce the same cache key regardless of insertion order; bytes get
+# hex-encoded so the JSON stays text-safe; everything else falls back
+# to ``repr`` which is stable for the dataclasses / namedtuples we use.
+
+def _stable_default(o):
+    if isinstance(o, (set, frozenset)):
+        return sorted(o, key=str)
+    if isinstance(o, tuple):
+        return list(o)
+    if isinstance(o, (bytes, bytearray)):
+        return o.hex()
+    return repr(o)
+
 logger = logging.getLogger(__name__)
 
 FeatureVector = Dict[str, float]
@@ -129,6 +146,18 @@ class CacheManager:
     # in cache keys so enable/disable of features auto-invalidates.
     feature_set_fingerprint: Optional[str] = field(default=None, init=False)
 
+    # Audit fix §7.6 — Prometheus-friendly hit / miss counters. Stored
+    # as plain ints; under CPython the GIL makes a single ``+= 1``
+    # observation effectively atomic for stats purposes (we accept the
+    # very rare lost increment in exchange for not paying a lock on the
+    # hot path).
+    mem_hits: int = field(default=0, init=False)
+    mem_misses: int = field(default=0, init=False)
+    disk_hits: int = field(default=0, init=False)
+    disk_misses: int = field(default=0, init=False)
+    computes: int = field(default=0, init=False)
+    disk_write_failures: int = field(default=0, init=False)
+
     # -----------------------------------------------------
 
     def __post_init__(self):
@@ -242,14 +271,20 @@ class CacheManager:
 
     # Source files holding the in-process lexicons. Resolved once at
     # class-load time and hashed lazily on first cache key computation.
+    #
+    # Audit fix §7 — entries that point at files removed in the §4
+    # cleanup (``emotion_lexicon.py``, ``emotion_lexicon_features.py``,
+    # ``emotion_features.py``, ``propaganda_lexicon_features.py``)
+    # used to contribute ``missing:<rel>`` placeholders to the
+    # fingerprint, which (a) was deterministic but (b) generated noisy
+    # hashes that drifted any time another deletion happened. We now
+    # only fingerprint files that still exist.
     _LEXICON_SOURCES: tuple = (
         "src/features/bias/bias_lexicon.py",
         "src/features/bias/bias_lexicon_features.py",
         "src/features/bias/bias_features.py",
-        "src/features/emotion/emotion_lexicon.py",
-        "src/features/emotion/emotion_lexicon_features.py",
-        "src/features/emotion/emotion_features.py",
-        "src/features/propaganda/propaganda_lexicon_features.py",
+        "src/features/emotion/emotion_schema.py",
+        "src/features/emotion/emotion_intensity_features.py",
         "src/features/propaganda/propaganda_features.py",
     )
 
@@ -284,7 +319,67 @@ class CacheManager:
             self.lexicon_fingerprint = self._compute_lexicon_fingerprint()
         return self.lexicon_fingerprint
 
-    def _context_key(self, context: FeatureContext) -> str:
+    # -----------------------------------------------------
+    # COMBINED FINGERPRINT  (audit fix §7.1)
+    #
+    # The on-disk pickle blob carries this short fingerprint in its
+    # header; reads whose stored fingerprint does not match are
+    # treated as a miss instead of returning stale data. This is a
+    # second line of defence behind ``context_key`` (which already
+    # bakes the same components into the path digest).
+    # -----------------------------------------------------
+
+    def _combined_fingerprint(self) -> str:
+        return f"{self._get_feature_fingerprint()}:{self._get_lexicon_fingerprint()}"
+
+    # -----------------------------------------------------
+    # STATS  (audit fix §7.6)
+    # -----------------------------------------------------
+
+    def stats(self) -> Dict[str, int]:
+        """Snapshot of cache hit / miss counters.
+
+        Suitable for scraping into Prometheus or logging at shutdown.
+        Counters are best-effort (not lock-protected) — fine for
+        observability, not for correctness checks.
+        """
+        return {
+            "mem_hits": self.mem_hits,
+            "mem_misses": self.mem_misses,
+            "disk_hits": self.disk_hits,
+            "disk_misses": self.disk_misses,
+            "computes": self.computes,
+            "disk_write_failures": self.disk_write_failures,
+            "mem_size_items": len(self._memory_cache.store),
+            "mem_size_bytes": self._memory_cache.total_bytes,
+        }
+
+    def reset_stats(self) -> None:
+        self.mem_hits = 0
+        self.mem_misses = 0
+        self.disk_hits = 0
+        self.disk_misses = 0
+        self.computes = 0
+        self.disk_write_failures = 0
+
+    def context_key(self, context: FeatureContext) -> str:
+        """Return the deterministic cache key for ``context``.
+
+        This is the public API. The cache key bakes in:
+        - ``CACHE_VERSION`` (bump to invalidate the entire on-disk cache).
+        - ``feature_set`` fingerprint (registry change → new key).
+        - ``lexicons`` fingerprint (lexicon edit → new key).
+        - ``tokenizer_id`` from ``context.metadata`` (model swap → new key).
+        - ``context.text`` and the precomputed ``context.tokens`` if any.
+        - The remaining metadata, serialised through ``_stable_default``
+          for deterministic JSON.
+
+        Audit fix §1.9 — promoted from the previous private
+        ``_context_key`` so ``DatasetFeatureGenerator`` and any other
+        external caller can derive a cache key without reaching into a
+        leading-underscore helper. ``_context_key`` is preserved below
+        as a thin deprecation shim so existing callers keep working.
+        """
 
         # Pull tokenizer_id out of metadata (if any) so switching
         # roberta-base ↔ xlm-roberta-base or upgrading the tokenizer
@@ -303,8 +398,25 @@ class CacheManager:
             "metadata": meta,
         }
 
-        raw = json.dumps(payload, sort_keys=True, default=str)
+        # Audit fix §1.10 — ``default=str`` was lossy for non-JSON-
+        # serialisable types (sets, tuples, custom objects all collapsed
+        # to their ``str()`` form, which is order-dependent and round-
+        # trips badly through ``repr``). ``_stable_default`` normalises
+        # the small set of ad-hoc types we see in metadata into a
+        # deterministic shape, then we fall back to ``repr`` for
+        # anything we have not handled explicitly. ``sort_keys=True``
+        # is preserved for the top-level payload.
+        raw = json.dumps(payload, sort_keys=True, default=_stable_default)
         return hashlib.sha256(raw.encode()).hexdigest()
+
+    def _context_key(self, context: FeatureContext) -> str:
+        """Backward-compat alias for :meth:`context_key`.
+
+        Audit fix §1.9 — kept so existing internal callers
+        (``get_or_compute``, ``get_or_compute_batch``) continue to work
+        without a churn-only diff. New code MUST use ``context_key``.
+        """
+        return self.context_key(context)
 
     # -----------------------------------------------------
 
@@ -317,6 +429,7 @@ class CacheManager:
 
         cache = self.get_cache(namespace)
         key = self._context_key(context)
+        fp = self._combined_fingerprint()
 
         # -------------------------
         # MEMORY CACHE
@@ -324,31 +437,37 @@ class CacheManager:
 
         cached = self._memory_cache.get(key)
         if cached is not None:
+            self.mem_hits += 1
             return cached
+        self.mem_misses += 1
 
         # -------------------------
         # DISK CACHE
         # -------------------------
 
-        cached = cache.load(key)
+        cached = cache.load(key, expected_fingerprint=fp)
 
         if cached is not None:
+            self.disk_hits += 1
             self._memory_cache.set(key, cached)
             return cached
+        self.disk_misses += 1
 
         # -------------------------
         # COMPUTE
         # -------------------------
 
         result = compute_fn(context)
+        self.computes += 1
 
         # -------------------------
         # SAVE
         # -------------------------
 
         try:
-            cache.save(key, result)
+            cache.save(key, result, fingerprint=fp)
         except Exception:
+            self.disk_write_failures += 1
             logger.warning("Disk cache write failed")
 
         self._memory_cache.set(key, result)
@@ -370,6 +489,7 @@ class CacheManager:
             return []
 
         cache = self.get_cache(namespace)
+        fp = self._combined_fingerprint()
 
         keys = [self._context_key(c) for c in contexts]
 
@@ -386,15 +506,19 @@ class CacheManager:
             cached = self._memory_cache.get(key)
 
             if cached is not None:
+                self.mem_hits += 1
                 results[i] = cached
                 continue
+            self.mem_misses += 1
 
-            cached = cache.load(key)
+            cached = cache.load(key, expected_fingerprint=fp)
 
             if cached is not None:
+                self.disk_hits += 1
                 results[i] = cached
                 self._memory_cache.set(key, cached)
             else:
+                self.disk_misses += 1
                 missing.append(contexts[i])
                 missing_idx.append(i)
 
@@ -405,14 +529,16 @@ class CacheManager:
         if missing:
 
             computed = compute_batch_fn(missing)
+            self.computes += len(computed)
 
             for i, key, val in zip(missing_idx, [keys[j] for j in missing_idx], computed):
 
                 results[i] = val
 
                 try:
-                    cache.save(key, val)
+                    cache.save(key, val, fingerprint=fp)
                 except Exception:
+                    self.disk_write_failures += 1
                     logger.warning("Disk write failed")
 
                 self._memory_cache.set(key, val)

@@ -20,6 +20,7 @@ features then read ``ctx.tokens_word`` for free.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from typing import List, Optional
 
 # ``[^\W\d_]`` = "word character minus digits and underscore" = Unicode letter.
@@ -69,3 +70,27 @@ def ensure_tokens_word(context, text: Optional[str] = None) -> List[str]:
     src = text if text is not None else getattr(context, "text", "") or ""
     context.tokens_word = tokenize_words(src)
     return context.tokens_word
+
+
+def ensure_tokens_word_counter(context, text: Optional[str] = None) -> Counter:
+    """Return a cached :class:`collections.Counter` of ``ensure_tokens_word``.
+
+    Audit fix §2.1 — eight extractors (bias / discourse / narrative /
+    propaganda / manipulation / conflict) used to call ``Counter(tokens)``
+    independently on the same per-context token list. Caching once on the
+    context yields ~7× the per-document Counter cost back; the cached
+    counter is read-only because returning a shared mutable object would
+    let one extractor corrupt another.
+    """
+    cache = getattr(context, "cache", None)
+    if cache is not None:
+        cached = cache.get("tokens_word_counter")
+        if cached is not None:
+            return cached
+
+    tokens = ensure_tokens_word(context, text)
+    counter = Counter(tokens)
+
+    if cache is not None:
+        cache["tokens_word_counter"] = counter
+    return counter

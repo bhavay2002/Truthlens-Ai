@@ -73,12 +73,21 @@ class AsyncCheckpointWriter:
         if self._closed:
             raise RuntimeError("Writer closed")
 
+        # C1.9: under back-pressure we MUST NOT silently drop the oldest
+        # queued checkpoint — that is what most often holds the best
+        # model so far and losing it corrupts run history. Drop the
+        # *incoming* save instead and surface a loud WARNING so the
+        # operator knows checkpoint cadence is exceeding I/O bandwidth.
         try:
             self._queue.put_nowait((path, (obj, compress)))
         except queue.Full:
-            _ = self._queue.get_nowait()
-            self._queue.task_done()
-            self._queue.put_nowait((path, (obj, compress)))
+            logger.warning(
+                "AsyncCheckpointWriter queue full (max=%d); "
+                "DROPPING incoming save: %s. Increase max_queue_size "
+                "or reduce checkpoint frequency.",
+                self._queue.maxsize,
+                path,
+            )
 
     def flush(self) -> None:
         self._queue.join()
@@ -111,10 +120,19 @@ def _quant_backend() -> str:
 
 
 # =========================================================
-# ARTIFACT MANAGER (PRO LEVEL)
+# DEDUPLICATING ARTIFACT STORE (PRO LEVEL)
 # =========================================================
-
-class ArtifactManager:
+#
+# C1.1: This class was previously named ``ArtifactManager`` and shared
+# that name with a *different* implementation in ``model_loader.py``.
+# Two unrelated classes under the same name caused ambiguous imports
+# (``from .checkpointing import ArtifactManager`` could resolve to
+# either, depending on package re-export order) and silent divergence
+# between the dedup-aware variant and the schema-aware variant. The
+# canonical name for the schema/integrity-first manager is
+# ``ArtifactManager`` (in ``model_loader.py``); this class is the
+# deduplicating, hash-cached variant and is now named accordingly.
+class DeduplicatingArtifactStore:
 
     def __init__(self, artifact_dir: str | Path) -> None:
         self.artifact_dir = Path(artifact_dir)
@@ -306,7 +324,11 @@ class ArtifactManager:
         if not path.exists():
             raise FileNotFoundError(path)
 
-        state = torch.load(path)
+        # C1.3: Deserialise with ``weights_only=True`` to forbid arbitrary
+        # pickle-based code execution. Artifacts produced by ``save_model``
+        # are pure state-dicts (tensors keyed by string), so the safer
+        # deserialiser is fully sufficient here.
+        state = torch.load(path, map_location="cpu", weights_only=True)
         validate_checkpoint(state, strict=False)
 
         return state

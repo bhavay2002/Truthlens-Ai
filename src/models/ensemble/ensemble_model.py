@@ -94,10 +94,26 @@ class EnsembleModel(nn.Module):
 
         logits_list: List[torch.Tensor] = []
 
+        # A5.5: free the per-member ``output`` dict (which can carry
+        # probabilities, attention maps, hidden states …) as soon as
+        # we've extracted the one tensor we actually need. On CUDA we
+        # also nudge the allocator with ``empty_cache`` so the freed
+        # blocks become available to the next member's forward — at
+        # ensemble sizes >= 5 this materially reduces peak memory on
+        # 80 GB cards. ``empty_cache`` is a host-side hint, not a
+        # synchronisation, and is gated on actually being on CUDA.
+        on_cuda = (
+            torch.cuda.is_available()
+            and self._runtime_device().type == "cuda"
+        )
+
         for model in self.models:
             output = model(*args, **kwargs)
             logits = extract_logits(output)
             logits_list.append(logits)
+            del output
+            if on_cuda:
+                torch.cuda.empty_cache()
 
         stacked = torch.stack(logits_list, dim=0)
 

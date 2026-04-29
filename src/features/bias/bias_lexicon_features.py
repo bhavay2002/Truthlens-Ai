@@ -11,19 +11,17 @@ import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
+from src.features.base.lexicon_loader import load_lexicon_set
 from src.features.base.lexicon_matcher import (
     WeightedLexiconMatcher,
     compute_negation_mask,
     to_token_array,
 )
-from src.features.base.numerics import normalized_entropy
+from src.features.base.numerics import EPS, MAX_CLIP, normalized_entropy
 from src.features.base.text_signals import get_text_signals
 from src.features.base.tokenization import ensure_tokens_word
 
 logger = logging.getLogger(__name__)
-
-EPS = 1e-8
-MAX_CLIP = 1.0
 
 
 # =========================================================
@@ -50,12 +48,16 @@ def _weighted_count(tokens: List[str], lexicon: Set[str]) -> float:
 # LEXICONS (same as yours)
 # =========================================================
 
-EVALUATIVE_WORDS = {...}
-ASSERTIVE_WORDS = {...}
-HEDGING_WORDS = {...}
-INTENSIFIERS = {...}
+# Audit fix §1.1 — see src/config/lexicons/bias_lexicon.json.
+EVALUATIVE_WORDS = load_lexicon_set("bias_lexicon", "evaluative")
+ASSERTIVE_WORDS = load_lexicon_set("bias_lexicon", "assertive")
+HEDGING_WORDS = load_lexicon_set("bias_lexicon", "hedging")
+INTENSIFIERS = load_lexicon_set("bias_lexicon", "intensifiers")
 
-COMPILED_BIAS_PHRASES = [...]
+# Reserved for compiled multi-word patterns (currently none); kept as an
+# empty list so the ``len(p.findall(text)) for p in COMPILED_BIAS_PHRASES``
+# sum stays valid and contributes 0 instead of erroring.
+COMPILED_BIAS_PHRASES: list = []
 
 
 # =========================================================
@@ -200,7 +202,5 @@ class BiasLexiconFeatures(BaseFeature):
             return 0.0
         return float(np.clip(v, 0.0, MAX_CLIP))
 
-    # -----------------------------------------------------
-
-    def extract_batch(self, contexts):
-        return [self.extract(ctx) for ctx in contexts]
+    # Audit fix §1.4 — the no-op ``extract_batch`` override was removed;
+    # ``BaseFeature.extract_batch`` provides the same per-sample dispatch.

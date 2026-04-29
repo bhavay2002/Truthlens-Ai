@@ -179,8 +179,10 @@ class ExplanationCache:
                 try:
                     path = self.cache_dir / key
                     path.write_bytes(self._serialize(item))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning(
+                        "Cache disk write failed for key %.16s…: %s", key, exc
+                    )
 
     # =====================================================
     # STATS ( NEW)

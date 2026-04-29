@@ -1,34 +1,47 @@
-# src/features/narrative_frame_features.py
-
 from __future__ import annotations
 
 import logging
-from collections import Counter
 from dataclasses import dataclass
-from typing import Dict, Set
+from typing import Dict
 
 import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
-from src.features.base.numerics import normalized_entropy
+from src.features.base.lexicon_loader import load_lexicon_set
+from src.features.base.lexicon_matcher import LexiconMatcher, to_token_array
+from src.features.base.numerics import EPS, MAX_CLIP, normalized_entropy
+from src.features.base.text_signals import get_text_signals
 from src.features.base.tokenization import ensure_tokens_word
 
 logger = logging.getLogger(__name__)
 
-EPS = 1e-8
-MAX_CLIP = 1.0
+
+# ---------------------------------------------------------
+# Lexicons — audit fix §1.1, see src/config/lexicons/narrative_frame.json.
+# Distinct vocabulary from src/features/bias/framing_features.py;
+# narrative-side adds ``responsibility`` and tunes the rest for story
+# framing rather than policy framing.
+# ---------------------------------------------------------
+
+CONFLICT_FRAME = load_lexicon_set("narrative_frame", "conflict")
+ECONOMIC_FRAME = load_lexicon_set("narrative_frame", "economic")
+HUMAN_INTEREST_FRAME = load_lexicon_set("narrative_frame", "human_interest")
+MORAL_FRAME = load_lexicon_set("narrative_frame", "moral")
+RESPONSIBILITY_FRAME = load_lexicon_set("narrative_frame", "responsibility")
 
 
 # ---------------------------------------------------------
-# Lexicons
+# Vectorized matchers — audit fix §2.2.
 # ---------------------------------------------------------
 
-CONFLICT_FRAME = {...}
-ECONOMIC_FRAME = {...}
-HUMAN_INTEREST_FRAME = {...}
-MORAL_FRAME = {...}
-RESPONSIBILITY_FRAME = {...}
+_NARR_FRAME_MATCHERS: Dict[str, LexiconMatcher] = {
+    "conflict":       LexiconMatcher(CONFLICT_FRAME,       "frame_conflict"),
+    "economic":       LexiconMatcher(ECONOMIC_FRAME,       "frame_economic"),
+    "human":          LexiconMatcher(HUMAN_INTEREST_FRAME, "frame_human_interest"),
+    "moral":          LexiconMatcher(MORAL_FRAME,          "frame_moral"),
+    "responsibility": LexiconMatcher(RESPONSIBILITY_FRAME, "frame_responsibility"),
+}
 
 
 # ---------------------------------------------------------
@@ -57,17 +70,13 @@ class NarrativeFrameFeatures(BaseFeature):
         if n == 0:
             return {}
 
-        counter = Counter(tokens)
-
-        def ratio(lexicon: Set[str]) -> float:
-            return sum(counter.get(w, 0) for w in lexicon) / (n + EPS)
+        # Audit fix §2.2 — vectorised lexicon counts.
+        tokens_arr = to_token_array(tokens)
+        denom = n + EPS
 
         raw = {
-            "conflict": ratio(CONFLICT_FRAME),
-            "economic": ratio(ECONOMIC_FRAME),
-            "human": ratio(HUMAN_INTEREST_FRAME),
-            "moral": ratio(MORAL_FRAME),
-            "responsibility": ratio(RESPONSIBILITY_FRAME),
+            key: matcher.count_in_tokens(tokens_arr) / denom
+            for key, matcher in _NARR_FRAME_MATCHERS.items()
         }
 
         # -------------------------
@@ -110,10 +119,11 @@ class NarrativeFrameFeatures(BaseFeature):
         balance = 1.0 - float(np.std(probs))
 
         # -------------------------
-        # RHETORIC (FIXED)
+        # RHETORIC — audit fix §3.4 / §4.3, shared text-signal cache.
         # -------------------------
 
-        rhetoric = (text.count("!") + text.count("?")) / (n + EPS)
+        signals = get_text_signals(context, n)
+        rhetoric = signals["exclamation_density"] + signals["question_density"]
 
         # -------------------------
         # OUTPUT

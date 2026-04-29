@@ -237,7 +237,7 @@ def ablation_importance(
         )
         return result["predictions"]
 
-    from src.features.importance.feature_ablation import FeatureAblation
+    from src.evaluation.importance.feature_ablation import FeatureAblation
 
     ablator = FeatureAblation(metric=metric)
 
@@ -277,7 +277,7 @@ def permutation_importance(
         )
         return result["predictions"]
 
-    from src.features.importance.permutation_importance import PermutationImportance
+    from src.evaluation.importance.permutation_importance import PermutationImportance
 
     perm = PermutationImportance(metric=metric)
 
@@ -317,7 +317,7 @@ def shap_importance(
         )
         return result["probabilities"]
 
-    from src.features.importance.shap_importance import ShapImportance
+    from src.evaluation.importance.shap_importance import ShapImportance
 
     shap_calc = ShapImportance()
 

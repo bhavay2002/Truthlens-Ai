@@ -8,7 +8,6 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import torch
-import matplotlib.pyplot as plt
 
 from src.explainability.attention_rollout import AttentionRollout
 
@@ -140,6 +139,7 @@ class AttentionVisualizer:
         size = min(len(tokens), attention_matrix.shape[0])
         matrix = attention_matrix[:size, :size]
 
+        import matplotlib.pyplot as plt  # GPU-5: lazy import
         fig, ax = plt.subplots(figsize=(10, 8))
 
         img = ax.imshow(matrix)
@@ -175,6 +175,7 @@ class AttentionVisualizer:
         scores = np.asarray(scores)
         scores = scores / (np.sum(scores) + EPS)
 
+        import matplotlib.pyplot as plt  # GPU-5: lazy import
         fig, ax = plt.subplots(figsize=(10, 4))
 
         ax.bar(range(len(tokens)), scores)

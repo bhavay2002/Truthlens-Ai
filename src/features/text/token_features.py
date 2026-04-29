@@ -10,13 +10,10 @@ import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
-from src.features.base.numerics import normalized_entropy
+from src.features.base.numerics import EPS, MAX_CLIP, normalized_entropy
 from src.features.base.tokenization import ensure_tokens_word
 
 logger = logging.getLogger(__name__)
-
-EPS = 1e-8
-MAX_CLIP = 1.0
 
 
 # ---------------------------------------------------------

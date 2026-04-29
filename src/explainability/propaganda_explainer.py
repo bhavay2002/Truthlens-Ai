@@ -136,6 +136,8 @@ def explain_propaganda(
             tokens=[],
             importance=[],
             structured=[],
+            # CRIT-9: propaganda explainer is heuristic / lexicon-only.
+            faithful=False,
         )
 
     raw_scores = _score_tokens(tokens)
@@ -149,6 +151,7 @@ def explain_propaganda(
             tokens=[],
             importance=[],
             structured=[],
+            faithful=False,
         )
 
     cal = calibrate_explanation(arr.tolist(), method="custom")
@@ -179,6 +182,8 @@ def explain_propaganda(
         structured=structured,
         confidence=confidence,
         entropy=entropy,
+        # CRIT-9: pattern-matched lexicon — not a model attribution.
+        faithful=False,
     )
 
 

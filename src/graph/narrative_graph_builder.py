@@ -172,8 +172,16 @@ class NarrativeGraphBuilder:
         """Extract ``(keyword, start_char, end_char)`` from a spaCy sentence.
 
         Uses noun-chunks (preferred — multi-word phrases are real
-        narrative units) plus named entities. Falls back to lemmatised
-        content tokens if neither is available (blank pipeline).
+        narrative units) plus named entities.
+
+        G-S10: the lemmatised-content-token fallback below was
+        previously documented as "the blank pipeline path", but its
+        trigger (``if not items``) also fires when a real spaCy model
+        produces zero noun-chunks *and* zero entities for a sentence
+        — short interjections, headlines, social-media fragments. So
+        treat it as a **graceful degradation path** that runs in
+        production any time both higher-quality extractors come back
+        empty, not just when the blank pipeline is loaded.
         """
         items: List[Tuple[str, int, int]] = []
         seen: Set[str] = set()
@@ -202,7 +210,11 @@ class NarrativeGraphBuilder:
                 items.append((key, ent.start_char, ent.end_char))
                 seen.add(key)
 
-        # ---- fallback: content tokens (blank pipeline path) ----
+        # ---- fallback: lemmatised content tokens ----
+        # G-S10: fires either when the loaded pipeline is blank (no
+        # parser → no noun_chunks, no NER → no ents) *or* when a real
+        # pipeline produces nothing for this specific sentence. Both
+        # cases are graceful degradation, not error states.
         if not items:
             for tok in sent:
                 if not tok.is_alpha:
@@ -228,6 +240,8 @@ class NarrativeGraphBuilder:
     def build_graph_with_spans(
         self,
         text: str,
+        *,
+        doc: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Build the narrative graph **and** return per-keyword char offsets.
 
@@ -256,8 +270,14 @@ class NarrativeGraphBuilder:
         # -------- collect per-sentence keyword lists --------
         sentence_keywords: List[List[str]] = []
 
-        if self.nlp is not None:
+        # G-P8: when the caller already parsed the text via spaCy
+        # (e.g. ``GraphPipeline._run_with_doc`` shares one ``Doc`` with
+        # the entity builder), accept it directly so we don't re-run
+        # the parser. Falls back to the previous self-parse path.
+        if doc is None and self.nlp is not None:
             doc = self.nlp(text)
+
+        if doc is not None:
 
             for s_idx, sent in enumerate(doc.sents):
                 kws = self._sentence_keywords_spacy(sent)
@@ -321,10 +341,19 @@ class NarrativeGraphBuilder:
                     graph[k] = defaultdict(float)
 
             # (1) intra-sentence co-occurrence — real shared-membership edges
+            #
+            # G-S5: write every edge into a single canonical
+            # (sorted-tuple) direction so the downstream
+            # ``canonicalize_weighted`` symmetrise step (which takes
+            # ``max(w_uv, w_vu)``) preserves the true co-occurrence
+            # count instead of returning ``max(uv, vu)`` when the
+            # same pair was independently written in both directions
+            # by different sentence pairs.
             for i, u in enumerate(kws):
                 for v in kws[i + 1:]:
                     if u != v:
-                        graph[u][v] += 1.0
+                        a, b = (u, v) if u < v else (v, u)
+                        graph[a][b] += 1.0
 
             # (2) temporal succession — preserves the prior chain semantics,
             # but on real linguistic units instead of regex tokens
@@ -332,7 +361,8 @@ class NarrativeGraphBuilder:
                 for src in prev_keywords:
                     for tgt in kws:
                         if src != tgt:
-                            graph[src][tgt] += 1.0
+                            a, b = (src, tgt) if src < tgt else (tgt, src)
+                            graph[a][b] += 1.0
 
             prev_keywords = kws
 
@@ -352,6 +382,19 @@ class NarrativeGraphBuilder:
         """
         return self.build_graph_with_spans(text)["graph"]
 
+    def build_graph_with_doc(
+        self,
+        text: str,
+        doc: Any,
+    ) -> Dict[str, Dict[str, float]]:
+        """G-P8: build the narrative graph from a pre-parsed spaCy ``Doc``.
+
+        Used by :class:`GraphPipeline` so the entity and narrative
+        builders share a single ``nlp(text)`` pass instead of running
+        the parser twice on the same string.
+        """
+        return self.build_graph_with_spans(text, doc=doc)["graph"]
+
     # =====================================================
     # FEATURES
     # =====================================================
@@ -366,24 +409,35 @@ class NarrativeGraphBuilder:
 
         nodes = set(graph.keys())
 
-        edges = set()
-        degrees = []
-
-        weights = []
+        # G-S4: the input graph is the post-``canonicalize_weighted``
+        # double-entry adjacency, so every undirected edge appears in
+        # *both* directions (``graph[u][v]`` and ``graph[v][u]``).
+        # The previous implementation counted ordered pairs into
+        # ``edges`` and appended each weight twice, which doubled the
+        # reported edge count, doubled the weight mass used by the
+        # entropy / flow_strength metrics, and broke parity with
+        # ``GraphAnalyzer.compute_graph_metrics`` (which divides by 2).
+        # Dedupe on a sorted-tuple key so each undirected edge
+        # contributes exactly once.
+        edge_weights: Dict[Tuple[str, str], float] = {}
+        degrees: List[int] = []
 
         for src, nbrs in graph.items():
 
             for tgt, w in nbrs.items():
                 if src != tgt:
-                    edges.add((src, tgt))
-                    weights.append(w)
+                    key = (src, tgt) if src < tgt else (tgt, src)
+                    if key not in edge_weights:
+                        edge_weights[key] = float(w)
 
             degrees.append(len(nbrs))
 
             nodes.update(nbrs.keys())
 
+        weights = list(edge_weights.values())
+
         n = len(nodes)
-        e = len(edges)
+        e = len(edge_weights)
 
         degrees_arr = np.array(degrees, dtype=float) if degrees else np.array([])
 

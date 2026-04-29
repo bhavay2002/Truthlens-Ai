@@ -9,9 +9,8 @@ from typing import Dict
 import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
-from src.features.base.feature_registry import register_feature
 from src.features.base.lexicon_matcher import LexiconMatcher, to_token_array
-from src.features.base.numerics import normalized_entropy
+from src.features.base.numerics import EPS, MAX_CLIP, normalized_entropy
 from src.features.base.tokenization import ensure_tokens_word
 
 from src.features.emotion.emotion_schema import (
@@ -21,9 +20,22 @@ from src.features.emotion.emotion_schema import (
 
 logger = logging.getLogger(__name__)
 
-EPS = 1e-8
-MAX_CLIP = 1.0
 
+# =========================================================
+# Audit fix §4 — private helper (NOT a registered feature).
+# =========================================================
+# This module previously also registered itself in the feature
+# pipeline via ``@register_feature``, which made it a duplicate of
+# the hybrid ``EmotionIntensityFeatures`` extractor (both wrote
+# emotion-distribution columns and the second-loaded one silently
+# overwrote the first). The class is kept as an internal helper for
+# the API-level :class:`EmotionLexiconAnalyzer` (which produces a
+# user-facing ``EmotionResult`` payload, not pipeline features), but
+# it is no longer registered.
+#
+# If you need lexicon emotion *features* in the pipeline, use
+# ``emotion_intensity_features`` — its lexicon path emits the same
+# distribution.
 
 # -----------------------------------------------------
 # Reverse lookup
@@ -47,16 +59,15 @@ _EMOTION_LEX_MATCHERS = {
 
 
 # -----------------------------------------------------
-# Feature extractor
+# Helper class (not @register_feature — see banner above)
 # -----------------------------------------------------
 
 @dataclass
-@register_feature
 class EmotionLexiconFeatures(BaseFeature):
 
     name: str = "emotion_lexicon_features"
     group: str = "emotion"
-    description: str = "Calibrated lexicon emotion features"
+    description: str = "Calibrated lexicon emotion features (helper for EmotionLexiconAnalyzer)"
 
     # -------------------------------------------------
 

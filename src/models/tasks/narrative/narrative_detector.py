@@ -46,38 +46,35 @@ class NarrativeDetectorConfig:
 
 
 class NarrativeDetector(BaseModel):
-    """Single-task narrative detector.
+    """Single-task narrative-role detector.
 
-    .. warning::
-       **A4 — semantic conflation in ``LABELS``.**
-       The 11-element label list below mixes three orthogonal axes
-       under one multi-label head:
+    Predicts the three narrative roles — ``hero`` / ``villain`` /
+    ``victim`` — as a 3-way multi-label head. This matches the
+    canonical dataset schema:
 
-         * narrative *roles* (``hero`` / ``villain`` / ``victim``),
-         * the *entities* that fill those roles
-           (``hero_entities`` / ``villain_entities`` / ``victim_entities``),
-         * narrative *frames* (``RE`` / ``HI`` / ``CO`` / ``MO`` / ``EC``).
+        narrative columns: text, hero, villain, victim,
+                           hero_entities, villain_entities, victim_entities
 
-       That conflation is intentionally preserved here for backward
-       compatibility with existing checkpoints and downstream label
-       maps. New code should prefer the multitask path
-       (``MultiTaskTruthLensModel``), which exposes ``narrative``
-       (3-class roles) and ``narrative_frame`` (5-class frames) as
-       distinct heads with distinct loss signals.
+    The three ``*_entities`` columns are *text spans*, not classification
+    targets — they identify which entities fill each role and are
+    consumed by the entity-extraction stage downstream, never by this
+    head. Narrative *frames* (``RE`` / ``HI`` / ``CO`` / ``MO`` /
+    ``EC``) live on a separate ``narrative_frame`` head; see
+    :class:`MultiTaskTruthLensModel` for the wired-up multi-task path.
+
+    .. note::
+       The previous version of this class concatenated the 3 roles,
+       3 entity-marker labels, and 5 frame labels into a single
+       11-class head. That conflated three orthogonal axes under one
+       loss signal and produced the well-known shape mismatch:
+       model emits ``[B, 11]`` but the dataset only carries 3 role
+       columns, giving ``labels [B, 3]`` vs ``logits [B, 11]``.
     """
 
     LABELS: List[str] = [
         "hero",
         "villain",
         "victim",
-        "hero_entities",
-        "villain_entities",
-        "victim_entities",
-        "RE",
-        "HI",
-        "CO",
-        "MO",
-        "EC",
     ]
 
     NUM_LABELS = len(LABELS)

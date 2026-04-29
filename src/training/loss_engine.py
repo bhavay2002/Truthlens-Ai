@@ -186,14 +186,34 @@ class LossEngine:
         shared_parameters=None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
 
-        if "task_logits" not in outputs:
-            raise RuntimeError("Missing 'task_logits'")
-
         if "labels" not in batch:
             raise RuntimeError("Missing 'labels'")
 
+        # Single-task model classes (BiasClassifier, IdeologyClassifier,
+        # …) emit ``outputs["logits"]`` (a single tensor) rather than the
+        # multi-head ``outputs["task_logits"]`` dict that
+        # MultiTaskTruthLensModel produces. When the LossEngine is
+        # configured with exactly one task, treat the bare ``logits``
+        # tensor as that task's logits and synthesise the ``task_logits``
+        # dict the rest of the engine expects. Multi-task callers MUST
+        # still supply ``task_logits`` — there is no way to disambiguate
+        # a single tensor across multiple heads.
+        if "task_logits" not in outputs:
+            if "logits" in outputs and len(self.config.task_types) == 1:
+                only_task = next(iter(self.config.task_types.keys()))
+                outputs["task_logits"] = {only_task: outputs["logits"]}
+            else:
+                raise RuntimeError("Missing 'task_logits'")
+
         logits = outputs["task_logits"]
         labels = batch["labels"]
+
+        # Single-task collate emits ``labels`` as a bare tensor, but
+        # MultiTaskLoss requires a {task: tensor} dict. Wrap it up using
+        # the only configured task name so the per-task loop matches.
+        if not isinstance(labels, dict) and len(self.config.task_types) == 1:
+            only_task = next(iter(self.config.task_types.keys()))
+            labels = {only_task: labels}
 
         # -------------------------------------------------
         # CORE LOSS  (BUG-10: forward shared_parameters into the

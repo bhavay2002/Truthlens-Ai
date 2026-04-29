@@ -4,7 +4,6 @@ import logging
 from typing import Dict, List, Optional
 
 import numpy as np
-import matplotlib.pyplot as plt
 
 logger = logging.getLogger(__name__)
 EPS = 1e-12
@@ -46,6 +45,7 @@ class ExplanationVisualizer:
     # =====================================================
 
     def _finalize(self, fig, save_path: Optional[str]):
+        import matplotlib.pyplot as plt  # GPU-5: lazy import
         if save_path:
             fig.savefig(save_path)
         else:
@@ -76,6 +76,7 @@ class ExplanationVisualizer:
                 k: self._normalize(v) for k, v in explanations.items()
             }
 
+        import matplotlib.pyplot as plt  # GPU-5: lazy import
         fig, ax = plt.subplots(figsize=(12, 6))
 
         for name, scores in explanations.items():
@@ -155,6 +156,7 @@ class ExplanationVisualizer:
 
         matrix = np.array(scores).reshape(1, -1)
 
+        import matplotlib.pyplot as plt  # GPU-5: lazy import
         fig, ax = plt.subplots(figsize=(max(len(tokens) * 0.5, 8), 2))
 
         im = ax.imshow(matrix, aspect="auto")
@@ -192,6 +194,7 @@ class ExplanationVisualizer:
 
         order = np.argsort(scores_arr)[::-1][:top_k]
 
+        import matplotlib.pyplot as plt  # GPU-5: lazy import
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.barh(tokens_arr[order][::-1], scores_arr[order][::-1])
 

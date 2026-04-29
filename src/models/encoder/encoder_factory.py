@@ -180,11 +180,8 @@ class EncoderFactory:
 
     @staticmethod
     def detect_device(device: Optional[str] = None) -> torch.device:
+        # A5.1: delegate to the single source of truth so CUDA / MPS /
+        # CPU fallback is identical across every device-picking site.
+        from src.models._device import detect_device
 
-        if device:
-            return torch.device(device)
-
-        if torch.cuda.is_available():
-            return torch.device("cuda")
-
-        return torch.device("cpu")
+        return detect_device(device)

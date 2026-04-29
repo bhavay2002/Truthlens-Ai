@@ -28,6 +28,16 @@ logger = logging.getLogger(__name__)
 # CACHE_VERSION + change the file suffix so any old gzip-JSON entries
 # from a previous run are treated as a miss instead of decoded as
 # garbage.
+#
+# Audit fix §7.1 — the pickled payload also carries an optional
+# ``fingerprint`` (caller-supplied; in practice the SHA-16 of the
+# combined feature-set + lexicon fingerprints from ``CacheManager``).
+# A read whose ``expected_fingerprint`` does not match the stored one
+# is treated as a miss instead of returning stale data. This protects
+# any code path that bypasses ``CacheManager.context_key`` (which
+# already bakes the fingerprints into the path digest) — e.g. a future
+# caller that reuses ``FeatureCache`` directly with arbitrary keys, or
+# a cache directory copied between processes.
 CACHE_VERSION = "v4"
 _PICKLE_PROTOCOL = pickle.HIGHEST_PROTOCOL
 
@@ -79,16 +89,21 @@ class FeatureCache:
     # SAFE SERIALIZATION
     # -----------------------------------------------------
 
-    def _serialize(self, data: Any) -> bytes:
+    def _serialize(self, data: Any, fingerprint: Optional[str] = None) -> bytes:
 
         payload = {
             "version": CACHE_VERSION,
+            "fingerprint": fingerprint,
             "data": data,
         }
 
         return pickle.dumps(payload, protocol=_PICKLE_PROTOCOL)
 
-    def _deserialize(self, raw: bytes) -> Any:
+    def _deserialize(
+        self,
+        raw: bytes,
+        expected_fingerprint: Optional[str] = None,
+    ) -> Any:
 
         try:
             payload = pickle.loads(raw)
@@ -102,20 +117,39 @@ class FeatureCache:
             logger.warning("Cache version mismatch")
             return None
 
+        # Audit fix §7.1 — schema-fingerprint header check. Only enforce
+        # when the caller supplied an expected fingerprint; legacy
+        # blobs written before this field existed have ``None`` and
+        # match a ``None`` expectation.
+        if expected_fingerprint is not None:
+            stored_fp = payload.get("fingerprint")
+            if stored_fp != expected_fingerprint:
+                logger.debug(
+                    "Cache fingerprint mismatch (have=%r expect=%r) — miss",
+                    stored_fp, expected_fingerprint,
+                )
+                return None
+
         return payload.get("data")
 
     # -----------------------------------------------------
     # ATOMIC WRITE (CRITICAL)
     # -----------------------------------------------------
 
-    def save(self, key: str, data: Any) -> Path:
+    def save(
+        self,
+        key: str,
+        data: Any,
+        *,
+        fingerprint: Optional[str] = None,
+    ) -> Path:
 
         path = self._get_path(key)
         temp_path: Optional[Path] = None
         replaced = False
 
         try:
-            serialized = self._serialize(data)
+            serialized = self._serialize(data, fingerprint=fingerprint)
 
             with tempfile.NamedTemporaryFile(
                 delete=False,
@@ -154,7 +188,12 @@ class FeatureCache:
     # LOAD
     # -----------------------------------------------------
 
-    def load(self, key: str) -> Optional[Any]:
+    def load(
+        self,
+        key: str,
+        *,
+        expected_fingerprint: Optional[str] = None,
+    ) -> Optional[Any]:
 
         path = self._get_path(key)
 
@@ -163,7 +202,9 @@ class FeatureCache:
 
         try:
             raw = path.read_bytes()
-            return self._deserialize(raw)
+            return self._deserialize(
+                raw, expected_fingerprint=expected_fingerprint
+            )
 
         except Exception:
             logger.exception("Cache load failed → deleting corrupted file")
@@ -174,8 +215,15 @@ class FeatureCache:
     # BATCH LOAD
     # -----------------------------------------------------
 
-    def load_many(self, keys: List[str]) -> List[Optional[Any]]:
-        return [self.load(k) for k in keys]
+    def load_many(
+        self,
+        keys: List[str],
+        *,
+        expected_fingerprint: Optional[str] = None,
+    ) -> List[Optional[Any]]:
+        return [
+            self.load(k, expected_fingerprint=expected_fingerprint) for k in keys
+        ]
 
     # -----------------------------------------------------
 

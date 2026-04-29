@@ -175,6 +175,36 @@ TRUTHLENS_RISK_KEY_MAP = {
 }
 
 
+# REC-AG-3: build the default `RiskConfig(invert_keys=...)` exactly
+# once at import time instead of allocating a fresh instance on every
+# article. Negligible per call but symptomatic of an avoidable hot-path
+# allocation under batched inference.
+_DEFAULT_TRUTHLENS_CONFIG = RiskConfig(
+    invert_keys=["truthlens_credibility_score"],
+)
+
+
+# CFG-AG-4: bridge for the Pydantic `aggregation_config.RiskConfig`
+# (low_threshold, medium_threshold, uncertainty_penalty) into the
+# runtime `RiskConfig` consumed here. Use this from the pipeline to
+# avoid maintaining two divergent shapes.
+def from_pydantic_config(
+    pydantic_cfg: Any,
+    *,
+    invert_keys: Optional[List[str]] = None,
+) -> "RiskConfig":
+    return RiskConfig(
+        default=RiskThresholds(
+            low=float(getattr(pydantic_cfg, "low_threshold", 0.3)),
+            medium=float(getattr(pydantic_cfg, "medium_threshold", 0.6)),
+        ),
+        uncertainty_penalty=float(
+            getattr(pydantic_cfg, "uncertainty_penalty", 0.2)
+        ),
+        invert_keys=invert_keys,
+    )
+
+
 def assess_truthlens_risks(
     scores: Dict[str, float],
     *,
@@ -182,27 +212,32 @@ def assess_truthlens_risks(
     config: Optional[RiskConfig] = None,
 ) -> Dict[str, Any]:
 
-    config = config or RiskConfig(
-        invert_keys=["truthlens_credibility_score"]
+    # PERF-AG-4: previously this called assess_risk_levels three times
+    # (once per key) and rebuilt RiskConfig validation each call. Issue
+    # one batched call with all present scores instead.
+    config = config or _DEFAULT_TRUTHLENS_CONFIG
+
+    present = {
+        k_in: scores[k_in]
+        for k_in in TRUTHLENS_RISK_KEY_MAP
+        if k_in in scores
+    }
+
+    if not present:
+        return {}
+
+    result = assess_risk_levels(
+        present,
+        probabilities=probabilities,
+        config=config,
+        return_scores=True,
     )
 
-    mapped = {}
-
-    for k_in, k_out in TRUTHLENS_RISK_KEY_MAP.items():
-
-        if k_in not in scores:
-            continue
-
-        result = assess_risk_levels(
-            {k_in: scores[k_in]},
-            probabilities=probabilities,
-            config=config,
-            return_scores=True,
-        )
-
-        mapped[k_out] = {
+    return {
+        k_out: {
             "level": result["levels"][k_in],
             "score": result["scores"][k_in],
         }
-
-    return mapped
+        for k_in, k_out in TRUTHLENS_RISK_KEY_MAP.items()
+        if k_in in present
+    }

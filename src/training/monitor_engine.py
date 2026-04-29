@@ -206,11 +206,19 @@ class MonitoringEngine:
 
     def _extract_loss(self, outputs: Dict[str, Any]) -> float:
 
-        loss = outputs.get("raw_loss") or outputs.get("loss")
+        # N-CRIT-1: Previously this raised ``RuntimeError`` on a non-finite
+        # loss, which crashed the run BEFORE the ``anomaly_on_nan`` policy
+        # downstream had a chance to translate the NaN into a soft signal
+        # (action=NAN).  That made the ``anomaly_on_nan`` flag a no-op —
+        # any non-finite loss would crash regardless.  Return ``nan`` here
+        # and let the caller's ``torch.isfinite`` guard apply the policy.
+        loss = outputs.get("raw_loss")
+        if loss is None:
+            loss = outputs.get("loss")
 
         if isinstance(loss, torch.Tensor):
             if not torch.isfinite(loss):
-                raise RuntimeError(f"Non-finite loss: {loss.item()}")
+                return float("nan")
             return float(loss.detach().item())
 
         if isinstance(loss, (int, float)):
@@ -223,15 +231,11 @@ class MonitoringEngine:
     # =====================================================
 
     def _compute_grad_norm(self, model: torch.nn.Module) -> float:
-
-        total_norm = 0.0
-
-        for p in model.parameters():
-            if p.grad is not None:
-                param_norm = p.grad.norm(2)
-                total_norm += param_norm.item() ** 2
-
-        return total_norm ** 0.5
+        # N-LOW-8: route through the canonical implementation instead of
+        # maintaining yet another L2 reduction loop. See
+        # ``training_setup._compute_grad_norm`` for the consolidation.
+        from src.training.training_utils import compute_grad_norm
+        return compute_grad_norm(model)
 
     # =====================================================
     # THROUGHPUT (SMOOTHED)

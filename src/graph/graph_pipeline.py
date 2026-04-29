@@ -3,11 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from collections import defaultdict
+import threading
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Tuple
-
-import numpy as np
 
 from src.graph.entity_graph import EntityGraphBuilder
 from src.graph.narrative_graph_builder import NarrativeGraphBuilder
@@ -19,7 +17,11 @@ from src.graph.graph_schema import GraphOutput, GraphStructure
 from src.graph.graph_embeddings import GraphEmbeddingConfig
 from src.graph.graph_config import GraphConfig, load_default_graph_config
 
-from src.analysis.integration_runner import AnalysisIntegrationRunner
+# G-D4: ``AnalysisIntegrationRunner`` pulls in 15 analysis modules at
+# import time. Top-level import made every consumer that touched
+# ``src.graph.graph_pipeline`` pay that cost — even when
+# ``run_analysis_modules: false``. Imported lazily inside ``__init__``
+# below, only when the runner is actually being constructed.
 
 logger = logging.getLogger(__name__)
 
@@ -197,11 +199,13 @@ class GraphPipeline:
             else None
         )
 
-        self.analysis_runner = (
-            AnalysisIntegrationRunner()
-            if self.config.run_analysis_modules
-            else None
-        )
+        # G-D4: lazy import — only pay the cost of dragging in the 15
+        # analysis modules when the caller actually opted into them.
+        if self.config.run_analysis_modules:
+            from src.analysis.integration_runner import AnalysisIntegrationRunner
+            self.analysis_runner = AnalysisIntegrationRunner()
+        else:
+            self.analysis_runner = None
 
         logger.info("GraphPipeline initialized")
 
@@ -220,6 +224,27 @@ class GraphPipeline:
                 if not k.startswith("_")
                 and not callable(getattr(self.config, k))
             }
+
+        # G-CFG4: ``batch_feature_pipeline._build_cache_key`` keys on
+        # this fingerprint. Previously it hashed only the dataclass
+        # fields, so a spaCy model swap (``en_core_web_sm`` →
+        # ``en_core_web_trf`` → blank fallback) silently re-used cached
+        # graphs from the *previous* model — a structurally different
+        # parse producing identical cache hits. Mix in the active
+        # model identity (name + version + pipe_names) so the cache
+        # key invalidates whenever the parser changes.
+        nlp_meta: Dict[str, Any] = {}
+        if self.entity_graph_builder is not None:
+            nlp = getattr(self.entity_graph_builder, "nlp", None)
+            if nlp is not None:
+                meta = getattr(nlp, "meta", {}) or {}
+                nlp_meta = {
+                    "name": meta.get("name", ""),
+                    "version": meta.get("version", ""),
+                    "lang": meta.get("lang", ""),
+                    "pipe_names": list(getattr(nlp, "pipe_names", []) or []),
+                }
+        payload["__nlp__"] = nlp_meta
 
         raw = json.dumps(payload, sort_keys=True, default=str).encode()
         return hashlib.sha256(raw).hexdigest()[:16]
@@ -246,45 +271,17 @@ class GraphPipeline:
     ) -> Tuple[Dict[str, Dict[str, float]], List[Dict[str, Any]]]:
         """Build the weighted entity graph from a pre-parsed spaCy ``Doc``.
 
-        Mirrors :meth:`EntityGraphBuilder.build_graph_with_spans` but
-        skips the ``self.nlp(text)`` call so a batch of documents
-        parsed once via ``nlp.pipe`` can share a single parser pass
-        (G-P3). Also returns per-mention character spans (G-T1).
+        G-D1: now a thin shim that delegates to
+        :meth:`EntityGraphBuilder.build_graph_with_doc` so the per-doc
+        graph-construction logic lives in exactly one place. This used
+        to be a 40-line copy of ``build_graph_with_spans`` minus the
+        ``self.nlp(text)`` call — two implementations to keep in sync.
         """
+        if self.entity_graph_builder is None:
+            return {}, []
 
-        graph: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
-        spans: List[Dict[str, Any]] = []
-
-        for s_idx, sent in enumerate(doc.sents):
-
-            seen: set = set()
-            ents: List[str] = []
-
-            for ent in sent.ents:
-                key = ent.text.lower().strip()
-                if not key:
-                    continue
-
-                spans.append(
-                    {
-                        "entity": key,
-                        "raw_text": ent.text,
-                        "start_char": int(ent.start_char),
-                        "end_char": int(ent.end_char),
-                        "sentence_index": s_idx,
-                        "label": getattr(ent, "label_", "") or "",
-                    }
-                )
-
-                if key not in seen:
-                    ents.append(key)
-                    seen.add(key)
-
-            for i, a in enumerate(ents):
-                for b in ents[i + 1:]:
-                    graph[a][b] += 1.0
-
-        return canonicalize_weighted(graph), spans
+        payload = self.entity_graph_builder.build_graph_with_doc(doc)
+        return payload["graph"], payload.get("spans", [])
 
     # =====================================================
     # MAIN
@@ -331,7 +328,21 @@ class GraphPipeline:
         else:
             docs = [None] * len(texts)
 
-        return [self._run_with_doc(t, d) for t, d in zip(texts, docs)]
+        # G-E5: previously a list comprehension — one bad doc (e.g. an
+        # explainer crash on a malformed sub-graph that slipped past
+        # validation) tore down the entire batch and the caller lost
+        # the 31 successful results. Isolate per-doc failures with a
+        # sentinel ``{"error": str}`` matching what
+        # ``inference_pipeline._fail_safe`` already expects, so the
+        # rest of the batch reaches the model.
+        results: List[Dict[str, Any]] = []
+        for t, d in zip(texts, docs):
+            try:
+                results.append(self._run_with_doc(t, d))
+            except Exception as exc:  # noqa: BLE001 — boundary trap
+                logger.exception("Per-doc graph pipeline failed; isolating")
+                results.append({"error": f"{type(exc).__name__}: {exc}"})
+        return results
 
     # =====================================================
     # SHARED IMPL
@@ -358,10 +369,16 @@ class GraphPipeline:
 
         # -------------------------------------------
         # NARRATIVE GRAPH — G-S1 / G-T2: spaCy-aligned, span-aware
+        # G-P8: pass the already-parsed ``Doc`` so the narrative
+        # builder doesn't run the spaCy parser a second time on the
+        # same text. Falls back to self-parse when no doc is shared
+        # (direct callers, tests).
         # -------------------------------------------
         if self.narrative_graph_builder is not None:
             narrative_payload = (
-                self.narrative_graph_builder.build_graph_with_spans(text)
+                self.narrative_graph_builder.build_graph_with_spans(
+                    text, doc=doc
+                )
             )
             narrative_graph = narrative_payload["graph"]
             narrative_spans = narrative_payload.get("spans", [])
@@ -375,9 +392,14 @@ class GraphPipeline:
 
         # -------------------------------------------
         # TEMPORAL GRAPH
+        # G-T4: pass the shared ``Doc`` so the analyzer extracts
+        # entity ids from spaCy NEs / noun-chunks (matching the
+        # entity-graph node space) instead of regex word tokens.
         # -------------------------------------------
         if self.temporal_analyzer is not None:
-            temporal_features = self.temporal_analyzer.analyze(text).to_dict()
+            temporal_features = self.temporal_analyzer.analyze(
+                text, doc=doc
+            ).to_dict()
 
         # -------------------------------------------
         # GRAPH METRICS
@@ -465,6 +487,13 @@ class GraphPipeline:
                 temporal_features=temporal_features,
                 entity_metrics=entity_metrics or None,
                 narrative_metrics=narrative_metrics or None,
+                # G-C6: spans + tokenizer now flow through the typed
+                # envelope as well as the raw result dict, so consumers
+                # that type their input as ``GraphOutput`` can reach
+                # them without dropping back to untyped ``Dict``.
+                entity_spans=entity_spans or None,
+                narrative_spans=narrative_spans or None,
+                narrative_tokenizer=narrative_tokenizer,
                 features=features,
                 embeddings=None,
                 explanation=explanation_dict,
@@ -525,6 +554,16 @@ class GraphPipeline:
 # isolation. Reset via ``reset_default_pipeline()`` between tests.
 
 _DEFAULT_PIPELINE: Optional[GraphPipeline] = None
+# G-T3: previously the comment claimed the GIL made the
+# ``if _DEFAULT_PIPELINE is None`` + assignment effectively atomic.
+# It does for the bytecode of those two ops in isolation, but two
+# threads can both pass the None-check before either assigns — the
+# loser's ``GraphPipeline()`` (6 builders + 15 analysis modules) is
+# constructed and immediately GC'd. Not a correctness bug — both
+# pipelines are functionally equivalent — but a real perf cliff at
+# FastAPI worker startup under concurrent first requests. Double-
+# checked locking with ``threading.Lock`` fixes it cheaply.
+_DEFAULT_PIPELINE_LOCK = threading.Lock()
 
 
 def get_default_pipeline() -> GraphPipeline:
@@ -532,16 +571,21 @@ def get_default_pipeline() -> GraphPipeline:
 
     Lazily constructed on first call so import order does not force
     ``AnalysisIntegrationRunner`` to load before its dependencies are
-    ready. Safe to call from many threads — Python's GIL makes the
-    None-check + assignment effectively atomic for our use here.
+    ready. Thread-safe via double-checked locking.
     """
     global _DEFAULT_PIPELINE
-    if _DEFAULT_PIPELINE is None:
-        _DEFAULT_PIPELINE = GraphPipeline()
+    # Fast path: already initialised — avoid the lock entirely.
+    if _DEFAULT_PIPELINE is not None:
+        return _DEFAULT_PIPELINE
+    with _DEFAULT_PIPELINE_LOCK:
+        # Re-check under the lock so we only ever construct once.
+        if _DEFAULT_PIPELINE is None:
+            _DEFAULT_PIPELINE = GraphPipeline()
     return _DEFAULT_PIPELINE
 
 
 def reset_default_pipeline() -> None:
     """Drop the cached singleton — used by tests."""
     global _DEFAULT_PIPELINE
-    _DEFAULT_PIPELINE = None
+    with _DEFAULT_PIPELINE_LOCK:
+        _DEFAULT_PIPELINE = None

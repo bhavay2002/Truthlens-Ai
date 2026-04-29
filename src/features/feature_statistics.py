@@ -8,12 +8,11 @@ from typing import Dict, List, Tuple, Optional
 import numpy as np
 
 from src.visualization.visualize import plot_feature_importance
+from src.features.base.numerics import EPS
 
 logger = logging.getLogger(__name__)
 
 FeatureVector = Dict[str, float]
-EPS = 1e-8
-
 
 # =========================================================
 # SAFE MATRIX CONVERSION (FIXED)
@@ -58,8 +57,16 @@ def _dict_to_matrix(features: List[FeatureVector]) -> Tuple[np.ndarray, List[str
 @dataclass
 class FeatureStatistics:
 
+    # Audit fix §1.7 — the cache used to be unkeyed: the FIRST feature
+    # list ever passed in was returned for every subsequent call,
+    # silently corrupting any pipeline that reused a ``FeatureStatistics``
+    # instance across batches. The cache is now keyed on
+    # ``(id(features), len(features), len(features[0]) if features else 0)``
+    # which catches the common "same list passed back-to-back to several
+    # stat methods" pattern without false hits across batches.
     _cached_matrix: Optional[np.ndarray] = field(default=None, init=False)
     _cached_keys: Optional[List[str]] = field(default=None, init=False)
+    _cached_signature: Optional[Tuple[int, int, int]] = field(default=None, init=False)
 
     # -----------------------------------------------------
     # CACHE MATRIX (BIG PERFORMANCE WIN)
@@ -67,13 +74,24 @@ class FeatureStatistics:
 
     def _get_matrix(self, features: List[FeatureVector]) -> Tuple[np.ndarray, List[str]]:
 
-        if self._cached_matrix is not None:
-            return self._cached_matrix, self._cached_keys  # type: ignore
+        signature = (
+            id(features),
+            len(features),
+            len(features[0]) if features else 0,
+        )
+
+        if (
+            self._cached_signature == signature
+            and self._cached_matrix is not None
+            and self._cached_keys is not None
+        ):
+            return self._cached_matrix, self._cached_keys
 
         X, keys = _dict_to_matrix(features)
 
         self._cached_matrix = X
         self._cached_keys = keys
+        self._cached_signature = signature
 
         return X, keys
 

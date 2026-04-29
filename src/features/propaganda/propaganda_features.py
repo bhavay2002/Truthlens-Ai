@@ -11,28 +11,26 @@ import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
+from src.features.base.lexicon_loader import load_lexicon_set
 from src.features.base.lexicon_matcher import LexiconMatcher, to_token_array
-from src.features.base.numerics import normalized_entropy
+from src.features.base.numerics import EPS, MAX_CLIP, normalized_entropy
 from src.features.base.text_signals import get_text_signals
 from src.features.base.tokenization import ensure_tokens_word
 
 logger = logging.getLogger(__name__)
 
-EPS = 1e-8
-MAX_CLIP = 1.0
-
 
 # ---------------------------------------------------------
-# Lexicons (reuse yours)
+# Lexicons — audit fix §1.1, see src/config/lexicons/propaganda.json.
 # ---------------------------------------------------------
 
-NAME_CALLING = {...}
-FEAR_APPEAL = {...}
-EXAGGERATION = {...}
-GLITTERING_GENERALITIES = {...}
-US_VS_THEM = {...}
-AUTHORITY_APPEAL = {...}
-INTENSIFIERS = {...}
+NAME_CALLING = load_lexicon_set("propaganda", "name_calling")
+FEAR_APPEAL = load_lexicon_set("propaganda", "fear_appeal")
+EXAGGERATION = load_lexicon_set("propaganda", "exaggeration")
+GLITTERING_GENERALITIES = load_lexicon_set("propaganda", "glittering_generalities")
+US_VS_THEM = load_lexicon_set("propaganda", "us_vs_them")
+AUTHORITY_APPEAL = load_lexicon_set("propaganda", "authority_appeal")
+INTENSIFIERS = load_lexicon_set("propaganda", "intensifiers")
 
 
 # ---------------------------------------------------------

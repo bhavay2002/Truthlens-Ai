@@ -4,7 +4,7 @@ import logging
 import re
 from collections import Counter
 from dataclasses import dataclass
-from typing import Dict, List, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
@@ -34,6 +34,19 @@ class TemporalGraphFeatures:
         # generated ``__slots__`` to build the mapping instead.
         return {f: getattr(self, f) for f in self.__slots__}
 
+    @classmethod
+    def zeros(cls) -> "TemporalGraphFeatures":
+        """Return an all-zero instance using **keyword** construction.
+
+        G-E3: the early-return for ``< 2`` sentences used to call
+        ``TemporalGraphFeatures(*([0.0] * 7))`` — positional, brittle.
+        Adding a future field would still construct successfully but
+        every value would silently shift one slot. ``cls.zeros()``
+        binds by name so the only failure mode is "compile error,
+        which slot do you want zeroed?" — i.e. the right one.
+        """
+        return cls(**{f: 0.0 for f in cls.__slots__})
+
 
 # =========================================================
 # ANALYZER
@@ -60,23 +73,88 @@ class TemporalGraphAnalyzer:
         tokens = re.findall(r"\b[a-zA-Z]+\b", sentence.lower())
         return {t for t in tokens if len(t) >= self.min_token_length}
 
+    # G-T4: spaCy-aware entity extraction. The regex path tokenises on
+    # word characters and lowercases — which produces ids like
+    # ``"barack"`` and ``"obama"`` while the entity graph (built from
+    # ``ent.text.lower().strip()``) produces ``"barack obama"``. The
+    # two id spaces never overlap, so the temporal "recurrence" /
+    # "transition" features measured a totally different population
+    # of entities than the graph layers they were supposed to
+    # complement. When the pipeline shares its parsed ``Doc`` we now
+    # use NEs + noun-chunks, lowered + stripped — exact parity with
+    # ``GraphPipeline._entity_graph_from_doc``.
+    def _extract_entities_from_sent(self, sent: Any) -> Set[str]:
+        out: Set[str] = set()
+
+        for ent in getattr(sent, "ents", []) or []:
+            key = ent.text.lower().strip()
+            if key:
+                out.add(key)
+
+        # Defensive: noun_chunks requires a dependency parser. Blank
+        # spaCy models (the fallback when ``en_core_web_sm`` is not
+        # installed) raise ValueError E029 from inside the iterator
+        # rather than returning an empty list, so ``getattr(...) or []``
+        # is not enough on its own — we have to actually iterate inside
+        # a try/except. (G-DEP-1)
+        try:
+            chunks = sent.noun_chunks
+        except (ValueError, AttributeError, NotImplementedError):
+            chunks = ()
+        try:
+            for chunk in chunks or ():
+                key = chunk.text.lower().strip()
+                if key and len(key) >= self.min_token_length:
+                    out.add(key)
+        except (ValueError, AttributeError, NotImplementedError):
+            pass
+
+        return out
+
+    def _sentences_from_doc(
+        self,
+        doc: Any,
+    ) -> Tuple[List[str], List[Set[str]]]:
+        sentences: List[str] = []
+        entity_sets: List[Set[str]] = []
+
+        for sent in doc.sents:
+            stripped = sent.text.strip()
+            if not stripped:
+                continue
+            sentences.append(stripped)
+            entity_sets.append(self._extract_entities_from_sent(sent))
+
+        return sentences, entity_sets
+
     # =====================================================
     # MAIN
     # =====================================================
 
-    def analyze(self, text: str) -> TemporalGraphFeatures:
+    def analyze(
+        self,
+        text: str,
+        *,
+        doc: Optional[Any] = None,
+    ) -> TemporalGraphFeatures:
 
         if not isinstance(text, str) or not text.strip():
             raise ValueError("Invalid text")
 
-        sentences = self._split_sentences(text)
+        # G-T4: prefer the shared spaCy ``Doc`` when the caller has
+        # one. Falls back to the regex path so direct callers / tests
+        # without spaCy keep working.
+        if doc is not None:
+            sentences, entity_sets = self._sentences_from_doc(doc)
+        else:
+            sentences = self._split_sentences(text)
+            entity_sets = [self._extract_entities(s) for s in sentences]
 
         if len(sentences) < 2:
-            return TemporalGraphFeatures(*([0.0] * 7))
-
-        entity_sets: List[Set[str]] = [
-            self._extract_entities(s) for s in sentences
-        ]
+            # G-E3: keyword construction via ``zeros()`` — see the
+            # classmethod docstring for why the positional form was
+            # removed.
+            return TemporalGraphFeatures.zeros()
 
         # =================================================
         # ENTITY RECURRENCE

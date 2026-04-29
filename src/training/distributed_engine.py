@@ -114,7 +114,29 @@ class DistributedEngine:
 
         device = torch.device(f"cuda:{self.local_rank}")
 
-        model = model.to(device)
+        # N-CRIT-3: Previously this called ``model.to(device)`` here — making
+        # this the THIRD redundant move (Trainer.__init__ and TrainingStep
+        # both also moved the model historically; GPU-1 already removed those
+        # two and asserts device match instead). Worse, this move runs AFTER
+        # ``create_trainer_fn`` has built the optimizer over the model
+        # parameters, so it leaves the optimizer holding parameter refs
+        # whose ``.device`` differs from where DDP now expects them — the
+        # classic "expected all tensors to be on the same device" failure
+        # at the first ``optimizer.step()``. Validate device match and
+        # surface a loud error rather than silently re-moving.
+        try:
+            model_device = next(model.parameters()).device
+        except StopIteration:
+            model_device = device
+
+        if model_device != device:
+            raise RuntimeError(
+                f"N-CRIT-3: DistributedEngine.wrap_model received model on "
+                f"{model_device} but DDP requires it on {device}. Move the "
+                f"model to its final CUDA device BEFORE building the optimizer "
+                f"in create_trainer_fn (the optimizer captures parameter "
+                f"references and a post-hoc move silently invalidates them)."
+            )
 
         model = DDP(
             model,

@@ -69,12 +69,21 @@ class AsyncCheckpointWriter:
         if self._closed:
             raise RuntimeError("Writer closed")
 
+        # C1.9: under back-pressure we MUST NOT silently drop the oldest
+        # queued checkpoint — that is what most often holds the best
+        # model so far and losing it corrupts run history. Drop the
+        # *incoming* save instead and surface a loud WARNING so the
+        # operator knows checkpoint cadence is exceeding I/O bandwidth.
         try:
             self._queue.put_nowait((path, obj))
         except queue.Full:
-            _ = self._queue.get_nowait()
-            self._queue.task_done()
-            self._queue.put_nowait((path, obj))
+            logger.warning(
+                "AsyncCheckpointWriter queue full (max=%d); "
+                "DROPPING incoming save: %s. Increase max_queue_size "
+                "or reduce checkpoint frequency.",
+                self._queue.maxsize,
+                path,
+            )
 
     def flush(self) -> None:
         self._queue.join()

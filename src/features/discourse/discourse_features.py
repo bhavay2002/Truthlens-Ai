@@ -1,9 +1,6 @@
-# src/features/discourse_features.py
-
 from __future__ import annotations
 
 import logging
-from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, Set
 
@@ -11,13 +8,10 @@ import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
-from src.features.base.numerics import normalized_entropy
-from src.features.base.tokenization import ensure_tokens_word
+from src.features.base.numerics import EPS, MAX_CLIP, normalized_entropy
+from src.features.base.tokenization import ensure_tokens_word, ensure_tokens_word_counter
 
 logger = logging.getLogger(__name__)
-
-EPS = 1e-8
-MAX_CLIP = 1.0
 
 
 # ---------------------------------------------------------
@@ -49,15 +43,18 @@ class DiscourseFeatures(BaseFeature):
 
         text = context.text.strip()
         if not text:
-            return {}
+            return self._empty()
 
         tokens = ensure_tokens_word(context, text)
         n = len(tokens)
 
         if n == 0:
-            return {}
+            return self._empty()
 
-        counter = Counter(tokens)
+        # Audit fix §2.5 — read the per-context cached Counter instead
+        # of materialising a fresh one. Eight extractors used to call
+        # ``Counter(tokens)`` on the same token list per request.
+        counter = ensure_tokens_word_counter(context)
 
         def ratio(lexicon: Set[str]) -> float:
             return sum(counter.get(w, 0) for w in lexicon) / (n + EPS)
@@ -107,16 +104,33 @@ class DiscourseFeatures(BaseFeature):
         # OUTPUT
         # -------------------------
 
+        # §10.1 — keys renamed to match feature_schema.DISCOURSE_FEATURES so
+        # partition_feature_sections() routes them to the "discourse" head
+        # instead of dropping them into "other".
         return {
-            "disc_causal": self._safe(dist["causal"]),
-            "disc_contrast": self._safe(dist["contrast"]),
-            "disc_additive": self._safe(dist["additive"]),
-            "disc_sequential": self._safe(dist["sequential"]),
-            "disc_evidential": self._safe(dist["evidential"]),
+            "discourse_causal_ratio":     self._safe(dist["causal"]),
+            "discourse_contrast_ratio":   self._safe(dist["contrast"]),
+            "discourse_additive_ratio":   self._safe(dist["additive"]),
+            "discourse_sequential_ratio": self._safe(dist["sequential"]),
+            "discourse_evidential_ratio": self._safe(dist["evidential"]),
+            # intensity → marker_density; entropy → diversity; balance dropped.
+            "discourse_marker_density":   self._safe(intensity),
+            "discourse_diversity":        self._safe(entropy),
+        }
 
-            "disc_intensity": self._safe(intensity),
-            "disc_entropy": self._safe(entropy),
-            "disc_balance": self._safe(balance),
+    # -----------------------------------------------------
+
+    def _empty(self) -> Dict[str, float]:
+        # §11.1 — return a fixed-key zero dict so the schema validator
+        # sees a consistent shape on empty-text inputs.
+        return {
+            "discourse_causal_ratio":     0.0,
+            "discourse_contrast_ratio":   0.0,
+            "discourse_additive_ratio":   0.0,
+            "discourse_sequential_ratio": 0.0,
+            "discourse_evidential_ratio": 0.0,
+            "discourse_marker_density":   0.0,
+            "discourse_diversity":        0.0,
         }
 
     # -----------------------------------------------------

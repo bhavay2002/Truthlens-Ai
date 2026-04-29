@@ -1,34 +1,52 @@
-# src/features/narrative_role_features.py
-
 from __future__ import annotations
 
 import logging
-from collections import Counter
 from dataclasses import dataclass, field
-from typing import Dict, Set, Any
+from typing import Dict, Any
 
 import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
-from src.features.base.numerics import normalized_entropy
+from src.features.base.lexicon_loader import load_lexicon_set
+from src.features.base.lexicon_matcher import LexiconMatcher, to_token_array
+from src.features.base.numerics import EPS, MAX_CLIP, normalized_entropy
+from src.features.base.spacy_doc import ensure_spacy_doc
 from src.features.base.spacy_loader import get_shared_nlp
 from src.features.base.tokenization import ensure_tokens_word
 
 logger = logging.getLogger(__name__)
 
-EPS = 1e-8
-MAX_CLIP = 1.0
+
+# ---------------------------------------------------------
+# Lexicons — audit fix §1.1, see src/config/lexicons/narrative.json.
+#
+# Previously declared inline as ``{...}`` (a single-element set whose
+# only member is the ``Ellipsis`` sentinel), which made every ratio
+# permanently zero. They now share the same JSON source as
+# ``narrative_features.py`` so the two extractors agree on the
+# lexicon and a calibration sweep updates both at once.
+# ---------------------------------------------------------
+
+HERO_TERMS = load_lexicon_set("narrative", "hero")
+VILLAIN_TERMS = load_lexicon_set("narrative", "villain")
+VICTIM_TERMS = load_lexicon_set("narrative", "victim")
+POLARIZATION_TERMS = load_lexicon_set("narrative", "polarization")
 
 
 # ---------------------------------------------------------
-# Lexicons
+# Vectorized matchers — audit fix §2.2.
 # ---------------------------------------------------------
 
-HERO_TERMS: Set[str] = {...}
-VILLAIN_TERMS: Set[str] = {...}
-VICTIM_TERMS: Set[str] = {...}
-POLARIZATION_TERMS: Set[str] = {...}
+_ROLE_MATCHERS: Dict[str, LexiconMatcher] = {
+    "hero":    LexiconMatcher(HERO_TERMS,    "narrative_role_hero"),
+    "villain": LexiconMatcher(VILLAIN_TERMS, "narrative_role_villain"),
+    "victim":  LexiconMatcher(VICTIM_TERMS,  "narrative_role_victim"),
+}
+
+_POLARIZATION_MATCHER = LexiconMatcher(
+    POLARIZATION_TERMS, "narrative_role_polarization"
+)
 
 
 # ---------------------------------------------------------
@@ -56,14 +74,28 @@ class NarrativeRoleFeatures(BaseFeature):
 
     # -----------------------------------------------------
 
-    def _entity_density(self, text: str) -> float:
+    def _entity_density(self, context: FeatureContext) -> float:
+        """Return ``len(doc.ents) / len(doc)`` using the shared cache.
+
+        Audit fix §2.7 — ``ensure_spacy_doc`` returns the per-context
+        cached ``Doc`` if any other extractor in the same request has
+        already parsed the text (typically the syntactic or graph
+        extractor). Falls back to ``self._nlp(text)`` only when no
+        cached doc exists, and seeds the cache for the next consumer.
+        """
         self.initialize()
 
         if not self._spacy_available or self._nlp is None:
             return 0.0
 
-        doc = self._nlp(text)
-        return len(doc.ents) / max(len(doc), 1)
+        doc = ensure_spacy_doc(context)
+        if doc is None:
+            return 0.0
+        # §11.3 — len(doc) counts ALL tokens including whitespace-only tokens,
+        # inflating the denominator.  Filter to content tokens (non-space) so
+        # the density reflects actual linguistic content in the document.
+        content_token_count = sum(1 for t in doc if not t.is_space)
+        return len(doc.ents) / max(content_token_count, 1)
 
     # -----------------------------------------------------
 
@@ -71,26 +103,24 @@ class NarrativeRoleFeatures(BaseFeature):
 
         text = context.text.strip()
         if not text:
-            return {}
+            return self._empty()
 
         tokens = ensure_tokens_word(context, text)
         n = len(tokens)
 
         if n == 0:
-            return {}
+            return self._empty()
 
-        counter = Counter(tokens)
-
-        def ratio(lexicon: Set[str]) -> float:
-            return sum(counter.get(w, 0) for w in lexicon) / (n + EPS)
+        # Audit fix §2.2 — vectorised lexicon counts.
+        tokens_arr = to_token_array(tokens)
+        denom = n + EPS
 
         raw = {
-            "hero": ratio(HERO_TERMS),
-            "villain": ratio(VILLAIN_TERMS),
-            "victim": ratio(VICTIM_TERMS),
+            key: matcher.count_in_tokens(tokens_arr) / denom
+            for key, matcher in _ROLE_MATCHERS.items()
         }
 
-        polarization = ratio(POLARIZATION_TERMS)
+        polarization = _POLARIZATION_MATCHER.count_in_tokens(tokens_arr) / denom
 
         # -------------------------
         # ROLE DISTRIBUTION (CRITICAL)
@@ -135,7 +165,7 @@ class NarrativeRoleFeatures(BaseFeature):
         # ENTITY SIGNAL
         # -------------------------
 
-        entity_density = self._entity_density(text)
+        entity_density = self._entity_density(context)
 
         # -------------------------
         # OUTPUT
@@ -162,6 +192,20 @@ class NarrativeRoleFeatures(BaseFeature):
         }
 
     # -----------------------------------------------------
+
+    def _empty(self) -> Dict[str, float]:
+        # §11.1 — consistent fixed-key zero dict for empty / zero-token inputs.
+        return {
+            "narrative_role_hero_ratio":        0.0,
+            "narrative_role_villain_ratio":     0.0,
+            "narrative_role_victim_ratio":      0.0,
+            "narrative_role_polarization_ratio": 0.0,
+            "narrative_role_intensity":         0.0,
+            "narrative_role_entropy":           0.0,
+            "narrative_role_balance":           0.0,
+            "narrative_role_diversity":         0.0,
+            "narrative_entity_density":         0.0,
+        }
 
     def _safe(self, v: float) -> float:
         if not np.isfinite(v):

@@ -1,42 +1,44 @@
-# src/features/ideological_features.py (RESEARCH-GRADE FINAL)
-
 from __future__ import annotations
 
 import logging
-from collections import Counter
 from dataclasses import dataclass
-from typing import Dict, Set
+from typing import Dict
 
 import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
-from src.features.base.numerics import normalized_entropy
+from src.features.base.lexicon_loader import load_lexicon_set
+from src.features.base.lexicon_matcher import LexiconMatcher, to_token_array
+from src.features.base.numerics import EPS, MAX_CLIP, normalized_entropy
 from src.features.base.tokenization import ensure_tokens_word
 
 logger = logging.getLogger(__name__)
 
-EPS = 1e-8
-MAX_CLIP = 1.0
+
+# ---------------------------------------------------------
+# Lexicons — audit fix §1.1, see src/config/lexicons/ideology.json.
+# ---------------------------------------------------------
+
+LEFT_LEXICON = load_lexicon_set("ideology", "left")
+RIGHT_LEXICON = load_lexicon_set("ideology", "right")
+POLARIZING_TERMS = load_lexicon_set("ideology", "polarizing")
+GROUP_REFERENCES = load_lexicon_set("ideology", "group_references")
+
+# Reserved for compiled multi-word patterns (currently none).
+COMPILED_IDEOLOGY_PHRASES: list = []
 
 
 # ---------------------------------------------------------
-# Utility
+# Vectorized matchers — audit fix §2.2.
 # ---------------------------------------------------------
 
-def _ratio(counter: Counter, lexicon: Set[str], total: int) -> float:
-    return sum(counter.get(w, 0) for w in lexicon) / (total + EPS)
-
-
-# ---------------------------------------------------------
-# Lexicons (same)
-# ---------------------------------------------------------
-
-LEFT_LEXICON = {...}
-RIGHT_LEXICON = {...}
-POLARIZING_TERMS = {...}
-GROUP_REFERENCES = {...}
-COMPILED_IDEOLOGY_PHRASES = [...]
+_IDEOLOGY_MATCHERS: Dict[str, LexiconMatcher] = {
+    "left":         LexiconMatcher(LEFT_LEXICON,     "ideology_left"),
+    "right":        LexiconMatcher(RIGHT_LEXICON,    "ideology_right"),
+    "polarization": LexiconMatcher(POLARIZING_TERMS, "ideology_polarization"),
+    "group_ref":    LexiconMatcher(GROUP_REFERENCES, "ideology_group_reference"),
+}
 
 
 # ---------------------------------------------------------
@@ -62,20 +64,24 @@ class IdeologicalFeatures(BaseFeature):
         if not tokens:
             return {}
 
-        counter = Counter(tokens)
         n = len(tokens)
+        denom = n + EPS
 
-        # -------------------------
-        # RAW RATIOS
-        # -------------------------
-
-        raw = {
-            "left": _ratio(counter, LEFT_LEXICON, n),
-            "right": _ratio(counter, RIGHT_LEXICON, n),
+        # Audit fix §2.2 — single ``np.isin`` per category replaces the
+        # per-token Python loop over four ``ratio(counter, lexicon, n)``
+        # calls. The four lexicons share one ``tokens_arr`` view.
+        tokens_arr = to_token_array(tokens)
+        counts = {
+            key: matcher.count_in_tokens(tokens_arr)
+            for key, matcher in _IDEOLOGY_MATCHERS.items()
         }
 
-        polarization = _ratio(counter, POLARIZING_TERMS, n)
-        group_ref = _ratio(counter, GROUP_REFERENCES, n)
+        raw = {
+            "left":  counts["left"] / denom,
+            "right": counts["right"] / denom,
+        }
+        polarization = counts["polarization"] / denom
+        group_ref = counts["group_ref"] / denom
 
         # -------------------------
         # NORMALIZED IDEOLOGY (CRITICAL)

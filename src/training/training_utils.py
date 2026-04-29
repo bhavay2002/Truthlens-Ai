@@ -1,64 +1,14 @@
-#src\models\training\training_utils.py
+# src/training/training_utils.py
 from __future__ import annotations
 
 import logging
-from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, Optional, Any
+from typing import Dict, Optional, Any
 
 import torch
 import torch.nn as nn
 
 logger = logging.getLogger(__name__)
-
-
-# =========================================================
-# PRECISION CONTROL
-# =========================================================
-
-def configure_training_precision(
-    *,
-    allow_tf32: bool = True,
-    matmul_precision: str = "high",
-) -> None:
-
-    if torch.cuda.is_available():
-        try:
-            torch.backends.cuda.matmul.allow_tf32 = bool(allow_tf32)
-            torch.backends.cudnn.allow_tf32 = bool(allow_tf32)
-        except Exception as exc:
-            logger.debug("TF32 config skipped: %s", exc)
-
-    try:
-        torch.set_float32_matmul_precision(matmul_precision)
-    except Exception as exc:
-        logger.debug("Matmul precision skipped: %s", exc)
-
-
-@contextmanager
-def training_precision(
-    *,
-    allow_tf32: bool = True,
-    matmul_precision: str = "high",
-):
-    prev_tf32_matmul = None
-    prev_tf32_cudnn = None
-
-    if torch.cuda.is_available():
-        prev_tf32_matmul = torch.backends.cuda.matmul.allow_tf32
-        prev_tf32_cudnn = torch.backends.cudnn.allow_tf32
-
-    configure_training_precision(
-        allow_tf32=allow_tf32,
-        matmul_precision=matmul_precision,
-    )
-
-    try:
-        yield
-    finally:
-        if torch.cuda.is_available() and prev_tf32_matmul is not None:
-            torch.backends.cuda.matmul.allow_tf32 = prev_tf32_matmul
-            torch.backends.cudnn.allow_tf32 = prev_tf32_cudnn
 
 
 # =========================================================
@@ -104,95 +54,6 @@ def move_batch_to_device(
 
 
 # =========================================================
-# GRADIENT UTILITIES
-# =========================================================
-
-def clip_gradients(
-    model: nn.Module,
-    optimizer: torch.optim.Optimizer,
-    max_norm: Optional[float],
-    scaler: Optional[torch.cuda.amp.GradScaler] = None,
-) -> float:
-
-    if max_norm is None:
-        return 0.0
-
-    if max_norm <= 0:
-        raise ValueError("max_norm must be > 0")
-
-    if scaler is not None:
-        scaler.unscale_(optimizer)  # ✅ FIXED
-
-    total_norm = torch.nn.utils.clip_grad_norm_(
-        model.parameters(),
-        max_norm,
-    )
-
-    return float(total_norm)
-
-
-def zero_gradients(optimizer: torch.optim.Optimizer) -> None:
-    optimizer.zero_grad(set_to_none=True)
-
-
-# =========================================================
-# BATCH SIZE
-# =========================================================
-
-def compute_batch_size(batch: Any) -> int:
-
-    if isinstance(batch, dict) and "input_ids" in batch:
-        return batch["input_ids"].shape[0]
-
-    if isinstance(batch, torch.Tensor):
-        return batch.shape[0] if batch.ndim > 0 else 1
-
-    if isinstance(batch, dict):
-        for v in batch.values():
-            if isinstance(v, torch.Tensor) and v.ndim > 0:
-                return v.shape[0]
-
-    if isinstance(batch, (list, tuple)):
-        for v in batch:
-            if isinstance(v, torch.Tensor) and v.ndim > 0:
-                return v.shape[0]
-
-    # ✅ safer fallback
-    return 1
-
-
-# =========================================================
-# TENSOR UTILITIES
-# =========================================================
-
-def detach_tensor_dict(data: Any, to_cpu: bool = True) -> Any:
-
-    if isinstance(data, torch.Tensor):
-        t = data.detach()
-        return t.cpu() if to_cpu else t
-
-    if isinstance(data, dict):
-        return {k: detach_tensor_dict(v, to_cpu) for k, v in data.items()}
-
-    if isinstance(data, (list, tuple)):
-        return type(data)(detach_tensor_dict(v, to_cpu) for v in data)
-
-    return data
-
-
-# =========================================================
-# MODEL MODES
-# =========================================================
-
-def enable_model_eval(model: nn.Module) -> None:
-    model.eval()
-
-
-def enable_model_train(model: nn.Module) -> None:
-    model.train()
-
-
-# =========================================================
 # GRADIENT MONITORING
 # =========================================================
 
@@ -220,43 +81,8 @@ def get_current_lr(optimizer: torch.optim.Optimizer) -> float:
 
 
 # =========================================================
-# NAN / INF GUARD
+# THROUGHPUT
 # =========================================================
-
-def check_finite(tensor: torch.Tensor, name: str = "tensor") -> None:
-    if not torch.isfinite(tensor).all():
-        raise RuntimeError(f"Non-finite values detected in {name}")
-
-
-# =========================================================
-# AMP AUTOCAST WRAPPER
-# =========================================================
-
-@contextmanager
-def autocast(enabled: bool = True):
-    if enabled and torch.cuda.is_available():
-        with torch.cuda.amp.autocast():
-            yield
-    else:
-        yield
-
-
-# =========================================================
-# THROUGHPUT / TIMING
-# =========================================================
-
-class StepTimer:
-    def __init__(self):
-        self.start_time = None
-
-    def start(self):
-        import time
-        self.start_time = time.time()
-
-    def stop(self) -> float:
-        import time
-        return time.time() - self.start_time if self.start_time else 0.0
-
 
 def compute_throughput(
     batch_size: int,
@@ -268,7 +94,7 @@ def compute_throughput(
 
 
 # =========================================================
-# IMPROVED METRICS CONTAINER
+# METRICS CONTAINER
 # =========================================================
 
 @dataclass

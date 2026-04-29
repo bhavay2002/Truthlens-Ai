@@ -7,8 +7,15 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from src.graph.entity_graph import EntityGraphBuilder, ordered_entity_graph_vector
-from src.graph.graph_analysis import GraphAnalyzer, ordered_graph_metrics_vector
-from src.graph.narrative_graph_builder import NarrativeGraphBuilder
+from src.graph.graph_analysis import (
+    GraphAnalyzer,
+    canonicalize_weighted,
+    ordered_graph_metrics_vector,
+)
+from src.graph.narrative_graph_builder import (
+    NarrativeGraphBuilder,
+    narrative_graph_vector,
+)
 from src.graph.graph_embeddings import graph_embedding_vector, GraphEmbeddingConfig
 
 logger = logging.getLogger(__name__)
@@ -150,6 +157,12 @@ class GraphFeatureExtractor:
 
         if self.narrative_builder:
             narrative_graph = self.narrative_builder.build_graph(text)
+            # G-P6: ensure narrative graph is canonical so downstream
+            # ``extract_graph_features`` and analyzer see a symmetric,
+            # double-entry adjacency (parity with the pipeline path
+            # which canonicalizes once in ``_run_with_doc``).
+            if narrative_graph:
+                narrative_graph = canonicalize_weighted(narrative_graph)
 
         return self.extract_from_graphs(entity_graph, narrative_graph)
 
@@ -197,13 +210,21 @@ class GraphFeatureExtractor:
             blocks.append(metrics)
 
             # 🔥 embeddings
+            # G-P7: emit the entire embedding block as a single dict
+            # rather than one ``{key: val}`` dict per scalar — the old
+            # loop produced ``embedding_dim`` python dicts plus an
+            # equal number of ``merge_feature_blocks_strict`` passes.
             if self.config.enable_embeddings:
                 emb = graph_embedding_vector(
                     entity_graph,
                     self.config.embedding_config,
                 )
-                for i, val in enumerate(emb):
-                    blocks.append({f"graph_embedding_{i}": float(val)})
+                blocks.append(
+                    {
+                        f"graph_embedding_{i}": float(val)
+                        for i, val in enumerate(emb)
+                    }
+                )
 
         # -------------------------
         # NARRATIVE GRAPH
@@ -216,11 +237,22 @@ class GraphFeatureExtractor:
 
             blocks.append(narrative_features)
 
-            # G-R2: surface narrative metrics too when supplied —
-            # downstream models that key on them (per G-C4) will then
-            # see them without paying for a duplicate ``analyze`` pass.
+            # G-R2 / G-K2: surface narrative metrics too when
+            # supplied. They share generic ``graph_*`` keys with the
+            # entity-metrics block (both come from
+            # ``GraphAnalyzer.analyze``), which previously caused
+            # ``merge_feature_blocks_strict`` to raise on every dual-
+            # graph call. Re-prefix with ``narrative_metric_`` to
+            # disambiguate while keeping the entity metrics block at
+            # its canonical ``graph_*`` keys (preserved so
+            # ``ordered_graph_metrics_vector`` keeps working).
             if narrative_metrics:
-                blocks.append(narrative_metrics)
+                blocks.append(
+                    {
+                        f"narrative_metric_{k}": v
+                        for k, v in narrative_metrics.items()
+                    }
+                )
 
         if not blocks:
             return {}
@@ -272,27 +304,32 @@ class GraphFeatureExtractor:
         # -------------------------
         # NARRATIVE
         # -------------------------
-        narrative_keys = [
-            "narrative_graph_nodes",
-            "narrative_graph_edges",
-            "narrative_graph_avg_degree",
-            "narrative_graph_density",
-            "narrative_graph_isolated_nodes",
-            "narrative_graph_components",
-        ]
-
-        if all(k in features for k in narrative_keys):
-            vectors.append(
-                np.array([features[k] for k in narrative_keys], dtype=np.float32)
-            )
+        # G-S8: use the canonical ``narrative_graph_vector`` helper so
+        # this block is always present at a fixed, schema-aligned
+        # shape — the previous all-or-nothing ``if all(...)`` silently
+        # dropped the entire block whenever a single key was missing
+        # (e.g. zero-edge graphs that legitimately omit
+        # ``flow_strength``), shrinking the vector mid-batch and
+        # corrupting any downstream concatenation.
+        if self.narrative_builder is not None or any(
+            k.startswith("narrative_graph_") for k in features
+        ):
+            vectors.append(narrative_graph_vector(features))
 
         if not vectors:
             return np.zeros(0, dtype=np.float32)
 
-        vec = np.concatenate(vectors).astype(np.float32)
-
-        # 🔥 normalization
+        # G-S9: per-block L2 instead of one global L2 across the
+        # heterogeneous concat. The blocks have wildly different
+        # native scales (entity counts ~1-50, density 0-1, embedding
+        # ~0-1, narrative counts 0-100) and global normalization
+        # collapses small-scale signals into rounding noise whenever
+        # a large-scale block dominates the norm. Per-block
+        # normalization keeps each block's relative geometry intact
+        # before concatenation.
         if self.config.normalize_features:
-            vec = _normalize_vector(vec)
+            vectors = [_normalize_vector(v) for v in vectors]
+
+        vec = np.concatenate(vectors).astype(np.float32)
 
         return vec

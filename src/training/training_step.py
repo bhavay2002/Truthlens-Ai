@@ -24,6 +24,51 @@ logger = logging.getLogger(__name__)
 
 
 # =========================================================
+# AMP COMPATIBILITY SHIM
+# =========================================================
+
+def get_amp_components(
+    device: str,
+    enabled: bool,
+    *,
+    dtype: Optional[torch.dtype] = None,
+    scaler_enabled: Optional[bool] = None,
+):
+    """Return ``(scaler, autocast_factory)`` matched to the installed PyTorch.
+
+    Newer torch (≥ 2.3) exposes the device-type-aware ``torch.amp`` API;
+    older torch (≤ 2.2) only ships ``torch.cuda.amp``. This helper picks
+    the right one at runtime so callers don't have to branch on
+    ``torch.__version__``.
+
+    ``dtype`` (fp16 / bf16) is bound into the returned autocast factory.
+    ``scaler_enabled`` lets the caller disable the GradScaler independently
+    of the autocast flag — needed because the dynamic-loss-scaling /
+    overflow-recovery path is fp16-only and must stay off for bf16.
+    """
+    s_enabled = enabled if scaler_enabled is None else scaler_enabled
+
+    # Modern API (PyTorch ≥ 2.3)
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        scaler = torch.amp.GradScaler(device, enabled=s_enabled)
+        if dtype is not None:
+            autocast = lambda: torch.amp.autocast(device, enabled=enabled, dtype=dtype)
+        else:
+            autocast = lambda: torch.amp.autocast(device, enabled=enabled)
+
+    # Legacy API (PyTorch ≤ 2.2)
+    else:
+        from torch.cuda.amp import GradScaler, autocast as cuda_autocast
+        scaler = GradScaler(enabled=s_enabled)
+        if dtype is not None:
+            autocast = lambda: cuda_autocast(enabled=enabled, dtype=dtype)
+        else:
+            autocast = lambda: cuda_autocast(enabled=enabled)
+
+    return scaler, autocast
+
+
+# =========================================================
 # CONFIG
 # =========================================================
 
@@ -40,6 +85,37 @@ class TrainingStepConfig:
     # here makes it tunable from the config layer (and matches
     # ``LRSchedulerConfig.spike_lr_scale`` semantics).
     spike_lr_scale: float = 0.5
+
+    # CFG-3: AMP autocast dtype.  Previously the autocast call hardcoded
+    # the default fp16 path on CUDA; now ``"bf16"`` (better range, no
+    # GradScaler needed on Ampere+) and ``"fp16"`` (legacy, requires
+    # GradScaler) are both selectable via config.  Anything else falls
+    # back to fp16 for backward-compat.  Mapped to ``torch.dtype`` at
+    # autocast-call time so the config layer stays string-only.
+    amp_dtype: str = "fp16"
+
+    # N-MED-2: feature-logging cadence.  Previously hardcoded to 50
+    # inside ``TrainingStep.run`` (decoupled from ``log_every_steps``).
+    # Set to 0 to disable feature logging entirely.
+    feature_log_every_steps: int = 50
+
+    def __post_init__(self) -> None:
+        # EDGE-8: ``loss / gradient_accumulation_steps`` would raise
+        # ZeroDivisionError on a config typo.  Validate at construction so
+        # the failure surfaces at config-load time, not 200 batches in.
+        if self.gradient_accumulation_steps < 1:
+            raise ValueError(
+                "gradient_accumulation_steps must be >= 1 "
+                f"(got {self.gradient_accumulation_steps})"
+            )
+        if self.max_grad_norm is not None and self.max_grad_norm < 0:
+            raise ValueError(
+                f"max_grad_norm must be >= 0 (got {self.max_grad_norm})"
+            )
+        if self.amp_dtype not in {"fp16", "bf16", "float16", "bfloat16"}:
+            raise ValueError(
+                f"amp_dtype must be one of fp16/bf16 (got {self.amp_dtype!r})"
+            )
 
 
 # =========================================================
@@ -116,7 +192,25 @@ class TrainingStep:
             self.model.to(self.device)
 
         self.use_amp = config.use_mixed_precision and self.device.type == "cuda"
-        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
+        # CFG-3: resolve amp_dtype string → torch.dtype once.  bf16 does
+        # not need a GradScaler (the dynamic-loss-scaling overflow-recovery
+        # path is fp16-only) so we still construct the scaler but disable
+        # it when bf16 is selected.
+        self._amp_dtype = (
+            torch.bfloat16
+            if config.amp_dtype in ("bf16", "bfloat16")
+            else torch.float16
+        )
+        # GPU/TORCH FIX: route GradScaler + autocast through ``get_amp_components``
+        # so the right API (torch.amp ≥ 2.3 vs legacy torch.cuda.amp ≤ 2.2) is
+        # picked at runtime instead of crashing on the missing attribute.
+        scaler_enabled = self.use_amp and self._amp_dtype == torch.float16
+        self.scaler, self._autocast = get_amp_components(
+            self.device.type,
+            enabled=self.use_amp,
+            dtype=self._amp_dtype,
+            scaler_enabled=scaler_enabled,
+        )
 
         self._last_time = time.time()
 
@@ -221,8 +315,16 @@ class TrainingStep:
         # -------------------------
         # 🔍 FEATURE OBSERVABILITY (NEW)
         # -------------------------
-
-        if step % 50 == 0:  # avoid slowdown
+        #
+        # N-MED-2: cadence was previously hardcoded to 50, decoupled from
+        # the trainer's ``log_every_steps``. That meant feature stats
+        # could fire 10× more (or less) often than the train-loss log line,
+        # and Optuna fast-trials with ``log_every_steps=1`` still paid the
+        # 50-step feature-logging tax. Drive it from the configurable
+        # cadence on the step config (``feature_log_every_steps``,
+        # default 50 — same as old behaviour).
+        feature_cadence = getattr(self.config, "feature_log_every_steps", 50)
+        if feature_cadence > 0 and step % feature_cadence == 0:
             try:
                 feature_dict = self._tensor_to_feature_dict(batch)
 
@@ -256,9 +358,23 @@ class TrainingStep:
         # Wrap the whole forward+loss block so the same skip semantics
         # apply uniformly.
         try:
-            with torch.cuda.amp.autocast(enabled=self.use_amp):
+            # GPU/TORCH FIX: ``self._autocast`` was built once in __init__ via
+            # ``get_amp_components``, which transparently picks the modern
+            # ``torch.amp.autocast`` (PyTorch ≥ 2.3) or the legacy
+            # ``torch.cuda.amp.autocast`` (PyTorch ≤ 2.2). CFG-3: the dtype
+            # (fp16 vs bf16) was bound there from ``TrainingStepConfig.amp_dtype``.
+            with self._autocast():
 
-                outputs = self.model(**batch)
+                # Strip non-tensor metadata that the data_processing
+                # ``collate`` injects (currently ``task``) before
+                # forward — the single-task model classes have strict
+                # ``forward(input_ids, attention_mask, labels)``
+                # signatures and reject unknown kwargs.
+                model_batch = {
+                    k: v for k, v in batch.items()
+                    if k not in ("task",)
+                }
+                outputs = self.model(**model_batch)
 
                 total_loss, task_losses = self.loss_engine.compute(
                     outputs,

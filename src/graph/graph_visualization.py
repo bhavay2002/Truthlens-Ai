@@ -2,9 +2,22 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional, Union
 
 import numpy as np
+
+# G-V1 / G-D3: the canonical graph type produced by every other
+# module in ``src.graph.*`` is ``Dict[str, Dict[str, float]]`` (a
+# weighted adjacency dict). The visualizer was typed as
+# ``Dict[str, List[str]]`` and ``_validate_graph`` rejected the
+# canonical form outright — calling ``GraphVisualizer.visualize`` on
+# any pipeline output raised ``ValueError("Invalid graph format")``,
+# making the visualizer unreachable from the live pipeline. We now
+# accept either shape and normalise in ``_to_nx``.
+GraphInput = Union[
+    Mapping[str, List[str]],
+    Mapping[str, Mapping[str, float]],
+]
 
 def ensure_headless_matplotlib_backend() -> None:
     import matplotlib
@@ -39,27 +52,46 @@ class GraphVisualizer:
     # VALIDATION
     # =====================================================
 
-    def _validate_graph(self, graph: Dict[str, List[str]]):
+    def _validate_graph(self, graph: GraphInput) -> None:
+        # G-V1: accept both the legacy ``Dict[str, List[str]]`` and the
+        # canonical weighted ``Dict[str, Dict[str, float]]`` produced by
+        # the rest of the pipeline. Previously rejected the latter
+        # outright, which made the visualizer unreachable from
+        # production.
         if not isinstance(graph, dict):
             raise ValueError("graph must be dict")
         for k, v in graph.items():
-            if not isinstance(k, str) or not isinstance(v, list):
-                raise ValueError("Invalid graph format")
+            if not isinstance(k, str):
+                raise ValueError("Invalid graph format: keys must be str")
+            if not isinstance(v, (list, dict)):
+                raise ValueError(
+                    "Invalid graph format: neighbours must be list or dict"
+                )
 
     # =====================================================
     # GRAPH BUILD
     # =====================================================
 
-    def _to_nx(self, graph: Dict[str, List[str]]) -> nx.Graph:
+    def _to_nx(self, graph: GraphInput) -> nx.Graph:
         G = nx.Graph()
         for node, nbrs in graph.items():
             n = node.strip().lower()
             G.add_node(n)
-            for nbr in nbrs:
-                if isinstance(nbr, str):
-                    m = nbr.strip().lower()
-                    if m and m != n:
-                        G.add_edge(n, m)
+
+            # Canonical weighted form: dict-of-dict.
+            if isinstance(nbrs, dict):
+                for nbr, w in nbrs.items():
+                    if isinstance(nbr, str):
+                        m = nbr.strip().lower()
+                        if m and m != n:
+                            G.add_edge(n, m, weight=float(w))
+            # Legacy unweighted form: list of neighbour ids.
+            else:
+                for nbr in nbrs:
+                    if isinstance(nbr, str):
+                        m = nbr.strip().lower()
+                        if m and m != n:
+                            G.add_edge(n, m, weight=1.0)
         return G
 
     # =====================================================
@@ -251,7 +283,7 @@ class GraphVisualizer:
 
     def visualize(
         self,
-        graph: Dict[str, List[str]],
+        graph: GraphInput,
         *,
         name: str = "graph",
         interactive: bool = False,

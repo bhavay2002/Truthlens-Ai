@@ -12,6 +12,55 @@ logger = logging.getLogger(__name__)
 
 
 # =========================================================
+# CFG-AG-1: single source of truth for weight grouping.
+#
+# Both `weight_manager.py` and `truthlens_score_calculator.py` used to
+# define their own private copies of these mappings. Any drift between
+# the two definitions silently broke per-group renormalisation. They
+# now live here and are re-exported from `weight_manager` for back-
+# compat with existing imports.
+# =========================================================
+
+WEIGHT_GROUPS: Dict[str, tuple] = {
+    "manipulation": (
+        "bias",
+        "emotion",
+        "narrative",
+        "analysis_influence_manipulation",
+    ),
+    "credibility": (
+        "discourse",
+        "graph",
+        "analysis_influence_credibility",
+    ),
+    "final": (
+        "final_credibility",
+        "final_manipulation",
+        "final_ideology",
+    ),
+}
+
+
+TASK_TO_GROUP: Dict[str, str] = {
+    "bias":            "manipulation",
+    "emotion":         "manipulation",
+    "narrative":       "manipulation",
+    "narrative_frame": "manipulation",
+    "propaganda":      "manipulation",
+    "discourse":       "credibility",
+    "graph":           "credibility",
+    "argument":        "credibility",
+    "analysis":        "credibility",
+    "ideology":        "final",
+}
+
+
+# Scalar multipliers — clipped to [0, 1] but never renormalised
+# inside a group. See WGT-AG-1.
+SCALAR_WEIGHT_KEYS: tuple = ("credibility_bias_penalty",)
+
+
+# =========================================================
 # NORMALIZATION CONFIG
 # =========================================================
 
@@ -134,6 +183,29 @@ class AttributionConfig(BaseModel):
 
 
 # =========================================================
+# FUSION CONFIG (WGT-AG-2)
+#
+# Previously the score calculator hardcoded a 0.1 cap for the graph
+# cross-signal and a 0.5 blend for the explanation alignment. Both
+# values are surfaced here so they can be tuned from config.yaml
+# without code changes.
+# =========================================================
+
+class FusionConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    graph_influence_cap: float = 0.1
+    explanation_blend: float = 0.5
+
+    @field_validator("graph_influence_cap", "explanation_blend")
+    @classmethod
+    def _in_unit(cls, v):
+        if not (0.0 <= v <= 1.0):
+            raise ValueError("Must be in [0, 1]")
+        return v
+
+
+# =========================================================
 # DRIFT CONFIG (🔥 NEW)
 # =========================================================
 
@@ -177,6 +249,20 @@ class AggregationConfig(BaseModel):
     drift: DriftConfig = DriftConfig()
     monitoring: MonitoringConfig = MonitoringConfig()
 
+    # WGT-AG-2: fusion constants (graph cap, explanation blend)
+    fusion: FusionConfig = FusionConfig()
+
+    # CRIT-AG-12: explicit task -> task_type map. When empty the
+    # pipeline lazy-loads from `config/config.yaml`. Set this here
+    # only if you want to override or pre-populate without touching
+    # the global app config.
+    task_types: Dict[str, str] = Field(default_factory=dict)
+
+    # PERF-AG-5: optional thread-pool fan-out for `run_batch`. Workers
+    # > 1 only helps now that the per-article pipeline is stateless
+    # (CRIT-AG-5/6 removed the per-article `fit_transform` mutations).
+    batch_max_workers: int = 1
+
     # pipeline behavior
     strict_mode: bool = False
     enable_logging: bool = True
@@ -185,6 +271,20 @@ class AggregationConfig(BaseModel):
 
     # versioning
     config_version: str = "v2"
+
+    # CFG-3 (v13/v14 audit): single source of truth for the
+    # model-version label that ends up on every aggregated result.
+    # Previously hard-coded as the literal "truthlens-v2" inside
+    # ``AggregationPipeline.run`` (line 359), which silently drifted
+    # from the model the predictor actually loaded.
+    model_version: str = "truthlens-v2"
+
+    @field_validator("batch_max_workers")
+    @classmethod
+    def _positive_workers(cls, v):
+        if v < 1:
+            raise ValueError("batch_max_workers must be >= 1")
+        return v
 
 
 # =========================================================
@@ -207,10 +307,19 @@ def load_aggregation_config(
 
         try:
             with path.open("r", encoding="utf-8") as f:
-                config_data = yaml.safe_load(f) or {}
+                raw = yaml.safe_load(f) or {}
         except Exception as e:
             logger.exception("Failed to load config")
             raise RuntimeError("Config loading failed") from e
+
+        # CFG-AG-6: when pointed at the global app config (which has an
+        # `aggregation:` block alongside `tasks:`, `model:`, ...) pull
+        # just the aggregation sub-tree. Standalone aggregation YAML
+        # files (no `aggregation:` key) are loaded as-is.
+        if isinstance(raw, dict) and isinstance(raw.get("aggregation"), dict):
+            config_data = raw["aggregation"]
+        else:
+            config_data = raw
 
     if override:
         config_data.update(override)

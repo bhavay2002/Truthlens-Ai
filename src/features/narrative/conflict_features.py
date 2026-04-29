@@ -1,35 +1,46 @@
-# src/features/conflict_features.py
-
 from __future__ import annotations
 
 import logging
-from collections import Counter
 from dataclasses import dataclass
-from typing import Dict, Set
+from typing import Dict
 
 import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
-from src.features.base.numerics import normalized_entropy
+from src.features.base.lexicon_loader import load_lexicon_set
+from src.features.base.lexicon_matcher import LexiconMatcher, to_token_array
+from src.features.base.numerics import EPS, MAX_CLIP, normalized_entropy
+from src.features.base.text_signals import get_text_signals
 from src.features.base.tokenization import ensure_tokens_word
 
 logger = logging.getLogger(__name__)
 
-EPS = 1e-8
-MAX_CLIP = 1.0
+
+# ---------------------------------------------------------
+# Lexicons — audit fix §1.1, see src/config/lexicons/narrative_conflict.json.
+# ---------------------------------------------------------
+
+CONFRONTATION_TERMS = load_lexicon_set("narrative_conflict", "confrontation")
+DISPUTE_TERMS = load_lexicon_set("narrative_conflict", "dispute")
+ACCUSATION_TERMS = load_lexicon_set("narrative_conflict", "accusation")
+AGGRESSIVE_LANGUAGE = load_lexicon_set("narrative_conflict", "aggressive")
+POLARIZATION_TERMS = load_lexicon_set("narrative_conflict", "polarization")
+ESCALATION_TERMS = load_lexicon_set("narrative_conflict", "escalation")
 
 
 # ---------------------------------------------------------
-# Lexicons
+# Vectorized matchers — audit fix §2.2.
 # ---------------------------------------------------------
 
-CONFRONTATION_TERMS = {...}
-DISPUTE_TERMS = {...}
-ACCUSATION_TERMS = {...}
-AGGRESSIVE_LANGUAGE = {...}
-POLARIZATION_TERMS = {...}
-ESCALATION_TERMS = {...}
+_CONFLICT_MATCHERS: Dict[str, LexiconMatcher] = {
+    "confrontation": LexiconMatcher(CONFRONTATION_TERMS, "conflict_confrontation"),
+    "dispute":       LexiconMatcher(DISPUTE_TERMS,       "conflict_dispute"),
+    "accusation":    LexiconMatcher(ACCUSATION_TERMS,    "conflict_accusation"),
+    "aggression":    LexiconMatcher(AGGRESSIVE_LANGUAGE, "conflict_aggression"),
+    "polarization":  LexiconMatcher(POLARIZATION_TERMS,  "conflict_polarization"),
+    "escalation":    LexiconMatcher(ESCALATION_TERMS,    "conflict_escalation"),
+}
 
 
 # ---------------------------------------------------------
@@ -58,18 +69,14 @@ class ConflictFeatures(BaseFeature):
         if n == 0:
             return {}
 
-        counter = Counter(tokens)
-
-        def ratio(lexicon: Set[str]) -> float:
-            return sum(counter.get(w, 0) for w in lexicon) / (n + EPS)
-
+        # Audit fix §2.2 — vectorised lexicon counts. Single
+        # ``to_token_array`` materialises the contiguous numpy view
+        # once for all six categories.
+        tokens_arr = to_token_array(tokens)
+        denom = n + EPS
         raw = {
-            "confrontation": ratio(CONFRONTATION_TERMS),
-            "dispute": ratio(DISPUTE_TERMS),
-            "accusation": ratio(ACCUSATION_TERMS),
-            "aggression": ratio(AGGRESSIVE_LANGUAGE),
-            "polarization": ratio(POLARIZATION_TERMS),
-            "escalation": ratio(ESCALATION_TERMS),
+            key: matcher.count_in_tokens(tokens_arr) / denom
+            for key, matcher in _CONFLICT_MATCHERS.items()
         }
 
         # -------------------------
@@ -106,13 +113,13 @@ class ConflictFeatures(BaseFeature):
         diversity = float(np.count_nonzero(values) / len(values))
 
         # -------------------------
-        # RHETORIC (FIXED)
+        # RHETORIC — audit fix §3.4 / §4.3 read from the shared,
+        # NER-aware text-signal cache instead of recomputing
+        # ``text.count("!")`` / ``text.count("?")`` inline.
         # -------------------------
 
-        exclam = text.count("!")
-        questions = text.count("?")
-
-        rhetoric = (exclam + questions) / (n + EPS)
+        signals = get_text_signals(context, n)
+        rhetoric = signals["exclamation_density"] + signals["question_density"]
 
         # -------------------------
         # OUTPUT

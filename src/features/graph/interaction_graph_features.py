@@ -1,10 +1,7 @@
-# src/features/interaction_graph_features.py
-
 from __future__ import annotations
 
 import itertools
 import logging
-import re
 from dataclasses import dataclass, field
 from typing import Dict, List
 
@@ -12,23 +9,19 @@ import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
+from src.features.base.numerics import EPS, MAX_CLIP
+from src.features.base.segmentation import (
+    heuristic_entities as _heuristic_entities,
+    split_sentences as _split_sentences,
+)
+from src.features.base.spacy_doc import ensure_spacy_doc
 
 logger = logging.getLogger(__name__)
 
-EPS = 1e-8
-MAX_CLIP = 1.0
 
-
-# ---------------------------------------------------------
-# Fallback utilities
-# ---------------------------------------------------------
-
-def _split_sentences(text: str) -> List[str]:
-    return [s.strip() for s in re.split(r"[.!?]+", text) if s.strip()]
-
-
-def _heuristic_entities(sentence: str) -> List[str]:
-    return list(set(re.findall(r"\b[A-Z][a-zA-Z]+\b", sentence)))
+# Audit fix §4 — local ``_split_sentences`` / ``_heuristic_entities``
+# duplicates removed; both come from ``base/segmentation.py`` so the
+# entity / interaction graph builders never disagree on segmentation.
 
 
 # ---------------------------------------------------------
@@ -69,7 +62,7 @@ class InteractionGraphFeatures(BaseFeature):
 
         text = context.text.strip()
         if not text:
-            return {}
+            return self._empty()
 
         self.initialize()
 
@@ -79,7 +72,19 @@ class InteractionGraphFeatures(BaseFeature):
 
         if self._builder and self._analyzer:
 
-            graph = self._builder.build_graph(text)
+            # Audit fix §2.7 — share the per-context cached spaCy
+            # ``Doc`` with the entity-graph extractor (and the
+            # syntactic extractor's ``extract_batch`` upstream).
+            # ``NarrativeGraphBuilder.build_graph_with_doc(text, doc)``
+            # returns the same ``Dict[str, Dict[str, float]]`` as
+            # ``build_graph`` and skips the duplicate ``self.nlp(text)``
+            # parse that previously dominated this extractor.
+            doc = ensure_spacy_doc(context)
+
+            if doc is not None and hasattr(self._builder, "build_graph_with_doc"):
+                graph = self._builder.build_graph_with_doc(text, doc)
+            else:
+                graph = self._builder.build_graph(text)
 
             metrics = self._builder.extract_graph_features(graph).to_dict()
             gmetrics = self._analyzer.analyze(graph).to_dict()
@@ -114,7 +119,9 @@ class InteractionGraphFeatures(BaseFeature):
 
         max_edges = nodes * (nodes - 1) / 2.0 if nodes > 1 else 1.0
 
-        density = edges / (max_edges + EPS)
+        # §11.4 — clamp density to [0, 1] for multigraphs where edges may
+        # exceed max_edges (parallel edges between the same node pair).
+        density = min(edges / (max_edges + EPS), 1.0)
         sparsity = 1.0 - density
 
         # normalized degree
@@ -167,6 +174,20 @@ class InteractionGraphFeatures(BaseFeature):
         }
 
     # -----------------------------------------------------
+
+    def _empty(self) -> Dict[str, float]:
+        # §11.1 — consistent fixed-key zero dict for empty-text inputs.
+        return {
+            "interaction_nodes_log":      0.0,
+            "interaction_edges_log":      0.0,
+            "interaction_density":        0.0,
+            "interaction_sparsity":       0.0,
+            "interaction_degree_norm":    0.0,
+            "interaction_clustering":     0.0,
+            "interaction_component_ratio": 0.0,
+            "interaction_entropy":        0.0,
+            "interaction_intensity":      0.0,
+        }
 
     def _safe(self, v: float) -> float:
         if not np.isfinite(v):

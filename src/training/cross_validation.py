@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedKFold, KFold
 
 from src.config.task_config import get_task_type
 from src.utils.seed_utils import set_seed
@@ -64,19 +64,55 @@ def build_splits(
     n_splits: int,
     seed: int,
 ):
+    """
+    Build CV split indices.
 
-    if label_column not in df:
-        raise ValueError(f"Missing label column: {label_column}")
+    EDGE-1: ``StratifiedKFold`` requires a 1-D ``y``. Multi-label tasks
+    (e.g. emotion has 20 ``emotion_<label>`` columns) have no single
+    ``label_column`` to stratify on, and supplying a non-existent column
+    used to crash the CV pipeline.  We now:
+      * fall back to plain ``KFold`` when ``label_column`` is missing
+        (with a warning), so multi-label / regression CV still runs;
+      * fall back to plain ``KFold`` when stratification fails because
+        the smallest class has fewer than ``n_splits`` members
+        (the typical low-resource-task failure mode).
+    """
+
+    n_splits = int(n_splits)
+    if n_splits < 2:
+        raise ValueError(f"n_splits must be >= 2 (got {n_splits})")
+    if len(df) < n_splits:
+        raise ValueError(
+            f"Cannot make {n_splits} folds from {len(df)} rows"
+        )
+
+    if label_column not in df.columns:
+        logger.warning(
+            "[build_splits] label_column=%r not found — falling back "
+            "to KFold (no stratification). This is expected for "
+            "multi-label / regression tasks.",
+            label_column,
+        )
+        kf = KFold(n_splits=n_splits, shuffle=True, random_state=seed)
+        return list(kf.split(df))
 
     y = df[label_column].values
 
-    splitter = StratifiedKFold(
-        n_splits=n_splits,
-        shuffle=True,
-        random_state=seed,
-    )
-
-    return list(splitter.split(df, y))
+    try:
+        splitter = StratifiedKFold(
+            n_splits=n_splits,
+            shuffle=True,
+            random_state=seed,
+        )
+        return list(splitter.split(df, y))
+    except ValueError as exc:
+        logger.warning(
+            "[build_splits] StratifiedKFold failed (%s) — falling back "
+            "to KFold. Smallest class likely has < n_splits members.",
+            exc,
+        )
+        kf = KFold(n_splits=n_splits, shuffle=True, random_state=seed)
+        return list(kf.split(df))
 
 
 # =========================================================
@@ -106,6 +142,17 @@ def cross_validate_task(
     for fold_id, (train_idx, val_idx) in enumerate(splits, start=1):
 
         logger.info("CV | task=%s | fold=%d/%d", task, fold_id, n_splits)
+
+        # N-MED-3: Previously every fold trained with the same global seed
+        # set ONCE before the loop. Because torch / numpy / python rng
+        # state advances during fold 1, fold 2's training started from
+        # fold-1's leftover entropy — which (a) is reproducible only at
+        # the granularity of the entire CV run, not per fold, and (b)
+        # means the rng correlation between folds inflated the apparent
+        # variance reduction. Reseed PER FOLD with a derived seed so each
+        # fold is independently reproducible AND independent of the
+        # others' rng consumption.
+        set_seed(seed + fold_id)
 
         train_df = df.iloc[train_idx].reset_index(drop=True)
         val_df = df.iloc[val_idx].reset_index(drop=True)
@@ -162,13 +209,16 @@ def cross_validate_task(
             logger.exception("Fold %d failed", fold_id)
 
         finally:
-            # 🔥 MEMORY SAFETY
-            try:
+            # EDGE-6: ``del trainer`` previously NameError'd whenever
+            # ``create_trainer_fn`` itself raised before the binding was
+            # made (the ``except Exception: pass`` swallowed the NameError
+            # but masked the smell).  Probe ``locals()`` first so the
+            # cleanup path is exception-free in both code paths.
+            if "trainer" in locals():
                 del trainer
-            except Exception:
-                pass
 
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             gc.collect()
 
     # -----------------------------------------------------

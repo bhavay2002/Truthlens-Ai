@@ -59,9 +59,14 @@ class BenchmarkRunner:
         measure_steps: int = 50,
     ) -> None:
 
-        self.device = device or torch.device(
-            "cuda" if torch.cuda.is_available() else "cpu"
-        )
+        # A5.1: route through the centralised detector so MPS is honoured
+        # and the resolution rules cannot drift across the codebase.
+        if device is not None:
+            self.device = device
+        else:
+            from src.models._device import detect_device
+
+            self.device = detect_device()
 
         self.warmup_steps = warmup_steps
         self.measure_steps = measure_steps
@@ -89,11 +94,32 @@ class BenchmarkRunner:
         inputs: List[Any],
     ) -> List[float]:
 
+        # P2.6: CUDA kernel launches are *asynchronous*. ``time.perf_counter``
+        # bracketing ``fn(inp)`` without a matching synchronisation
+        # measures only the launch overhead, not the actual GPU work,
+        # so reported latency on CUDA is wildly under-counted (often by
+        # 2–3 orders of magnitude on small kernels). The fix is to
+        # ``cuda.synchronize()`` BEFORE starting the timer (drain
+        # anything left over from warmup) and AFTER the call (block
+        # until the work this iteration scheduled is actually done).
+        # On CPU the synchronize is a no-op via the ``is_available``
+        # guards.
+        cuda_active = (
+            torch.cuda.is_available() and self.device.type == "cuda"
+        )
+
         timings = []
 
         for inp in inputs:
+            if cuda_active:
+                torch.cuda.synchronize(self.device)
+
             start = time.perf_counter()
             fn(inp)
+
+            if cuda_active:
+                torch.cuda.synchronize(self.device)
+
             end = time.perf_counter()
             timings.append(end - start)
 

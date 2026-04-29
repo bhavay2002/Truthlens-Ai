@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import logging
 from pathlib import Path
 from typing import Dict, Any
@@ -94,6 +95,22 @@ class ModelFactory:
     # =====================================================
 
     @staticmethod
+    def _filter_for_dataclass(
+        cls: type, merged: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Keep only keys that are valid fields of the given dataclass.
+
+        Callers (notably the training pipeline) hand the factory a single
+        ``params`` dict that mixes model-config fields (``model_name``,
+        ``dropout`` …) with optimizer / loop fields (``lr``, ``epochs``,
+        ``tokenizer`` …). The task-config dataclasses are strict and
+        reject unknown keys, so we drop the non-model keys here rather
+        than asking every call site to split the dict.
+        """
+        valid = {f.name for f in dataclasses.fields(cls)}
+        return {k: v for k, v in merged.items() if k in valid}
+
+    @staticmethod
     def create(model_type: str, config: Dict[str, Any]) -> nn.Module:
 
         if not isinstance(model_type, str) or not model_type.strip():
@@ -112,22 +129,42 @@ class ModelFactory:
 
         logger.info("[MODEL FACTORY] Creating: %s", model_type)
 
+        _filter = ModelFactory._filter_for_dataclass
+
         try:
 
             if model_type == "bias_classifier":
-                model = BiasClassifier(BiasClassifierConfig(**merged))
+                model = BiasClassifier(
+                    BiasClassifierConfig(**_filter(BiasClassifierConfig, merged))
+                )
 
             elif model_type == "ideology_classifier":
-                model = IdeologyClassifier(IdeologyClassifierConfig(**merged))
+                model = IdeologyClassifier(
+                    IdeologyClassifierConfig(
+                        **_filter(IdeologyClassifierConfig, merged)
+                    )
+                )
 
             elif model_type == "propaganda_detector":
-                model = PropagandaDetector(PropagandaDetectorConfig(**merged))
+                model = PropagandaDetector(
+                    PropagandaDetectorConfig(
+                        **_filter(PropagandaDetectorConfig, merged)
+                    )
+                )
 
             elif model_type == "narrative_detector":
-                model = NarrativeDetector(NarrativeDetectorConfig(**merged))
+                model = NarrativeDetector(
+                    NarrativeDetectorConfig(
+                        **_filter(NarrativeDetectorConfig, merged)
+                    )
+                )
 
             elif model_type == "emotion_classifier":
-                model = EmotionClassifier(EmotionClassifierConfig(**merged))
+                model = EmotionClassifier(
+                    EmotionClassifierConfig(
+                        **_filter(EmotionClassifierConfig, merged)
+                    )
+                )
 
             elif model_type == "multitask_truthlens":
                 # P4: MultiTaskTruthLensModel.__init__ accepts the
@@ -136,7 +173,9 @@ class ModelFactory:
                 # stays unambiguous). Passing it positionally would
                 # bind to ``encoder`` and explode at validation time.
                 model = MultiTaskTruthLensModel(
-                    config=MultiTaskTruthLensConfig(**merged)
+                    config=MultiTaskTruthLensConfig(
+                        **_filter(MultiTaskTruthLensConfig, merged)
+                    )
                 )
 
             else:

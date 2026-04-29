@@ -10,15 +10,12 @@ import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
-from src.features.base.numerics import normalized_entropy
+from src.features.base.numerics import EPS, MAX_CLIP, normalized_entropy
 from src.features.base.spacy_loader import get_shared_nlp
 from src.features.base.tokenization import ensure_tokens_word
 from src.features.emotion.emotion_schema import WORD_TO_EMOTION
 
 logger = logging.getLogger(__name__)
-
-EPS = 1e-8
-MAX_CLIP = 1.0
 
 
 # -----------------------------------------------------

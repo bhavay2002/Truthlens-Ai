@@ -156,7 +156,15 @@ def _build_data_paths(data_dir: Path) -> DataPaths:
 # MAIN
 # =========================================================
 
-def load_settings() -> Settings:
+def load_settings(*, validate_data: bool = False) -> Settings:
+    """Load runtime settings.
+
+    The ``data/`` directory is built lazily — datasets only need to exist
+    when the train pipeline actually runs. Pass ``validate_data=True`` from
+    the train entry point to assert all 18 split files are present; the
+    default leaves them unchecked so ``--mode infer`` and the API can boot
+    without any CSVs on disk.
+    """
 
     root = _project_root()
 
@@ -197,8 +205,11 @@ def load_settings() -> Settings:
 
     data_paths = _build_data_paths(data_dir)
 
-    #  VALIDATE DATA FILES
-    data_paths.validate()
+    # Opt-in CSV-presence check. Train flows pass ``validate_data=True``;
+    # inference / API flows do not need the data directory populated and
+    # would otherwise crash at boot time on a fresh checkout.
+    if validate_data:
+        data_paths.validate()
 
     # -----------------------------------------------------
     # RUNTIME FLAGS

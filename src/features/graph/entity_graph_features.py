@@ -1,9 +1,6 @@
-# src/features/entity_graph_features.py
-
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass, field
 from typing import Dict, List
 
@@ -11,23 +8,20 @@ import numpy as np
 
 from src.features.base.base_feature import BaseFeature, FeatureContext
 from src.features.base.feature_registry import register_feature
+from src.features.base.numerics import EPS, MAX_CLIP
+from src.features.base.segmentation import (
+    heuristic_entities as _heuristic_entities,
+    split_sentences as _sentence_split,
+)
+from src.features.base.spacy_doc import ensure_spacy_doc
 
 logger = logging.getLogger(__name__)
 
-EPS = 1e-8
-MAX_CLIP = 1.0
 
-
-# ---------------------------------------------------------
-# Fallback utilities
-# ---------------------------------------------------------
-
-def _sentence_split(text: str) -> List[str]:
-    return [s.strip() for s in re.split(r"[.!?]+", text) if s.strip()]
-
-
-def _heuristic_entities(sentence: str) -> List[str]:
-    return list(set(re.findall(r"\b[A-Z][a-zA-Z]+\b", sentence)))
+# Audit fix §4 — local ``_sentence_split`` / ``_heuristic_entities``
+# duplicates removed; the canonical implementations now live in
+# ``src/features/base/segmentation.py`` and are shared with the
+# trajectory and interaction-graph extractors.
 
 
 # ---------------------------------------------------------
@@ -68,7 +62,7 @@ class EntityGraphFeatures(BaseFeature):
 
         text = context.text.strip()
         if not text:
-            return {}
+            return self._empty()
 
         self.initialize()
 
@@ -78,7 +72,21 @@ class EntityGraphFeatures(BaseFeature):
 
         if self._builder and self._analyzer:
 
-            graph = self._builder.build_graph(text)
+            # Audit fix §2.7 — reuse the per-context cached spaCy
+            # ``Doc`` if any earlier extractor (e.g. the syntactic
+            # extractor's ``extract_batch``) has already parsed the
+            # text. ``EntityGraphBuilder.build_graph_with_doc`` skips
+            # the ``self.nlp(text)`` re-parse and returns the same
+            # graph shape as ``build_graph``. Falls back to the
+            # text-only path when no cached doc is available so the
+            # behaviour is identical when this extractor runs alone.
+            doc = ensure_spacy_doc(context)
+
+            if doc is not None and hasattr(self._builder, "build_graph_with_doc"):
+                result = self._builder.build_graph_with_doc(doc)
+                graph = result["graph"] if isinstance(result, dict) and "graph" in result else result
+            else:
+                graph = self._builder.build_graph(text)
 
             metrics = self._builder.extract_graph_features(graph).to_dict()
             gmetrics = self._analyzer.analyze(graph).to_dict()
@@ -110,7 +118,10 @@ class EntityGraphFeatures(BaseFeature):
 
         max_edges = nodes * (nodes - 1) / 2.0 if nodes > 1 else 1.0
 
-        density = edges / (max_edges + EPS)
+        # §11.4 — for multigraphs (parallel edges allowed) `edges` can exceed
+        # `max_edges`, producing density > 1.0.  Clamp to [0, 1] so the value
+        # is always a valid ratio that the scaling stage can handle.
+        density = min(edges / (max_edges + EPS), 1.0)
 
         # normalized degree
         avg_degree = (2.0 * edges) / (nodes + EPS)
@@ -161,6 +172,19 @@ class EntityGraphFeatures(BaseFeature):
         }
 
     # -----------------------------------------------------
+
+    def _empty(self) -> Dict[str, float]:
+        # §11.1 — consistent fixed-key zero dict so the schema validator sees
+        # a stable shape for empty-text inputs.
+        return {
+            "graph_nodes_log":   0.0,
+            "graph_edges_log":   0.0,
+            "graph_density":     0.0,
+            "graph_sparsity":    0.0,
+            "graph_degree_norm": 0.0,
+            "graph_entropy":     0.0,
+            "graph_intensity":   0.0,
+        }
 
     def _safe(self, v: float) -> float:
         if not np.isfinite(v):

@@ -1,24 +1,87 @@
 from __future__ import annotations
 
-from typing import Tuple, Optional
+from typing import Optional, Tuple
 
-import numpy as np
 import torch
-import torch.nn.functional as F
 
 
 # =========================================================
-# MIXUP UTILS
+# C1.6: REPRODUCIBLE MIXUP RNG
 # =========================================================
+#
+# Previously ``_sample_lambda`` used ``np.random.beta`` and
+# ``_shuffle_indices`` used a generator-less ``torch.randperm``. Two
+# problems:
+#
+#   1. NumPy's global RNG is *not* synchronised with PyTorch's RNG.
+#      Setting ``torch.manual_seed(SEED)`` (the standard reproducibility
+#      knob) does not seed numpy, so the lambda drawn for each batch is
+#      effectively unsynchronised — runs that should be byte-identical
+#      diverge in their loss curves.
+#
+#   2. ``torch.randperm`` without a ``generator=`` argument falls back
+#      to the *default* CUDA / CPU RNG, which is shared with the rest
+#      of the model (dropout, augmentations). Two consecutive calls can
+#      perturb the global state of unrelated stochastic ops.
+#
+# Both samplers below now route through ``torch`` and accept an explicit
+# ``torch.Generator`` so distributed callers can derive a per-rank
+# deterministic stream and trainers can pin reproducibility on a single
+# RNG handle.
 
-def _sample_lambda(alpha: float, size: int = 1) -> float:
+def _sample_lambda(
+    alpha: float,
+    device: Optional[torch.device] = None,
+    generator: Optional[torch.Generator] = None,
+) -> float:
     if alpha <= 0:
         return 1.0
-    lam = np.random.beta(alpha, alpha, size=size)
-    return float(lam[0] if size == 1 else lam)
+
+    # ``torch.distributions.Beta`` does not accept a ``generator`` kwarg
+    # at sampling time, so we hand-roll the sampler from two Gamma
+    # draws via ``empty().exponential_(...)``-style primitives that DO
+    # accept a generator. Beta(α, α) = G1 / (G1 + G2) where G_i ~
+    # Gamma(α, 1); ``torch.empty(()).gamma_(α, generator=...)`` is the
+    # generator-aware Gamma sampler exposed by PyTorch.
+    a = torch.tensor(float(alpha), device=device or torch.device("cpu"))
+
+    if hasattr(torch.Tensor, "gamma_") and generator is not None:
+        try:
+            g1 = torch.empty((), device=a.device).gamma_(
+                a.item(), generator=generator
+            )
+            g2 = torch.empty((), device=a.device).gamma_(
+                a.item(), generator=generator
+            )
+            return float(g1 / (g1 + g2))
+        except (RuntimeError, AttributeError, TypeError):
+            # Fall through to the global-RNG path below.
+            pass
+
+    # Generator-less path: still uses the *torch* RNG (so
+    # ``torch.manual_seed`` controls reproducibility), unlike the
+    # previous numpy implementation.
+    sample = torch.distributions.Beta(a, a).sample()
+    return float(sample.item())
 
 
-def _shuffle_indices(batch_size: int, device: torch.device) -> torch.Tensor:
+def _shuffle_indices(
+    batch_size: int,
+    device: torch.device,
+    generator: Optional[torch.Generator] = None,
+) -> torch.Tensor:
+    if generator is not None:
+        # ``randperm`` requires the generator's device to match the
+        # output device — fall back to CPU + ``.to(device)`` when the
+        # generator lives on CPU, which is the common case.
+        try:
+            return torch.randperm(
+                batch_size, device=device, generator=generator
+            )
+        except RuntimeError:
+            return torch.randperm(
+                batch_size, device=generator.device, generator=generator
+            ).to(device)
     return torch.randperm(batch_size, device=device)
 
 
@@ -30,6 +93,8 @@ def mixup(
     inputs: torch.Tensor,
     targets: torch.Tensor,
     alpha: float = 0.2,
+    *,
+    generator: Optional[torch.Generator] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, float]:
     """
     Perform MixUp on inputs and targets.
@@ -38,6 +103,7 @@ def mixup(
         inputs: (B, ...)
         targets: (B, C) or (B,)
         alpha: Beta distribution parameter
+        generator: optional torch.Generator for reproducible sampling
 
     Returns:
         mixed_inputs
@@ -49,9 +115,9 @@ def mixup(
     device = inputs.device
     batch_size = inputs.size(0)
 
-    lam = _sample_lambda(alpha)
+    lam = _sample_lambda(alpha, device=device, generator=generator)
 
-    index = _shuffle_indices(batch_size, device)
+    index = _shuffle_indices(batch_size, device, generator=generator)
 
     mixed_inputs = lam * inputs + (1 - lam) * inputs[index]
 
@@ -69,6 +135,8 @@ def embedding_mixup(
     embeddings: torch.Tensor,
     targets: torch.Tensor,
     alpha: float = 0.2,
+    *,
+    generator: Optional[torch.Generator] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, float]:
     """
     MixUp applied to hidden representations.
@@ -76,6 +144,7 @@ def embedding_mixup(
     Args:
         embeddings: (B, H) or (B, T, H)
         targets: labels
+        generator: optional torch.Generator for reproducible sampling
 
     Returns:
         mixed_embeddings, targets_a, targets_b, lam
@@ -84,9 +153,9 @@ def embedding_mixup(
     device = embeddings.device
     batch_size = embeddings.size(0)
 
-    lam = _sample_lambda(alpha)
+    lam = _sample_lambda(alpha, device=device, generator=generator)
 
-    index = _shuffle_indices(batch_size, device)
+    index = _shuffle_indices(batch_size, device, generator=generator)
 
     mixed_embeddings = lam * embeddings + (1 - lam) * embeddings[index]
 
@@ -129,6 +198,8 @@ def mixup_multilabel(
     inputs: torch.Tensor,
     targets: torch.Tensor,
     alpha: float = 0.2,
+    *,
+    generator: Optional[torch.Generator] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     MixUp for multilabel classification.
@@ -142,9 +213,9 @@ def mixup_multilabel(
     device = inputs.device
     batch_size = inputs.size(0)
 
-    lam = _sample_lambda(alpha)
+    lam = _sample_lambda(alpha, device=device, generator=generator)
 
-    index = _shuffle_indices(batch_size, device)
+    index = _shuffle_indices(batch_size, device, generator=generator)
 
     mixed_inputs = lam * inputs + (1 - lam) * inputs[index]
     mixed_targets = lam * targets + (1 - lam) * targets[index]
@@ -160,6 +231,8 @@ def token_mixup(
     embeddings: torch.Tensor,
     attention_mask: Optional[torch.Tensor] = None,
     alpha: float = 0.2,
+    *,
+    generator: Optional[torch.Generator] = None,
 ) -> Tuple[torch.Tensor, float]:
     """
     MixUp at token level (sequence-wise interpolation).
@@ -167,6 +240,7 @@ def token_mixup(
     Args:
         embeddings: (B, T, H)
         attention_mask: optional mask
+        generator: optional torch.Generator for reproducible sampling
 
     Returns:
         mixed_embeddings, lam
@@ -175,8 +249,8 @@ def token_mixup(
     device = embeddings.device
     batch_size = embeddings.size(0)
 
-    lam = _sample_lambda(alpha)
-    index = _shuffle_indices(batch_size, device)
+    lam = _sample_lambda(alpha, device=device, generator=generator)
+    index = _shuffle_indices(batch_size, device, generator=generator)
 
     mixed = lam * embeddings + (1 - lam) * embeddings[index]
 

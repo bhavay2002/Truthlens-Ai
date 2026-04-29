@@ -234,7 +234,7 @@ TASK_OPS: Dict[str, List[Callable]] = {
     "bias": [synonym_replacement, random_deletion],
     "ideology": [ideology_frame_shift],
     "propaganda": [propaganda_injection],
-    "frame": [random_swap],
+    "narrative_frame": [random_swap],
     "narrative": [narrative_reframe],
     "emotion": [emotion_amplify],
 }

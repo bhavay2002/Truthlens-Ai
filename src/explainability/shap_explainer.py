@@ -53,6 +53,12 @@ def _process_shap_values(values):
         values = values[:, :, -1]
     elif values.ndim == 2 and values.shape[1] == 1:
         values = values[:, 0]
+    elif values.ndim == 2:
+        # EDGE CASE FIX: (seq_len, num_classes) from a multi-class SHAP
+        # explainer — take the last column (positive/fake class).
+        # Previously fell through, leaving a 2D array that broke every
+        # downstream caller expecting a 1-D importance vector.
+        values = values[:, -1]
 
     return np.nan_to_num(values, nan=0.0, posinf=1.0, neginf=-1.0)
 

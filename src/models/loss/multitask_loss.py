@@ -16,6 +16,36 @@ logger = logging.getLogger(__name__)
 
 
 # =========================================================
+# SHARED-PARAMETER HELPER (A4.5)
+# =========================================================
+
+def gather_shared_parameters(
+    model: torch.nn.Module,
+) -> Optional[Iterable[torch.nn.Parameter]]:
+    """Return the model's *shared* parameters for GradNorm-style balancers.
+
+    Multi-task gradient balancers (``GradNorm``, ``PCGrad``, …) need the
+    parameters that all tasks share — typically the encoder trunk —
+    in order to compute per-task gradient norms against a *common*
+    surface. Models can publish this via
+    ``get_optimization_parameters()``. Plain ``nn.Module``s without
+    that contract get ``None``, which the balancer interprets as
+    "skip the gradient-shaping step" rather than crashing.
+
+    A4.5: documents the previously implicit ``shared_parameters``
+    contract on :meth:`MultiTaskLoss.forward` and gives callers a
+    one-liner so the boilerplate isn't duplicated at every training
+    step.
+    """
+
+    fn = getattr(model, "get_optimization_parameters", None)
+    if not callable(fn):
+        return None
+
+    return fn()
+
+
+# =========================================================
 # CONFIG
 # =========================================================
 
@@ -150,6 +180,14 @@ class MultiTaskLoss(nn.Module):
         *,
         shared_parameters: Optional[Iterable[torch.nn.Parameter]] = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """Compute weighted multi-task loss.
+
+        ``shared_parameters`` (A4.5) is the iterable of trunk / shared
+        parameters that GradNorm-style balancers will compute per-task
+        gradient norms against. Most callers should obtain it via
+        :func:`gather_shared_parameters(model)`; non-balancer setups can
+        leave it ``None``.
+        """
 
         if not isinstance(logits, dict) or not isinstance(labels, dict):
             raise TypeError("logits and labels must be dict")

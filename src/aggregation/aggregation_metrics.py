@@ -41,8 +41,7 @@ def compute_basic_stats(values: np.ndarray) -> Dict[str, float]:
         "std": float(np.std(values)),
         "min": float(np.min(values)),
         "max": float(np.max(values)),
-        "median": float(np.median(values),
-        ),
+        "median": float(np.median(values)),
         "p95": float(np.percentile(values, 95)),
         "p99": float(np.percentile(values, 99)),
     }

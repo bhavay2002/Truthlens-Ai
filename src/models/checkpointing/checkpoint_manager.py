@@ -194,18 +194,62 @@ class CheckpointManager:
             verify_from_metadata(path, meta)
 
         # -------------------------
-        # LOAD MODEL
+        # LOAD MODEL  (C1.8: backup-and-rollback)
         # -------------------------
+        #
+        # Previously we always called ``load_state_dict(strict=False)``
+        # and then post-checked the missing/unexpected key lists. Two
+        # problems with that ordering:
+        #
+        #   • ``strict=False`` already mutates the model in place — by
+        #     the time we discover the schema mismatch we have already
+        #     overwritten any keys that *did* match. Raising at that
+        #     point leaves the caller with a half-loaded model whose
+        #     parameters are an unstructured mix of old and new.
+        #
+        #   • The caller's explicit choice of ``strict=True`` was
+        #     silently downgraded — schema validation happened *after*
+        #     the unsafe load, not before it.
+        #
+        # The fix is to honour ``strict`` at the ``load_state_dict``
+        # call site, take a defensive snapshot of the current
+        # parameters and buffers first, and roll the snapshot back if
+        # the load raises.
 
         state_dict = checkpoint["model_state_dict"]
 
-        result = model.load_state_dict(state_dict, strict=False)
+        backup_state = {
+            k: v.detach().clone()
+            for k, v in model.state_dict().items()
+        }
 
-        if strict:
-            if result.missing_keys:
-                raise RuntimeError(f"Missing keys: {result.missing_keys}")
-            if result.unexpected_keys:
-                raise RuntimeError(f"Unexpected keys: {result.unexpected_keys}")
+        try:
+            result = model.load_state_dict(state_dict, strict=strict)
+
+            # In permissive mode we still log mismatches loudly so
+            # silent partial loads remain auditable.
+            if not strict:
+                if result.missing_keys:
+                    logger.warning(
+                        "Partial load — %d missing key(s): %s",
+                        len(result.missing_keys),
+                        result.missing_keys,
+                    )
+                if result.unexpected_keys:
+                    logger.warning(
+                        "Partial load — %d unexpected key(s): %s",
+                        len(result.unexpected_keys),
+                        result.unexpected_keys,
+                    )
+
+        except Exception:
+            # Restore the pre-load state so the caller's model object
+            # is never left in a half-overwritten configuration.
+            logger.exception(
+                "load_state_dict raised; rolling model back to pre-load state."
+            )
+            model.load_state_dict(backup_state, strict=True)
+            raise
 
         # -------------------------
         # OPTIMIZER

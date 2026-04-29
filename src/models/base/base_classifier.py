@@ -106,10 +106,17 @@ class BaseClassifier(BaseModel):
                     probs * log_p + (1.0 - probs) * log_1mp
                 ).mean(dim=-1)
             else:
+                # A6.2: derive ``preds`` and ``confidence`` directly
+                # from ``logits`` / ``log_probs``. ``argmax(logits) ==
+                # argmax(probs)`` (softmax is monotone) and the maxed
+                # log-prob exponentiates to the same value as
+                # ``probs.max()`` — but skipping the second softmax /
+                # max pass avoids a redundant kernel launch on every
+                # eval batch.
                 log_probs = F.log_softmax(logits, dim=-1)
                 probs = log_probs.exp()
-                preds = torch.argmax(probs, dim=-1)
-                confidence = probs.max(dim=-1).values
+                preds = torch.argmax(logits, dim=-1)
+                confidence = log_probs.max(dim=-1).values.exp()
                 entropy = -(probs * log_probs).sum(dim=-1)
 
             output["probabilities"] = probs
@@ -142,6 +149,18 @@ class BaseClassifier(BaseModel):
 
         if self.multi_label:
             labels = labels.float()
+            return self.loss_fn(logits, labels)
+
+        # A4.3: only cast to ``long`` when the label tensor is integer-
+        # typed. ``CrossEntropyLoss`` happily accepts a float tensor
+        # whose last dim equals ``num_classes`` and treats it as a
+        # smoothed-soft target distribution (the upstream MixUp
+        # pipeline relies on this). Unconditionally calling ``.long()``
+        # on a float-soft-label tensor truncates the probabilities to
+        # the integer class index 0 / 1 / 2 …, silently destroying the
+        # smoothed signal and biasing training toward whichever class
+        # the rounding happened to land on.
+        if torch.is_floating_point(labels):
             return self.loss_fn(logits, labels)
 
         return self.loss_fn(logits, labels.long())

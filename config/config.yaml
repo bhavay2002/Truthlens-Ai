@@ -57,12 +57,31 @@ model:
 # =========================================================
 
 tasks:
-  bias: "multiclass"
-  ideology: "multiclass"
-  propaganda: "multiclass"
-  narrative: "multilabel"
-  narrative_frame: "multilabel"
-  emotion: "multilabel"
+  # Each entry must declare ``type`` AND ``num_labels`` explicitly.
+  # The defaults in src/utils/config_loader._DEFAULT_NUM_LABELS are
+  # only a safety net — they cannot know that bias has 2 classes
+  # while ideology has 3, or that emotion has 20 multilabels while
+  # narrative has 3. Keeping these in sync with the dataset schema
+  # (see the per-task column lists in the project README) is what
+  # prevents shape mismatches between the model heads and the labels.
+  bias:
+    type: "multiclass"      # bias_label ∈ {0, 1}
+    num_labels: 2
+  ideology:
+    type: "multiclass"      # ideology_label ∈ {0, 1, 2}
+    num_labels: 3
+  propaganda:
+    type: "multiclass"      # propaganda_label ∈ {0, 1}
+    num_labels: 2
+  narrative:
+    type: "multilabel"      # columns: hero, villain, victim
+    num_labels: 3
+  narrative_frame:
+    type: "multilabel"      # columns: CO, EC, HI, MO, RE
+    num_labels: 5
+  emotion:
+    type: "multilabel"      # columns: emotion_0 .. emotion_19
+    num_labels: 20
 
 task_weights:
   bias: 1.0
@@ -96,7 +115,10 @@ data:
 
 distributed:
   use_ddp: true
-  backend: "nccl"
+  # CONFIG FIX: "nccl" requires CUDA and fails on CPU-only environments.
+  # Use "gloo" which works across CPU and GPU.  Switch to "nccl" only when
+  # running on multi-GPU hardware for optimal bandwidth.
+  backend: "gloo"
   find_unused_parameters: false
 
 # =========================================================
@@ -218,3 +240,80 @@ tracking:
   tags:
     stage: "experiment"
     version: "v1"
+
+# =========================================================
+# AGGREGATION (CFG-AG-6)
+#
+# The aggregation pipeline reads its own block from this file when
+# `load_aggregation_config(config/config.yaml)` is called. The keys
+# below mirror `src/aggregation/aggregation_config.AggregationConfig`
+# and override the in-code defaults. Leaving a key unset keeps the
+# default from `AggregationConfig`.
+# =========================================================
+
+aggregation:
+  config_version: v2
+
+  strict_mode: false
+  enable_logging: true
+  enable_explanations: true
+  enable_risk: true
+
+  batch_max_workers: 1
+
+  weights:
+    version: v2
+    allow_dynamic_adjustment: true
+    use_confidence: true
+    use_entropy: true
+    use_explainability: true
+    smoothing: 0.1
+
+  risk:
+    low_threshold: 0.30
+    medium_threshold: 0.60
+    uncertainty_penalty: 0.20
+
+  attribution:
+    method: integrated_gradients
+    top_k: 5
+    normalize: true
+    use_confidence_weighting: true
+    use_entropy_weighting: true
+
+  fusion:
+    graph_influence_cap: 0.10
+    explanation_blend: 0.50
+
+  uncertainty:
+    enable_entropy: true
+    track_percentiles: true
+    p95_threshold: 0.80
+    p99_threshold: 0.95
+
+  drift:
+    enabled: true
+    method: js
+    threshold: 0.10
+
+  monitoring:
+    enabled: true
+    track_latency: true
+    track_confidence: true
+    track_entropy: true
+
+# =========================================================
+# EXPLAINABILITY (CFG-3)
+#
+# Per-method fusion weights used by ExplanationAggregator.
+# Values are re-normalised to sum to 1.0 automatically; you
+# can therefore treat them as relative priorities.
+# =========================================================
+
+explainability:
+  aggregation_weights:
+    shap: 0.35
+    integrated_gradients: 0.25
+    attention: 0.20
+    lime: 0.10
+    graph: 0.10

@@ -196,7 +196,13 @@ class EvaluationEngine:
 
             batch = self._move_batch(batch)
 
-            outputs = model(**batch)
+            # Strip non-tensor metadata (``task``) injected by collate
+            # so the strict single-task model signatures don't choke.
+            model_batch = {
+                k: v for k, v in batch.items()
+                if k not in ("task",)
+            }
+            outputs = model(**model_batch)
 
             self._update_metrics(metrics, outputs, batch)
 
@@ -242,15 +248,54 @@ class EvaluationEngine:
     def _update_metrics(self, metrics, outputs, batch):
 
         task_logits = outputs.get("task_logits")
+        # Single-task model classes emit ``outputs["logits"]`` (a single
+        # tensor) instead of the multi-head ``task_logits`` dict the
+        # MultiTaskTruthLensModel produces. Mirror the LossEngine
+        # synthesis so single-task evaluation works without forcing
+        # every model class to emit both shapes.
+        if task_logits is None and "logits" in outputs and len(self.config.task_types) == 1:
+            only_task = next(iter(self.config.task_types.keys()))
+            task_logits = {only_task: outputs["logits"]}
         if task_logits is None:
+            return
+
+        # EDGE-2: ``batch["labels"]`` may be a single tensor (single-task
+        # collate) instead of a per-task dict (multi-task collate). The
+        # previous ``task not in batch["labels"]`` did ``in`` on a tensor
+        # and raised ``TypeError`` mid-eval.  Normalize to a dict here so
+        # both collate styles work transparently — single-tensor batches
+        # are interpreted as labels for the *only* task in ``task_logits``.
+        raw_labels = batch.get("labels")
+        if raw_labels is None:
+            return
+
+        if isinstance(raw_labels, dict):
+            labels_by_task = raw_labels
+        elif isinstance(raw_labels, torch.Tensor):
+            if len(task_logits) != 1:
+                logger.warning(
+                    "EDGE-2: batch['labels'] is a tensor but the model "
+                    "produced %d task heads — cannot disambiguate. "
+                    "Pass labels as a {task: tensor} dict for multi-task.",
+                    len(task_logits),
+                )
+                return
+            only_task = next(iter(task_logits.keys()))
+            labels_by_task = {only_task: raw_labels}
+        else:
+            logger.warning(
+                "EDGE-2: unexpected batch['labels'] type %s — skipping "
+                "metric update.",
+                type(raw_labels).__name__,
+            )
             return
 
         for task, logits in task_logits.items():
 
-            if task not in batch["labels"]:
+            if task not in labels_by_task:
                 continue
 
-            labels = batch["labels"][task].to(logits.device)
+            labels = labels_by_task[task].to(logits.device)
             ttype = self.config.task_types.get(task)
 
             if ttype == "multiclass":
@@ -293,6 +338,20 @@ class EvaluationEngine:
             elif ttype == "regression":
 
                 preds = logits
+
+                # N-LOW-2: regression targets can legitimately contain
+                # NaN sentinels (e.g. missing-value rows that survived a
+                # join, or quarantined samples flagged by a label-quality
+                # filter). Without a finite mask those NaNs propagate into
+                # MSE / MAE accumulators and silently poison the metric
+                # for the whole epoch. Mask non-finite AND ignore_index.
+                finite_mask = torch.isfinite(labels)
+                if labels.dtype.is_floating_point:
+                    keep = finite_mask & (labels != self.config.ignore_index)
+                else:
+                    keep = labels != self.config.ignore_index
+                preds = preds[keep]
+                labels = labels[keep]
 
             else:
                 continue
