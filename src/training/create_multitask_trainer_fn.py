@@ -1,0 +1,560 @@
+"""Production-grade multi-task trainer factory.
+
+Counterpart to ``src.training.create_trainer_fn`` (single-task).
+
+The single-task factory builds one Trainer per task and so trains six
+independent encoders for the six TruthLens heads — wasting both compute
+(every encoder forward pass is reused exactly once) and generalisation
+(no shared representation across the heads). This factory wires up the
+*intended* multi-task topology that ``MultiTaskTruthLensModel`` was
+designed for:
+
+    MultiTaskLoader  ──►  weighted task sampling
+                                │
+                                ▼
+                    MultiTaskTruthLensModel   (single shared encoder
+                                │              + per-task heads)
+                                ▼
+                          LossEngine          (weighted per-task loss
+                                │              + EMA normalizer / coverage)
+                                ▼
+                          Optimizer / TrainingStep
+                                │
+                                ▼
+                           Trainer.train()
+
+Key contract differences vs ``create_trainer_fn``
+-------------------------------------------------
+* The model is instantiated **once** as a ``MultiTaskTruthLensModel``;
+  every per-task head sits behind a single shared encoder. No per-task
+  ``build_model`` calls — they would each instantiate a fresh encoder.
+
+* Per-task DataLoaders are wrapped in ``MultiTaskLoader`` which:
+  - yields single-task batches (one task per step, full batch from
+    that task's per-task loader),
+  - rewraps ``batch["labels"]`` from ``Tensor`` into ``{task: Tensor}``
+    so it satisfies the ``MultiTaskLoss`` dict contract,
+  - samples tasks by ``task_weights`` (training) / round-robin
+    (validation).
+
+* The ``LossEngine`` is built with the FULL ``task_types`` map — not a
+  single-entry dict. This activates the multi-task code paths that
+  ``LossEngine.__init__`` force-disables for the single-task case
+  (EMA normalizer, coverage tracker, ``normalization="active"``,
+  optional GradNorm/Uncertainty balancer).
+
+* The ``TaskScheduler`` here is the *loss-driven* scheduler used by the
+  training step for adaptive task EMAs / instrumentation — the
+  *batch-level* task selection happens inside ``MultiTaskLoader``. Both
+  honour ``settings.task_weights``.
+
+Settings contract
+-----------------
+``settings`` is the attribute-style namespace produced by
+``src.utils.settings.load_settings()`` (an ``AttrDict`` over
+``config/config.yaml``). The factory reads:
+
+  - ``settings.model``                    — passed through to
+                                            ``MultiTaskTruthLensConfig``.
+  - ``settings.training.epochs``
+  - ``settings.training.lr`` (or ``settings.optimizer.lr``)
+  - ``settings.training.weight_decay`` (or ``settings.optimizer.weight_decay``)
+  - ``settings.training.use_amp`` (or ``settings.precision.use_amp``)
+  - ``settings.training.max_grad_norm``
+  - ``settings.training.gradient_accumulation_steps``
+  - ``settings.training.batch_size`` (or ``settings.data.batch_size``)
+  - ``settings.training.num_workers`` (or ``settings.data.num_workers``)
+  - ``settings.training.device`` (default: ``cuda`` if available else ``cpu``)
+  - ``settings.task_weights``             — per-task float dict.
+  - ``settings.config_path``              — optional, forwarded to
+                                            ``Trainer`` for its
+                                            ``ModelConfigLoader.load_multitask_config``
+                                            call.
+
+``data_bundle`` is the per-task DataFrame map:
+
+    {
+        "bias":       {"train": pd.DataFrame, "val": pd.DataFrame},
+        "ideology":   {"train": ..., "val": ...},
+        ...
+    }
+
+Exactly the layout that ``src.data_processing.dataset_factory.build_all_datasets``
+already consumes.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any, Dict, Mapping, Optional
+
+import torch
+
+from src.config.task_config import get_all_tasks, get_task_type
+from src.data_processing.dataset_factory import build_dataset
+from src.data_processing.dataloader_factory import build_dataloader, DataLoaderConfig
+from src.data_processing.multitask_loader import MultiTaskLoader
+
+from src.models.multitask.multitask_truthlens_model import (
+    MultiTaskTruthLensModel,
+    MultiTaskTruthLensConfig,
+)
+from src.models.optimization.optimizer_factory import build_optimizer
+
+from src.training.evaluation_engine import EvaluationConfig, EvaluationEngine
+from src.training.loss_engine import LossEngine, LossEngineConfig
+from src.training.monitor_engine import MonitoringEngine
+from src.training.task_scheduler import TaskScheduler, TaskSchedulerConfig
+from src.training.trainer import Trainer
+from src.training.training_step import TrainingStep, TrainingStepConfig
+
+from src.utils.seed_utils import set_seed
+
+logger = logging.getLogger(__name__)
+
+
+# =========================================================
+# CONFIG HELPERS
+# =========================================================
+
+def _get(obj: Any, key: str, default: Any = None) -> Any:
+    """Attribute / dict / Mapping fallback accessor.
+
+    Used to read from ``settings`` (AttrDict), nested dicts, or hybrid
+    objects without a separate code path per shape.
+    """
+    if obj is None:
+        return default
+    if isinstance(obj, Mapping):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _resolve_device(settings: Any) -> torch.device:
+    explicit = _get(_get(settings, "training"), "device") or _get(settings, "device")
+    if explicit and explicit not in ("auto", None):
+        return torch.device(explicit)
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _resolve_lr(settings: Any) -> float:
+    # MT-FACTORY: accept BOTH ``training.lr`` (spec layout) and
+    # ``optimizer.lr`` (current ``config.yaml`` layout). Fail loudly
+    # if neither is set rather than silently defaulting — LR is a
+    # safety-critical knob and a typo silently picking up 0.0 / 1.0
+    # would be catastrophic.
+    training = _get(settings, "training")
+    lr = _get(training, "lr")
+    if lr is None:
+        lr = _get(_get(settings, "optimizer"), "lr")
+    if lr is None:
+        raise ValueError(
+            "settings is missing learning rate "
+            "(expected settings.training.lr or settings.optimizer.lr)"
+        )
+    return float(lr)
+
+
+def _resolve_weight_decay(settings: Any) -> float:
+    training = _get(settings, "training")
+    wd = _get(training, "weight_decay")
+    if wd is None:
+        wd = _get(_get(settings, "optimizer"), "weight_decay", 0.0)
+    return float(wd)
+
+
+def _resolve_use_amp(settings: Any) -> bool:
+    training = _get(settings, "training")
+    val = _get(training, "use_amp")
+    if val is None:
+        val = _get(_get(settings, "precision"), "use_amp", True)
+    return bool(val)
+
+
+def _resolve_batch_size(settings: Any) -> int:
+    training = _get(settings, "training")
+    bs = _get(training, "batch_size")
+    if bs is None:
+        bs = _get(_get(settings, "data"), "batch_size", 16)
+    return int(bs)
+
+
+def _resolve_num_workers(settings: Any) -> int:
+    training = _get(settings, "training")
+    nw = _get(training, "num_workers")
+    if nw is None:
+        nw = _get(_get(settings, "data"), "num_workers", -1)
+    return int(nw)
+
+
+def _resolve_grad_accum(settings: Any) -> int:
+    training = _get(settings, "training")
+    return int(_get(training, "gradient_accumulation_steps", 1))
+
+
+def _resolve_max_grad_norm(settings: Any) -> float:
+    training = _get(settings, "training")
+    return float(_get(training, "max_grad_norm", 1.0))
+
+
+def _resolve_epochs(settings: Any) -> int:
+    training = _get(settings, "training")
+    return int(_get(training, "epochs") or _get(training, "num_epochs") or 1)
+
+
+def _resolve_task_weights(
+    settings: Any,
+    tasks: list,
+) -> Dict[str, float]:
+    raw = _get(settings, "task_weights")
+    if raw is None:
+        return {t: 1.0 for t in tasks}
+
+    # AttrDict behaves like both a namespace and a mapping; normalise
+    # to a plain dict so downstream code (LossEngineConfig, scheduler
+    # configs) doesn't have to care.
+    if isinstance(raw, Mapping):
+        weights = {t: float(raw.get(t, 1.0)) for t in tasks}
+    else:
+        weights = {t: float(getattr(raw, t, 1.0)) for t in tasks}
+
+    return weights
+
+
+def _build_model_config(settings: Any) -> MultiTaskTruthLensConfig:
+    """Map ``settings.model`` → ``MultiTaskTruthLensConfig``.
+
+    Accepts either an already-built ``MultiTaskTruthLensConfig`` (passed
+    through verbatim) or an attribute / dict-shaped namespace. Unknown
+    keys are dropped with a single warning so a stale YAML field can't
+    blow up training.
+    """
+    model_section = _get(settings, "model")
+
+    if isinstance(model_section, MultiTaskTruthLensConfig):
+        return model_section
+
+    if model_section is None:
+        return MultiTaskTruthLensConfig()
+
+    if isinstance(model_section, Mapping):
+        raw = dict(model_section)
+    else:
+        raw = {
+            k: v
+            for k, v in vars(model_section).items()
+            if not k.startswith("_")
+        }
+
+    valid = set(MultiTaskTruthLensConfig.__dataclass_fields__)
+    # Common config.yaml field name is ``encoder``; the dataclass field
+    # is ``model_name``. Translate so the YAML doesn't need to use
+    # internal names.
+    if "model_name" not in raw and "encoder" in raw:
+        encoder_val = raw.pop("encoder")
+        raw["model_name"] = (
+            encoder_val.get("name")
+            if isinstance(encoder_val, Mapping)
+            else getattr(encoder_val, "name", encoder_val)
+            if not isinstance(encoder_val, str)
+            else encoder_val
+        )
+
+    unknown = set(raw) - valid
+    if unknown:
+        logger.warning(
+            "create_multitask_trainer_fn: dropping unknown settings.model "
+            "fields %s (valid: %s)",
+            sorted(unknown),
+            sorted(valid),
+        )
+    kept = {k: raw[k] for k in raw if k in valid}
+    return MultiTaskTruthLensConfig(**kept)
+
+
+# =========================================================
+# FACTORY
+# =========================================================
+
+def create_multitask_trainer_fn(
+    settings: Any,
+    data_bundle: Mapping[str, Mapping[str, Any]],
+    *,
+    tokenizer: Any,
+    enabled_tasks: Optional[list] = None,
+    config_path: Optional[str] = None,
+) -> Trainer:
+    """Build a Trainer that jointly trains every TruthLens task.
+
+    Parameters
+    ----------
+    settings:
+        Attribute-accessible settings namespace (see module docstring
+        for the field contract).
+    data_bundle:
+        ``{task_name: {"train": DataFrame, "val": DataFrame}}``. Every
+        task in ``enabled_tasks`` must have BOTH splits present.
+    tokenizer:
+        HF tokenizer used by ``build_dataset`` to tokenise text. Required
+        — the multi-task pipeline must use a single shared tokenizer
+        (and thus a single shared vocabulary) since the encoder is
+        shared.
+    enabled_tasks:
+        Optional whitelist; defaults to every task registered in
+        ``src.config.task_config``. Order is preserved.
+    config_path:
+        Optional path passed through to ``Trainer`` (which uses it for
+        ``ModelConfigLoader.load_multitask_config``). Falls back to
+        ``settings.config_path``; empty string is acceptable when the
+        downstream YAML loader isn't strictly required.
+
+    Returns
+    -------
+    A fully-wired :class:`Trainer` ready for ``trainer.train()``.
+    """
+
+    # -----------------------------------------------------
+    # 1. SEED + DEVICE
+    # -----------------------------------------------------
+    seed = int(_get(_get(settings, "project"), "seed", 42))
+    set_seed(seed)
+
+    device = _resolve_device(settings)
+
+    # -----------------------------------------------------
+    # 2. TASK REGISTRY
+    # -----------------------------------------------------
+    tasks = list(enabled_tasks) if enabled_tasks else get_all_tasks()
+    if not tasks:
+        raise ValueError("No tasks resolved — registry is empty.")
+
+    missing = [t for t in tasks if t not in data_bundle]
+    if missing:
+        raise ValueError(
+            f"data_bundle is missing required tasks: {missing}. "
+            f"Provided: {list(data_bundle)}"
+        )
+
+    for t in tasks:
+        for split in ("train", "val"):
+            if split not in data_bundle[t]:
+                raise ValueError(
+                    f"data_bundle[{t!r}] is missing split={split!r} "
+                    f"(found: {list(data_bundle[t])})"
+                )
+
+    task_types: Dict[str, str] = {t: get_task_type(t) for t in tasks}
+    task_weights: Dict[str, float] = _resolve_task_weights(settings, tasks)
+
+    logger.info(
+        "create_multitask_trainer_fn | tasks=%s | task_types=%s | weights=%s",
+        tasks, task_types, task_weights,
+    )
+
+    # -----------------------------------------------------
+    # 3. PER-TASK DATASETS + DATALOADERS
+    # -----------------------------------------------------
+    batch_size = _resolve_batch_size(settings)
+    num_workers = _resolve_num_workers(settings)
+    max_length = int(_get(_get(settings, "model"), "max_length", 512))
+
+    loader_cfg = DataLoaderConfig(
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=bool(_get(_get(settings, "data"), "pin_memory", True)),
+        use_sampler=bool(_get(_get(settings, "data"), "use_sampler", True)),
+        drop_last=bool(_get(_get(settings, "data"), "drop_last", False)),
+    )
+
+    train_loaders = {}
+    val_loaders = {}
+
+    for task in tasks:
+        train_df = data_bundle[task]["train"]
+        val_df = data_bundle[task]["val"]
+
+        train_ds = build_dataset(
+            task=task,
+            df=train_df,
+            tokenizer=tokenizer,
+            max_length=max_length,
+        )
+        val_ds = build_dataset(
+            task=task,
+            df=val_df,
+            tokenizer=tokenizer,
+            max_length=max_length,
+        )
+
+        train_loaders[task] = build_dataloader(
+            task=task,
+            dataset=train_ds,
+            df=train_df,
+            split="train",
+            config=loader_cfg,
+            tokenizer=tokenizer,
+        )
+        val_loaders[task] = build_dataloader(
+            task=task,
+            dataset=val_ds,
+            df=val_df,
+            split="val",
+            config=loader_cfg,
+            tokenizer=tokenizer,
+        )
+
+    # -----------------------------------------------------
+    # 4. MULTI-TASK LOADER (unified iterator)
+    # -----------------------------------------------------
+    train_loader = MultiTaskLoader(
+        dataloaders=train_loaders,
+        task_weights=task_weights,
+        strategy="weighted",
+        seed=seed,
+    )
+    # MT-FACTORY: validation uses round-robin so every task gets the
+    # same number of evaluation batches per epoch — required for the
+    # per-task metrics in EvaluationEngine to be comparable across
+    # tasks (a weighted val loop would over-sample heavy tasks and
+    # bias the validation report).
+    val_loader = MultiTaskLoader(
+        dataloaders=val_loaders,
+        task_weights=None,
+        strategy="round_robin",
+        seed=seed,
+    )
+
+    # -----------------------------------------------------
+    # 5. MODEL  (single shared encoder + multi-head)
+    # -----------------------------------------------------
+    model_cfg = _build_model_config(settings)
+    if model_cfg.enabled_tasks is None:
+        # MT-FACTORY: pin the head set to the resolved task list so the
+        # model's task_logits keys match the loader's task selection.
+        # Mismatches here would cause MultiTaskLoss to silently skip
+        # tasks (no logits ⇒ no loss contribution).
+        model_cfg.enabled_tasks = list(tasks)
+
+    model = MultiTaskTruthLensModel(config=model_cfg)
+
+    # GPU-1 (mirrors single-task factory): move BEFORE optimizer build
+    # so the optimizer captures parameters that already live on the
+    # target device. See create_trainer_fn for the full rationale.
+    model = model.to(device)
+
+    # -----------------------------------------------------
+    # 6. LOSS ENGINE  (TRUE multi-task mode)
+    # -----------------------------------------------------
+    grad_accum = _resolve_grad_accum(settings)
+
+    loss_engine = LossEngine(
+        LossEngineConfig(
+            task_types=task_types,
+            task_weights=task_weights,
+            # MT-FACTORY: ``"active"`` divides the summed weighted
+            # losses by the number of heads that actually fired this
+            # step. Because MultiTaskLoader emits single-task batches,
+            # exactly one head fires per step and this resolves to a
+            # divide-by-1 — equivalent to ``"sum"`` but advertises the
+            # multi-task intent. ``"mean"`` (spec) would divide by the
+            # FULL task count even for single-task batches and shrink
+            # the gradient by 1/N.
+            normalization="active",
+            use_normalizer=True,
+            use_coverage=True,
+            gradient_accumulation_steps=grad_accum,
+        )
+    )
+
+    # -----------------------------------------------------
+    # 7. TASK SCHEDULER  (loss-EMA tracker for the training step)
+    # -----------------------------------------------------
+    task_scheduler = TaskScheduler(
+        tasks=tasks,
+        config=TaskSchedulerConfig(
+            strategy="weighted",
+            task_weights=task_weights,
+            seed=seed,
+        ),
+    )
+
+    # -----------------------------------------------------
+    # 8. OPTIMIZER  (no LR scheduler wired — left to the caller via
+    #    Trainer.checkpoint hooks; can be added when settings provides
+    #    explicit warmup / total step counts.)
+    # -----------------------------------------------------
+    optimizer = build_optimizer(
+        model=model,
+        lr=_resolve_lr(settings),
+        weight_decay=_resolve_weight_decay(settings),
+    )
+
+    # -----------------------------------------------------
+    # 9. MONITORING
+    # -----------------------------------------------------
+    monitor = MonitoringEngine(_get(settings, "monitoring"))
+
+    # -----------------------------------------------------
+    # 10. TRAINING STEP  (AMP + clipping + grad accum)
+    # -----------------------------------------------------
+    training_step = TrainingStep(
+        model=model,
+        optimizer=optimizer,
+        scheduler=None,
+        loss_engine=loss_engine,
+        monitor=monitor,
+        tracker=None,
+        task_scheduler=task_scheduler,
+        instrumentation=None,
+        config=TrainingStepConfig(
+            gradient_accumulation_steps=grad_accum,
+            max_grad_norm=_resolve_max_grad_norm(settings),
+            use_mixed_precision=_resolve_use_amp(settings),
+        ),
+        device=str(device),
+    )
+
+    # -----------------------------------------------------
+    # 11. EVALUATION ENGINE
+    # -----------------------------------------------------
+    evaluator = EvaluationEngine(
+        EvaluationConfig(
+            task_types=task_types,
+            device=str(device),
+        )
+    )
+
+    # -----------------------------------------------------
+    # 12. TRAINER
+    # -----------------------------------------------------
+    resolved_config_path = (
+        config_path
+        if config_path is not None
+        else _get(settings, "config_path", "")
+    )
+
+    trainer = Trainer(
+        config_path=resolved_config_path,
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        training_step=training_step,
+        evaluator=evaluator,
+        monitor_metric=_get(_get(settings, "checkpoint"), "monitor_metric", "val_loss"),
+        maximize_metric=(
+            _get(_get(settings, "checkpoint"), "mode", "min") == "max"
+        ),
+        params_override={"epochs": _resolve_epochs(settings)},
+    )
+
+    logger.info(
+        "MultiTaskTrainer ready | device=%s | tasks=%d | batch_size=%d | "
+        "epochs=%d | grad_accum=%d | amp=%s",
+        device, len(tasks), batch_size, _resolve_epochs(settings),
+        grad_accum, training_step.use_amp,
+    )
+
+    return trainer
+
+
+__all__ = ["create_multitask_trainer_fn"]

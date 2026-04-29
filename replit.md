@@ -612,3 +612,38 @@ Closed the four remaining categories from the inference-layer audit. No public A
 **Verification.** `Start application` restarts cleanly; `Application startup complete`; `GET /` returns 200. Smoke import tests pass for all six edited modules; `PredictionService.__init__` exposes the `monitor` kwarg; `InferenceCacheConfig().cache_version == "v2"`; `PredictionPipelineConfig().device == "auto"`; `InferenceConfig.batch_size == 32` and `BatchInferenceConfig.batch_size == 32` both resolve through the constant.
 
 **Still deferred (architectural, out of scope for this audit pass):** `MT-1`/`MT-2` engine unification, `DriftDetector` endpoint wiring, `run_inference.py` multitask migration, `_flatten`/`_worker` dedup, `enable_full_pipeline` re-evaluation. These are tracked for the engine-unification pass.
+
+## Apr 29 2026 — True multi-task trainer factory (`create_multitask_trainer_fn`)
+
+Built the multi-task counterpart to `src.training.create_trainer_fn`. The single-task factory builds one Trainer per task, which trains six independent encoders for the six TruthLens heads — wasting compute (each encoder forward pass is reused exactly once) and generalisation (no shared representation). The new factory wires up the topology that `MultiTaskTruthLensModel` was designed for: ONE shared encoder, six per-task heads, joint training over weighted task sampling + weighted per-task loss.
+
+**New module — `src/data_processing/multitask_loader.py`.** `MultiTaskLoader` mixes a dict of per-task `DataLoader`s into a single batch stream. Per emitted batch:
+- The whole batch comes from exactly ONE underlying per-task loader (the `collate.py`-enforced single-task batch is preserved — no mixed-task forward passes).
+- `batch["task"]` is set to the sampled task name; `batch["labels"]` is rewrapped from `Tensor` into `{task: Tensor}`. The label rewrap is the critical glue that lets the existing `MultiTaskLoss.forward` (which `isinstance(labels, dict)` asserts and iterates `task_names`) consume what `ClassificationDataset` / `MultiLabelDataset` produce. It is idempotent (already-dict labels pass through, but the key must match the sampled task — silent mismatches would cause `MultiTaskLoss` to skip the head).
+- Sampling: `"weighted"` for training (probability ∝ `task_weights`, per-task iterators wrap on exhaustion, epoch length = sum of per-task lengths); `"round_robin"` for validation (deterministic; epoch length = `num_tasks × min(per-task lengths)` so every task contributes the same number of eval batches and the per-task metrics are comparable).
+
+**New module — `src/training/create_multitask_trainer_fn.py`.** Factory entry: `create_multitask_trainer_fn(settings, data_bundle, *, tokenizer, enabled_tasks=None, config_path=None) -> Trainer`. Wiring:
+1. `set_seed(settings.project.seed)` and resolve device (`settings.training.device` → `"cuda"` if available else `"cpu"`).
+2. Resolve task list (`enabled_tasks` ?? `get_all_tasks()`), validate `data_bundle` has both `"train"` and `"val"` for every task.
+3. Build per-task `Dataset` + `DataLoader` (using existing `dataset_factory` / `dataloader_factory`).
+4. Wrap into `MultiTaskLoader` (`weighted` for train, `round_robin` for val).
+5. Build `MultiTaskTruthLensModel(config=...)` with the head set pinned to the resolved tasks (so model `task_logits` keys match what the loader emits — mismatches would silently skip heads in `MultiTaskLoss`). Move to device BEFORE the optimizer (GPU-1 invariant carried over from the single-task factory).
+6. `LossEngine` with the FULL `task_types` map (NOT a single-entry dict — that would trigger the `LossEngine.__init__` single-task fast-path which force-disables the EMA normalizer / coverage tracker / `normalization="active"`). `gradient_accumulation_steps` is forwarded so static task weights survive the LOSS-3 pre-scaling.
+7. `TaskScheduler(strategy="weighted", task_weights=...)` for the loss-EMA / instrumentation path. Batch-level task selection happens inside `MultiTaskLoader`; the scheduler tracks per-task loss EMAs for adaptive monitoring.
+8. `build_optimizer` with resolved `lr` / `weight_decay`.
+9. `MonitoringEngine(settings.monitoring)`.
+10. `TrainingStep(model, optimizer, scheduler=None, loss_engine, monitor, task_scheduler, config=TrainingStepConfig(grad_accum, max_grad_norm, use_amp))`.
+11. `EvaluationEngine(EvaluationConfig(task_types, device))` — uses the full task_types map so every head's per-task metric is reported.
+12. `Trainer(...)` with `params_override={"epochs": ...}` so the YAML `training.epochs` always reaches the loop.
+
+**Settings contract.** Reads from the existing `AttrDict` produced by `src.utils.settings.load_settings()`. Every knob has fallbacks across both the spec layout (`settings.training.lr`, `settings.training.use_amp`, `settings.training.batch_size`) AND the live `config/config.yaml` layout (`settings.optimizer.lr`, `settings.precision.use_amp`, `settings.data.batch_size`) so callers don't have to migrate the YAML before adopting the factory. LR has no default — missing both `training.lr` and `optimizer.lr` raises `ValueError` (a silent default would be catastrophic).
+
+**Why the `normalization` choice diverges from the spec.** The spec recommends `normalization="mean"` "for stability", but `"mean"` divides by `len(task_types)` regardless of which heads fired this step. With single-task batches (as `MultiTaskLoader` produces) exactly one head fires per step → the gradient gets shrunk by `1/N` (here `1/6`) for no reason. The factory uses `"active"` instead, which divides by the number of heads that actually contributed → effectively `1/1` per step, equivalent in magnitude to `"sum"` but advertising the multi-task intent. Tested under simulation; matches the existing `MultiTaskLoss` contract.
+
+**Verification.** `Start application` restarts cleanly; `GET /` returns 200; both new modules import without error. `MultiTaskLoader` smoke test passes:
+- weighted strategy with `{bias: 3.0, narrative: 1.0}` over loaders of length (2, 1) yields 3 batches with the heavy task seen more often;
+- round-robin yields exactly `min(2,1) × 2 = 2` batches in deterministic order;
+- pre-wrapped dict labels pass through unchanged;
+- pre-wrapped dict labels under the wrong task key raise `KeyError` instead of silently no-op'ing the loss.
+
+**Out of scope (deferred).** LR scheduler wiring (needs explicit `num_training_steps` / `num_warmup_steps` from settings — the existing single-task factory derives them from `len(train_loader) // grad_accum × epochs`, but `MultiTaskLoader.__len__` follows the same contract so this can be added when the YAML grows the keys); ExperimentTracker / CheckpointEngine wiring (factory exposes the slots — caller can attach by patching the returned `Trainer`); GradNorm / Uncertainty balancer (`LossEngine.attach_balancer` is supported, but the choice of balancer is research-level so not hardcoded here).
