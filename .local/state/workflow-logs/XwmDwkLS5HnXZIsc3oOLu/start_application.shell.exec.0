@@ -1,0 +1,1712 @@
+[32mINFO[0m:     Will watch for changes in these directories: ['/home/runner/workspace/api', '/home/runner/workspace/config', '/home/runner/workspace/models', '/home/runner/workspace/src']
+[32mINFO[0m:     Uvicorn running on [1mhttp://0.0.0.0:5000[0m (Press CTRL+C to quit)
+[32mINFO[0m:     Started reloader process [[36m[1m1443[0m] using [36m[1mWatchFiles[0m
+2026-04-28 03:51:02 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 03:51:02 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 03:51:02 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 03:51:03 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:51:03 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:51:03 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:51:03 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:51:03 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:51:03 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:51:03 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:51:03 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:51:03 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:51:03 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:51:03 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:51:03 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 03:51:03 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 03:51:03 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+2026-04-28 03:51:03 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:51:03 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:51:03 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:51:03 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:51:03 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:51:03 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 03:51:03 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:51:03 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 03:51:03 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:51:03 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:51:03 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:51:03 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:51:03 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:51:03 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:51:03 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:51:03 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:51:03 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:51:03 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:51:03 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:51:03 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 03:51:03 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 03:51:03 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 03:51:03 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:51:03 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v1)
+2026-04-28 03:51:03 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 03:51:03 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 03:51:03 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 03:51:03 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 03:51:03 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 03:51:03 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m1455[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[32mINFO[0m:     10.82.4.29:0 - "[1mGET / HTTP/1.1[0m" [32m200 OK[0m
+[32mINFO[0m:     127.0.0.1:46936 - "[1mGET / HTTP/1.1[0m" [32m200 OK[0m
+[32mINFO[0m:     127.0.0.1:46936 - "[1mGET /favicon.ico HTTP/1.1[0m" [31m404 Not Found[0m
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/constants.py'. Reloading...
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m1455[0m]
+2026-04-28 03:56:21 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 03:56:21 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 03:56:21 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 03:56:21 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:56:21 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:56:21 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:56:21 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:56:21 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:56:21 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:56:21 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:56:21 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:56:21 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:56:21 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:56:21 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:56:21 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 03:56:21 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 03:56:21 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+2026-04-28 03:56:21 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:56:21 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:56:21 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:56:21 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:56:21 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:56:21 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 03:56:21 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:56:21 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 03:56:21 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:56:21 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:56:21 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:56:21 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:56:21 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:56:21 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:56:21 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:56:21 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:56:21 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:56:21 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:56:21 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:56:21 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 03:56:21 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 03:56:21 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 03:56:21 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:56:21 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v1)
+2026-04-28 03:56:21 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 03:56:21 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 03:56:21 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 03:56:21 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 03:56:21 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 03:56:21 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m2313[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/inference_cache.py'. Reloading...
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m2313[0m]
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/predict_api.py'. Reloading...
+2026-04-28 03:56:30 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 03:56:30 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 03:56:30 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 03:56:31 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:56:31 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:56:31 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:56:31 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:56:31 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:56:31 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:56:31 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:56:31 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:56:31 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:56:31 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:56:31 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:56:31 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 03:56:31 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 03:56:31 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+2026-04-28 03:56:31 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:56:31 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:56:31 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:56:31 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:56:31 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:56:31 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 03:56:31 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:56:31 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 03:56:31 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:56:31 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:56:31 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:56:31 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:56:31 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:56:31 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:56:31 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:56:31 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:56:31 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:56:31 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:56:31 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:56:31 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 03:56:31 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 03:56:31 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 03:56:31 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:56:31 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v2)
+2026-04-28 03:56:31 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 03:56:31 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 03:56:31 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 03:56:31 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 03:56:31 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 03:56:31 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m2336[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m2336[0m]
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/predict_api.py'. Reloading...
+2026-04-28 03:56:38 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 03:56:38 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 03:56:38 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 03:56:38 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:56:38 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:56:38 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:56:38 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:56:38 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:56:38 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:56:38 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:56:38 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:56:38 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:56:38 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:56:38 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:56:38 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 03:56:38 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 03:56:38 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+2026-04-28 03:56:38 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:56:38 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:56:38 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:56:38 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:56:38 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:56:38 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 03:56:38 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:56:38 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 03:56:38 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:56:38 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:56:38 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:56:38 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:56:38 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:56:38 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:56:38 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:56:38 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:56:38 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:56:38 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:56:38 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:56:38 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 03:56:38 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 03:56:38 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 03:56:38 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:56:38 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v2)
+2026-04-28 03:56:38 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 03:56:38 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 03:56:38 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 03:56:38 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 03:56:38 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 03:56:38 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m2378[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m2378[0m]
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/predict_api.py'. Reloading...
+2026-04-28 03:56:45 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 03:56:45 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 03:56:45 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 03:56:45 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:56:45 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:56:45 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:56:45 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:56:45 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:56:45 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:56:45 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:56:45 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:56:45 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:56:45 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:56:45 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:56:45 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 03:56:45 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 03:56:45 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+2026-04-28 03:56:46 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:56:46 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:56:46 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:56:46 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:56:46 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:56:46 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 03:56:46 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:56:46 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 03:56:46 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:56:46 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:56:46 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:56:46 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:56:46 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:56:46 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:56:46 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:56:46 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:56:46 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:56:46 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:56:46 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:56:46 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 03:56:46 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 03:56:46 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 03:56:46 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:56:46 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v2)
+2026-04-28 03:56:46 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 03:56:46 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 03:56:46 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 03:56:46 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 03:56:46 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 03:56:46 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m2407[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m2407[0m]
+2026-04-28 03:56:52 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 03:56:52 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 03:56:52 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 03:56:53 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:56:53 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:56:53 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:56:53 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:56:53 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:56:53 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:56:53 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:56:53 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:56:53 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:56:53 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:56:53 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:56:53 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 03:56:53 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 03:56:53 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+2026-04-28 03:56:53 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:56:53 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:56:53 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:56:53 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:56:53 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:56:53 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 03:56:53 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:56:53 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 03:56:53 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:56:53 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:56:53 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:56:53 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:56:53 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:56:53 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:56:53 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:56:53 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:56:53 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:56:53 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:56:53 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:56:53 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 03:56:53 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 03:56:53 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 03:56:53 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:56:53 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v2)
+2026-04-28 03:56:53 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 03:56:53 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 03:56:53 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 03:56:53 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 03:56:53 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 03:56:53 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m2437[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/inference_pipeline.py'. Reloading...
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m2437[0m]
+2026-04-28 03:57:31 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 03:57:31 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 03:57:31 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 03:57:32 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:57:32 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:57:32 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:57:32 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:57:32 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:57:32 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:57:32 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:57:32 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:57:32 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:57:32 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:57:32 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:57:32 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 03:57:32 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 03:57:32 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+2026-04-28 03:57:32 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:57:32 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:57:32 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:57:32 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:57:32 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:57:32 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 03:57:32 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:57:32 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 03:57:32 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:57:32 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:57:32 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:57:32 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:57:32 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:57:32 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:57:32 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:57:32 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:57:32 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:57:32 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:57:32 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:57:32 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 03:57:32 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 03:57:32 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 03:57:32 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:57:32 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v2)
+2026-04-28 03:57:32 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 03:57:32 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 03:57:32 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 03:57:32 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 03:57:32 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 03:57:32 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m2541[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/inference_pipeline.py'. Reloading...
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m2541[0m]
+2026-04-28 03:57:40 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 03:57:40 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 03:57:40 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 03:57:40 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:57:40 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:57:40 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:57:40 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:57:40 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:57:40 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:57:40 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:57:40 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:57:40 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:57:40 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:57:40 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:57:40 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 03:57:41 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 03:57:41 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+2026-04-28 03:57:41 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:57:41 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:57:41 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:57:41 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:57:41 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:57:41 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 03:57:41 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:57:41 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 03:57:41 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:57:41 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:57:41 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:57:41 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:57:41 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:57:41 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:57:41 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:57:41 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:57:41 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:57:41 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:57:41 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:57:41 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 03:57:41 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 03:57:41 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 03:57:41 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:57:41 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v2)
+2026-04-28 03:57:41 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 03:57:41 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 03:57:41 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 03:57:41 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 03:57:41 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 03:57:41 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m2585[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/prediction_service.py'. Reloading...
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m2585[0m]
+2026-04-28 03:57:57 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 03:57:57 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 03:57:57 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 03:57:58 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:57:58 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:57:58 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:57:58 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:57:58 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:57:58 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:57:58 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:57:58 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:57:58 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:57:58 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:57:58 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:57:58 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 03:57:58 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 03:57:58 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+2026-04-28 03:57:58 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:57:58 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:57:58 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:57:58 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:57:58 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:57:58 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 03:57:58 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:57:58 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 03:57:58 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:57:58 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:57:58 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:57:58 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:57:58 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:57:58 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:57:58 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:57:58 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:57:58 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:57:58 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:57:58 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:57:58 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 03:57:58 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 03:57:58 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 03:57:58 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:57:58 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v2)
+2026-04-28 03:57:58 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 03:57:58 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 03:57:58 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 03:57:58 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 03:57:58 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 03:57:58 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m2614[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/prediction_service.py'. Reloading...
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m2614[0m]
+2026-04-28 03:58:18 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 03:58:18 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 03:58:18 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 03:58:19 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:58:19 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:58:19 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:58:19 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:58:19 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:58:19 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:58:19 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:58:19 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:58:19 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:58:19 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:58:19 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:58:19 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 03:58:19 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 03:58:19 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+2026-04-28 03:58:19 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:58:19 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:58:19 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:58:19 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:58:19 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:58:19 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 03:58:19 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:58:19 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 03:58:19 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:58:19 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:58:19 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:58:19 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:58:19 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:58:19 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:58:19 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:58:19 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:58:19 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:58:19 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:58:19 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:58:19 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 03:58:19 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 03:58:19 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 03:58:19 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:58:19 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v2)
+2026-04-28 03:58:19 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 03:58:19 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 03:58:19 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 03:58:19 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 03:58:19 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 03:58:19 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m2675[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/prediction_service.py'. Reloading...
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m2675[0m]
+2026-04-28 03:58:33 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 03:58:33 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 03:58:33 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 03:58:33 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:58:33 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:58:33 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:58:33 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:58:33 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:58:33 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:58:33 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:58:33 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:58:33 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:58:33 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:58:33 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:58:33 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 03:58:33 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 03:58:33 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+2026-04-28 03:58:34 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:58:34 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:58:34 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:58:34 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:58:34 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:58:34 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 03:58:34 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:58:34 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 03:58:34 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:58:34 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:58:34 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:58:34 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:58:34 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:58:34 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:58:34 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:58:34 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:58:34 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:58:34 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:58:34 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:58:34 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 03:58:34 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 03:58:34 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 03:58:34 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:58:34 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v2)
+2026-04-28 03:58:34 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 03:58:34 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 03:58:34 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 03:58:34 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 03:58:34 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 03:58:34 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m2705[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/prediction_service.py'. Reloading...
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m2705[0m]
+2026-04-28 03:58:46 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 03:58:46 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 03:58:46 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 03:58:47 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:58:47 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:58:47 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:58:47 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:58:47 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:58:47 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:58:47 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:58:47 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:58:47 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:58:47 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:58:47 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:58:47 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 03:58:47 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 03:58:47 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+2026-04-28 03:58:47 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:58:47 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:58:47 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:58:47 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:58:47 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:58:47 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 03:58:47 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:58:47 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 03:58:47 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:58:47 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:58:47 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:58:47 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:58:47 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:58:47 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:58:47 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:58:47 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:58:47 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:58:47 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:58:47 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:58:47 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 03:58:47 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 03:58:47 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 03:58:47 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:58:47 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v2)
+2026-04-28 03:58:47 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 03:58:47 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 03:58:47 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 03:58:47 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 03:58:47 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 03:58:47 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m2735[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/prediction_service.py'. Reloading...
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m2735[0m]
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/report_generator.py'. Reloading...
+2026-04-28 03:58:58 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 03:58:58 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 03:58:58 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 03:58:58 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:58:58 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:58:58 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:58:58 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:58:58 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:58:58 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:58:58 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:58:58 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:58:58 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:58:58 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:58:58 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:58:58 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 03:58:58 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 03:58:58 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+2026-04-28 03:58:59 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:58:59 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:58:59 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:58:59 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:58:59 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:58:59 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 03:58:59 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:58:59 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 03:58:59 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:58:59 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:58:59 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:58:59 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:58:59 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:58:59 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:58:59 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:58:59 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:58:59 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:58:59 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:58:59 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:58:59 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 03:58:59 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 03:58:59 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 03:58:59 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:58:59 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v2)
+2026-04-28 03:58:59 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 03:58:59 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 03:58:59 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 03:58:59 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 03:58:59 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 03:58:59 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m2764[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m2764[0m]
+2026-04-28 03:59:06 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 03:59:06 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 03:59:06 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 03:59:06 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:59:06 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:59:06 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:59:06 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:59:06 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:59:06 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:59:06 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:59:06 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:59:06 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:59:06 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:59:06 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:59:06 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 03:59:06 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 03:59:06 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+2026-04-28 03:59:07 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:59:07 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:59:07 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:59:07 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:59:07 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:59:07 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 03:59:07 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:59:07 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 03:59:07 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:59:07 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:59:07 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:59:07 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:59:07 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:59:07 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:59:07 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:59:07 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:59:07 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:59:07 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:59:07 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:59:07 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 03:59:07 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 03:59:07 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 03:59:07 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:59:07 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v2)
+2026-04-28 03:59:07 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 03:59:07 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 03:59:07 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 03:59:07 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 03:59:07 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 03:59:07 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m2806[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/report_generator.py'. Reloading...
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m2806[0m]
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/report_generator.py'. Reloading...
+2026-04-28 03:59:14 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 03:59:14 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 03:59:14 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 03:59:15 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:59:15 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:59:15 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:59:15 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:59:15 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:59:15 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:59:15 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:59:15 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:59:15 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:59:15 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:59:15 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:59:15 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 03:59:15 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 03:59:15 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+2026-04-28 03:59:15 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:59:15 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:59:15 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:59:15 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:59:15 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:59:15 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 03:59:15 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:59:15 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 03:59:15 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:59:15 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:59:15 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:59:15 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:59:15 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:59:15 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:59:15 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:59:15 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:59:15 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:59:15 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:59:15 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:59:15 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 03:59:15 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 03:59:15 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 03:59:15 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:59:15 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v2)
+2026-04-28 03:59:15 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 03:59:15 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 03:59:15 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 03:59:15 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 03:59:15 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 03:59:15 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m2823[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m2823[0m]
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/analyze_article.py'. Reloading...
+2026-04-28 03:59:22 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 03:59:22 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 03:59:22 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 03:59:23 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:59:23 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:59:23 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:59:23 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:59:23 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:59:23 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:59:23 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:59:23 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:59:23 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:59:23 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:59:23 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:59:23 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 03:59:23 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 03:59:23 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+2026-04-28 03:59:23 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:59:23 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:59:23 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:59:23 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:59:23 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:59:23 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 03:59:23 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:59:23 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 03:59:23 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:59:23 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:59:23 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:59:23 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:59:23 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:59:23 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:59:23 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:59:23 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:59:23 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:59:23 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:59:23 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:59:23 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 03:59:23 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 03:59:23 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 03:59:23 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:59:23 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v2)
+2026-04-28 03:59:23 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 03:59:23 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 03:59:23 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 03:59:23 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 03:59:23 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 03:59:23 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m2865[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m2865[0m]
+2026-04-28 03:59:30 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 03:59:30 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 03:59:30 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 03:59:30 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:59:30 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:59:30 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:59:30 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:59:30 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:59:30 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:59:30 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:59:30 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:59:30 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:59:30 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:59:30 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:59:30 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 03:59:30 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 03:59:30 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+2026-04-28 03:59:31 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:59:31 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:59:31 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:59:31 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:59:31 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:59:31 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 03:59:31 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:59:31 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 03:59:31 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:59:31 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:59:31 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:59:31 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:59:31 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:59:31 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:59:31 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:59:31 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:59:31 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:59:31 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:59:31 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:59:31 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 03:59:31 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 03:59:31 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 03:59:31 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:59:31 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v2)
+2026-04-28 03:59:31 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 03:59:31 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 03:59:31 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 03:59:31 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 03:59:31 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 03:59:31 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m2895[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/analyze_article.py'. Reloading...
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m2895[0m]
+2026-04-28 03:59:42 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 03:59:42 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 03:59:42 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 03:59:42 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:59:42 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:59:42 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:59:42 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:59:42 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:59:42 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:59:42 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:59:42 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:59:42 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:59:42 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:59:42 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:59:42 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 03:59:42 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 03:59:42 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+2026-04-28 03:59:43 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:59:43 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:59:43 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:59:43 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:59:43 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:59:43 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 03:59:43 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:59:43 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 03:59:43 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:59:43 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:59:43 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:59:43 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:59:43 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:59:43 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:59:43 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:59:43 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:59:43 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:59:43 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:59:43 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:59:43 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 03:59:43 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 03:59:43 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 03:59:43 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:59:43 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v2)
+2026-04-28 03:59:43 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 03:59:43 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 03:59:43 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 03:59:43 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 03:59:43 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 03:59:43 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m2912[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/model_loader.py'. Reloading...
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m2912[0m]
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/model_loader.py'. Reloading...
+2026-04-28 03:59:53 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 03:59:53 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 03:59:53 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 03:59:54 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:59:54 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:59:54 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:59:54 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:59:54 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:59:54 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:59:54 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:59:54 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:59:54 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:59:54 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:59:54 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:59:54 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 03:59:54 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 03:59:54 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+2026-04-28 03:59:54 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:59:54 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:59:54 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:59:54 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 03:59:54 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 03:59:54 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 03:59:54 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:59:54 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 03:59:54 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 03:59:54 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 03:59:54 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 03:59:54 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 03:59:54 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 03:59:54 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 03:59:54 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 03:59:54 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 03:59:54 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 03:59:54 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 03:59:54 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 03:59:54 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 03:59:54 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 03:59:54 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 03:59:54 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 03:59:54 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v2)
+2026-04-28 03:59:54 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 03:59:54 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 03:59:54 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 03:59:54 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 03:59:54 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 03:59:54 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m2943[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m2943[0m]
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/inference_engine.py'. Reloading...
+2026-04-28 04:00:01 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 04:00:01 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 04:00:01 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 04:00:02 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 04:00:02 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 04:00:02 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 04:00:02 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 04:00:02 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 04:00:02 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 04:00:02 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 04:00:02 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 04:00:02 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 04:00:02 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 04:00:02 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 04:00:02 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 04:00:02 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 04:00:02 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+2026-04-28 04:00:02 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 04:00:02 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:00:02 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 04:00:02 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 04:00:02 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 04:00:02 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 04:00:02 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:00:02 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 04:00:02 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 04:00:02 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 04:00:02 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 04:00:02 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 04:00:02 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 04:00:02 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 04:00:02 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 04:00:02 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 04:00:02 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 04:00:02 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 04:00:02 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 04:00:02 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 04:00:02 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 04:00:02 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 04:00:02 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:00:02 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v2)
+2026-04-28 04:00:02 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 04:00:02 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 04:00:02 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 04:00:02 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 04:00:02 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 04:00:02 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m2984[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m2984[0m]
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/inference_engine.py'. Reloading...
+2026-04-28 04:00:09 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 04:00:09 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 04:00:09 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 04:00:09 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 04:00:09 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 04:00:09 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 04:00:09 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 04:00:09 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 04:00:09 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 04:00:09 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 04:00:09 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 04:00:09 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 04:00:09 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 04:00:09 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 04:00:09 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 04:00:09 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 04:00:09 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+2026-04-28 04:00:10 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 04:00:10 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:00:10 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 04:00:10 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 04:00:10 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 04:00:10 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 04:00:10 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:00:10 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 04:00:10 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 04:00:10 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 04:00:10 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 04:00:10 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 04:00:10 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 04:00:10 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 04:00:10 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 04:00:10 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 04:00:10 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 04:00:10 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 04:00:10 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 04:00:10 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 04:00:10 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 04:00:10 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 04:00:10 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:00:10 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v2)
+2026-04-28 04:00:10 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 04:00:10 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 04:00:10 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 04:00:10 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 04:00:10 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 04:00:10 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m3014[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m3014[0m]
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/inference_engine.py'. Reloading...
+2026-04-28 04:00:16 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 04:00:16 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 04:00:16 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 04:00:17 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 04:00:17 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 04:00:17 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 04:00:17 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 04:00:17 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 04:00:17 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 04:00:17 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 04:00:17 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 04:00:17 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 04:00:17 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 04:00:17 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 04:00:17 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 04:00:17 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 04:00:17 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+2026-04-28 04:00:17 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 04:00:17 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:00:17 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 04:00:17 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 04:00:17 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 04:00:17 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 04:00:17 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:00:17 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 04:00:17 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 04:00:17 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 04:00:17 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 04:00:17 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 04:00:17 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 04:00:17 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 04:00:17 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 04:00:17 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 04:00:17 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 04:00:17 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 04:00:17 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 04:00:17 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 04:00:17 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 04:00:17 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 04:00:17 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:00:17 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v2)
+2026-04-28 04:00:17 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 04:00:17 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 04:00:17 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 04:00:17 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 04:00:17 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 04:00:17 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m3055[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m3055[0m]
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/inference_engine.py'. Reloading...
+2026-04-28 04:00:24 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 04:00:24 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 04:00:24 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 04:00:25 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 04:00:25 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 04:00:25 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 04:00:25 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 04:00:25 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 04:00:25 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 04:00:25 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 04:00:25 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 04:00:25 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 04:00:25 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 04:00:25 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 04:00:25 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 04:00:25 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 04:00:25 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+2026-04-28 04:00:25 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 04:00:25 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:00:25 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 04:00:25 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 04:00:25 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 04:00:25 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 04:00:25 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:00:25 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 04:00:25 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 04:00:25 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 04:00:25 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 04:00:25 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 04:00:25 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 04:00:25 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 04:00:25 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 04:00:25 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 04:00:25 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 04:00:25 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 04:00:25 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 04:00:25 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 04:00:25 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 04:00:25 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 04:00:25 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:00:25 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v2)
+2026-04-28 04:00:25 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 04:00:25 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 04:00:25 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 04:00:25 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 04:00:25 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 04:00:25 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m3084[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m3084[0m]
+2026-04-28 04:00:32 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 04:00:32 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 04:00:32 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 04:00:33 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 04:00:33 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 04:00:33 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 04:00:33 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 04:00:33 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 04:00:33 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 04:00:33 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 04:00:33 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 04:00:33 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 04:00:33 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 04:00:33 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 04:00:33 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 04:00:33 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 04:00:33 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+2026-04-28 04:00:33 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 04:00:33 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:00:33 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 04:00:33 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 04:00:33 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 04:00:33 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 04:00:33 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:00:33 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 04:00:33 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 04:00:33 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 04:00:33 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 04:00:33 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 04:00:33 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 04:00:33 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 04:00:33 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 04:00:33 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 04:00:33 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 04:00:33 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 04:00:33 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 04:00:33 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 04:00:33 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 04:00:33 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 04:00:33 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:00:33 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v2)
+2026-04-28 04:00:33 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 04:00:33 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 04:00:33 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 04:00:33 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 04:00:33 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 04:00:33 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m3101[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/inference_engine.py'. Reloading...
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m3101[0m]
+2026-04-28 04:00:43 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 04:00:43 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 04:00:43 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 04:00:44 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 04:00:44 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 04:00:44 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 04:00:44 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 04:00:44 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 04:00:44 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 04:00:44 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 04:00:44 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 04:00:44 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 04:00:44 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 04:00:44 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 04:00:44 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 04:00:44 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 04:00:44 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/inference_engine.py'. Reloading...
+2026-04-28 04:00:45 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 04:00:45 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:00:45 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 04:00:45 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 04:00:45 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 04:00:45 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 04:00:45 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:00:45 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 04:00:45 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 04:00:45 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 04:00:45 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 04:00:45 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 04:00:45 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 04:00:45 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 04:00:45 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 04:00:45 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 04:00:45 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 04:00:45 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 04:00:45 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 04:00:45 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 04:00:45 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 04:00:45 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 04:00:45 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:00:45 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v2)
+2026-04-28 04:00:45 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 04:00:45 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 04:00:45 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 04:00:45 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 04:00:45 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 04:00:45 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m3118[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m3118[0m]
+2026-04-28 04:00:54 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 04:00:54 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 04:00:54 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 04:00:54 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 04:00:54 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 04:00:54 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 04:00:54 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 04:00:54 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 04:00:54 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 04:00:54 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 04:00:54 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 04:00:54 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 04:00:54 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 04:00:54 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 04:00:54 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 04:00:54 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 04:00:54 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+2026-04-28 04:00:55 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 04:00:55 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:00:55 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 04:00:55 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 04:00:55 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 04:00:55 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 04:00:55 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:00:55 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 04:00:55 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 04:00:55 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 04:00:55 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 04:00:55 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 04:00:55 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 04:00:55 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 04:00:55 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 04:00:55 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 04:00:55 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 04:00:55 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 04:00:55 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 04:00:55 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 04:00:55 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 04:00:55 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 04:00:55 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:00:55 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v2)
+2026-04-28 04:00:55 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 04:00:55 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 04:00:55 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 04:00:55 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 04:00:55 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 04:00:55 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m3147[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/inference_engine.py'. Reloading...
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m3147[0m]
+2026-04-28 04:01:08 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 04:01:08 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 04:01:08 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 04:01:09 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 04:01:09 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 04:01:09 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 04:01:09 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 04:01:09 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 04:01:09 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 04:01:09 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 04:01:09 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 04:01:09 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 04:01:09 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 04:01:09 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 04:01:09 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 04:01:09 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 04:01:09 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+2026-04-28 04:01:09 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 04:01:09 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:01:09 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 04:01:09 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 04:01:09 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 04:01:09 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 04:01:09 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:01:09 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 04:01:09 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 04:01:09 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 04:01:09 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 04:01:09 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 04:01:09 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 04:01:09 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 04:01:09 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 04:01:09 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 04:01:09 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 04:01:09 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 04:01:09 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 04:01:09 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 04:01:09 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 04:01:09 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 04:01:09 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:01:09 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v2)
+2026-04-28 04:01:09 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 04:01:09 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 04:01:09 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 04:01:09 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 04:01:09 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 04:01:09 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m3189[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/inference_engine.py'. Reloading...
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m3189[0m]
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/inference_config.py'. Reloading...
+2026-04-28 04:01:19 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 04:01:19 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 04:01:19 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 04:01:19 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 04:01:19 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 04:01:19 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 04:01:19 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 04:01:19 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 04:01:19 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 04:01:19 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 04:01:19 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 04:01:19 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 04:01:19 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 04:01:19 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 04:01:19 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 04:01:19 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 04:01:19 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+2026-04-28 04:01:20 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 04:01:20 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:01:20 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 04:01:20 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 04:01:20 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 04:01:20 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 04:01:20 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:01:20 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 04:01:20 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 04:01:20 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 04:01:20 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 04:01:20 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 04:01:20 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 04:01:20 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 04:01:20 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 04:01:20 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 04:01:20 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 04:01:20 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 04:01:20 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 04:01:20 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 04:01:20 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 04:01:20 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 04:01:20 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:01:20 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v2)
+2026-04-28 04:01:20 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 04:01:20 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 04:01:20 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 04:01:20 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 04:01:20 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 04:01:20 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m3219[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m3219[0m]
+2026-04-28 04:01:27 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 04:01:27 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 04:01:27 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 04:01:28 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 04:01:28 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 04:01:28 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 04:01:28 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 04:01:28 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 04:01:28 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 04:01:28 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 04:01:28 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 04:01:28 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 04:01:28 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 04:01:28 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 04:01:28 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 04:01:28 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 04:01:28 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/inference_config.py'. Reloading...
+2026-04-28 04:01:28 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 04:01:28 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:01:28 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 04:01:28 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 04:01:28 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 04:01:28 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 04:01:28 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:01:28 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 04:01:28 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 04:01:28 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 04:01:28 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 04:01:28 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 04:01:28 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 04:01:28 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 04:01:28 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 04:01:28 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 04:01:28 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 04:01:28 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 04:01:28 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 04:01:28 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 04:01:28 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 04:01:28 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 04:01:28 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:01:28 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v2)
+2026-04-28 04:01:28 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 04:01:28 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 04:01:28 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 04:01:28 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 04:01:28 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 04:01:28 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m3262[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m3262[0m]
+2026-04-28 04:01:35 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 04:01:35 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 04:01:35 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 04:01:36 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 04:01:36 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 04:01:36 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 04:01:36 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 04:01:36 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 04:01:36 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 04:01:36 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 04:01:36 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 04:01:36 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 04:01:36 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 04:01:36 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 04:01:36 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 04:01:36 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 04:01:36 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+2026-04-28 04:01:36 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 04:01:36 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:01:36 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 04:01:36 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 04:01:36 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 04:01:36 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 04:01:36 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:01:36 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 04:01:36 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 04:01:36 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 04:01:36 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 04:01:36 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 04:01:36 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 04:01:36 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 04:01:36 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 04:01:36 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 04:01:36 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 04:01:36 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 04:01:36 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 04:01:36 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 04:01:36 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 04:01:36 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 04:01:36 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:01:36 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v2)
+2026-04-28 04:01:36 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 04:01:36 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 04:01:36 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 04:01:36 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 04:01:36 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 04:01:36 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m3291[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/batch_inference.py'. Reloading...
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m3291[0m]
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/batch_inference.py'. Reloading...
+2026-04-28 04:01:54 | INFO | src.utils.settings | Loaded settings from /home/runner/workspace/config/config.yaml
+2026-04-28 04:01:54 | INFO | src.analysis.bias_profile_builder | BiasProfileBuilder initialized
+2026-04-28 04:01:54 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=('parser',)
+2026-04-28 04:01:54 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 04:01:54 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 04:01:54 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 04:01:54 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 04:01:54 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 04:01:54 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 04:01:54 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 04:01:54 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 04:01:54 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 04:01:54 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 04:01:54 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 04:01:54 | INFO | src.graph.graph_config | GraphConfigLoader initialized
+2026-04-28 04:01:54 | INFO | src.graph.graph_config | GraphConfig loaded
+2026-04-28 04:01:54 | INFO | src.analysis.spacy_loader | [spaCy] Loading | model=en_core_web_sm | disable=()
+2026-04-28 04:01:55 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 04:01:55 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:01:55 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 04:01:55 | INFO | src.graph.narrative_graph_builder | NarrativeGraphBuilder initialized (spacy=yes)
+2026-04-28 04:01:55 | INFO | src.graph.graph_analysis | GraphAnalyzer initialized
+2026-04-28 04:01:55 | INFO | src.graph.graph_features | GraphFeatureExtractor initialized
+2026-04-28 04:01:55 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:01:55 | INFO | src.graph.graph_explainer | GraphExplainer initialized (weights node=0.40 edge=0.30 temporal=0.30)
+2026-04-28 04:01:55 | INFO | src.analysis.framing_analysis | FramingAnalyzer initialized (final)
+2026-04-28 04:01:55 | INFO | src.analysis.ideological_language_detector | IdeologicalLanguageDetector initialized (final)
+2026-04-28 04:01:55 | INFO | src.analysis.information_density_analyzer | InformationDensityAnalyzer initialized (final)
+2026-04-28 04:01:55 | INFO | src.analysis.information_omission_detector | InformationOmissionDetector initialized (final)
+2026-04-28 04:01:55 | INFO | src.analysis.emotion_target_analysis | EmotionTargetAnalyzer initialized
+2026-04-28 04:01:55 | INFO | src.analysis.narrative_conflict | NarrativeConflictAnalyzer initialized (final)
+2026-04-28 04:01:55 | INFO | src.analysis.narrative_propagation | NarrativePropagationAnalyzer initialized (final)
+2026-04-28 04:01:55 | INFO | src.analysis.narrative_role_extractor | NarrativeRoleExtractor initialized (final)
+2026-04-28 04:01:55 | INFO | src.analysis.narrative_temporal_analyzer | NarrativeTemporalAnalyzer initialized (final)
+2026-04-28 04:01:55 | INFO | src.analysis.rhetorical_device_detector | RhetoricalDeviceDetector initialized (final)
+2026-04-28 04:01:55 | INFO | src.analysis.source_attribution_analyzer | SourceAttributionAnalyzer initialized (final)
+2026-04-28 04:01:55 | INFO | src.analysis.integration_runner | AnalysisIntegrationRunner initialized | analyzers=15
+2026-04-28 04:01:55 | INFO | src.graph.graph_pipeline | GraphPipeline initialized
+2026-04-28 04:01:55 | INFO | src.graph.graph_embeddings | GraphEmbeddingGenerator initialized (hybrid)
+2026-04-28 04:01:55 | INFO | src.graph.temporal_graph | TemporalGraphAnalyzer initialized
+2026-04-28 04:01:55 | INFO | src.inference.inference_cache | InferenceCache initialized (version=v2)
+2026-04-28 04:01:55 | INFO | src.inference.inference_logger | InferenceLogger initialized
+2026-04-28 04:01:55 | INFO | src.inference.result_formatter | ResultFormatter initialized
+2026-04-28 04:01:55 | INFO | src.aggregation.feature_mapper | [FeatureMapper] init | strict=False normalize=True
+2026-04-28 04:01:55 | INFO | src.aggregation.weight_manager | [WeightManager] Initialized | version=v2 frozen=False
+2026-04-28 04:01:55 | INFO | src.aggregation.aggregation_pipeline | [AggregationPipeline] Initialized
+2026-04-28 04:01:55 | INFO | src.inference.report_generator | ReportGenerator initialized
+[32mINFO[0m:     Started server process [[36m3361[0m]
+[32mINFO[0m:     Waiting for application startup.
+[32mINFO[0m:     Application startup complete.
+[32mINFO[0m:     Shutting down
+[32mINFO[0m:     Waiting for application shutdown.
+[32mINFO[0m:     Application shutdown complete.
+[32mINFO[0m:     Finished server process [[36m3361[0m]
+[32mINFO[0m:     Stopping reloader process [[36m[1m1443[0m]

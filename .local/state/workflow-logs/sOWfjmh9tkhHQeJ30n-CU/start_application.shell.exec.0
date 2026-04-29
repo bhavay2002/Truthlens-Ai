@@ -1,0 +1,1227 @@
+[32mINFO[0m:     Will watch for changes in these directories: ['/home/runner/workspace/api', '/home/runner/workspace/config', '/home/runner/workspace/models', '/home/runner/workspace/src']
+[32mINFO[0m:     Uvicorn running on [1mhttp://0.0.0.0:5000[0m (Press CTRL+C to quit)
+[32mINFO[0m:     Started reloader process [[36m[1m150[0m] using [36m[1mWatchFiles[0m
+[33mWARNING[0m:  WatchFiles detected changes in 'src/analysis/base_analyzer.py', 'src/inference/report_generator.py', 'src/inference/inference_config.py', 'src/analysis/label_analysis.py', 'src/models/loss/coverage_tracker.py', 'src/models/base/base_classifier.py', 'src/features/fusion/feature_scaling.py', 'src/utils/experiment_utils.py', 'src/pipelines/baseline_training.py', 'src/training/checkpointing.py', 'src/visualization/visualize.py', 'src/inference/run_inference.py', 'src/graph/graph_config.py', 'src/explainability/attention_rollout.py', 'src/models/checkpointing/io_utils.py', 'src/training/evaluation_engine.py', 'src/explainability/bias_explainer.py', 'src/features/fusion/feature_fusion.py', 'src/models/representation/pooling.py', 'src/models/loss/loss_normalizer.py', 'src/models/encoder/__init__.py', 'src/analysis/emotion_lexicon.py', 'src/training/scheduler_factory.py', 'src/evaluation/fairness.py', 'src/models/checkpointing/metadata.py', 'src/models/encoder/encoder_config.py', 'src/data/class_balance.py', 'src/features/base/base_feature.py', 'src/features/cache/cache_manager.py', 'src/features/fusion/feature_selection.py', 'src/models/architectures/__init__.py', 'src/features/text/semantic_features.py', 'src/analysis/narrative_propagation.py', 'src/models/tasks/bias/bias_classifier.py', 'src/training/loss_engine.py', 'src/utils/time_utils.py', 'src/models/base/base_model.py', 'src/evaluation/evaluation_engine.py', 'src/models/monitoring/embedding_drift.py', 'src/models/export/torchscript_export.py', 'src/data_processing/dataloader_factory.py', 'src/features/propaganda/manipulation_patterns.py', 'src/graph/graph_utils.py', 'src/training/train_transformer_model.py', 'src/evaluation/report_writer.py', 'src/evaluation/advanced_analysis.py', 'src/explainability/explanation_visualizer.py', 'src/features/bias/bias_lexicon.py', 'src/models/interpretability/gradient_hooks.py', 'src/data_processing/data_contracts.py', 'src/aggregation/aggregation_metrics.py', 'src/models/distillation/knowledge_distillation.py', 'src/monitoring/feature_logger.py', 'src/config/settings_loader.py', 'src/features/emotion/emotion_lexicon.py', 'src/utils/json_utils.py', 'src/analysis/narrative_temporal_analyzer.py', 'src/features/narrative/narrative_features.py', 'src/features/pipelines/feature_schema.py', 'src/features/discourse/discourse_features.py', 'src/explainability/shap_explainer.py', 'src/models/multitask/multitask_loss.py', 'src/models/uncertainty/uncertainty_head.py', 'src/graph/graph_schema.py', 'src/features/bias/bias_features.py', 'src/inference/inference_engine.py', 'src/graph/graph_visualization.py', 'src/data_processing/dataset.py', 'src/features/cache/feature_cache.py', 'src/features/feature_schema.py', 'src/features/pipelines/batch_feature_pipeline.py', 'src/features/graph/interaction_graph_features.py', 'src/features/dataset_feature_generator.py', 'src/training/cross_validation.py', 'src/features/emotion/emotion_target_features.py', 'src/models/loss/base_balancer.py', 'src/models/checkpointing/selection.py', 'src/models/checkpointing/model_loader.py', 'src/models/registry/model_registry.py', 'src/explainability/propaganda_explainer.py', 'src/training/instrumentation.py', 'src/analysis/feature_schema.py', 'src/analysis/ideological_language_detector.py', 'src/evaluation/evaluate_model.py', 'src/aggregation/calibration.py', 'src/models/encoder/transformer_encoder.py', 'src/explainability/explainability_pipeline.py', 'src/analysis/analysis_registry.py', 'src/features/emotion/emotion_features.py', 'src/models/checkpointing/validator.py', 'src/features/base/feature_config.py', 'src/explainability/emotion_explainer.py', 'src/models/representation/mean_pooling.py', 'src/inference/monitoring.py', 'src/pipelines/prediction_pipeline.py', 'src/features/propaganda/propaganda_lexicon_features.py', 'src/models/training/training_utils.py', 'src/inference/__init__.py', 'src/models/multitask/multitask_output.py', 'src/utils/helper_functions.py', 'src/data/validate_data.py', 'src/data_processing/data_loader.py', 'src/training/optimizer_factory.py', 'src/features/fusion/feature_merger.py', 'src/analysis/propaganda_pattern_detector.py', 'src/aggregation/risk_assessment.py', 'src/graph/graph_pipeline.py', 'src/models/adapters/adapter_config.py', 'src/analysis/_nlp.py', 'src/models/calibration/temperature_scaling.py', 'src/data_processing/data_validator.py', 'src/features/narrative/conflict_features.py', 'src/models/architectures/hybrid_truthlens_model.py', 'src/models/checkpointing/artifact_manager.py', 'src/inference/drift_detection.py', 'src/aggregation/aggregation_validator.py', 'src/utils/input_validation.py', 'src/models/tasks/ideology/ideology_classifier.py', 'src/models/calibration/isotonic_calibration.py', 'src/models/metadata/model_card.py', 'src/features/bias/ideological_features.py', 'src/models/loss/task_loss_router.py', 'src/training/monitor_engine.py', 'src/aggregation/truthlens_score_calculator.py', 'src/evaluation/uncertainty.py', 'src/features/importance/permutation_importance.py', 'src/explainability/common_schema.py', 'src/data_processing/dataset_factory.py', 'src/data_processing/class_balance.py', 'src/training/trainer.py', 'src/data_processing/data_cleaning.py', 'src/models/loss/gradnorm.py', 'src/analysis/rhetorical_device_detector.py', 'src/evaluation/evaluate_saved_model.py', 'src/models/calibration/calibration_metrics.py', 'src/models/training/loss_functions.py', 'src/models/loss/uncertainty.py', 'src/analysis/orchestrator.py', 'src/models/heads/regression_head.py', 'src/utils/config_loader.py', 'src/inference/model_loader.py', 'src/models/inference/predictor.py', 'src/training/distributed_engine.py', 'src/features/base/text_signals.py', 'src/models/utils/model_utils.py', 'src/data/merge_datasets.py', 'src/models/encoder/encoder_factory.py', 'src/pipelines/feature_pipeline.py', 'src/models/checkpointing/resolver.py', 'src/analysis/context_omission_detector.py', 'src/models/training/__init__.py', 'src/evaluation/evaluation_dashboard.py', 'src/analysis/multitask_validator.py', 'src/inference/inference_cache.py', 'src/models/calibration/__init__.py', 'src/training/training_step.py', 'src/models/tasks/emotion/emotion_classifier.py', 'src/analysis/feature_keys.py', 'src/analysis/batch_processor.py', 'src/analysis/emotion_target_analysis.py', 'src/config/task_config.py', 'src/evaluation/pdf_report.py', 'src/evaluation/error_analysis.py', 'src/models/metadata/model_metadata.py', 'src/evaluation/evaluator.py', 'src/aggregation/aggregation_config.py', 'src/utils/distributed_utils.py', 'src/analysis/information_density_analyzer.py', 'src/models/adapters/lora_adapter.py', 'src/features/feature_schema_validator.py', 'src/models/uncertainty/mc_dropout.py', 'src/features/bias/framing_features.py', 'src/graph/graph_analysis.py', 'src/inference/inference_pipeline.py', 'src/analysis/feature_context.py', 'src/features/emotion/emotion_intensity_features.py', 'src/features/base/lexicon_matcher.py', 'src/features/importance/feature_ablation.py', 'src/training/experiment_tracker.py', 'src/data/clean_data.py', 'src/features/feature_statistics.py', 'src/features/emotion/emotion_schema.py', 'src/evaluation/metrics_engine.py', 'src/data_processing/leakage_checker.py', 'src/models/multitask/multitask_model.py', 'src/data_processing/data_pipeline.py', 'src/features/bias/bias_lexicon_features.py', 'src/models/regularization/label_smoothing.py', 'src/training/create_trainer_fn.py', 'src/evaluation/task_correlation.py', 'src/features/base/feature_registry.py', 'src/data/unified_label_schema.py', 'src/analysis/narrative_role_extractor.py', 'src/models/checkpointing/checkpoint_manager.py', 'src/data/data_split.py', 'src/features/fusion/feature_reduction.py', 'src/inference/prediction_service.py', 'src/models/config/model_config.py', 'src/training/hyperparameter_tuning.py', 'src/analysis/feature_merger.py', 'src/models/benchmarking/benchmark_runner.py', 'src/training/task_scheduler.py', 'src/features/base/spacy_loader.py', 'src/analysis/discourse_coherence_analyzer.py', 'src/models/loss/multitask_loss.py', 'src/explainability/utils_validation.py', 'src/features/analysis/analysis_adapter_features.py', 'src/utils/device_utils.py', 'src/models/ensemble/ensemble_model.py', 'src/analysis/spacy_config.py', 'src/explainability/orchestrator.py', 'src/inference/inference_logger.py', 'src/analysis/spacy_loader.py', 'src/analysis/argument_mining.py', 'src/training/training_utils.py', 'src/aggregation/score_normalizer.py', 'src/explainability/explanation_metrics.py', 'src/analysis/analysis_pipeline.py', 'src/data_processing/data_resolver.py', 'src/models/benchmarking/dataset_benchmarks.py', 'src/models/registry/model_factory.py', 'src/explainability/lime_explainer.py', 'src/models/regularization/mixup.py', 'src/models/export/onnx_export.py', 'src/data_processing/__init__.py', 'src/analysis/information_omission_detector.py', 'src/features/discourse/argument_structure_features.py', 'src/models/inference/prediction_output.py', 'src/features/pipelines/feature_pipeline.py', 'src/explainability/explanation_calibrator.py', 'src/models/interpretability/attention_extractor.py', 'src/analysis/bias_profile_builder.py', 'src/inference/predict_api.py', 'src/explainability/token_alignment.py', 'src/features/emotion/emotion_trajectory_features.py', 'src/models/adapters/adapter_layer.py', 'src/models/optimization/optimizer_factory.py', 'src/features/emotion/emotion_lexicon_features.py', 'src/models/checkpointing/integrity.py', 'src/graph/entity_graph.py', 'src/evaluation/prediction_collector.py', 'src/models/base/multitask_base_model.py', 'src/explainability/explanation_aggregator.py', 'src/models/utils/weight_initialization.py', 'src/models/representation/cls_pooling.py', 'src/inference/prediction_pipeline.py', 'src/inference/feature_preparer.py', 'src/features/feature_bootstrap.py', 'src/data/data_profiler.py', 'src/explainability/attention_visualizer.py', 'src/features/text/lexical_features.py', 'src/graph/narrative_graph_builder.py', 'src/models/representation/attention_pooling.py', 'src/inference/result_formatter.py', 'src/training/training_setup.py', 'src/models/ensemble/stacking_ensemble.py', 'src/utils/__init__.py', 'src/features/utils/tfidf_engineering.py', 'src/features/narrative/narrative_role_features.py', 'src/inference/postprocessing.py', 'src/inference/batch_inference.py', 'src/models/optimization/lr_scheduler.py', 'src/features/propaganda/propaganda_features.py', 'src/explainability/model_explainer.py', 'src/utils/logging_utils.py', 'src/aggregation/weight_manager.py', 'src/data_processing/samplers.py', 'src/features/text/syntactic_features.py', 'src/analysis/preprocessing.py', 'src/analysis/_text_features.py', 'src/data/data_augmentation.py', 'src/inference/schema.py', 'src/aggregation/score_schema.py', 'src/features/base/numerics.py', 'src/models/heads/multitask_head.py', 'src/data/eda.py', 'src/models/utils/parameter_count.py', 'src/evaluation/mlflow_tracker.py', 'src/features/text/token_features.py', 'src/models/checkpointing/schema.py', 'src/features/narrative/narrative_frame_features.py', 'src/analysis/integration_runner.py', 'src/pipelines/truthlens_pipeline.py', 'src/models/regularization/adversarial_training.py', 'src/evaluation/metrics.py', 'src/data_processing/collate.py', 'src/evaluation/reliability_diagram.py', 'src/features/base/tokenization.py', 'src/models/metadata/model_versioning.py', 'src/data/load_data.py', 'src/features/feature_pruning.py', 'src/aggregation/score_explainer.py', 'src/explainability/explanation_cache.py', 'src/aggregation/feature_mapper.py', 'src/models/monitoring/prediction_drift.py', 'src/explainability/explanation_consistency.py', 'src/models/training/trainer.py', 'src/evaluation/calibration.py', 'src/models/export/quantization.py', 'src/data_processing/data_profiler.py', 'src/models/emotion/train_emotion_model.py', 'src/models/inference/model_wrapper.py', 'src/evaluation/evaluation_pipeline.py', 'src/analysis/output_models.py', 'src/models/tasks/narrative/narrative_detector.py', 'src/analysis/analysis_config.py', 'src/explainability/explanation_report_generator.py', 'src/features/feature_report.py', 'src/graph/graph_embeddings.py', 'src/graph/graph_explainer.py', 'src/utils/metrics_utils.py', 'src/aggregation/aggregation_pipeline.py', 'src/graph/temporal_graph.py', 'src/models/heads/classification_head.py', 'src/features/graph/entity_graph_features.py', 'src/models/checkpointing/loader_utils.py', 'src/features/importance/shap_importance.py', 'src/explainability/explanation_monitor.py', 'src/evaluation/threshold_optimizer.py', 'src/models/multitask/multitask_truthlens_model.py', 'src/graph/graph_features.py', 'src/features/pipelines/feature_engineering_pipeline.py', 'src/config/config_loader.py', 'src/models/tasks/propaganda/propaganda_detector.py', 'src/models/ensemble/weighted_ensemble.py', 'src/utils/settings.py', 'src/analysis/source_attribution_analyzer.py', 'src/utils/error_handling.py', 'src/pipelines/preprocessing_pipeline.py', 'src/utils/seed_utils.py', 'src/models/uncertainty/ensemble_uncertainty.py', 'api/app.py', 'src/inference/analyze_article.py', 'src/models/training/training_step.py', 'src/data_processing/data_augmentation.py', 'src/models/ensemble/_utils.py', 'src/analysis/narrative_conflict.py', 'src/models/emotion/load_emotion_model.py', 'src/training/loss_functions.py', 'src/analysis/framing_analysis.py', 'src/models/heads/multilabel_head.py', 'src/data_processing/data_cache.py'. Reloading...
+Process SpawnProcess-1:
+Traceback (most recent call last):
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/_subprocess.py", line 80, in subprocess_started
+    target(sockets=sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 75, in run
+    return asyncio_run(self.serve(sockets=sockets), loop_factory=self.config.get_loop_factory())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 79, in serve
+    await self._serve(sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 86, in _serve
+    config.load()
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/config.py", line 449, in load
+    self.loaded_app = import_from_string(self.app)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 22, in import_from_string
+    raise exc from None
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 19, in import_from_string
+    module = importlib.import_module(module_str)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/runner/workspace/api/app.py", line 12, in <module>
+    from src.inference.predict_api import predict, predict_batch
+  File "/home/runner/workspace/src/inference/__init__.py", line 12, in <module>
+    from src.inference.inference_engine import (
+  File "/home/runner/workspace/src/inference/inference_engine.py", line 20, in <module>
+    from src.utils import (
+  File "/home/runner/workspace/src/utils/__init__.py", line 41, in <module>
+    from .json_utils import (
+  File "/home/runner/workspace/src/utils/json_utils.py", line 14, in <module>
+    import portalocker
+ModuleNotFoundError: No module named 'portalocker'
+Process SpawnProcess-2:
+Traceback (most recent call last):
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/_subprocess.py", line 80, in subprocess_started
+    target(sockets=sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 75, in run
+    return asyncio_run(self.serve(sockets=sockets), loop_factory=self.config.get_loop_factory())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 79, in serve
+    await self._serve(sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 86, in _serve
+    config.load()
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/config.py", line 449, in load
+    self.loaded_app = import_from_string(self.app)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 22, in import_from_string
+    raise exc from None
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 19, in import_from_string
+    module = importlib.import_module(module_str)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/runner/workspace/api/app.py", line 12, in <module>
+    from src.inference.predict_api import predict, predict_batch
+  File "/home/runner/workspace/src/inference/__init__.py", line 12, in <module>
+    from src.inference.inference_engine import (
+  File "/home/runner/workspace/src/inference/inference_engine.py", line 20, in <module>
+    from src.utils import (
+  File "/home/runner/workspace/src/utils/__init__.py", line 41, in <module>
+    from .json_utils import (
+  File "/home/runner/workspace/src/utils/json_utils.py", line 14, in <module>
+    import portalocker
+ModuleNotFoundError: No module named 'portalocker'
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/postprocessing.py'. Reloading...
+Process SpawnProcess-3:
+Traceback (most recent call last):
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/_subprocess.py", line 80, in subprocess_started
+    target(sockets=sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 75, in run
+    return asyncio_run(self.serve(sockets=sockets), loop_factory=self.config.get_loop_factory())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 79, in serve
+    await self._serve(sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 86, in _serve
+    config.load()
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/config.py", line 449, in load
+    self.loaded_app = import_from_string(self.app)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 22, in import_from_string
+    raise exc from None
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 19, in import_from_string
+    module = importlib.import_module(module_str)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/runner/workspace/api/app.py", line 12, in <module>
+    from src.inference.predict_api import predict, predict_batch
+  File "/home/runner/workspace/src/inference/__init__.py", line 12, in <module>
+    from src.inference.inference_engine import (
+  File "/home/runner/workspace/src/inference/inference_engine.py", line 20, in <module>
+    from src.utils import (
+  File "/home/runner/workspace/src/utils/__init__.py", line 41, in <module>
+    from .json_utils import (
+  File "/home/runner/workspace/src/utils/json_utils.py", line 14, in <module>
+    import portalocker
+ModuleNotFoundError: No module named 'portalocker'
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/postprocessing.py'. Reloading...
+Process SpawnProcess-4:
+Traceback (most recent call last):
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/_subprocess.py", line 80, in subprocess_started
+    target(sockets=sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 75, in run
+    return asyncio_run(self.serve(sockets=sockets), loop_factory=self.config.get_loop_factory())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 79, in serve
+    await self._serve(sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 86, in _serve
+    config.load()
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/config.py", line 449, in load
+    self.loaded_app = import_from_string(self.app)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 22, in import_from_string
+    raise exc from None
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 19, in import_from_string
+    module = importlib.import_module(module_str)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/runner/workspace/api/app.py", line 12, in <module>
+    from src.inference.predict_api import predict, predict_batch
+  File "/home/runner/workspace/src/inference/__init__.py", line 12, in <module>
+    from src.inference.inference_engine import (
+  File "/home/runner/workspace/src/inference/inference_engine.py", line 20, in <module>
+    from src.utils import (
+  File "/home/runner/workspace/src/utils/__init__.py", line 41, in <module>
+    from .json_utils import (
+  File "/home/runner/workspace/src/utils/json_utils.py", line 14, in <module>
+    import portalocker
+ModuleNotFoundError: No module named 'portalocker'
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/postprocessing.py'. Reloading...
+Process SpawnProcess-5:
+Traceback (most recent call last):
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/_subprocess.py", line 80, in subprocess_started
+    target(sockets=sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 75, in run
+    return asyncio_run(self.serve(sockets=sockets), loop_factory=self.config.get_loop_factory())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 79, in serve
+    await self._serve(sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 86, in _serve
+    config.load()
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/config.py", line 449, in load
+    self.loaded_app = import_from_string(self.app)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 22, in import_from_string
+    raise exc from None
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 19, in import_from_string
+    module = importlib.import_module(module_str)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/runner/workspace/api/app.py", line 12, in <module>
+    from src.inference.predict_api import predict, predict_batch
+  File "/home/runner/workspace/src/inference/__init__.py", line 12, in <module>
+    from src.inference.inference_engine import (
+  File "/home/runner/workspace/src/inference/inference_engine.py", line 20, in <module>
+    from src.utils import (
+  File "/home/runner/workspace/src/utils/__init__.py", line 41, in <module>
+    from .json_utils import (
+  File "/home/runner/workspace/src/utils/json_utils.py", line 14, in <module>
+    import portalocker
+ModuleNotFoundError: No module named 'portalocker'
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/model_loader.py'. Reloading...
+Process SpawnProcess-6:
+Traceback (most recent call last):
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/_subprocess.py", line 80, in subprocess_started
+    target(sockets=sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 75, in run
+    return asyncio_run(self.serve(sockets=sockets), loop_factory=self.config.get_loop_factory())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 79, in serve
+    await self._serve(sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 86, in _serve
+    config.load()
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/config.py", line 449, in load
+    self.loaded_app = import_from_string(self.app)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 22, in import_from_string
+    raise exc from None
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 19, in import_from_string
+    module = importlib.import_module(module_str)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/runner/workspace/api/app.py", line 12, in <module>
+    from src.inference.predict_api import predict, predict_batch
+  File "/home/runner/workspace/src/inference/__init__.py", line 12, in <module>
+    from src.inference.inference_engine import (
+  File "/home/runner/workspace/src/inference/inference_engine.py", line 20, in <module>
+    from src.utils import (
+  File "/home/runner/workspace/src/utils/__init__.py", line 41, in <module>
+    from .json_utils import (
+  File "/home/runner/workspace/src/utils/json_utils.py", line 14, in <module>
+    import portalocker
+ModuleNotFoundError: No module named 'portalocker'
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/model_loader.py'. Reloading...
+Process SpawnProcess-7:
+Traceback (most recent call last):
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/_subprocess.py", line 80, in subprocess_started
+    target(sockets=sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 75, in run
+    return asyncio_run(self.serve(sockets=sockets), loop_factory=self.config.get_loop_factory())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 79, in serve
+    await self._serve(sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 86, in _serve
+    config.load()
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/config.py", line 449, in load
+    self.loaded_app = import_from_string(self.app)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 22, in import_from_string
+    raise exc from None
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 19, in import_from_string
+    module = importlib.import_module(module_str)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/runner/workspace/api/app.py", line 12, in <module>
+    from src.inference.predict_api import predict, predict_batch
+  File "/home/runner/workspace/src/inference/__init__.py", line 12, in <module>
+    from src.inference.inference_engine import (
+  File "/home/runner/workspace/src/inference/inference_engine.py", line 20, in <module>
+    from src.utils import (
+  File "/home/runner/workspace/src/utils/__init__.py", line 41, in <module>
+    from .json_utils import (
+  File "/home/runner/workspace/src/utils/json_utils.py", line 14, in <module>
+    import portalocker
+ModuleNotFoundError: No module named 'portalocker'
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/model_loader.py'. Reloading...
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/model_loader.py'. Reloading...
+Process SpawnProcess-8:
+Traceback (most recent call last):
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/_subprocess.py", line 80, in subprocess_started
+    target(sockets=sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 75, in run
+    return asyncio_run(self.serve(sockets=sockets), loop_factory=self.config.get_loop_factory())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 79, in serve
+    await self._serve(sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 86, in _serve
+    config.load()
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/config.py", line 449, in load
+    self.loaded_app = import_from_string(self.app)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 22, in import_from_string
+    raise exc from None
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 19, in import_from_string
+    module = importlib.import_module(module_str)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/runner/workspace/api/app.py", line 12, in <module>
+    from src.inference.predict_api import predict, predict_batch
+  File "/home/runner/workspace/src/inference/__init__.py", line 12, in <module>
+    from src.inference.inference_engine import (
+  File "/home/runner/workspace/src/inference/inference_engine.py", line 20, in <module>
+    from src.utils import (
+  File "/home/runner/workspace/src/utils/__init__.py", line 41, in <module>
+    from .json_utils import (
+  File "/home/runner/workspace/src/utils/json_utils.py", line 14, in <module>
+    import portalocker
+ModuleNotFoundError: No module named 'portalocker'
+Process SpawnProcess-9:
+Traceback (most recent call last):
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/_subprocess.py", line 80, in subprocess_started
+    target(sockets=sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 75, in run
+    return asyncio_run(self.serve(sockets=sockets), loop_factory=self.config.get_loop_factory())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 79, in serve
+    await self._serve(sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 86, in _serve
+    config.load()
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/config.py", line 449, in load
+    self.loaded_app = import_from_string(self.app)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 22, in import_from_string
+    raise exc from None
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 19, in import_from_string
+    module = importlib.import_module(module_str)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/runner/workspace/api/app.py", line 12, in <module>
+    from src.inference.predict_api import predict, predict_batch
+  File "/home/runner/workspace/src/inference/__init__.py", line 12, in <module>
+    from src.inference.inference_engine import (
+  File "/home/runner/workspace/src/inference/inference_engine.py", line 20, in <module>
+    from src.utils import (
+  File "/home/runner/workspace/src/utils/__init__.py", line 41, in <module>
+    from .json_utils import (
+  File "/home/runner/workspace/src/utils/json_utils.py", line 14, in <module>
+    import portalocker
+ModuleNotFoundError: No module named 'portalocker'
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/inference_pipeline.py'. Reloading...
+Process SpawnProcess-10:
+Traceback (most recent call last):
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/_subprocess.py", line 80, in subprocess_started
+    target(sockets=sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 75, in run
+    return asyncio_run(self.serve(sockets=sockets), loop_factory=self.config.get_loop_factory())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 79, in serve
+    await self._serve(sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 86, in _serve
+    config.load()
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/config.py", line 449, in load
+    self.loaded_app = import_from_string(self.app)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 22, in import_from_string
+    raise exc from None
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 19, in import_from_string
+    module = importlib.import_module(module_str)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/runner/workspace/api/app.py", line 12, in <module>
+    from src.inference.predict_api import predict, predict_batch
+  File "/home/runner/workspace/src/inference/__init__.py", line 12, in <module>
+    from src.inference.inference_engine import (
+  File "/home/runner/workspace/src/inference/inference_engine.py", line 20, in <module>
+    from src.utils import (
+  File "/home/runner/workspace/src/utils/__init__.py", line 41, in <module>
+    from .json_utils import (
+  File "/home/runner/workspace/src/utils/json_utils.py", line 14, in <module>
+    import portalocker
+ModuleNotFoundError: No module named 'portalocker'
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/inference_pipeline.py'. Reloading...
+Process SpawnProcess-11:
+Traceback (most recent call last):
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/_subprocess.py", line 80, in subprocess_started
+    target(sockets=sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 75, in run
+    return asyncio_run(self.serve(sockets=sockets), loop_factory=self.config.get_loop_factory())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 79, in serve
+    await self._serve(sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 86, in _serve
+    config.load()
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/config.py", line 449, in load
+    self.loaded_app = import_from_string(self.app)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 22, in import_from_string
+    raise exc from None
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 19, in import_from_string
+    module = importlib.import_module(module_str)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/runner/workspace/api/app.py", line 12, in <module>
+    from src.inference.predict_api import predict, predict_batch
+  File "/home/runner/workspace/src/inference/__init__.py", line 12, in <module>
+    from src.inference.inference_engine import (
+  File "/home/runner/workspace/src/inference/inference_engine.py", line 20, in <module>
+    from src.utils import (
+  File "/home/runner/workspace/src/utils/__init__.py", line 41, in <module>
+    from .json_utils import (
+  File "/home/runner/workspace/src/utils/json_utils.py", line 14, in <module>
+    import portalocker
+ModuleNotFoundError: No module named 'portalocker'
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/inference_pipeline.py'. Reloading...
+Process SpawnProcess-12:
+Traceback (most recent call last):
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/_subprocess.py", line 80, in subprocess_started
+    target(sockets=sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 75, in run
+    return asyncio_run(self.serve(sockets=sockets), loop_factory=self.config.get_loop_factory())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 79, in serve
+    await self._serve(sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 86, in _serve
+    config.load()
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/config.py", line 449, in load
+    self.loaded_app = import_from_string(self.app)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 22, in import_from_string
+    raise exc from None
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 19, in import_from_string
+    module = importlib.import_module(module_str)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/runner/workspace/api/app.py", line 12, in <module>
+    from src.inference.predict_api import predict, predict_batch
+  File "/home/runner/workspace/src/inference/__init__.py", line 12, in <module>
+    from src.inference.inference_engine import (
+  File "/home/runner/workspace/src/inference/inference_engine.py", line 20, in <module>
+    from src.utils import (
+  File "/home/runner/workspace/src/utils/__init__.py", line 41, in <module>
+    from .json_utils import (
+  File "/home/runner/workspace/src/utils/json_utils.py", line 14, in <module>
+    import portalocker
+ModuleNotFoundError: No module named 'portalocker'
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/inference_pipeline.py'. Reloading...
+Process SpawnProcess-13:
+Traceback (most recent call last):
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/_subprocess.py", line 80, in subprocess_started
+    target(sockets=sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 75, in run
+    return asyncio_run(self.serve(sockets=sockets), loop_factory=self.config.get_loop_factory())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 79, in serve
+    await self._serve(sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 86, in _serve
+    config.load()
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/config.py", line 449, in load
+    self.loaded_app = import_from_string(self.app)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 22, in import_from_string
+    raise exc from None
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 19, in import_from_string
+    module = importlib.import_module(module_str)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/runner/workspace/api/app.py", line 12, in <module>
+    from src.inference.predict_api import predict, predict_batch
+  File "/home/runner/workspace/src/inference/__init__.py", line 12, in <module>
+    from src.inference.inference_engine import (
+  File "/home/runner/workspace/src/inference/inference_engine.py", line 20, in <module>
+    from src.utils import (
+  File "/home/runner/workspace/src/utils/__init__.py", line 41, in <module>
+    from .json_utils import (
+  File "/home/runner/workspace/src/utils/json_utils.py", line 14, in <module>
+    import portalocker
+ModuleNotFoundError: No module named 'portalocker'
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/inference_pipeline.py'. Reloading...
+Process SpawnProcess-14:
+Traceback (most recent call last):
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/_subprocess.py", line 80, in subprocess_started
+    target(sockets=sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 75, in run
+    return asyncio_run(self.serve(sockets=sockets), loop_factory=self.config.get_loop_factory())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 79, in serve
+    await self._serve(sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 86, in _serve
+    config.load()
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/config.py", line 449, in load
+    self.loaded_app = import_from_string(self.app)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 22, in import_from_string
+    raise exc from None
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 19, in import_from_string
+    module = importlib.import_module(module_str)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/runner/workspace/api/app.py", line 12, in <module>
+    from src.inference.predict_api import predict, predict_batch
+  File "/home/runner/workspace/src/inference/__init__.py", line 12, in <module>
+    from src.inference.inference_engine import (
+  File "/home/runner/workspace/src/inference/inference_engine.py", line 20, in <module>
+    from src.utils import (
+  File "/home/runner/workspace/src/utils/__init__.py", line 41, in <module>
+    from .json_utils import (
+  File "/home/runner/workspace/src/utils/json_utils.py", line 14, in <module>
+    import portalocker
+ModuleNotFoundError: No module named 'portalocker'
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/inference_engine.py'. Reloading...
+Process SpawnProcess-15:
+Traceback (most recent call last):
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/_subprocess.py", line 80, in subprocess_started
+    target(sockets=sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 75, in run
+    return asyncio_run(self.serve(sockets=sockets), loop_factory=self.config.get_loop_factory())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 79, in serve
+    await self._serve(sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 86, in _serve
+    config.load()
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/config.py", line 449, in load
+    self.loaded_app = import_from_string(self.app)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 22, in import_from_string
+    raise exc from None
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 19, in import_from_string
+    module = importlib.import_module(module_str)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/runner/workspace/api/app.py", line 12, in <module>
+    from src.inference.predict_api import predict, predict_batch
+  File "/home/runner/workspace/src/inference/__init__.py", line 12, in <module>
+    from src.inference.inference_engine import (
+  File "/home/runner/workspace/src/inference/inference_engine.py", line 35, in <module>
+    from src.utils import (
+  File "/home/runner/workspace/src/utils/__init__.py", line 41, in <module>
+    from .json_utils import (
+  File "/home/runner/workspace/src/utils/json_utils.py", line 14, in <module>
+    import portalocker
+ModuleNotFoundError: No module named 'portalocker'
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/inference_engine.py'. Reloading...
+Process SpawnProcess-16:
+Traceback (most recent call last):
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/_subprocess.py", line 80, in subprocess_started
+    target(sockets=sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 75, in run
+    return asyncio_run(self.serve(sockets=sockets), loop_factory=self.config.get_loop_factory())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 79, in serve
+    await self._serve(sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 86, in _serve
+    config.load()
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/config.py", line 449, in load
+    self.loaded_app = import_from_string(self.app)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 22, in import_from_string
+    raise exc from None
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 19, in import_from_string
+    module = importlib.import_module(module_str)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/runner/workspace/api/app.py", line 12, in <module>
+    from src.inference.predict_api import predict, predict_batch
+  File "/home/runner/workspace/src/inference/__init__.py", line 12, in <module>
+    from src.inference.inference_engine import (
+  File "/home/runner/workspace/src/inference/inference_engine.py", line 35, in <module>
+    from src.utils import (
+  File "/home/runner/workspace/src/utils/__init__.py", line 41, in <module>
+    from .json_utils import (
+  File "/home/runner/workspace/src/utils/json_utils.py", line 14, in <module>
+    import portalocker
+ModuleNotFoundError: No module named 'portalocker'
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/inference_engine.py'. Reloading...
+Process SpawnProcess-17:
+Traceback (most recent call last):
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/_subprocess.py", line 80, in subprocess_started
+    target(sockets=sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 75, in run
+    return asyncio_run(self.serve(sockets=sockets), loop_factory=self.config.get_loop_factory())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 79, in serve
+    await self._serve(sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 86, in _serve
+    config.load()
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/config.py", line 449, in load
+    self.loaded_app = import_from_string(self.app)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 22, in import_from_string
+    raise exc from None
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 19, in import_from_string
+    module = importlib.import_module(module_str)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/runner/workspace/api/app.py", line 12, in <module>
+    from src.inference.predict_api import predict, predict_batch
+  File "/home/runner/workspace/src/inference/__init__.py", line 12, in <module>
+    from src.inference.inference_engine import (
+  File "/home/runner/workspace/src/inference/inference_engine.py", line 35, in <module>
+    from src.utils import (
+  File "/home/runner/workspace/src/utils/__init__.py", line 41, in <module>
+    from .json_utils import (
+  File "/home/runner/workspace/src/utils/json_utils.py", line 14, in <module>
+    import portalocker
+ModuleNotFoundError: No module named 'portalocker'
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/inference_engine.py'. Reloading...
+Process SpawnProcess-18:
+Traceback (most recent call last):
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/_subprocess.py", line 80, in subprocess_started
+    target(sockets=sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 75, in run
+    return asyncio_run(self.serve(sockets=sockets), loop_factory=self.config.get_loop_factory())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 79, in serve
+    await self._serve(sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 86, in _serve
+    config.load()
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/config.py", line 449, in load
+    self.loaded_app = import_from_string(self.app)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 22, in import_from_string
+    raise exc from None
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 19, in import_from_string
+    module = importlib.import_module(module_str)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/runner/workspace/api/app.py", line 12, in <module>
+    from src.inference.predict_api import predict, predict_batch
+  File "/home/runner/workspace/src/inference/__init__.py", line 12, in <module>
+    from src.inference.inference_engine import (
+  File "/home/runner/workspace/src/inference/inference_engine.py", line 35, in <module>
+    from src.utils import (
+  File "/home/runner/workspace/src/utils/__init__.py", line 41, in <module>
+    from .json_utils import (
+  File "/home/runner/workspace/src/utils/json_utils.py", line 14, in <module>
+    import portalocker
+ModuleNotFoundError: No module named 'portalocker'
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/inference_engine.py'. Reloading...
+Process SpawnProcess-19:
+Traceback (most recent call last):
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/_subprocess.py", line 80, in subprocess_started
+    target(sockets=sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 75, in run
+    return asyncio_run(self.serve(sockets=sockets), loop_factory=self.config.get_loop_factory())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 79, in serve
+    await self._serve(sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 86, in _serve
+    config.load()
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/config.py", line 449, in load
+    self.loaded_app = import_from_string(self.app)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 22, in import_from_string
+    raise exc from None
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 19, in import_from_string
+    module = importlib.import_module(module_str)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/runner/workspace/api/app.py", line 12, in <module>
+    from src.inference.predict_api import predict, predict_batch
+  File "/home/runner/workspace/src/inference/__init__.py", line 12, in <module>
+    from src.inference.inference_engine import (
+  File "/home/runner/workspace/src/inference/inference_engine.py", line 35, in <module>
+    from src.utils import (
+  File "/home/runner/workspace/src/utils/__init__.py", line 41, in <module>
+    from .json_utils import (
+  File "/home/runner/workspace/src/utils/json_utils.py", line 14, in <module>
+    import portalocker
+ModuleNotFoundError: No module named 'portalocker'
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/inference_engine.py'. Reloading...
+Process SpawnProcess-20:
+Traceback (most recent call last):
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/_subprocess.py", line 80, in subprocess_started
+    target(sockets=sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 75, in run
+    return asyncio_run(self.serve(sockets=sockets), loop_factory=self.config.get_loop_factory())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 79, in serve
+    await self._serve(sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 86, in _serve
+    config.load()
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/config.py", line 449, in load
+    self.loaded_app = import_from_string(self.app)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 22, in import_from_string
+    raise exc from None
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 19, in import_from_string
+    module = importlib.import_module(module_str)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/runner/workspace/api/app.py", line 12, in <module>
+    from src.inference.predict_api import predict, predict_batch
+  File "/home/runner/workspace/src/inference/__init__.py", line 12, in <module>
+    from src.inference.inference_engine import (
+  File "/home/runner/workspace/src/inference/inference_engine.py", line 35, in <module>
+    from src.utils import (
+  File "/home/runner/workspace/src/utils/__init__.py", line 41, in <module>
+    from .json_utils import (
+  File "/home/runner/workspace/src/utils/json_utils.py", line 14, in <module>
+    import portalocker
+ModuleNotFoundError: No module named 'portalocker'
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/prediction_service.py'. Reloading...
+Process SpawnProcess-21:
+Traceback (most recent call last):
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/_subprocess.py", line 80, in subprocess_started
+    target(sockets=sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 75, in run
+    return asyncio_run(self.serve(sockets=sockets), loop_factory=self.config.get_loop_factory())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 79, in serve
+    await self._serve(sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 86, in _serve
+    config.load()
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/config.py", line 449, in load
+    self.loaded_app = import_from_string(self.app)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 22, in import_from_string
+    raise exc from None
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 19, in import_from_string
+    module = importlib.import_module(module_str)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/runner/workspace/api/app.py", line 12, in <module>
+    from src.inference.predict_api import predict, predict_batch
+  File "/home/runner/workspace/src/inference/__init__.py", line 12, in <module>
+    from src.inference.inference_engine import (
+  File "/home/runner/workspace/src/inference/inference_engine.py", line 35, in <module>
+    from src.utils import (
+  File "/home/runner/workspace/src/utils/__init__.py", line 41, in <module>
+    from .json_utils import (
+  File "/home/runner/workspace/src/utils/json_utils.py", line 14, in <module>
+    import portalocker
+ModuleNotFoundError: No module named 'portalocker'
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/inference_cache.py'. Reloading...
+Process SpawnProcess-22:
+Traceback (most recent call last):
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/_subprocess.py", line 80, in subprocess_started
+    target(sockets=sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 75, in run
+    return asyncio_run(self.serve(sockets=sockets), loop_factory=self.config.get_loop_factory())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 79, in serve
+    await self._serve(sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 86, in _serve
+    config.load()
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/config.py", line 449, in load
+    self.loaded_app = import_from_string(self.app)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 22, in import_from_string
+    raise exc from None
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 19, in import_from_string
+    module = importlib.import_module(module_str)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/runner/workspace/api/app.py", line 12, in <module>
+    from src.inference.predict_api import predict, predict_batch
+  File "/home/runner/workspace/src/inference/__init__.py", line 12, in <module>
+    from src.inference.inference_engine import (
+  File "/home/runner/workspace/src/inference/inference_engine.py", line 35, in <module>
+    from src.utils import (
+  File "/home/runner/workspace/src/utils/__init__.py", line 41, in <module>
+    from .json_utils import (
+  File "/home/runner/workspace/src/utils/json_utils.py", line 14, in <module>
+    import portalocker
+ModuleNotFoundError: No module named 'portalocker'
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/inference_cache.py'. Reloading...
+Process SpawnProcess-23:
+Traceback (most recent call last):
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/_subprocess.py", line 80, in subprocess_started
+    target(sockets=sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 75, in run
+    return asyncio_run(self.serve(sockets=sockets), loop_factory=self.config.get_loop_factory())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 79, in serve
+    await self._serve(sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 86, in _serve
+    config.load()
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/config.py", line 449, in load
+    self.loaded_app = import_from_string(self.app)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 22, in import_from_string
+    raise exc from None
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 19, in import_from_string
+    module = importlib.import_module(module_str)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/runner/workspace/api/app.py", line 12, in <module>
+    from src.inference.predict_api import predict, predict_batch
+  File "/home/runner/workspace/src/inference/__init__.py", line 12, in <module>
+    from src.inference.inference_engine import (
+  File "/home/runner/workspace/src/inference/inference_engine.py", line 35, in <module>
+    from src.utils import (
+  File "/home/runner/workspace/src/utils/__init__.py", line 41, in <module>
+    from .json_utils import (
+  File "/home/runner/workspace/src/utils/json_utils.py", line 14, in <module>
+    import portalocker
+ModuleNotFoundError: No module named 'portalocker'
+[33mWARNING[0m:  WatchFiles detected changes in 'src/inference/inference_cache.py'. Reloading...
+Process SpawnProcess-24:
+Traceback (most recent call last):
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+    self.run()
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/multiprocessing/process.py", line 108, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/_subprocess.py", line 80, in subprocess_started
+    target(sockets=sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 75, in run
+    return asyncio_run(self.serve(sockets=sockets), loop_factory=self.config.get_loop_factory())
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 79, in serve
+    await self._serve(sockets)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/server.py", line 86, in _serve
+    config.load()
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/config.py", line 449, in load
+    self.loaded_app = import_from_string(self.app)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 22, in import_from_string
+    raise exc from None
+  File "/home/runner/workspace/.pythonlibs/lib/python3.12/site-packages/uvicorn/importer.py", line 19, in import_from_string
+    module = importlib.import_module(module_str)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/nix/store/iizfzmqjdfvbyx82gqw92glb5zl6m4my-python3-3.12.12/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/runner/workspace/api/app.py", line 12, in <module>
+    from src.inference.predict_api import predict, predict_batch
+  File "/home/runner/workspace/src/inference/__init__.py", line 12, in <module>
+    from src.inference.inference_engine import (
+  File "/home/runner/workspace/src/inference/inference_engine.py", line 35, in <module>
+    from src.utils import (
+  File "/home/runner/workspace/src/utils/__init__.py", line 41, in <module>
+    from .json_utils import (
+  File "/home/runner/workspace/src/utils/json_utils.py", line 14, in <module>
+    import portalocker
+ModuleNotFoundError: No module named 'portalocker'
+[32mINFO[0m:     Stopping reloader process [[36m[1m150[0m]

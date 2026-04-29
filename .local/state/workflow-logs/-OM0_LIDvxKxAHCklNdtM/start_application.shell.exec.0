@@ -1,0 +1,2 @@
+[32mINFO[0m:     Will watch for changes in these directories: ['/home/runner/workspace/api', '/home/runner/workspace/config', '/home/runner/workspace/models', '/home/runner/workspace/src']
+[31mERROR[0m:    [Errno 98] Address already in use
