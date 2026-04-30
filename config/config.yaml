@@ -17,7 +17,7 @@ training:
   log_every: 50
   eval_every: 1
   checkpoint_every: 500
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 1
   early_stopping_patience: 5
 
 # =========================================================
@@ -51,6 +51,10 @@ model:
   encoder: "roberta-base"
   hidden_dim: 768
   dropout: 0.1
+  gradient_checkpointing: true
+  flash_attention: true
+  torch_compile: true
+  compile_mode: "max-autotune"
 
 # =========================================================
 # TASK CONFIG (CRITICAL)
@@ -104,8 +108,8 @@ loss:
 # =========================================================
 
 data:
-  batch_size: 16
-  num_workers: 4
+  batch_size: 64
+  num_workers: 8
   pin_memory: true
   shuffle: true
 
@@ -146,7 +150,7 @@ checkpoint:
 # =========================================================
 
 evaluation:
-  device: null   # auto
+  device: "cuda"
 
 # =========================================================
 # FEATURES
