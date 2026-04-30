@@ -104,7 +104,7 @@ Final Label Index Mapping (Recommended)
 
 After cleaning, remap labels 0–19.
 
-New ID	Emotion
+ ID	Emotion
 0	neutral
 1	admiration
 2	approval
@@ -160,7 +160,32 @@ emotion_map = {
 }
 
 
+| New Emotion | Comes From Old | Value  |
+| ----------- | -------------- | ------ |
+| emotion_0   | emotion_2      | 0.0517 |
+| emotion_1   | emotion_3      | 0.0000 |
+| emotion_2   | emotion_4      | 0.0000 |
+| emotion_3   | emotion_5      | 0.0000 |
+| emotion_4   | emotion_6      | 0.1430 |
+| emotion_5   | emotion_7      | 0.0000 |
+| emotion_6   | emotion_8      | 0.1254 |
+| emotion_7   | emotion_9      | 0.3216 |
+| emotion_8   | emotion_10     | 0.3718 |
+| emotion_9   | emotion_11     | 0.4023 |
+| emotion_10  | emotion_12     | 0.1736 |
 
-| Task                     | 0             | 1          |
-| ------------------------ | ------------- | ---------- |
-| **Propaganda detection** | No propaganda | Propaganda |
+
+| New ID     | Comes From Old ID | Old Emotion | New Emotion Label |
+| ---------- | ----------------- | ----------- | ----------------- |
+| emotion_0  | 2                 | approval    | approval          |
+| emotion_1  | 3                 | gratitude   | gratitude         |
+| emotion_2  | 4                 | annoyance   | annoyance         |
+| emotion_3  | 5                 | amusement   | amusement         |
+| emotion_4  | 6                 | curiosity   | curiosity         |
+| emotion_5  | 7                 | disapproval | disapproval       |
+| emotion_6  | 8                 | love        | love              |
+| emotion_7  | 9                 | optimism    | optimism          |
+| emotion_8  | 10                | anger       | anger             |
+| emotion_9  | 11                | joy         | joy               |
+| emotion_10 | 12                | confusion   | confusion         |
+
