@@ -59,6 +59,14 @@ class LossEngineConfig:
     use_normalizer: bool = True
     use_coverage: bool = True
 
+    # NORMALIZER-ALPHA-DAMP: EMA decay forwarded to ``EMALossNormalizer``
+    # inside ``MultiTaskLoss``. Lower → smoother running mean / longer
+    # effective averaging window → quieter per-task normalisation factors
+    # → fewer downstream gradient spikes. ``None`` keeps the
+    # ``EMALossNormalizer`` default (0.1) for back-compat with callers
+    # that don't set it.
+    normalizer_alpha: Optional[float] = None
+
     # LOSS-3: TrainingStep divides the loss by ``gradient_accumulation_steps``
     # so the gradient magnitude matches a single big batch. MultiTaskLoss
     # ALSO divides by ``active_heads``. The two are correct in isolation but
@@ -165,6 +173,9 @@ class LossEngine:
             normalization=effective_normalization,
             use_normalizer=effective_use_normalizer,
             use_coverage=effective_use_coverage,
+            # NORMALIZER-ALPHA-DAMP: forward the YAML-tunable EMA alpha
+            # into the normalizer (see LossEngineConfig docstring).
+            normalizer_alpha=config.normalizer_alpha,
         )
 
         self._balancer: Optional[BaseBalancer] = None

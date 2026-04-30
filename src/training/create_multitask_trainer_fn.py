@@ -241,11 +241,40 @@ def _resolve_spike_lr_scale(settings: Any) -> float:
     Read from ``training.spike_lr_scale`` (default 0.5 to preserve the
     legacy aggressive halving for callers that don't set it). Lower
     values are more aggressive; values close to 1.0 (e.g. 0.9) make
-    the auto-reducer a gentle taper rather than a chainsaw.
+    the auto-reducer a gentle taper rather than a chainsaw. Setting it
+    to exactly 1.0 fully disables the reducer (see SPIKE-LR-DISABLED
+    short-circuit in ``TrainingStep._reduce_lr``).
     """
     training = _get(settings, "training")
     val = _get(training, "spike_lr_scale")
     return float(val) if val is not None else 0.5
+
+
+def _resolve_min_delta(settings: Any) -> float:
+    """MIN-DELTA: floor for what counts as a validation improvement.
+
+    Read from ``training.early_stopping_min_delta`` (default 0.0 to
+    preserve the legacy strict-comparison behaviour). Multitask runs
+    that monitor noisy composite metrics should set this to ~2× the
+    observed per-epoch noise floor so the patience counter actually
+    accumulates on a real plateau.
+    """
+    training = _get(settings, "training")
+    val = _get(training, "early_stopping_min_delta")
+    return float(val) if val is not None else 0.0
+
+
+def _resolve_normalizer_alpha(settings: Any) -> Optional[float]:
+    """NORMALIZER-ALPHA-DAMP: EMA decay for the loss normaliser.
+
+    Read from ``loss.normalizer_alpha``. Returns ``None`` when the YAML
+    field is absent so downstream code keeps the legacy
+    ``EMALossNormalizer`` default (0.1) instead of accidentally
+    overriding it.
+    """
+    loss_section = _get(settings, "loss")
+    val = _get(loss_section, "normalizer_alpha") if loss_section is not None else None
+    return float(val) if val is not None else None
 
 
 def _resolve_task_weights(
@@ -564,6 +593,9 @@ def create_multitask_trainer_fn(
             use_normalizer=True,
             use_coverage=True,
             gradient_accumulation_steps=grad_accum,
+            # NORMALIZER-ALPHA-DAMP: forward ``loss.normalizer_alpha``
+            # so a YAML edit takes effect without code changes.
+            normalizer_alpha=_resolve_normalizer_alpha(settings),
         )
     )
 
@@ -685,6 +717,8 @@ def create_multitask_trainer_fn(
             # MIN-EPOCH-EARLY-STOPPING: trainer enforces "always train at
             # least this many epochs before any patience-based stop"
             "min_epochs": _resolve_min_epochs(settings),
+            # MIN-DELTA: noise-floor threshold for "improvement"
+            "early_stopping_min_delta": _resolve_min_delta(settings),
             # WEIGHTED-COMPOSITE-METRIC: forward the same per-task weights
             # already used for the loss multiplier and the batch sampler
             # so the Trainer can synthesise a single

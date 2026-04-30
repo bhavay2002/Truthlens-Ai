@@ -230,6 +230,18 @@ class Trainer:
             str(k): float(v) for k, v in raw_weights.items()
         }
 
+        # MIN-DELTA: minimum *absolute* change in the monitored metric
+        # required to count as an improvement. Without this, multi-task
+        # validation noise oscillates ±0.001 around the running best
+        # forever — every up-tick resets ``no_improve_epochs`` to 0,
+        # every down-tick increments it by 1, so the patience counter
+        # never reaches its limit and early stopping never fires.
+        # Defaults to 0.0 (legacy behaviour) so single-task callers and
+        # paths that don't set it are unaffected.
+        self.min_delta = max(
+            0.0, float(params_override.get("early_stopping_min_delta", 0.0))
+        )
+
         self.global_step = 0
         self._epoch = 0
         self.best_metric = None
@@ -470,12 +482,19 @@ class Trainer:
 
         improved = False
 
+        # MIN-DELTA: an "improvement" must beat the previous best by at
+        # least ``self.min_delta`` in the right direction. With
+        # min_delta == 0 this reduces to the legacy strict-comparison
+        # behaviour. With min_delta > 0 (recommended for noisy multitask
+        # validation), tiny ±noise oscillations no longer reset the
+        # patience counter, which is what allows early stopping to
+        # actually fire on a real plateau.
         if self.best_metric is None:
             improved = True
         elif self.maximize_metric:
-            improved = metric_value > self.best_metric
+            improved = metric_value > self.best_metric + self.min_delta
         else:
-            improved = metric_value < self.best_metric
+            improved = metric_value < self.best_metric - self.min_delta
 
         if improved:
             self.best_metric = metric_value

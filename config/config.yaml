@@ -24,22 +24,36 @@ training:
   log_every: 50
   eval_every: 1
   checkpoint_every: 500
-  # GRAD-ACCUM-2: doubles effective batch size to smooth out per-step
-  # gradient noise that was tripping the spike detector and triggering
-  # the auto-LR reducer over and over.
-  gradient_accumulation_steps: 2
+  # GRAD-ACCUM-4: doubled again from 2 → 4 (effective batch ≈ 256 with
+  # data.batch_size=64). The previous 2× still left grad_norm bouncing
+  # 9 → 47 → 159 → 75 across consecutive steps; averaging across 4
+  # micro-batches damps the per-step variance further so the optimiser
+  # sees a smoother gradient signal.
+  gradient_accumulation_steps: 4
   # MIN-EPOCH-EARLY-STOPPING: tightened from 5 → 2 so the trainer
   # stops promptly once improvement stalls past min_epochs.
   early_stopping_patience: 2
+  # MIN-DELTA: a validation score must improve by AT LEAST this much
+  # over the running best to count as "improved" — otherwise the
+  # patience counter increments. Without it, multi-task validation noise
+  # in the ±0.001 band oscillates above and below the previous best
+  # forever, perpetually resetting the counter and making early stopping
+  # a no-op. 0.002 sits comfortably above the observed noise floor.
+  early_stopping_min_delta: 0.002
   # GRAD-CLIP-1: explicit hard cap on the L2 norm of the full parameter
   # gradient. ``TrainingStep`` already calls ``clip_grad_norm_`` whenever
   # this is non-zero; setting it here keeps the value tunable from YAML.
   max_grad_norm: 1.0
-  # SPIKE-LR-RELAX: the spike detector used to multiply LR by 0.5 every
-  # time it fired, halving the effective LR towards zero within the first
-  # epoch on noisy multi-task gradients. 0.9 keeps a gentle 10% taper so
-  # genuine instability still gets damped without nuking the LR schedule.
-  spike_lr_scale: 0.9
+  # SPIKE-LR-DISABLED: setting the factor to 1.0 makes the per-step
+  # reactive LR reducer a no-op (lr *= 1.0). ``TrainingStep._reduce_lr``
+  # ALSO short-circuits when ``factor >= 1.0`` so we don't even pay for
+  # the warning log. The reactive decay loop was running on every other
+  # step ("LR reduced (factor=0.900) due to instability") and steadily
+  # zeroing the LR on top of the cosine schedule. Real instability is
+  # now handled by gradient clipping (max_grad_norm=1.0) and the
+  # smoother grad_accum=4 averaging instead. Set to <1.0 to bring it
+  # back if you ever need it.
+  spike_lr_scale: 1.0
 
 # =========================================================
 # OPTIMIZATION
@@ -47,16 +61,24 @@ training:
 
 optimizer:
   name: "adamw"
-  # LR-LOWERED: dropped from 2e-5 → 1e-5 so per-step gradient magnitudes
-  # stay below the spike-detector threshold under the new bf16 + grad-
-  # accum-2 + clip_grad_norm=1.0 regime. The previous 2e-5 (already a
-  # reduction from 3e-5) still pushed the multilabel narrative head
-  # past the auto-reducer threshold within a few hundred steps.
-  lr: 1e-5
+  # LR-LOWERED-V2: halved again from 1e-5 → 5e-6. With grad_accum=4
+  # the effective batch is ~4× larger, which would normally argue for
+  # a HIGHER LR (linear scaling rule); we go the other way because the
+  # observed grad-norm spikes (9 → 47 → 85 → 159) prove the loss
+  # surface is too sharp at the current LR for the multitask gradient
+  # mix. Halving the LR is the cheapest way to stop the spikes without
+  # changing the optimisation algorithm.
+  lr: 5e-6
   weight_decay: 0.01
 
 scheduler:
-  name: "linear"
+  # COSINE-SCHED: switched from "linear" → "cosine" so the LR
+  # decays smoothly toward zero across the full training run instead
+  # of in straight-line steps. Combined with SPIKE-LR-DISABLED above
+  # this gives a single, predictable LR trajectory (warmup → cosine
+  # decay) rather than the previous "linear schedule + reactive
+  # halving" interaction that produced unpredictable LR values mid-run.
+  name: "cosine"
   step_mode: "step"   # step | epoch | metric
   warmup_steps: 1000
 
@@ -153,6 +175,15 @@ task_weights:
 loss:
   ignore_index: -100
   validate_loss: true
+  # NORMALIZER-ALPHA-DAMP: lowered from default 0.1 → 0.05 so the
+  # ``EMALossNormalizer`` running mean responds half as fast to per-step
+  # loss fluctuations. With six tasks of very different scales (multilabel
+  # BCE on emotion vs. multiclass CE on bias) the previous 0.1 alpha let
+  # one noisy batch swing the per-task normalisation factor and ripple
+  # into the next step's effective task weights, which contributed to
+  # the gradient-norm oscillations. 0.05 ≈ longer EMA window → smoother
+  # normalisation → calmer gradients.
+  normalizer_alpha: 0.05
 
 # =========================================================
 # DATALOADER

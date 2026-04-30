@@ -705,6 +705,17 @@ class TrainingStep:
         if factor is None:
             factor = float(self.config.spike_lr_scale)
 
+        # SPIKE-LR-DISABLED: a factor >= 1.0 would either be a no-op
+        # (= 1.0) or, worse, an LR *increase* (> 1.0). Short-circuit so
+        # the YAML knob ``training.spike_lr_scale: 1.0`` cleanly
+        # disables the entire reactive-decay loop — no mutation of the
+        # optimiser groups, no scheduler base_lrs rewrite, no warning
+        # spam in the logs. Real instability is now expected to be
+        # damped by gradient clipping + cosine schedule rather than by
+        # this reactive per-step reducer.
+        if factor >= 1.0:
+            return
+
         # BUG-6: a LambdaLR (and most functional schedulers) compute
         # ``g["lr"] = base_lr * lambda(step)`` on every ``scheduler.step()``.
         # Mutating only ``g["lr"]`` is therefore overwritten on the very

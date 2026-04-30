@@ -128,6 +128,7 @@ class MultiTaskLoss(nn.Module):
         normalization: str = "active",
         use_normalizer: bool = True,
         use_coverage: bool = True,
+        normalizer_alpha: Optional[float] = None,
     ) -> None:
         super().__init__()
 
@@ -212,7 +213,17 @@ class MultiTaskLoss(nn.Module):
         self.loss_functions = loss_functions
         self.router = TaskLossRouter(loss_functions, task_configs)
 
-        self.normalizer = EMALossNormalizer() if use_normalizer else None
+        # NORMALIZER-ALPHA-DAMP: pass through the YAML-tunable EMA alpha
+        # when the caller supplied one; otherwise fall back to the
+        # ``EMALossNormalizer`` default (0.1) so legacy callers are
+        # unaffected.
+        if use_normalizer:
+            if normalizer_alpha is not None:
+                self.normalizer = EMALossNormalizer(alpha=float(normalizer_alpha))
+            else:
+                self.normalizer = EMALossNormalizer()
+        else:
+            self.normalizer = None
         self.coverage = EMACoverageTracker() if use_coverage else None
 
         self.balancer: Optional[BaseBalancer] = None
