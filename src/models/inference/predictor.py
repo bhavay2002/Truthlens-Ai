@@ -182,24 +182,125 @@ class Predictor:
 
             formatted = {}
 
+            # =====================================================
+            # INFERENCE-CONTRACT-FIX V7 — per-task dict entries
+            #
+            # ``MultiTaskTruthLensModel.forward`` returns a dict shaped
+            # like::
+            #
+            #     {
+            #       "bias":         {"logits": Tensor, ...},
+            #       "ideology":     {"logits": Tensor, ...},
+            #       ...,
+            #       "task_logits":  {"bias": Tensor, "ideology": Tensor, ...},
+            #     }
+            #
+            # — i.e. each *per-task* entry is itself a dict (the
+            # ``BaseHead`` contract requires it), and ``"task_logits"``
+            # is a parallel dict-of-tensors view consumed by the
+            # training loop.
+            #
+            # Pre-V7 ``_format_outputs`` only flattened entries where
+            # ``v`` was a *tensor* whose key ended in ``"_logits"``. No
+            # such key exists in the multi-task forward output: the
+            # per-task entries are dicts, ``"task_logits"`` is itself a
+            # dict, and so the flattening branch *never fired*. The
+            # downstream aggregator (``WeightManager`` /
+            # ``TruthLensScoreCalculator``) therefore saw zero
+            # confidence / entropy / probabilities and silently
+            # produced an aggregate score of 0.0.
+            #
+            # We now handle three shapes explicitly:
+            #
+            #   1) Tensor whose key ends in ``"_logits"`` —
+            #      legacy single-task / pre-flattened path.
+            #
+            #   2) Per-task dict containing ``"logits"`` — the
+            #      multi-task contract. The task name is the dict key
+            #      itself (``"bias"`` / ``"ideology"`` / ...). We
+            #      flatten into ``<task>_logits``,
+            #      ``<task>_probabilities``, ``<task>_confidence``,
+            #      ``<task>_entropy``, ``<task>_predictions`` so the
+            #      aggregator pipeline (which keys on those exact
+            #      suffixes) sees real values.
+            #
+            #   3) ``"task_logits"`` dict-of-tensors — flatten each
+            #      ``{task: tensor}`` entry the same way we handle (2).
+            #      This is the back-compat path for any caller that
+            #      still relies on the parallel view.
+            #
+            # Calibration is applied per-task via ``_calibrate`` so
+            # temperature / isotonic adjustments stay scoped to each
+            # head's logits.
+            # =====================================================
+
+            def _flatten_task_logits(
+                base: str,
+                logits_tensor: torch.Tensor,
+            ) -> None:
+                logits = torch.nan_to_num(logits_tensor)
+                probs = torch.softmax(logits, dim=-1)
+                probs = self._calibrate(logits, probs)
+                preds = torch.argmax(probs, dim=-1)
+
+                # Confidence = max class probability per row;
+                # entropy   = Shannon entropy of the calibrated
+                # distribution. Both are consumed by the aggregator
+                # weight manager (``src.aggregation.weight_manager``)
+                # as per-task scalars keyed on these exact suffixes.
+                confidence = probs.max(dim=-1).values
+                # Use ``clamp_min`` to avoid ``log(0)`` → -inf when a
+                # calibrator collapses a class to exactly 0.
+                safe_probs = probs.clamp_min(1e-12)
+                entropy = -(probs * safe_probs.log()).sum(dim=-1)
+
+                formatted[f"{base}_logits"] = logits
+                formatted[f"{base}_probabilities"] = probs
+                formatted[f"{base}_predictions"] = preds
+                formatted[f"{base}_confidence"] = confidence
+                formatted[f"{base}_entropy"] = entropy
+
             for k, v in outputs.items():
 
+                # Shape (1): legacy tensor-with-_logits-suffix path.
                 if isinstance(v, torch.Tensor) and k.endswith("_logits"):
+                    _flatten_task_logits(k[:-7], v)
+                    continue
 
-                    logits = torch.nan_to_num(v)
-                    base = k[:-7]
-
-                    probs = torch.softmax(logits, dim=-1)
-                    probs = self._calibrate(logits, probs)
-
-                    preds = torch.argmax(probs, dim=-1)
-
-                    formatted[k] = logits
-                    formatted[f"{base}_probabilities"] = probs
-                    formatted[f"{base}_predictions"] = preds
-
-                else:
+                # Shape (2): per-task dict carrying ``"logits"``. The
+                # key is the task name (no ``_logits`` suffix). We
+                # also keep the original dict under ``k`` for any
+                # downstream consumer that already speaks the
+                # nested shape.
+                if (
+                    isinstance(v, dict)
+                    and "logits" in v
+                    and isinstance(v["logits"], torch.Tensor)
+                ):
+                    _flatten_task_logits(k, v["logits"])
                     formatted[k] = v
+                    continue
+
+                # Shape (3): ``"task_logits"`` parallel view —
+                # ``{task: tensor}``. Flatten each entry and keep
+                # the dict itself for back-compat.
+                if k == "task_logits" and isinstance(v, dict):
+                    for task_name, task_logits in v.items():
+                        if isinstance(task_logits, torch.Tensor):
+                            # Shape (2) above already produced
+                            # ``<task>_logits`` for every per-task
+                            # dict entry. Skip the duplicate work
+                            # but still expose the parallel view so
+                            # callers that read ``task_logits`` see
+                            # the same tensor.
+                            formatted.setdefault(
+                                f"{task_name}_logits",
+                                torch.nan_to_num(task_logits),
+                            )
+                    formatted[k] = v
+                    continue
+
+                formatted[k] = v
 
             return formatted
 

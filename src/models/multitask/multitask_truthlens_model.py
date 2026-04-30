@@ -25,13 +25,94 @@ The forward pass returns a dict that contains BOTH:
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 import torch
 import torch.nn as nn
 
 from src.models.base.base_model import BaseModel
+
+
+# =========================================================
+# INFERENCE-CONTRACT-FIX V7 — explainability-facing heads view
+#
+# The explainability layer (``src.explainability.bias_explainer``,
+# ``src.explainability.emotion_explainer``,
+# ``src.aggregation.score_explainer``) calls into
+# ``model.heads[task](cls)`` and expects the result to be a *tensor of
+# logits* — see e.g. ``score_explainer._integrated_gradients`` which
+# does ``logits = self.model.heads[task](cls)`` followed by
+# ``logits[:, target_idx].sum()``.
+#
+# Internally, however, every TruthLens task head obeys the strict
+# ``BaseHead`` contract (asserted in ``MultiTaskTruthLensModel.forward``)
+# that requires returning a ``dict`` with at least a ``"logits"`` key.
+# Calling ``self.task_heads[name](cls)`` therefore yields a dict, not a
+# tensor, and the explainer crashes inside the very next tensor op.
+#
+# Pre-V7 the wrapper also only registered the heads under
+# ``self.task_heads`` — there was no ``self.heads`` attribute at all,
+# so ``bias_explainer._is_multitask`` (which keys on
+# ``hasattr(model, "heads")``) returned False and the code fell through
+# to the non-multitask branch, which then died on
+# ``model.get_input_embeddings()`` (also missing).
+#
+# ``_HeadsLogitsView`` is a read-only mapping that wraps the
+# ``task_heads`` ModuleDict and adapts each head into a callable that
+# returns *just* the logits tensor. It does NOT register new modules
+# (the wrappers are stored in a plain ``dict``), so it does not
+# perturb ``model.parameters()`` or any optimizer state — it is a pure
+# inference-side adapter that exists only to make the explainability
+# contract line up with the heads' internal dict-output contract.
+# =========================================================
+
+
+class _HeadsLogitsView(Mapping):
+    """Read-only mapping exposing each task head as a logits-returning callable.
+
+    Parameters
+    ----------
+    task_heads:
+        The live ``nn.ModuleDict`` of task heads. Held by reference so
+        the view stays consistent if heads are added or replaced after
+        construction. The view does not own the heads — it must not
+        register them as submodules (that would cause double-counting
+        in ``parameters()``).
+    """
+
+    def __init__(self, task_heads: nn.ModuleDict) -> None:
+        self._task_heads = task_heads
+
+    def __getitem__(self, key: str) -> Callable[[torch.Tensor], torch.Tensor]:
+        head = self._task_heads[key]
+
+        def _call(x: torch.Tensor) -> torch.Tensor:
+            out = head(x)
+            # The model-side contract guarantees this is a dict with
+            # ``"logits"`` (see ``MultiTaskTruthLensModel.forward``),
+            # but we still defend in case an explainer hands us a head
+            # that has been monkey-patched in tests.
+            if isinstance(out, torch.Tensor):
+                return out
+            if isinstance(out, dict) and "logits" in out:
+                return out["logits"]
+            raise RuntimeError(
+                f"Head '{key}' returned an unsupported type for the "
+                f"explainability contract: {type(out).__name__}"
+            )
+
+        return _call
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._task_heads)
+
+    def __len__(self) -> int:
+        return len(self._task_heads)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._task_heads
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +308,75 @@ class MultiTaskTruthLensModel(BaseModel):
         logger.info(
             "MultiTaskTruthLensModel initialized | tasks=%s",
             list(self.task_heads.keys()),
+        )
+
+    # =====================================================
+    # INFERENCE-CONTRACT-FIX V7 — explainability adapters
+    #
+    # See the comment block above ``_HeadsLogitsView`` for the full
+    # rationale. In short:
+    #
+    #   * ``heads`` exposes a logits-returning view over
+    #     ``self.task_heads`` so ``bias_explainer._is_multitask`` /
+    #     ``score_explainer._integrated_gradients`` recognise this as
+    #     the multi-task wrapper AND get a callable that returns a
+    #     bare tensor (matching their ``logits = heads[task](cls)``
+    #     contract).
+    #
+    #   * ``get_input_embeddings`` mirrors HuggingFace's
+    #     ``PreTrainedModel.get_input_embeddings`` so the
+    #     non-multitask explainer fallback path AND
+    #     ``adversarial_training._embedding_weight`` (which keys on
+    #     this method) work uniformly.
+    #
+    # Both are defined as a property / method (rather than set in
+    # ``__init__``) so they always reflect the *current* state of
+    # ``self.task_heads`` / ``self.encoder`` even after head
+    # additions, swaps, or encoder hot-reloads.
+    # =====================================================
+
+    @property
+    def heads(self) -> _HeadsLogitsView:
+        """Logits-returning view of ``task_heads`` for explainers."""
+        cached = getattr(self, "_heads_view", None)
+        if cached is None or cached._task_heads is not self.task_heads:
+            cached = _HeadsLogitsView(self.task_heads)
+            self._heads_view = cached
+        return cached
+
+    def get_input_embeddings(self) -> nn.Module:
+        """Return the underlying token-embedding module.
+
+        Walks through the ``TransformerEncoder`` wrapper to reach the
+        HuggingFace ``AutoModel.embeddings`` (or its
+        ``word_embeddings`` sub-module if the wrapper exposes only
+        the full embedding stack). Raises a clear error if neither
+        path is available so the failure mode is greppable rather
+        than the generic ``AttributeError`` the explainer used to
+        surface.
+        """
+        encoder = self.encoder
+
+        # Preferred path: ``TransformerEncoder.embeddings`` (also
+        # added in INFERENCE-CONTRACT-FIX V7) → HF embedding module.
+        emb = getattr(encoder, "embeddings", None)
+        if emb is not None:
+            # HF embedding modules expose ``word_embeddings`` as the
+            # raw token-id → vector lookup; that is what
+            # ``adversarial_training._embedding_weight`` and most
+            # gradient-based attribution helpers actually want.
+            we = getattr(emb, "word_embeddings", None)
+            return we if we is not None else emb
+
+        # Fallback: the wrapper is the HF model itself.
+        getter = getattr(encoder, "get_input_embeddings", None)
+        if callable(getter):
+            return getter()
+
+        raise AttributeError(
+            "MultiTaskTruthLensModel.get_input_embeddings: encoder "
+            f"({type(encoder).__name__}) does not expose an "
+            "`embeddings` attribute or `get_input_embeddings` method."
         )
 
     # =====================================================

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -136,11 +136,108 @@ class TransformerEncoder(BaseModel):
     # FORWARD
     # =====================================================
 
+    # =====================================================
+    # INFERENCE-CONTRACT-FIX V7 — embeddings access
+    #
+    # The explainability layer (``src.explainability.bias_explainer``,
+    # ``src.explainability.emotion_explainer``,
+    # ``src.aggregation.score_explainer``) builds Integrated-Gradients
+    # / gradient×input attributions by walking through ``model.encoder``
+    # directly: it grabs the embedding layer with
+    # ``model.encoder.embeddings(input_ids)`` and then re-runs the
+    # encoder on the resulting embedding tensor with
+    # ``model.encoder(inputs_embeds=..., attention_mask=...)``.
+    #
+    # Pre-V7 the wrapper only exposed ``self.encoder`` (the underlying
+    # HuggingFace ``AutoModel``) but had no top-level ``embeddings``
+    # attribute, and the wrapper's ``forward`` had a strict
+    # ``(input_ids, attention_mask)`` signature with no
+    # ``inputs_embeds`` parameter. Both code paths therefore raised
+    # before any attribution could be produced — the IG step in
+    # ``score_explainer._integrated_gradients`` died at the
+    # ``model.encoder.embeddings(...)`` line and the gradient×input
+    # step in ``bias_explainer.compute_gradients`` died one line later
+    # at ``model.encoder(inputs_embeds=...)``.
+    #
+    # We surface the HF embedding module via ``self.embeddings`` (so
+    # it is callable on ``input_ids`` exactly as the explainers expect)
+    # and accept ``inputs_embeds`` as an alternate, mutually-exclusive
+    # entry point in ``forward``.
+    # =====================================================
+
+    @property
+    def embeddings(self):
+        """Expose the underlying HF embedding module.
+
+        Used by Integrated-Gradients / gradient×input attribution
+        helpers that need to (a) run ``input_ids`` through the
+        embedding layer to materialise a leaf tensor and then
+        (b) re-enter the encoder with ``inputs_embeds=...``.
+        """
+        return self.encoder.embeddings
+
+    # =====================================================
+    # INFERENCE-CONTRACT-FIX V7 — encoder output container
+    #
+    # The wrapper has historically returned a plain ``dict`` from
+    # ``forward`` (``{"sequence_output", "pooled_output"}``). The
+    # explainability / inference call sites split into two camps:
+    #
+    #   * Internal callers (``MultiTaskTruthLensModel._extract_pooled``,
+    #     training step, etc.) use *dict* access:
+    #     ``encoder_outputs.get("pooled_output")``.
+    #
+    #   * Explainability callers (``bias_explainer._forward_logits``,
+    #     ``score_explainer._integrated_gradients``) use *attribute*
+    #     access in the HF style: ``out.last_hidden_state[:, 0]``.
+    #     Pre-V7 this raised ``AttributeError: 'dict' object has no
+    #     attribute 'last_hidden_state'`` and was the second failure
+    #     mode in the explainability pipeline (the first being the
+    #     missing ``model.heads`` / ``get_input_embeddings``).
+    #
+    # We make the return value a ``dict`` *subclass* that also
+    # honours ``__getattr__`` so both call styles work without
+    # forcing every caller to migrate. Subclassing ``dict`` (as
+    # opposed to using ``transformers.modeling_outputs.BaseModelOutput``
+    # / ``SimpleNamespace``) keeps every existing ``isinstance(...,
+    # dict)`` / ``dict.get`` / ``**outputs`` site green.
+    # =====================================================
+
+    class _EncoderOutput(dict):
+        """Dict that also exposes its keys as attributes (HF-style)."""
+
+        def __getattr__(self, name: str):
+            try:
+                return self[name]
+            except KeyError as exc:
+                raise AttributeError(name) from exc
+
     def forward(
         self,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
+        input_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
+
+        # INFERENCE-CONTRACT-FIX V7: accept ``inputs_embeds`` as a
+        # mutually-exclusive alternative to ``input_ids`` so the
+        # explainability IG path can re-enter the encoder with a
+        # custom embedding tensor (see the ``embeddings`` property
+        # comment block above).
+        if input_ids is None and inputs_embeds is None:
+            raise TypeError(
+                "TransformerEncoder.forward requires either "
+                "`input_ids` or `inputs_embeds`."
+            )
+        if input_ids is not None and inputs_embeds is not None:
+            raise TypeError(
+                "TransformerEncoder.forward accepts `input_ids` OR "
+                "`inputs_embeds`, not both."
+            )
+        if attention_mask is None:
+            raise TypeError(
+                "TransformerEncoder.forward requires `attention_mask`."
+            )
 
         # P2.7 + A3.3: ``self._cached_device`` is a plain attribute set
         # in ``__init__`` / ``set_device``; the ``device`` property's
@@ -152,8 +249,11 @@ class TransformerEncoder(BaseModel):
             device = self.device
             self._cached_device = device
 
-        if input_ids.device != device:
+        if input_ids is not None and input_ids.device != device:
             input_ids = input_ids.to(device)
+
+        if inputs_embeds is not None and inputs_embeds.device != device:
+            inputs_embeds = inputs_embeds.to(device)
 
         if attention_mask.device != device:
             attention_mask = attention_mask.to(device)
@@ -162,6 +262,20 @@ class TransformerEncoder(BaseModel):
             torch.bfloat16 if self.amp_dtype == "bf16" else torch.float16
         )
 
+        # INFERENCE-CONTRACT-FIX V7: build the kwargs once so the
+        # ``input_ids`` vs ``inputs_embeds`` branch only lives in one
+        # place. HF transformers reject passing both as not-None even
+        # if one is just a left-over default, so we have to be strict.
+        encoder_kwargs: Dict[str, Any] = {
+            "attention_mask": attention_mask,
+            "return_dict": True,
+            "output_hidden_states": self.output_hidden_states,
+        }
+        if input_ids is not None:
+            encoder_kwargs["input_ids"] = input_ids
+        else:
+            encoder_kwargs["inputs_embeds"] = inputs_embeds
+
         with torch.autocast(
             device_type=device.type,
             enabled=self.use_amp and device.type == "cuda",
@@ -169,27 +283,28 @@ class TransformerEncoder(BaseModel):
         ):
             if self._encoder_frozen:
                 with torch.no_grad():
-                    outputs = self.encoder(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        return_dict=True,
-                        output_hidden_states=self.output_hidden_states,
-                    )
+                    outputs = self.encoder(**encoder_kwargs)
             else:
-                outputs = self.encoder(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    return_dict=True,
-                    output_hidden_states=self.output_hidden_states,
-                )
+                outputs = self.encoder(**encoder_kwargs)
 
         sequence_output = outputs.last_hidden_state
         pooled_output = self._pool(sequence_output, attention_mask)
 
-        return {
-            "sequence_output": sequence_output,
-            "pooled_output": pooled_output,
-        }
+        # INFERENCE-CONTRACT-FIX V7: surface ``last_hidden_state`` so
+        # callers that prefer the HF-style attribute access (e.g.
+        # ``score_explainer._integrated_gradients`` does
+        # ``outputs.last_hidden_state[:, 0]``) keep working when they
+        # invoke the wrapper's ``forward`` directly. The dict already
+        # carries the same tensor under ``sequence_output``; the new
+        # key is purely a back-compat alias. We wrap the return in
+        # ``_EncoderOutput`` (a dict subclass with attribute access)
+        # so HF-style ``out.last_hidden_state`` works too — see the
+        # block-comment above ``_EncoderOutput``.
+        return self._EncoderOutput(
+            sequence_output=sequence_output,
+            pooled_output=pooled_output,
+            last_hidden_state=sequence_output,
+        )
 
     # =====================================================
     # POOLING
