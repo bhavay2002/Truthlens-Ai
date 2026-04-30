@@ -97,6 +97,21 @@ class TrainingConfig:
 
     seed: int = 42
 
+    # MIN-EPOCH-EARLY-STOPPING / SPIKE-LR-RELAX: declared here so the
+    # strict ``TrainingConfig(**raw.get("training", {}))`` call inside
+    # ``ModelConfigLoader.load_multitask_config`` doesn't crash on the
+    # new YAML keys. Defaults preserve the legacy behaviour. NOTE:
+    # this dataclass uses ``num_epochs`` while the YAML key is
+    # ``epochs``; the multitask training factory bypasses this loader
+    # entirely (see ``MT-FACTORY-NOLEGACY-CFG`` in
+    # ``create_multitask_trainer_fn.py``), so the mismatch is
+    # tolerated for back-compat with the few remaining callers
+    # (``model_factory``, ``encoder_factory``, inference
+    # ``model_loader``) that only need encoder / task metadata from
+    # this struct, not training hyperparameters.
+    min_epochs: int = 1
+    spike_lr_scale: float = 0.5
+
 
 # =========================================================
 # Uncertainty Configuration

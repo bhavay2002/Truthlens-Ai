@@ -28,6 +28,19 @@ class TrainingConfig:
     checkpoint_every: int
     gradient_accumulation_steps: int
     early_stopping_patience: int
+    # MIN-EPOCH-EARLY-STOPPING / GRAD-CLIP-1 / SPIKE-LR-RELAX:
+    # these three knobs were added to ``config/config.yaml`` to control
+    # the new training-stability behaviour (see the ``training:`` block
+    # there for the full rationale). They have to be declared here too
+    # because ``load_config`` below does ``TrainingConfig(**raw["training"])``
+    # — i.e. a strict kwargs-init that crashes on any YAML key it
+    # doesn't know about. Defaults reproduce the legacy behaviour
+    # (no min-epoch floor, 1.0 grad-clip cap, aggressive 0.5 spike
+    # halving) so this struct stays back-compat with older YAMLs that
+    # don't set them.
+    min_epochs: int = 1
+    max_grad_norm: float = 1.0
+    spike_lr_scale: float = 0.5
 
 
 @dataclass(frozen=True)
