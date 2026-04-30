@@ -311,6 +311,76 @@ def _resolve_task_weights(
     return weights
 
 
+def _resolve_monitor_task_weights(
+    settings: Any,
+    tasks: list,
+    fallback: Dict[str, float],
+) -> Dict[str, float]:
+    """MONITOR-WEIGHTS: weights used by the Trainer's
+    ``weighted_composite_score`` early-stopping metric, decoupled from
+    the per-task LOSS weights in ``settings.task_weights``.
+
+    Decoupling matters because the loss weights are tuned to balance
+    *gradient flow into the shared encoder* (under-train heads get
+    upweighted), while the monitor weights answer "which heads should
+    drive the early-stopping decision?" — typically the heads that
+    represent the application objective rather than the heads that
+    happen to need the most learning signal. Mixing the two means a
+    rebalanced loss weight (e.g. ideology 0.7 → 1.1 because it's
+    lagging) silently shifts the early-stopping target.
+
+    Reads ``settings.monitor_task_weights`` (a YAML mapping in the
+    same shape as ``task_weights``). Tasks not listed there get
+    weight 0.0 and are excluded from the composite — this is the
+    intended way to opt a head out of the early-stopping signal
+    (e.g. ``narrative_frame`` is a research head that doesn't drive
+    product decisions). When the YAML key is missing entirely, falls
+    back to the loss ``task_weights`` so single-task / legacy callers
+    behave exactly as before.
+    """
+    raw = _get(settings, "monitor_task_weights")
+    if raw is None:
+        return dict(fallback)
+
+    if isinstance(raw, Mapping):
+        weights = {t: float(raw.get(t, 0.0)) for t in tasks}
+    else:
+        weights = {t: float(getattr(raw, t, 0.0)) for t in tasks}
+
+    # Drop zero-weight tasks so ``_inject_weighted_composite`` doesn't
+    # iterate over them at all (it's already idempotent for skipped
+    # tasks, but this keeps the debug log clean).
+    return {t: w for t, w in weights.items() if w > 0.0}
+
+
+def _resolve_spike_decay_factor(settings: Any) -> float:
+    """EXPLOSION-WATCHDOG-RESPONSE: factor applied by the watchdog's
+    ``_reduce_lr`` call when a gradient spike is observed.
+
+    Read from ``training.spike_decay_factor`` (default 0.7 per the
+    audit recommendation). Set to 1.0 in YAML to keep the warning-only
+    behaviour without the LR decay; values >1.0 are short-circuited by
+    ``_reduce_lr`` so the worst case is "no-op", not "LR runaway".
+    """
+    training = _get(settings, "training")
+    val = _get(training, "spike_decay_factor")
+    return float(val) if val is not None else 0.7
+
+
+def _resolve_grad_scaler_init_scale(settings: Any) -> Optional[float]:
+    """AMP-INIT-SCALE-FIX: optional ``GradScaler(init_scale=...)`` value.
+
+    Read from ``precision.grad_scaler_init_scale``. Returns ``None``
+    when the YAML key is missing so the torch default (2**16 = 65536)
+    is preserved for callers that don't set it. Set to 1024.0 (= 2**10)
+    on H100 / fp16 stacks to suppress the early-warmup
+    "Gradient overflow detected" warning storm.
+    """
+    precision = _get(settings, "precision")
+    val = _get(precision, "grad_scaler_init_scale")
+    return float(val) if val is not None else None
+
+
 def _build_model_config(settings: Any) -> MultiTaskTruthLensConfig:
     """Map ``settings.model`` → ``MultiTaskTruthLensConfig``.
 
@@ -490,10 +560,19 @@ def create_multitask_trainer_fn(
 
     task_types: Dict[str, str] = {t: get_task_type(t) for t in tasks}
     task_weights: Dict[str, float] = _resolve_task_weights(settings, tasks)
+    # MONITOR-WEIGHTS: resolved here (not just at the params_override
+    # site below) so the value is logged alongside ``task_weights``,
+    # making mismatches obvious when reviewing a run from the head of
+    # the trainer log. Falls back to ``task_weights`` when the YAML key
+    # is missing — see ``_resolve_monitor_task_weights`` for rationale.
+    monitor_task_weights: Dict[str, float] = _resolve_monitor_task_weights(
+        settings, tasks, fallback=task_weights,
+    )
 
     logger.info(
-        "create_multitask_trainer_fn | tasks=%s | task_types=%s | weights=%s",
-        tasks, task_types, task_weights,
+        "create_multitask_trainer_fn | tasks=%s | task_types=%s | "
+        "loss_weights=%s | monitor_weights=%s",
+        tasks, task_types, task_weights, monitor_task_weights,
     )
 
     # -----------------------------------------------------
@@ -666,6 +745,21 @@ def create_multitask_trainer_fn(
             # tunable from YAML. Default 100.0 matches
             # ``TrainingStepConfig.spike_warn_threshold``.
             spike_warn_threshold=_resolve_spike_warn_threshold(settings),
+            # EXPLOSION-WATCHDOG-RESPONSE: forwards
+            # ``training.spike_decay_factor`` so the LR-decay-on-spike
+            # action (separate from the legacy ``spike_lr_scale`` /
+            # REDUCE_LR pathway above) is tunable from YAML. Default
+            # 0.7 matches ``TrainingStepConfig.spike_decay_factor``;
+            # set to 1.0 in YAML to keep the warning-only behaviour.
+            spike_decay_factor=_resolve_spike_decay_factor(settings),
+            # AMP-INIT-SCALE-FIX: forwards
+            # ``precision.grad_scaler_init_scale`` so the
+            # ``GradScaler(init_scale=...)`` value is tunable from YAML.
+            # ``None`` (YAML key absent) preserves the torch default
+            # (2**16); 1024.0 (= 2**10) is the audit-recommended value
+            # for H100 / fp16 stacks. No-op under bf16 (the scaler is
+            # constructed disabled).
+            grad_scaler_init_scale=_resolve_grad_scaler_init_scale(settings),
         ),
         device=str(device),
     )
@@ -749,6 +843,15 @@ def create_multitask_trainer_fn(
             # *task-balanced* signal instead of the easy-task-dominated
             # ``val_loss``.
             "task_weights": task_weights,
+            # MONITOR-WEIGHTS: separate weights driving the
+            # ``weighted_composite_score`` early-stopping metric.
+            # Decoupled from ``task_weights`` (loss multiplier) so a
+            # rebalanced loss weight doesn't silently shift the
+            # early-stopping target. Trainer's
+            # ``_inject_weighted_composite`` consumes this when present
+            # and falls back to ``task_weights`` otherwise. See
+            # ``_resolve_monitor_task_weights`` for the full rationale.
+            "monitor_task_weights": monitor_task_weights,
         },
         setup_config=mt_setup_cfg,
     )

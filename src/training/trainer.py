@@ -230,6 +230,27 @@ class Trainer:
             str(k): float(v) for k, v in raw_weights.items()
         }
 
+        # MONITOR-WEIGHTS: separate weights driving the
+        # ``weighted_composite_score`` early-stopping metric, decoupled
+        # from the LOSS ``task_weights`` above. The two answer different
+        # questions: ``task_weights`` balances *gradient flow into the
+        # shared encoder* (under-train heads get upweighted), while
+        # ``monitor_task_weights`` answers "which heads should drive
+        # the early-stopping decision?". Mixing them means a
+        # rebalanced loss weight (e.g. ideology 0.7 → 1.1 because it's
+        # lagging) silently shifts the early-stopping target.
+        # Falls back to ``self.task_weights`` so callers that don't set
+        # the key behave exactly as before. ``_inject_weighted_composite``
+        # consumes ``self.monitor_task_weights`` (NOT ``self.task_weights``)
+        # below.
+        raw_monitor_weights = params_override.get("monitor_task_weights")
+        if raw_monitor_weights is None:
+            self.monitor_task_weights: Dict[str, float] = dict(self.task_weights)
+        else:
+            self.monitor_task_weights = {
+                str(k): float(v) for k, v in raw_monitor_weights.items()
+            }
+
         # MIN-DELTA: minimum *absolute* change in the monitored metric
         # required to count as an improvement. Without this, multi-task
         # validation noise oscillates ±0.001 around the running best
@@ -577,15 +598,24 @@ class Trainer:
         """Add ``weighted_composite_score`` to ``val_metrics`` in place.
 
         Computed as the weighted average of the per-task ``{task}_score``
-        values emitted by ``EvaluationEngine``, using the same per-task
-        weights as the multitask loss (``self.task_weights``). The result
-        is normalised by the sum of weights of the tasks that *actually*
-        produced a score this run, so adding / removing a task from the
-        eval set doesn't silently rescale the metric.
+        values emitted by ``EvaluationEngine``, using
+        ``self.monitor_task_weights`` (which falls back to
+        ``self.task_weights`` when the caller didn't supply a separate
+        monitor mapping). The result is normalised by the sum of
+        weights of the tasks that *actually* produced a score this run,
+        so adding / removing a task from the eval set doesn't silently
+        rescale the metric.
 
-        No-ops when ``self.task_weights`` is empty (e.g. single-task
-        training, or callers that didn't forward the weights), so the
-        legacy behaviour is preserved for non-multitask paths.
+        No-ops when ``self.monitor_task_weights`` is empty (e.g.
+        single-task training, or callers that didn't forward any
+        weights), so the legacy behaviour is preserved for
+        non-multitask paths.
+
+        MONITOR-WEIGHTS: switched from ``self.task_weights`` (loss
+        multiplier) to ``self.monitor_task_weights`` (early-stopping
+        signal) so a rebalanced loss weight (e.g. ``ideology 0.7 →
+        1.1`` because it's lagging) doesn't silently shift the
+        early-stopping target.
 
         Why this matters: ``val_loss`` on a multitask run is dominated
         by the easy / large-dataset heads (``narrative``, ``propaganda``)
@@ -596,14 +626,14 @@ class Trainer:
         objective, so early stopping fires when the *whole system*
         stops improving — not when the loss curve looks busy.
         """
-        if not self.task_weights:
+        if not self.monitor_task_weights:
             return
 
         total_weighted = 0.0
         total_weight = 0.0
         contributing: list[str] = []
 
-        for task, weight in self.task_weights.items():
+        for task, weight in self.monitor_task_weights.items():
             key = f"{task}_score"
             score = val_metrics.get(key)
             # Skip tasks that didn't emit a score this eval pass (task

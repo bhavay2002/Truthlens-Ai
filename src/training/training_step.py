@@ -34,6 +34,7 @@ def get_amp_components(
     *,
     dtype: Optional[torch.dtype] = None,
     scaler_enabled: Optional[bool] = None,
+    scaler_init_scale: Optional[float] = None,
 ):
     """Return ``(scaler, autocast_factory)`` matched to the installed PyTorch.
 
@@ -46,12 +47,28 @@ def get_amp_components(
     ``scaler_enabled`` lets the caller disable the GradScaler independently
     of the autocast flag — needed because the dynamic-loss-scaling /
     overflow-recovery path is fp16-only and must stay off for bf16.
+
+    AMP-INIT-SCALE-FIX: ``scaler_init_scale`` overrides the
+    ``GradScaler(init_scale=...)`` value (torch default: 2**16 = 65536).
+    Lowering this to e.g. 2**10 = 1024 reduces the count of "Gradient
+    overflow detected, step skipped" warnings during the early-training
+    warm-up window on hardware with aggressive fp16 ranges (notably
+    H100). Pass ``None`` to keep the torch default.
     """
     s_enabled = enabled if scaler_enabled is None else scaler_enabled
 
+    # AMP-INIT-SCALE-FIX: only forward ``init_scale`` when the caller
+    # opted in. Avoids forcing 65536 onto callers that depended on the
+    # torch default and keeps the bf16 ``s_enabled=False`` path free of
+    # an irrelevant kwarg (the scaler is a no-op when disabled, but
+    # ``init_scale`` is still validated by the constructor).
+    scaler_kwargs: Dict[str, Any] = {"enabled": s_enabled}
+    if scaler_init_scale is not None:
+        scaler_kwargs["init_scale"] = float(scaler_init_scale)
+
     # Modern API (PyTorch ≥ 2.3)
     if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
-        scaler = torch.amp.GradScaler(device, enabled=s_enabled)
+        scaler = torch.amp.GradScaler(device, **scaler_kwargs)
         if dtype is not None:
             autocast = lambda: torch.amp.autocast(device, enabled=enabled, dtype=dtype)
         else:
@@ -60,7 +77,7 @@ def get_amp_components(
     # Legacy API (PyTorch ≤ 2.2)
     else:
         from torch.cuda.amp import GradScaler, autocast as cuda_autocast
-        scaler = GradScaler(enabled=s_enabled)
+        scaler = GradScaler(**scaler_kwargs)
         if dtype is not None:
             autocast = lambda: cuda_autocast(enabled=enabled, dtype=dtype)
         else:
@@ -93,6 +110,20 @@ class TrainingStepConfig:
     # surfacing to the operator.
     spike_warn_threshold: float = 100.0
 
+    # EXPLOSION-WATCHDOG-RESPONSE: factor applied to every optimiser
+    # ``param_group['lr']`` (and the scheduler's ``base_lrs`` so the
+    # cosine LambdaLR doesn't immediately overwrite the decay) the
+    # FIRST time the watchdog fires on a given step. This is the
+    # "spike RESPONSE" half of the watchdog — not just detection. The
+    # factor is independent from ``spike_lr_scale`` above (which is
+    # tied to the legacy instrumentation/monitor REDUCE_LR action and
+    # is currently disabled by setting it to 1.0 in YAML). Set to 1.0
+    # to disable the response and keep the warning-only behaviour;
+    # defaults to 0.7 per the post-V5 audit recommendation. Routes
+    # through the same ``_reduce_lr`` helper so per-group LR + scheduler
+    # base_lrs stay in sync.
+    spike_decay_factor: float = 0.7
+
     # CFG-2: factor used by ``_reduce_lr`` when the spike / health detectors
     # (instrumentation engine OR monitor engine) raise ``REDUCE_LR``. Was
     # previously hardcoded as ``0.5`` in two separate sites; centralising
@@ -115,6 +146,17 @@ class TrainingStepConfig:
     # spurious "Gradient overflow detected" warnings under bf16-supported
     # hardware (see config/config.yaml optimizer comment for context).
     amp_dtype: str = "bf16"
+
+    # AMP-INIT-SCALE-FIX: ``GradScaler(init_scale=...)`` override.
+    # Default ``None`` keeps the torch default (2**16 = 65536) so
+    # callers that don't set it preserve the legacy behaviour. Set to
+    # 1024.0 (= 2**10) on H100 / fp16 stacks to reduce the
+    # "Gradient overflow detected, step skipped" warning rate during
+    # the early-training warm-up window. No-op under bf16 (the scaler
+    # is constructed with ``enabled=False`` further down). Wired into
+    # ``get_amp_components(scaler_init_scale=...)`` at construction
+    # time so the kwarg is only forwarded when the caller opts in.
+    grad_scaler_init_scale: Optional[float] = None
 
     # N-MED-2: feature-logging cadence.  Previously hardcoded to 50
     # inside ``TrainingStep.run`` (decoupled from ``log_every_steps``).
@@ -259,11 +301,16 @@ class TrainingStep:
         # so the right API (torch.amp ≥ 2.3 vs legacy torch.cuda.amp ≤ 2.2) is
         # picked at runtime instead of crashing on the missing attribute.
         scaler_enabled = self.use_amp and self._amp_dtype == torch.float16
+        # AMP-INIT-SCALE-FIX: forward ``grad_scaler_init_scale`` so the
+        # ``GradScaler(init_scale=...)`` value is tunable from YAML
+        # (precision.grad_scaler_init_scale → factory →
+        # TrainingStepConfig.grad_scaler_init_scale → here).
         self.scaler, self._autocast = get_amp_components(
             self.device.type,
             enabled=self.use_amp,
             dtype=self._amp_dtype,
             scaler_enabled=scaler_enabled,
+            scaler_init_scale=config.grad_scaler_init_scale,
         )
 
         self._last_time = time.time()
@@ -564,6 +611,22 @@ class TrainingStep:
                     self.config.spike_warn_threshold,
                     int(step),
                 )
+                # EXPLOSION-WATCHDOG-RESPONSE: not just detection — also
+                # decay the LR by ``spike_decay_factor`` (default 0.7)
+                # the same step the spike is observed. Routed through
+                # ``_reduce_lr`` so per-group LR AND scheduler.base_lrs
+                # are updated in lockstep (otherwise the cosine LambdaLR
+                # would overwrite the per-group decay on its very next
+                # ``step()`` call). ``_reduce_lr`` short-circuits on
+                # ``factor >= 1.0``, so setting ``spike_decay_factor``
+                # to 1.0 disables the response without disabling the
+                # warning. Gated on ``not dry_run`` so the sanity check
+                # leaves the optimiser pristine. Skipped under AMP fp16
+                # overflow (scaler_stepped_ok=False set further below)
+                # is N/A here because that flag is only computed inside
+                # the ``not dry_run`` block beneath us.
+                if not dry_run:
+                    self._reduce_lr(factor=self.config.spike_decay_factor)
 
             # MT-3: in dry-run validate forward + loss + backward only.
             # Skip the optimizer / scaler / scheduler / balancer mutations

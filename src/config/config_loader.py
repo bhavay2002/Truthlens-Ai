@@ -50,6 +50,16 @@ class TrainingConfig:
     # ``src/training/create_multitask_trainer_fn.py``. Default 100.0
     # matches the audit-driven default; set to 0.0 in YAML to disable.
     spike_warn_threshold: float = 100.0
+    # EXPLOSION-WATCHDOG-RESPONSE: factor applied to optimiser LR when
+    # the watchdog above fires (separate from the legacy
+    # ``spike_lr_scale`` which is wired into the REDUCE_LR pathway).
+    # Mirrors ``TrainingStepConfig.spike_decay_factor``; read from
+    # ``training.spike_decay_factor`` via ``_resolve_spike_decay_factor``
+    # in ``src/training/create_multitask_trainer_fn.py``. Default 0.7
+    # matches the audit-driven default; set to 1.0 in YAML to keep the
+    # warning-only behaviour without LR decay. Declared here defensively
+    # because ``load_config`` does ``TrainingConfig(**raw["training"])``.
+    spike_decay_factor: float = 0.7
 
 
 @dataclass(frozen=True)
@@ -71,6 +81,14 @@ class PrecisionConfig:
     use_amp: bool
     amp_dtype: str  # bf16 | fp16
     allow_tf32: bool
+    # AMP-INIT-SCALE-FIX: optional ``GradScaler(init_scale=...)``
+    # override (torch default is 2**16 = 65536). Declared here
+    # defensively because ``load_config`` does
+    # ``PrecisionConfig(**raw["precision"])`` and would otherwise crash
+    # on the new YAML key. Mirrors
+    # ``TrainingStepConfig.grad_scaler_init_scale``; ``None`` = keep
+    # torch default. No-op under bf16 (scaler constructed disabled).
+    grad_scaler_init_scale: Optional[float] = None
 
 
 @dataclass(frozen=True)

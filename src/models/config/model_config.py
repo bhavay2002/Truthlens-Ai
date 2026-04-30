@@ -112,6 +112,11 @@ class TrainingConfig:
     min_epochs: int = 1
     spike_lr_scale: float = 0.5
     spike_warn_threshold: float = 100.0
+    # EXPLOSION-WATCHDOG-RESPONSE: declared so the strict
+    # ``TrainingConfig(**raw.get("training", {}))`` call inside
+    # ``ModelConfigLoader.load_multitask_config`` doesn't crash on the
+    # new YAML key. Default mirrors ``TrainingStepConfig.spike_decay_factor``.
+    spike_decay_factor: float = 0.7
 
 
 # =========================================================

@@ -29,7 +29,18 @@ training:
   # 9 → 47 → 159 → 75 across consecutive steps; averaging across 4
   # micro-batches damps the per-step variance further so the optimiser
   # sees a smoother gradient signal.
-  gradient_accumulation_steps: 4
+  # POST-CONVERGENCE-FIX-V5: lowered 4 → 2 in tandem with
+  # ``data.batch_size: 64 → 32`` below. New effective batch = 32 × 2
+  # = 64 (was 64 × 4 = 256). The 256 effective batch was driving the
+  # post-convergence stagnation: with so many samples averaged before
+  # each optimiser step the model only saw ~1/4 as many feedback
+  # cycles per epoch, so per-task convergence rates diverged (the
+  # easy heads saturated while the hard heads — ideology — barely
+  # moved). The smaller effective batch trades a bit of gradient
+  # smoothness for 4× more update steps per epoch, which the new
+  # max_grad_norm=1.0 + spike_warn_threshold=100 + LR=1.75e-6 stack
+  # is now stable enough to absorb.
+  gradient_accumulation_steps: 2
   # MIN-EPOCH-EARLY-STOPPING: tightened from 5 → 2 so the trainer
   # stops promptly once improvement stalls past min_epochs.
   early_stopping_patience: 2
@@ -85,6 +96,21 @@ training:
   # worth surfacing to the operator.
   spike_warn_threshold: 100.0
 
+  # POST-CONVERGENCE-FIX-V5: EXPLOSION-WATCHDOG-RESPONSE — factor
+  # applied to every optimiser ``param_group['lr']`` (and
+  # ``scheduler.base_lrs`` so the cosine LambdaLR doesn't immediately
+  # overwrite it) the first time the watchdog fires on a given step.
+  # The ``spike_warn_threshold`` knob above is detection-only;
+  # ``spike_decay_factor`` is the *response*. Independent from the
+  # legacy ``spike_lr_scale`` (which is wired into the
+  # instrumentation/monitor REDUCE_LR pathway and currently disabled
+  # at 1.0 in TrainingStepConfig). Set to 1.0 to keep the
+  # warning-only behaviour; default 0.7 = "back off by 30% the
+  # moment we see a spike, then let cosine decay continue from
+  # there". ``_reduce_lr`` short-circuits on values >=1.0 so a
+  # mistuned 1.5 is a no-op rather than an LR-runaway hazard.
+  spike_decay_factor: 0.7
+
 # =========================================================
 # OPTIMIZATION
 # =========================================================
@@ -134,6 +160,19 @@ precision:
   use_amp: true
   amp_dtype: "bf16"   # bf16 | fp16
   allow_tf32: true
+
+  # POST-CONVERGENCE-FIX-V5: AMP-INIT-SCALE-FIX — overrides
+  # ``GradScaler(init_scale=...)``; torch's default is 2**16 = 65536.
+  # 1024 (= 2**10) suppresses the early-warmup "Gradient overflow
+  # detected, step skipped" warning storm on H100 / fp16 stacks
+  # without affecting the dynamic-loss-scaling steady state (the
+  # scaler doubles back up by powers of two on every consecutive
+  # non-overflowing step). NO-OP under the current ``amp_dtype:
+  # bf16`` setting because the scaler is constructed with
+  # ``enabled=False`` for bf16 — kept here so flipping ``amp_dtype``
+  # to fp16 picks up the audit-recommended value automatically
+  # instead of regressing to the noisy 65536 default.
+  grad_scaler_init_scale: 1024
 
 # =========================================================
 # MODEL
@@ -248,6 +287,35 @@ task_weights:
   # gradient budget that ideology / emotion still need.
   propaganda: 0.7
 
+# POST-CONVERGENCE-FIX-V5 (MONITOR-WEIGHTS): per-task weights that
+# drive the ``weighted_composite_score`` early-stopping metric,
+# DECOUPLED from the loss ``task_weights`` above. The two answer
+# different questions:
+#   * ``task_weights`` balances *gradient flow into the shared
+#     encoder* — under-trained heads get upweighted (e.g. ideology
+#     0.7 → 1.1 because it lags). Tuned for *training dynamics*.
+#   * ``monitor_task_weights`` answers "which heads should drive
+#     the early-stopping decision?" — typically the heads that
+#     represent the application objective (emotion / ideology /
+#     narrative are user-facing; bias / propaganda are gating
+#     signals; narrative_frame is a research-only head we don't
+#     want stalling early stopping). Tuned for *product priority*.
+# Mixing the two means a rebalanced loss weight (e.g. ideology
+# 0.7 → 1.1) silently shifts the early-stopping target — exactly
+# the failure mode this block exists to prevent.
+#
+# Tasks omitted from this mapping are excluded from the composite
+# (``narrative_frame`` is excluded by being absent). Weights are
+# normalised by the sum of CONTRIBUTING task weights inside
+# ``Trainer._inject_weighted_composite``, so the absolute values
+# matter only as ratios — these sum to 1.0 for readability.
+monitor_task_weights:
+  emotion: 0.4
+  ideology: 0.2
+  narrative: 0.2
+  bias: 0.1
+  propaganda: 0.1
+
 # =========================================================
 # LOSS
 # =========================================================
@@ -270,7 +338,11 @@ loss:
 # =========================================================
 
 data:
-  batch_size: 64
+  # POST-CONVERGENCE-FIX-V5: lowered 64 → 32 in tandem with
+  # ``training.gradient_accumulation_steps: 4 → 2`` above. New
+  # effective batch = 32 × 2 = 64. See the comment on the
+  # gradient_accumulation_steps key for the full rationale.
+  batch_size: 32
   num_workers: 8
   pin_memory: true
   shuffle: true
