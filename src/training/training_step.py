@@ -450,7 +450,22 @@ class TrainingStep:
 
         if should_step:
 
-            if self.use_amp:
+            # AMP-FIX: ``self.scaler.unscale_(optimizer)`` flips the scaler's
+            # per-optimizer ``_per_optimizer_states`` to "unscaled" and that
+            # flag is ONLY reset by ``self.scaler.update()``. In the
+            # ``dry_run=True`` path below we deliberately skip
+            # ``scaler.step`` / ``scaler.update`` (sanity check must not
+            # mutate persistent training state — see MT-3 above), so calling
+            # ``unscale_`` here would leave the optimizer permanently in the
+            # "already unscaled" state. The very next REAL training step
+            # would then hit ``RuntimeError: unscale_() has already been
+            # called on this optimizer since the last update()`` at this
+            # exact line. Gate ``unscale_`` on ``not dry_run`` so the
+            # sanity-check leaves the scaler state pristine. The grad_norm
+            # measured below in dry-run will be the AMP-scaled value, which
+            # is acceptable: the sanity check only asserts the backward
+            # pass works, not the absolute gradient magnitude.
+            if self.use_amp and not dry_run:
                 self.scaler.unscale_(self.optimizer)
 
             # REC-3: ``compute_grad_norm`` and ``clip_grad_norm_`` BOTH
