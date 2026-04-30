@@ -28,15 +28,14 @@ class TrainingSetupConfig:
     # Performance
     cudnn_benchmark: bool = True
 
-    # COMPILE-OFF: ``torch.compile`` is fully disabled across the
-    # codebase (see ``optimize_model`` below and the matching gates in
-    # transformer_encoder, model_loader, feature_pipeline,
-    # batch_feature_pipeline). The flags below are kept as inert
-    # back-compat fields so callers that read them don't break — flipping
-    # them back to True will NOT re-enable compilation; remove the
-    # explicit no-op gates first if you want it back.
-    use_compile: bool = False
-    compile_mode: str = "default"   # inert; see COMPILE-OFF above
+    # COMPILE-RE-ENABLED: ``torch.compile`` is wired into
+    # ``optimize_model`` below; flipping ``use_compile`` to ``True`` (or
+    # leaving the YAML default ``model.torch_compile: true``) compiles
+    # the model at training-time. The OTHER call sites (encoder,
+    # model_loader, feature pipelines) remain off — see their COMPILE-OFF
+    # comments for the per-site rationale.
+    use_compile: bool = True
+    compile_mode: str = "default"
 
     # Gradient checkpointing
     use_gradient_checkpointing: bool = True
@@ -258,19 +257,33 @@ def optimize_model(
     """
 
     use_gc = config.use_gradient_checkpointing if config is not None else True
+    use_compile = config.use_compile if config is not None else False
+    compile_mode = config.compile_mode if config is not None else "default"
 
-    # COMPILE-OFF: model compilation is intentionally disabled. It added
-    # instability across the supported environments (Python / CUDA /
-    # kernel combinations on Replit and on user machines), surfaced as
-    # spurious "Gradient overflow detected" warnings under bf16 AMP, and
-    # was not necessary for current training stability. The previous
-    # call site has been removed; the ``use_compile`` / ``compile_mode``
-    # config fields are kept as inert back-compat plumbing (see
-    # ``TrainingSetupConfig`` above).
-    logger.info(
-        "torch.compile is disabled project-wide (COMPILE-OFF); "
-        "running model in eager mode."
-    )
+    # COMPILE-RE-ENABLED: ``torch.compile`` is wired back in at the
+    # user's explicit request. Caveats:
+    #   * On CPU-only environments the speedup is typically < 5% and
+    #     can be negative on small batches; the call still costs a
+    #     ~30s warm-up on the first step.
+    #   * Under bf16 AMP some kernels can re-surface
+    #     ``Gradient overflow detected`` warnings — those are
+    #     informational; the AMP scaler skips the affected steps.
+    #   * If compilation fails for any reason (Dynamo bail-out,
+    #     unsupported op) we fall back to eager and continue, rather
+    #     than killing training over an optimisation knob.
+    if use_compile:
+        try:
+            model = torch.compile(model, mode=compile_mode)
+            logger.info(
+                "torch.compile enabled (mode=%s)", compile_mode,
+            )
+        except Exception as e:
+            logger.warning(
+                "torch.compile failed (%s); falling back to eager mode.",
+                e,
+            )
+    else:
+        logger.info("torch.compile disabled; running model in eager mode.")
 
     # gradient checkpointing
     if use_gc:

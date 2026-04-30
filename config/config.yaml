@@ -13,12 +13,33 @@ project:
 # =========================================================
 
 training:
-  epochs: 4
+  # MIN-EPOCH-EARLY-STOPPING: ``epochs`` is now the *upper bound*
+  # (max_epochs); the trainer always runs at least ``min_epochs`` before
+  # any early-stop check, then continues up to ``epochs`` only if the
+  # monitored validation metric keeps improving (with ``patience`` epochs
+  # of grace). Wired by ``create_multitask_trainer_fn`` →
+  # ``Trainer.params_override``.
+  epochs: 10
+  min_epochs: 4
   log_every: 50
   eval_every: 1
   checkpoint_every: 500
-  gradient_accumulation_steps: 1
-  early_stopping_patience: 5
+  # GRAD-ACCUM-2: doubles effective batch size to smooth out per-step
+  # gradient noise that was tripping the spike detector and triggering
+  # the auto-LR reducer over and over.
+  gradient_accumulation_steps: 2
+  # MIN-EPOCH-EARLY-STOPPING: tightened from 5 → 2 so the trainer
+  # stops promptly once improvement stalls past min_epochs.
+  early_stopping_patience: 2
+  # GRAD-CLIP-1: explicit hard cap on the L2 norm of the full parameter
+  # gradient. ``TrainingStep`` already calls ``clip_grad_norm_`` whenever
+  # this is non-zero; setting it here keeps the value tunable from YAML.
+  max_grad_norm: 1.0
+  # SPIKE-LR-RELAX: the spike detector used to multiply LR by 0.5 every
+  # time it fired, halving the effective LR towards zero within the first
+  # epoch on noisy multi-task gradients. 0.9 keeps a gentle 10% taper so
+  # genuine instability still gets damped without nuking the LR schedule.
+  spike_lr_scale: 0.9
 
 # =========================================================
 # OPTIMIZATION
@@ -26,13 +47,12 @@ training:
 
 optimizer:
   name: "adamw"
-  # 3e-5 was triggering repeated "Gradient overflow detected" warnings
-  # under bf16 AMP on the narrative head (multilabel BCE has steeper
-  # logits than the single-class CE heads, so the same LR pushes early
-  # gradients past the dynamic-loss-scale ceiling). 2e-5 is the standard
-  # roberta-base finetune LR and stops the LR scheduler from chasing
-  # overflows down to a no-op value.
-  lr: 2e-5
+  # LR-LOWERED: dropped from 2e-5 → 1e-5 so per-step gradient magnitudes
+  # stay below the spike-detector threshold under the new bf16 + grad-
+  # accum-2 + clip_grad_norm=1.0 regime. The previous 2e-5 (already a
+  # reduction from 3e-5) still pushed the multilabel narrative head
+  # past the auto-reducer threshold within a few hundred steps.
+  lr: 1e-5
   weight_decay: 0.01
 
 scheduler:
@@ -59,14 +79,17 @@ model:
   dropout: 0.1
   gradient_checkpointing: true
   flash_attention: true
-  # COMPILE-OFF: ``torch.compile`` was removed from every call site in
-  # the codebase (see src/training/training_setup.py for the full
-  # rationale: environment instability, spurious bf16 overflow warnings,
-  # not necessary for current training stability). The fields below are
-  # kept as inert back-compat plumbing so older config readers don't
-  # crash; setting torch_compile back to true will NOT re-enable
-  # compilation — the call sites are gone.
-  torch_compile: false
+  # COMPILE-RE-ENABLED: ``torch.compile`` is wired back into the
+  # training-time ``optimize_model`` call site. The previous COMPILE-OFF
+  # gate was reverted at the user's explicit request — see the
+  # ``optimize_model`` body in src/training/training_setup.py for the
+  # current behaviour and the safety caveats (CPU-only environments
+  # see little-to-no speedup; bf16 AMP can re-surface
+  # ``Gradient overflow detected`` warnings on some kernels). The
+  # inference-time call sites (``model_loader``, ``feature_pipeline``,
+  # ``batch_feature_pipeline``) remain off — flipping this only affects
+  # training.
+  torch_compile: true
   compile_mode: "default"
 
 # =========================================================
@@ -106,13 +129,22 @@ tasks:
     type: "multilabel"      # columns: emotion_0 .. emotion_10
     num_labels: 11
 
+# PER-TASK-WEIGHTS-V2: previously every task was weighted 1.0, which
+# let the larger-dataset heads (ideology ~46k, propaganda ~32k) dominate
+# the shared-encoder gradient and stall the smaller / harder heads
+# (emotion ~8k multilabel, narrative_frame multilabel). The values below
+# upweight the under-fitted heads and downweight the dominant ones; see
+# ``src/training/loss_engine.py`` (``LossEngineConfig.task_weights``)
+# and ``src/data_processing/multitask_loader.py`` (sampling) — both
+# read this same dict so the rebalancing applies to BOTH the per-task
+# loss multiplier AND the per-task batch sampling probability.
 task_weights:
-  bias: 1.0
-  ideology: 1.0
-  propaganda: 1.0
+  emotion: 2.0
+  ideology: 0.7
   narrative: 1.0
-  narrative_frame: 1.0
-  emotion: 1.0
+  bias: 1.0
+  narrative_frame: 1.5
+  propaganda: 0.8
 
 # =========================================================
 # LOSS

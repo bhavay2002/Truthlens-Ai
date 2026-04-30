@@ -199,6 +199,24 @@ class Trainer:
         self.early_patience = int(
             params_override.get("early_stopping_patience", cfg_patience)
         )
+        # MIN-EPOCH-EARLY-STOPPING: ``min_epochs`` is the floor below
+        # which the early-stopping break is suppressed even if the
+        # patience counter has been exceeded. Defaults to 1 (no floor)
+        # so callers that don't set it preserve the legacy behaviour.
+        # Clamped to ``self.epochs`` to avoid the pathological
+        # ``min_epochs > epochs`` configuration silently turning into
+        # "early stopping disabled".
+        self.min_epochs = max(
+            1, int(params_override.get("min_epochs", 1))
+        )
+        if self.min_epochs > self.epochs:
+            logger.warning(
+                "Trainer: min_epochs=%d exceeds epochs=%d; clamping "
+                "min_epochs to %d (early stopping is effectively "
+                "disabled for this run).",
+                self.min_epochs, self.epochs, self.epochs,
+            )
+            self.min_epochs = self.epochs
 
         self.global_step = 0
         self._epoch = 0
@@ -312,9 +330,28 @@ class Trainer:
                         self._save_checkpoint(val_metrics)
 
                     # EARLY STOP
-                    if self.no_improve_epochs >= self.early_patience:
+                    # MIN-EPOCH-EARLY-STOPPING: suppress the break until
+                    # the trainer has completed at least ``min_epochs``
+                    # epochs. ``epoch`` is 0-indexed in the surrounding
+                    # ``for epoch in range(self.epochs)`` loop, so
+                    # ``epoch + 1`` is the human-friendly "epochs
+                    # completed" count and the comparison reads
+                    # naturally ("only stop after we've finished epoch
+                    # min_epochs or later").
+                    if (
+                        self.no_improve_epochs >= self.early_patience
+                        and (epoch + 1) >= self.min_epochs
+                    ):
                         if self._is_main():
-                            logger.warning("Early stopping triggered")
+                            logger.warning(
+                                "Early stopping triggered "
+                                "(epoch=%d, no_improve=%d, "
+                                "patience=%d, min_epochs=%d)",
+                                epoch + 1,
+                                self.no_improve_epochs,
+                                self.early_patience,
+                                self.min_epochs,
+                            )
                         break
 
         finally:

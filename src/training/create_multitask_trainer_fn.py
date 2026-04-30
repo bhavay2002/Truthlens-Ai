@@ -223,6 +223,31 @@ def _resolve_early_stopping_patience(settings: Any) -> int:
     return int(_get(training, "early_stopping_patience") or 3)
 
 
+def _resolve_min_epochs(settings: Any) -> int:
+    """MIN-EPOCH-EARLY-STOPPING: minimum epochs to always train.
+
+    Below ``min_epochs`` the trainer ignores the patience counter; above
+    it, the standard early-stopping logic kicks in. Defaults to 1 (i.e.
+    no minimum floor) when the YAML field is absent, preserving the
+    legacy behaviour for callers that haven't opted in.
+    """
+    training = _get(settings, "training")
+    return int(_get(training, "min_epochs") or 1)
+
+
+def _resolve_spike_lr_scale(settings: Any) -> float:
+    """SPIKE-LR-RELAX: factor used by the per-step LR auto-reducer.
+
+    Read from ``training.spike_lr_scale`` (default 0.5 to preserve the
+    legacy aggressive halving for callers that don't set it). Lower
+    values are more aggressive; values close to 1.0 (e.g. 0.9) make
+    the auto-reducer a gentle taper rather than a chainsaw.
+    """
+    training = _get(settings, "training")
+    val = _get(training, "spike_lr_scale")
+    return float(val) if val is not None else 0.5
+
+
 def _resolve_task_weights(
     settings: Any,
     tasks: list,
@@ -586,6 +611,9 @@ def create_multitask_trainer_fn(
             gradient_accumulation_steps=grad_accum,
             max_grad_norm=_resolve_max_grad_norm(settings),
             use_mixed_precision=_resolve_use_amp(settings),
+            # SPIKE-LR-RELAX: forwards ``training.spike_lr_scale`` so a
+            # YAML edit (e.g. 0.9) takes effect without code changes.
+            spike_lr_scale=_resolve_spike_lr_scale(settings),
         ),
         device=str(device),
     )
@@ -654,6 +682,9 @@ def create_multitask_trainer_fn(
         params_override={
             "epochs": _resolve_epochs(settings),
             "early_stopping_patience": _resolve_early_stopping_patience(settings),
+            # MIN-EPOCH-EARLY-STOPPING: trainer enforces "always train at
+            # least this many epochs before any patience-based stop"
+            "min_epochs": _resolve_min_epochs(settings),
         },
         setup_config=mt_setup_cfg,
     )
