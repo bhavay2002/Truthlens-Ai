@@ -188,6 +188,28 @@ class MultiTaskLoss(nn.Module):
         # MODULES
         # =====================================================
 
+        # GPU-3 (loss buffers): ``loss_functions`` is an ``nn.ModuleDict`` that
+        # holds ``nn.BCEWithLogitsLoss(pos_weight=…)`` and
+        # ``nn.CrossEntropyLoss(weight=…)``. PyTorch registers ``pos_weight`` /
+        # ``weight`` as *buffers* on those loss modules — so they only move
+        # device when their parent ``nn.Module`` walks them via ``.to(device)``.
+        # ``TaskLossRouter`` is a plain Python class (deliberately, to keep the
+        # routing logic stateless), which means ``self.router.loss_functions``
+        # is INVISIBLE to ``MultiTaskLoss.children()`` / ``.modules()`` — and
+        # therefore invisible to ``MultiTaskLoss.to(device)``. The result is
+        # the classic "Expected all tensors to be on the same device, but
+        # found cuda:0 and cpu" crash on the very first BCE forward pass when
+        # ``pos_weight`` / ``class_weights`` are populated by the loss
+        # balancer (e.g. emotion multilabel).
+        #
+        # Fix: assign the ``ModuleDict`` to ``self.loss_functions`` BEFORE
+        # passing it into the router. PyTorch's ``__setattr__`` then registers
+        # it as a submodule of ``MultiTaskLoss``, so a single call to
+        # ``MultiTaskLoss.to(device)`` (already done in
+        # ``TrainingStep.__init__``) propagates to every per-task loss buffer.
+        # The router still gets the same ``ModuleDict`` reference so its
+        # routing logic is unchanged.
+        self.loss_functions = loss_functions
         self.router = TaskLossRouter(loss_functions, task_configs)
 
         self.normalizer = EMALossNormalizer() if use_normalizer else None
