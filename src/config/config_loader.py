@@ -55,11 +55,21 @@ class TrainingConfig:
     # ``spike_lr_scale`` which is wired into the REDUCE_LR pathway).
     # Mirrors ``TrainingStepConfig.spike_decay_factor``; read from
     # ``training.spike_decay_factor`` via ``_resolve_spike_decay_factor``
-    # in ``src/training/create_multitask_trainer_fn.py``. Default 0.7
-    # matches the audit-driven default; set to 1.0 in YAML to keep the
-    # warning-only behaviour without LR decay. Declared here defensively
-    # because ``load_config`` does ``TrainingConfig(**raw["training"])``.
-    spike_decay_factor: float = 0.7
+    # in ``src/training/create_multitask_trainer_fn.py``. POST-V6:
+    # default relaxed 0.7 → 0.85 — the previous 0.7 compounded too
+    # aggressively on consecutive spikes and stalled learning past
+    # epoch 4. Set to 1.0 in YAML to keep the warning-only behaviour
+    # without LR decay. Declared here defensively because
+    # ``load_config`` does ``TrainingConfig(**raw["training"])``.
+    spike_decay_factor: float = 0.85
+    # EXPLOSION-WATCHDOG-SKIP: pre-clip gradient L2 norm above which
+    # ``TrainingStep.run`` discards the optimiser step entirely.
+    # Mirrors ``TrainingStepConfig.spike_skip_threshold``. Default
+    # 150.0 places the skip threshold 50% above the warn threshold
+    # (100.0); set to 0.0 in YAML to disable. Declared here
+    # defensively because ``load_config`` does
+    # ``TrainingConfig(**raw["training"])``.
+    spike_skip_threshold: float = 150.0
 
 
 @dataclass(frozen=True)

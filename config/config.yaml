@@ -105,11 +105,42 @@ training:
   # legacy ``spike_lr_scale`` (which is wired into the
   # instrumentation/monitor REDUCE_LR pathway and currently disabled
   # at 1.0 in TrainingStepConfig). Set to 1.0 to keep the
-  # warning-only behaviour; default 0.7 = "back off by 30% the
-  # moment we see a spike, then let cosine decay continue from
-  # there". ``_reduce_lr`` short-circuits on values >=1.0 so a
-  # mistuned 1.5 is a no-op rather than an LR-runaway hazard.
-  spike_decay_factor: 0.7
+  # warning-only behaviour. ``_reduce_lr`` short-circuits on
+  # values >=1.0 so a mistuned 1.5 is a no-op rather than an
+  # LR-runaway hazard.
+  #
+  # POST-CONVERGENCE-FIX-V6: relaxed 0.7 → 0.85. The 0.7 value (= -30%
+  # per spike) compounded too aggressively when the watchdog fired on
+  # consecutive steps — three back-to-back spikes collapsed the LR by
+  # ~66% in <100 steps, which then prevented the model from learning
+  # out of the post-spike plateau and contributed to the "stops
+  # improving at epoch 4" symptom that motivated the V6 audit. 0.85
+  # (= -15% per spike) is half as severe and lets the model continue
+  # learning between spike events while still applying a meaningful
+  # brake. Pairs with ``spike_skip_threshold`` below: moderate spikes
+  # (100 < grad_norm <= 150) trigger LR decay only; extreme spikes
+  # (grad_norm > 150) ALSO discard the corrupt update entirely.
+  spike_decay_factor: 0.85
+
+  # POST-CONVERGENCE-FIX-V6: EXPLOSION-WATCHDOG-SKIP — pre-clip
+  # gradient L2 norm above which TrainingStep.run discards the
+  # optimiser step entirely (calls ``scaler.update()`` to drain AMP
+  # state, but skips ``scaler.step()`` / ``optimizer.step()`` /
+  # ``scheduler.step()``; gradients are zeroed at end-of-step as
+  # usual so the next backward starts clean). Distinct from
+  # ``max_grad_norm`` (silent clip) and from ``spike_warn_threshold``
+  # (warn + LR decay only). Rationale: some spikes are numerically
+  # unrecoverable — the gradient direction is dominated by a few
+  # outlier components, so even a clipped step pushes the parameters
+  # in a corrupted direction. Skipping the step is cleaner than
+  # relying on LR reduction to attenuate the bad update.
+  # Layered on top of (not in place of) the warn + decay pathway
+  # above: a step at grad_norm=200 fires both — LR decays for the
+  # *next* step AND this step's update is dropped. Set to 0.0 to
+  # disable. Default 150.0 = 50% above ``spike_warn_threshold`` so
+  # the 100-150 band keeps using the gentle decay-only response and
+  # only true outliers (>150) trigger the heavier skip action.
+  spike_skip_threshold: 150.0
 
 # =========================================================
 # OPTIMIZATION

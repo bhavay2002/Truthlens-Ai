@@ -115,8 +115,14 @@ class TrainingConfig:
     # EXPLOSION-WATCHDOG-RESPONSE: declared so the strict
     # ``TrainingConfig(**raw.get("training", {}))`` call inside
     # ``ModelConfigLoader.load_multitask_config`` doesn't crash on the
-    # new YAML key. Default mirrors ``TrainingStepConfig.spike_decay_factor``.
-    spike_decay_factor: float = 0.7
+    # new YAML key. POST-V6: default relaxed 0.7 → 0.85 (see
+    # ``TrainingStepConfig.spike_decay_factor`` for rationale).
+    spike_decay_factor: float = 0.85
+    # EXPLOSION-WATCHDOG-SKIP: declared defensively for the same
+    # reason as the fields above. Mirrors
+    # ``TrainingStepConfig.spike_skip_threshold``; default 150.0
+    # places the skip threshold 50% above the warn threshold (100.0).
+    spike_skip_threshold: float = 150.0
 
 
 # =========================================================

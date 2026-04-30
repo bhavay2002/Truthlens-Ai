@@ -357,14 +357,33 @@ def _resolve_spike_decay_factor(settings: Any) -> float:
     """EXPLOSION-WATCHDOG-RESPONSE: factor applied by the watchdog's
     ``_reduce_lr`` call when a gradient spike is observed.
 
-    Read from ``training.spike_decay_factor`` (default 0.7 per the
-    audit recommendation). Set to 1.0 in YAML to keep the warning-only
-    behaviour without the LR decay; values >1.0 are short-circuited by
-    ``_reduce_lr`` so the worst case is "no-op", not "LR runaway".
+    Read from ``training.spike_decay_factor``. Default 0.85 (post-V6
+    audit recommendation, relaxed from the previous 0.7 because
+    consecutive spikes were collapsing the LR by ~66% in <100 steps
+    and stalling learning past epoch 4). Set to 1.0 in YAML to keep
+    the warning-only behaviour without the LR decay; values >1.0 are
+    short-circuited by ``_reduce_lr`` so the worst case is "no-op",
+    not "LR runaway".
     """
     training = _get(settings, "training")
     val = _get(training, "spike_decay_factor")
-    return float(val) if val is not None else 0.7
+    return float(val) if val is not None else 0.85
+
+
+def _resolve_spike_skip_threshold(settings: Any) -> float:
+    """EXPLOSION-WATCHDOG-SKIP: pre-clip gradient L2 norm above which
+    ``TrainingStep.run`` discards the optimiser step entirely.
+
+    Read from ``training.spike_skip_threshold`` (default 150.0,
+    placing the skip threshold 50% above the warn threshold of
+    100.0). Set to 0.0 in YAML to disable the skip path and keep the
+    legacy "always step, just warn loud" behaviour. Steps in the
+    100-150 band trigger warn + LR decay only; steps above 150 are
+    discarded outright.
+    """
+    training = _get(settings, "training")
+    val = _get(training, "spike_skip_threshold")
+    return float(val) if val is not None else 150.0
 
 
 def _resolve_grad_scaler_init_scale(settings: Any) -> Optional[float]:
@@ -748,10 +767,23 @@ def create_multitask_trainer_fn(
             # EXPLOSION-WATCHDOG-RESPONSE: forwards
             # ``training.spike_decay_factor`` so the LR-decay-on-spike
             # action (separate from the legacy ``spike_lr_scale`` /
-            # REDUCE_LR pathway above) is tunable from YAML. Default
-            # 0.7 matches ``TrainingStepConfig.spike_decay_factor``;
-            # set to 1.0 in YAML to keep the warning-only behaviour.
+            # REDUCE_LR pathway above) is tunable from YAML.
+            # POST-CONVERGENCE-FIX-V6: default relaxed 0.7 → 0.85
+            # because the previous 0.7 compounded too aggressively on
+            # consecutive spikes and stalled learning past epoch 4.
+            # Matches ``TrainingStepConfig.spike_decay_factor``; set
+            # to 1.0 in YAML to keep the warning-only behaviour.
             spike_decay_factor=_resolve_spike_decay_factor(settings),
+            # EXPLOSION-WATCHDOG-SKIP: forwards
+            # ``training.spike_skip_threshold`` so the
+            # discard-the-step-on-extreme-gradient action is tunable
+            # from YAML. Default 150.0 matches
+            # ``TrainingStepConfig.spike_skip_threshold``; set to 0.0
+            # in YAML to disable. Layered ON TOP of the warn + decay
+            # pathway above — a step at grad_norm=200 fires both, and
+            # this step's update is dropped while the *next* step's
+            # LR is decayed.
+            spike_skip_threshold=_resolve_spike_skip_threshold(settings),
             # AMP-INIT-SCALE-FIX: forwards
             # ``precision.grad_scaler_init_scale`` so the
             # ``GradScaler(init_scale=...)`` value is tunable from YAML.

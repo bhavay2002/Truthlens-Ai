@@ -118,11 +118,41 @@ class TrainingStepConfig:
     # factor is independent from ``spike_lr_scale`` above (which is
     # tied to the legacy instrumentation/monitor REDUCE_LR action and
     # is currently disabled by setting it to 1.0 in YAML). Set to 1.0
-    # to disable the response and keep the warning-only behaviour;
-    # defaults to 0.7 per the post-V5 audit recommendation. Routes
-    # through the same ``_reduce_lr`` helper so per-group LR + scheduler
-    # base_lrs stay in sync.
-    spike_decay_factor: float = 0.7
+    # to disable the response and keep the warning-only behaviour.
+    #
+    # POST-CONVERGENCE-FIX-V6: relaxed 0.7 → 0.85. The 0.7 (= -30% per
+    # spike) factor compounded too aggressively when the watchdog fired
+    # on consecutive steps — three spikes in a row collapsed the LR by
+    # ~66% in <100 steps, which then prevented the model from learning
+    # out of the post-spike plateau and contributed to the "stops
+    # improving at epoch 4" symptom. 0.85 (= -15%) is half as severe
+    # per spike and lets the model continue learning between events
+    # while still applying a meaningful brake. Routes through the same
+    # ``_reduce_lr`` helper so per-group LR + scheduler base_lrs stay
+    # in sync.
+    spike_decay_factor: float = 0.85
+
+    # EXPLOSION-WATCHDOG-SKIP: pre-clip gradient L2 norm above which
+    # ``run()`` SKIPS the optimiser / scaler step entirely for the
+    # current accumulation boundary. Distinct from
+    # ``spike_warn_threshold`` (warning + LR decay only) and from
+    # ``max_grad_norm`` (silent clip). Rationale: some spikes are
+    # numerically unrecoverable — the per-parameter direction encoded
+    # in the gradient is dominated by a few outlier components, so
+    # even a clipped step still pushes the parameters in a corrupted
+    # direction. Skipping the step entirely (while preserving LR-decay
+    # bookkeeping for the *next* step via the warn block above) is
+    # cleaner than relying on LR reduction to attenuate the bad update.
+    # Set to 0.0 to disable. Default 150.0 places the skip threshold
+    # 50% above the warn threshold (100.0), so steps in the 100-150
+    # band trigger warn + decay only, while steps above 150 are
+    # discarded outright. Implementation calls ``self.scaler.update()``
+    # (without ``scaler.step()``) under AMP to drain the unscale_'d
+    # per-optimizer state, sets ``scaler_stepped_ok=False`` so the
+    # scheduler is also held back this step, and relies on the
+    # unconditional ``zero_grad`` at the end of ``run()`` to clear the
+    # corrupt gradients before the next backward.
+    spike_skip_threshold: float = 150.0
 
     # CFG-2: factor used by ``_reduce_lr`` when the spike / health detectors
     # (instrumentation engine OR monitor engine) raise ``REDUCE_LR``. Was
@@ -628,13 +658,64 @@ class TrainingStep:
                 if not dry_run:
                     self._reduce_lr(factor=self.config.spike_decay_factor)
 
+            # EXPLOSION-WATCHDOG-SKIP: pre-clip ``grad_norm`` above
+            # ``spike_skip_threshold`` (default 150.0) → discard the
+            # optimiser update entirely. Layered on top of (not in
+            # place of) the warn + LR-decay block above: a step at
+            # grad_norm=200 fires both — LR decays by
+            # ``spike_decay_factor`` for the *next* step, AND this
+            # step's corrupt update is dropped on the floor. Setting
+            # ``spike_skip_threshold = 0.0`` disables the skip path
+            # entirely (legacy behaviour). ``math.isfinite`` guard
+            # avoids double-firing with the AMP fp16 overflow log
+            # below (which handles non-finite gradients). ``not
+            # dry_run`` guard preserves the sanity-check contract
+            # ("must not mutate training state").
+            spike_skip_step = (
+                not dry_run
+                and self.config.spike_skip_threshold > 0.0
+                and math.isfinite(grad_norm)
+                and grad_norm > self.config.spike_skip_threshold
+            )
+            if spike_skip_step:
+                logger.warning(
+                    "Extreme gradient detected (grad_norm=%.1f > %.1f) at "
+                    "step=%d - SKIPPING optimizer step",
+                    grad_norm,
+                    self.config.spike_skip_threshold,
+                    int(step),
+                )
+                # Mark the scheduler as held-back so the existing
+                # ``if self.scheduler and scaler_stepped_ok:`` gate
+                # below also skips advancing the LR schedule for
+                # this step. Without this the cosine LambdaLR would
+                # tick forward despite the optimiser not stepping —
+                # i.e. the schedule would silently desync from the
+                # optimiser-step count.
+                scaler_stepped_ok = False
+
             # MT-3: in dry-run validate forward + loss + backward only.
             # Skip the optimizer / scaler / scheduler / balancer mutations
             # so the persistent training state is preserved. Gradients are
             # zeroed below so the first real step starts clean.
             if not dry_run:
 
-                if self.use_amp:
+                if spike_skip_step:
+                    # EXPLOSION-WATCHDOG-SKIP: explicitly DO NOT call
+                    # ``scaler.step(optimizer)`` / ``optimizer.step()``
+                    # — that's the entire point of this branch. Under
+                    # AMP we still need to drain the per-optimizer
+                    # ``UNSCALED`` state set by the ``unscale_`` call
+                    # earlier in the function, otherwise the *next*
+                    # real step hits ``RuntimeError: unscale_() has
+                    # already been called on this optimizer since the
+                    # last update()``. ``scaler.update()`` resets that
+                    # state and also lets the dynamic loss scale
+                    # evolve normally (no overflow this step → scale
+                    # may grow on its usual cadence).
+                    if self.use_amp:
+                        self.scaler.update()
+                elif self.use_amp:
                     prev_scale = self.scaler.get_scale()
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
