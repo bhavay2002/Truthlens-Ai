@@ -103,7 +103,7 @@ from src.models.optimization.optimizer_factory import build_optimizer
 
 from src.training.evaluation_engine import EvaluationConfig, EvaluationEngine
 from src.training.loss_engine import LossEngine, LossEngineConfig
-from src.training.monitor_engine import MonitoringEngine
+from src.training.monitor_engine import MonitoringConfig, MonitoringEngine
 from src.training.task_scheduler import TaskScheduler, TaskSchedulerConfig
 from src.training.trainer import Trainer
 from src.training.training_setup import TrainingSetupConfig
@@ -261,7 +261,29 @@ def _build_model_config(settings: Any) -> MultiTaskTruthLensConfig:
             else encoder_val
         )
 
-    unknown = set(raw) - valid
+    # MT-FACTORY: ``MultiTaskTruthLensConfig`` is *strict* by design —
+    # the dataclass docstring rejects unknown kwargs to make YAML typos
+    # surface as load-time errors. But ``config.yaml::model`` legitimately
+    # carries a few RUNTIME knobs (compile / checkpointing / flash attn)
+    # that belong on ``TrainingSetupConfig`` instead, plus a couple of
+    # informational fields (``hidden_dim``) the model derives from the
+    # pretrained encoder. Filter those out *silently* so the warning
+    # below only fires for genuine typos. The runtime knobs are picked
+    # up further down via ``TrainingSetupConfig(use_compile=…,
+    # compile_mode=…, use_gradient_checkpointing=…)`` reading the SAME
+    # ``settings.model`` block — so dropping them here does NOT silently
+    # disable them. ``flash_attention`` is currently a no-op in
+    # ``MultiTaskTruthLensModel`` (no attention-impl override wired);
+    # silencing the warning avoids the false alarm.
+    _RUNTIME_ONLY_KEYS = {
+        "torch_compile",       # → TrainingSetupConfig.use_compile
+        "compile_mode",        # → TrainingSetupConfig.compile_mode
+        "gradient_checkpointing",  # → TrainingSetupConfig.use_gradient_checkpointing
+        "flash_attention",     # currently no-op (no attention impl override)
+        "hidden_dim",          # derived from the pretrained encoder
+    }
+
+    unknown = set(raw) - valid - _RUNTIME_ONLY_KEYS
     if unknown:
         logger.warning(
             "create_multitask_trainer_fn: dropping unknown settings.model "
@@ -271,6 +293,39 @@ def _build_model_config(settings: Any) -> MultiTaskTruthLensConfig:
         )
     kept = {k: raw[k] for k in raw if k in valid}
     return MultiTaskTruthLensConfig(**kept)
+
+
+def _build_monitoring_config(settings: Any) -> MonitoringConfig:
+    """Build a ``MonitoringConfig`` from the YAML ``monitoring:`` block.
+
+    MONITORING-CFG-FIX: previously the factory passed
+    ``_get(settings, "monitoring")`` (a raw AttrDict) directly to
+    ``MonitoringEngine(...)``. The engine's first line is then
+    ``self.config = config or MonitoringConfig()`` — the AttrDict is
+    truthy so the dataclass default is bypassed, and the next line
+    ``EMA(self.config.throughput_ema_alpha)`` raises
+    ``AttributeError: 'AttrDict' has no attribute 'throughput_ema_alpha'``
+    because the YAML doesn't define every dataclass field. Map the
+    YAML fields explicitly and fall back to dataclass defaults for
+    anything missing — the dataclass defaults are the contract, not
+    the YAML.
+    """
+    section = _get(settings, "monitoring")
+    if section is None:
+        return MonitoringConfig()
+    if isinstance(section, MonitoringConfig):
+        return section
+
+    valid = set(MonitoringConfig.__dataclass_fields__)
+    if isinstance(section, Mapping):
+        raw = {k: v for k, v in section.items() if k in valid}
+    else:
+        raw = {
+            k: getattr(section, k)
+            for k in valid
+            if hasattr(section, k)
+        }
+    return MonitoringConfig(**raw)
 
 
 # =========================================================
@@ -493,7 +548,7 @@ def create_multitask_trainer_fn(
     # -----------------------------------------------------
     # 9. MONITORING
     # -----------------------------------------------------
-    monitor = MonitoringEngine(_get(settings, "monitoring"))
+    monitor = MonitoringEngine(_build_monitoring_config(settings))
 
     # -----------------------------------------------------
     # 10. TRAINING STEP  (AMP + clipping + grad accum)
