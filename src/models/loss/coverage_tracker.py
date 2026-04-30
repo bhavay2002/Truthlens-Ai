@@ -78,23 +78,31 @@ class EMACoverageTracker:
         task: str,
         labels: torch.Tensor,
         ignore_index: float | int = -100,
-        task_type: str = "multi_class",
+        task_type: str = "multiclass",
     ) -> None:
 
         if not self.enabled:
             return
 
+        # Normalize task_type to the canonical form used elsewhere in the
+        # loss stack (see ``TaskLossConfig.__post_init__`` in
+        # ``src/models/loss/multitask_loss.py`` — it folds
+        # ``multi_class``/``multi-class`` → ``multiclass`` and
+        # ``multi_label``/``multi-label`` → ``multilabel``). Accept both
+        # spellings here so legacy callers don't crash.
+        canonical_task_type = str(task_type).replace("_", "").replace("-", "").lower()
+
         if not torch.is_tensor(labels) or labels.numel() == 0:
             has_label = False
 
         else:
-            if task_type == "multi_class":
+            if canonical_task_type == "multiclass":
                 has_label = bool(labels.ne(ignore_index).any())
 
-            elif task_type in {"binary", "multi_label"}:
+            elif canonical_task_type in {"binary", "multilabel"}:
                 has_label = bool(labels.ne(float(ignore_index)).any())
 
-            elif task_type == "regression":
+            elif canonical_task_type == "regression":
                 has_label = True
 
             else:
