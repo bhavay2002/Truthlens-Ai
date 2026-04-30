@@ -172,14 +172,39 @@ def _multilabel_plan(
 
     dist = {str(i): float(r) for i, r in enumerate(pos_ratio)}
 
+    # MULTILABEL-FOCAL-FIX: previously the multilabel branch only
+    # produced ``pos_weight`` and never set ``use_focal``, so on a
+    # task like emotion with max positive ratio ≈ 0.95 (one column
+    # collapsed at the negative class) the loss kept matching
+    # majority predictions and the head plateaued at F1 ~0.5. The
+    # multiclass and binary branches both gate focal loss on
+    # ``max_ratio >= focal_threshold``; mirror that here so heavy
+    # multilabel skew triggers the same remedy. Use the *minority*
+    # ratio per column (min of pos/neg) to detect skew — a column
+    # with pos_ratio=0.95 and one with pos_ratio=0.05 are both
+    # equally pathological for BCE.
+    if pos_ratio.size:
+        skew_per_col = np.maximum(pos_ratio, 1.0 - pos_ratio)
+        max_skew = float(skew_per_col.max())
+    else:
+        max_skew = 0.0
+
     plan = LossBalancingPlan(
         task_type="multilabel",
         distribution=dist,
-        max_ratio=float(pos_ratio.max()) if pos_ratio.size else 0.0,
+        max_ratio=max_skew,
         pos_weight=pos_weight,
+        focal_gamma=config.focal_gamma,
         valid_label_indices=valid_idx,
         dropped_label_indices=dropped_idx,
     )
+
+    if max_skew >= config.focal_threshold:
+        plan.use_focal = True
+        plan.notes.append(
+            f"focal loss enabled gamma={config.focal_gamma} "
+            f"(max_skew={max_skew:.3f} >= {config.focal_threshold})"
+        )
 
     if dropped_idx:
         plan.notes.append(

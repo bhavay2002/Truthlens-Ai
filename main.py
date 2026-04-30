@@ -1,8 +1,19 @@
 from __future__ import annotations
 
+# TOKENIZERS-FORK-FIX: HuggingFace's fast tokenizers spawn a Rust thread
+# pool eagerly; when the DataLoader later forks worker processes the
+# child inherits a poisoned tokenizer and prints
+# "huggingface/tokenizers: process just got forked..." on every step.
+# In the worst case the child deadlocks on the parent's lock. Setting
+# this BEFORE ``transformers`` is imported is the only reliable fix —
+# setting it after import is silently ignored. Override with
+# ``TOKENIZERS_PARALLELISM=true`` in the environment if a caller knows
+# the dataloader is single-process.
+import os
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 import argparse
 import logging
-import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -18,6 +29,7 @@ CONFIG_PATH = Path(__file__).resolve().parent / "config" / "config.yaml"
 from src.data_processing.data_pipeline import run_data_pipeline, DataPipelineConfig
 from src.data_processing.dataloader_factory import DataLoaderConfig
 from src.training.create_trainer_fn import create_trainer_fn
+from src.training.create_multitask_trainer_fn import create_multitask_trainer_fn
 from src.pipelines.truthlens_pipeline import TruthLensPipeline
 from src.utils.logging_utils import configure_logging
 from src.utils.seed_utils import set_seed
@@ -68,116 +80,175 @@ def main():
             )
             logger.info("✅ Data pipeline completed")
 
-            # ``narrative_frame`` only exists inside the multitask spec
-            # (a 5-label head); the single-task model factory has no
-            # mapping for it, so skip it here with a clear note.
-            SINGLE_TASK_SUPPORTED = {
-                "bias", "ideology", "propaganda", "narrative", "emotion",
-            }
-            unsupported = [t for t in datasets if t not in SINGLE_TASK_SUPPORTED]
-            if unsupported:
-                logger.info(
-                    "Skipping tasks not wired into single-task training: %s "
-                    "(only the multitask path covers these heads)",
-                    unsupported,
-                )
-
-            trainers = {}
-            for task in datasets:
-                if task not in SINGLE_TASK_SUPPORTED:
-                    continue
-                logger.info("🧠 Creating trainer | task=%s", task)
-                trainer = create_trainer_fn(
-                    task=task,
-                    train_df=datasets[task]["train"],
-                    val_df=datasets[task]["val"],
-                    params={
-                        # YAML scalars like ``3e-5`` (no decimal point) are
-                        # parsed as ``str`` by PyYAML — coerce to ``float``
-                        # before handing off to torch.optim, which checks
-                        # ``0.0 <= lr`` and crashes on a string compare.
-                        "lr": float(config.optimizer.lr),
-                        "batch_size": int(loader_cfg.batch_size),
-                        "weight_decay": float(config.optimizer.weight_decay),
-                        # Cap epochs at 1 for the CPU smoke run — 4 epochs ×
-                        # 5 roberta-base finetunes is unworkably slow on CPU
-                        # and the goal here is "produce a checkpoint", not
-                        # "fully train". Override via env var if needed.
-                        "epochs": int(os.environ.get(
-                            "TRUTHLENS_TRAIN_EPOCHS", "1"
-                        )),
-                        # NUM-WORKERS-FIX: respect the configured
-                        # ``data.num_workers`` from config.yaml (default 8)
-                        # instead of force-overriding to 0 for the smoke
-                        # run. The previous override was a CPU-only
-                        # safety net for a 10-row demo on Replit; on a
-                        # GPU host with the real dataset it caused a
-                        # severe DataLoader bottleneck (single-process
-                        # tokenization vs multi-worker pipelined I/O)
-                        # and GPU underutilization. Set
-                        # ``TRUTHLENS_FORCE_SINGLE_WORKER=1`` to recover
-                        # the old behaviour on memory-constrained CPU
-                        # smoke runs that fork-bomb across sequential
-                        # task trainers.
-                        "num_workers": (
-                            0
-                            if os.environ.get(
-                                "TRUTHLENS_FORCE_SINGLE_WORKER"
-                            ) == "1"
-                            else int(loader_cfg.num_workers)
-                        ),
-                        "pin_memory": bool(loader_cfg.pin_memory),
-                        "tokenizer": tokenizer,
-                        "model_name": config.model.encoder,
-                        "dropout": float(config.model.dropout),
-                        # GPU performance settings from config.yaml model section
-                        "gradient_checkpointing": bool(config.model.gradient_checkpointing),
-                        "use_compile": bool(config.model.torch_compile),
-                        "compile_mode": str(config.model.compile_mode),
-                        # Precision settings from config.yaml precision section
-                        "amp": bool(config.precision.use_amp),
-                        "amp_dtype": str(config.precision.amp_dtype),
-                        "allow_tf32": bool(config.precision.allow_tf32),
-                        # Device: prefer CUDA if available
-                        "device": "cuda" if torch.cuda.is_available() else "cpu",
-                    },
-                )
-                trainers[task] = trainer
-
-            # Save the checkpoint INCREMENTALLY after each task so a
-            # crash midway through (e.g. a CPU OOM on the 4th roberta-
-            # base finetune) still leaves a usable checkpoint behind
-            # for the inference path. The unified shape is the
-            # ``{"model": nn.Module}`` dict that ``main.py --mode infer``
-            # expects via ``state.get("model")`` — re-saving simply
-            # overwrites with the most recently trained head.
-            import gc
             save_dir = Path("saved_models")
             save_dir.mkdir(parents=True, exist_ok=True)
             ckpt_path = save_dir / "checkpoint.pt"
-            last_trained_task = None
-            for task, trainer in trainers.items():
-                logger.info("🔥 Training | task=%s", task)
+
+            # MULTITASK-DEFAULT: train ALL heads in a single unified
+            # MultiTaskTruthLensModel run (one shared roberta-base
+            # encoder + per-task heads + true multi-task LossEngine
+            # over every task at once). This replaces the legacy
+            # per-task loop which:
+            #   * recreated the encoder N times (5x roberta-base
+            #     instantiated and trained sequentially → 5x compute,
+            #     5x memory, zero shared representation)
+            #   * built a LossEngine with len(task_configs)==1 every
+            #     time, which the engine itself force-disables the
+            #     EMA normalizer + coverage tracker for and prints
+            #     "MT-1: LossEngine instantiated with 1 task(s)"
+            #   * trained each task for ``TRUTHLENS_TRAIN_EPOCHS``
+            #     epochs *independently*, defaulting to 1, so the
+            #     "Epoch 1/1" log line was real — config.training.epochs
+            #     was never read by the per-task path.
+            # The single-task path is preserved behind
+            # ``TRUTHLENS_USE_SINGLE_TASK=1`` strictly as an escape
+            # hatch for the rare case someone needs to debug one head
+            # in isolation. Everyone else gets the right architecture
+            # by default.
+            use_single_task = os.environ.get(
+                "TRUTHLENS_USE_SINGLE_TASK", "0"
+            ) == "1"
+
+            # Honour env-var epoch override on top of YAML
+            # ``training.epochs`` (configured to 4). The env var is the
+            # canonical knob the trainer factories already accept and
+            # is preserved here so existing CI / smoke-run scripts
+            # continue to work. Without an override, YAML wins.
+            epochs_override = os.environ.get("TRUTHLENS_TRAIN_EPOCHS")
+            if epochs_override is not None:
+                try:
+                    config.training.epochs = int(epochs_override)
+                    logger.info(
+                        "Epochs overridden by TRUTHLENS_TRAIN_EPOCHS=%s",
+                        epochs_override,
+                    )
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "Ignoring non-integer TRUTHLENS_TRAIN_EPOCHS=%r",
+                        epochs_override,
+                    )
+
+            if not use_single_task:
+                # Pin enabled tasks to whatever the data pipeline
+                # actually materialised so a missing dataset doesn't
+                # blow up the trainer. ``MultiTaskTruthLensModel``'s
+                # default head set covers every task in
+                # ``config.yaml::tasks`` including ``narrative_frame``
+                # (5-label) — which the legacy single-task factory
+                # had no mapping for and silently skipped.
+                enabled_tasks = list(datasets.keys())
+                logger.info(
+                    "🧠 Creating UNIFIED multi-task trainer | tasks=%s | "
+                    "epochs=%d | shared_encoder=%s",
+                    enabled_tasks,
+                    int(config.training.epochs),
+                    config.model.encoder,
+                )
+                trainer = create_multitask_trainer_fn(
+                    settings=config,
+                    data_bundle=datasets,
+                    tokenizer=tokenizer,
+                    enabled_tasks=enabled_tasks,
+                    config_path=str(CONFIG_PATH),
+                )
+                logger.info("🔥 Training | unified multi-task")
                 trainer.train()
-                last_trained_task = task
                 torch.save(
                     {
                         "model": trainer.model.cpu().eval(),
-                        "task": task,
+                        "task": "multitask",
+                        "tasks": enabled_tasks,
                         "encoder": config.model.encoder,
                     },
                     ckpt_path,
                 )
                 logger.info(
-                    "📦 Saved checkpoint → %s (task=%s)", ckpt_path, task,
+                    "📦 Saved checkpoint → %s (multi-task, %d heads)",
+                    ckpt_path, len(enabled_tasks),
                 )
-                # Drop references and force GC before the next per-task
-                # roberta-base finetune so 5 sequential trainers don't
-                # accumulate ~700MB each in resident memory.
-                trainer.model = None
-                trainers[task] = None
-                del trainer
-                gc.collect()
+            else:
+                # ───────── LEGACY SINGLE-TASK PATH (escape hatch) ─────────
+                logger.warning(
+                    "TRUTHLENS_USE_SINGLE_TASK=1 → falling back to legacy "
+                    "per-task training. Encoder will be recreated for each "
+                    "task and no shared representation will be learned."
+                )
+                # ``narrative_frame`` only exists inside the multitask spec
+                # (a 5-label head); the single-task model factory has no
+                # mapping for it, so skip it here with a clear note.
+                SINGLE_TASK_SUPPORTED = {
+                    "bias", "ideology", "propaganda", "narrative", "emotion",
+                }
+                unsupported = [t for t in datasets if t not in SINGLE_TASK_SUPPORTED]
+                if unsupported:
+                    logger.info(
+                        "Skipping tasks not wired into single-task training: %s "
+                        "(only the multitask path covers these heads)",
+                        unsupported,
+                    )
+
+                trainers = {}
+                for task in datasets:
+                    if task not in SINGLE_TASK_SUPPORTED:
+                        continue
+                    logger.info("🧠 Creating trainer | task=%s", task)
+                    trainer = create_trainer_fn(
+                        task=task,
+                        train_df=datasets[task]["train"],
+                        val_df=datasets[task]["val"],
+                        params={
+                            "lr": float(config.optimizer.lr),
+                            "batch_size": int(loader_cfg.batch_size),
+                            "weight_decay": float(config.optimizer.weight_decay),
+                            # CONFIG-PLUMBING-FIX: the legacy path used
+                            # to default to 1 epoch unconditionally and
+                            # ignored config.training.epochs entirely.
+                            # Honour YAML now; env var still wins.
+                            "epochs": int(os.environ.get(
+                                "TRUTHLENS_TRAIN_EPOCHS",
+                                str(int(config.training.epochs)),
+                            )),
+                            "num_workers": (
+                                0
+                                if os.environ.get(
+                                    "TRUTHLENS_FORCE_SINGLE_WORKER"
+                                ) == "1"
+                                else int(loader_cfg.num_workers)
+                            ),
+                            "pin_memory": bool(loader_cfg.pin_memory),
+                            "tokenizer": tokenizer,
+                            "model_name": config.model.encoder,
+                            "dropout": float(config.model.dropout),
+                            "gradient_checkpointing": bool(config.model.gradient_checkpointing),
+                            "use_compile": bool(config.model.torch_compile),
+                            "compile_mode": str(config.model.compile_mode),
+                            "amp": bool(config.precision.use_amp),
+                            "amp_dtype": str(config.precision.amp_dtype),
+                            "allow_tf32": bool(config.precision.allow_tf32),
+                            "device": "cuda" if torch.cuda.is_available() else "cpu",
+                        },
+                    )
+                    trainers[task] = trainer
+
+                import gc
+                for task, trainer in trainers.items():
+                    logger.info("🔥 Training | task=%s", task)
+                    trainer.train()
+                    torch.save(
+                        {
+                            "model": trainer.model.cpu().eval(),
+                            "task": task,
+                            "encoder": config.model.encoder,
+                        },
+                        ckpt_path,
+                    )
+                    logger.info(
+                        "📦 Saved checkpoint → %s (task=%s)", ckpt_path, task,
+                    )
+                    trainer.model = None
+                    trainers[task] = None
+                    del trainer
+                    gc.collect()
         if args.mode in ("infer", "both"):
             logger.info("🧪 Running FULL TruthLens pipeline")
             model_version = getattr(getattr(config, "model", object()), "version", config.model.encoder)

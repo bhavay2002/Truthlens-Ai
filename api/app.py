@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+# TOKENIZERS-FORK-FIX: must be set BEFORE ``transformers`` is imported.
+# See main.py for the full rationale.
+import os
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 import logging
 from pathlib import Path
 from typing import Any, List, Optional
