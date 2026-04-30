@@ -61,14 +61,17 @@ training:
 
 optimizer:
   name: "adamw"
-  # LR-LOWERED-V2: halved again from 1e-5 → 5e-6. With grad_accum=4
-  # the effective batch is ~4× larger, which would normally argue for
-  # a HIGHER LR (linear scaling rule); we go the other way because the
-  # observed grad-norm spikes (9 → 47 → 85 → 159) prove the loss
-  # surface is too sharp at the current LR for the multitask gradient
-  # mix. Halving the LR is the cheapest way to stop the spikes without
-  # changing the optimisation algorithm.
-  lr: 5e-6
+  # LR-LOWERED-V3: halved AGAIN from 5e-6 → 2.5e-6. The previous
+  # 5e-6 + grad_accum=4 + clip=1.0 + cosine + EMA-alpha=0.05 stack
+  # damped the high-frequency oscillations but the per-step grad
+  # norm was still cycling 178 → 227 → 365 → 288 → 256 → 184. Norms
+  # >300 are deep in "loss-surface too sharp for current LR"
+  # territory, so we halve once more. Empirically the right LR for
+  # this multitask mix lives somewhere between 1e-6 and 5e-6 — this
+  # is the next bisection step. If grad norms still cycle >100 after
+  # this, the next lever is per-task gradient balancing (GradNorm /
+  # PCGrad), not another LR cut.
+  lr: 2.5e-6
   weight_decay: 0.01
 
 scheduler:
@@ -161,11 +164,23 @@ tasks:
 # read this same dict so the rebalancing applies to BOTH the per-task
 # loss multiplier AND the per-task batch sampling probability.
 task_weights:
-  emotion: 2.0
+  # TASK-WEIGHT-REBALANCE: lowered emotion 2.0 → 1.5. At 2.0 the
+  # multilabel-BCE emotion head was producing the largest single-task
+  # gradient contribution every step, dominating the multitask
+  # gradient mix and driving the observed >300 grad-norm spikes.
+  # 1.5 keeps emotion as the most-weighted task (it is the hardest /
+  # most-imbalanced label space) but stops it from drowning out the
+  # other heads' gradient signal.
+  emotion: 1.5
   ideology: 0.7
   narrative: 1.0
   bias: 1.0
-  narrative_frame: 1.5
+  # TASK-WEIGHT-REBALANCE: lowered narrative_frame 1.5 → 1.2 in the
+  # same spirit as the emotion change above. narrative_frame is also
+  # multilabel and was the second-largest contributor to the
+  # gradient-norm spikes. 1.2 still flags it as "harder than baseline"
+  # without amplifying its gradient noise into the shared backbone.
+  narrative_frame: 1.2
   propaganda: 0.8
 
 # =========================================================

@@ -559,6 +559,34 @@ class TrainingStep:
 
             self.optimizer.zero_grad(set_to_none=True)
 
+        else:
+            # GRAD-LOG-EVERY-STEP: on accumulation micro-batches the
+            # ``if should_step`` branch above is skipped and the
+            # ``train/grad_norm`` log key would be ``None`` — i.e. for
+            # ``grad_accum=4`` we'd be flying blind on 3 of every 4
+            # backward passes. Measure the running L2 norm of the
+            # currently-accumulated ``.grad`` tensors *without*
+            # mutating them (no clip, no zero, no unscale) so the per-
+            # step log line always carries a real number. Two caveats
+            # worth knowing about the value:
+            #   (a) it's the *partial* accumulated norm (after K of N
+            #       micro-batches), not the full per-step norm — it
+            #       monotonically grows toward the should_step value.
+            #   (b) under AMP the ``.grad`` tensors here are still
+            #       loss-scaled (we deliberately don't ``unscale_`` on
+            #       non-step micro-batches because that flag is reset
+            #       only by ``scaler.update`` which runs on step). We
+            #       divide by the current scale to put the logged
+            #       value on the same scale as the should_step
+            #       grad_norm above, so the two are directly
+            #       comparable in dashboards.
+            partial = compute_grad_norm(self.model)
+            if self.use_amp:
+                scale = float(self.scaler.get_scale())
+                if scale > 0.0:
+                    partial = partial / scale
+            grad_norm = float(partial)
+
         # -------------------------
         # THROUGHPUT
         # -------------------------
