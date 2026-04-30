@@ -180,7 +180,22 @@ class TrainingStep:
         except StopIteration:
             model_device = self.device
 
-        if model_device != self.device:
+        # GPU-1b: ``torch.device("cuda") != torch.device("cuda:0")`` returns
+        # True even though both refer to the same physical device — the
+        # equality check is index-strict. After ``model.to("cuda")`` PyTorch
+        # always resolves params to the indexed form (``cuda:0``), so the
+        # naive ``!=`` comparison fired a false-positive "stale parameter
+        # refs" warning on EVERY single trainer construction and triggered
+        # an unnecessary in-place re-move. Compare on type + index, treating
+        # ``index is None`` as "any index of this type".
+        def _same_device(a: torch.device, b: torch.device) -> bool:
+            if a.type != b.type:
+                return False
+            if a.index is None or b.index is None:
+                return True
+            return a.index == b.index
+
+        if not _same_device(model_device, self.device):
             logger.warning(
                 "GPU-1: TrainingStep received model on %s but expected %s; "
                 "falling back to in-place move (optimizer may hold stale "
@@ -190,6 +205,23 @@ class TrainingStep:
                 self.device,
             )
             self.model.to(self.device)
+
+        # GPU-3: the loss module wraps ``nn.CrossEntropyLoss(weight=...)`` /
+        # ``nn.BCEWithLogitsLoss(pos_weight=...)`` whose ``weight`` /
+        # ``pos_weight`` are registered as buffers on the loss module —
+        # they only move device when ``.to(device)`` is called on the parent
+        # module. The loss-balancing pipeline (``training.loss_balancer``
+        # → ``compute_class_weights`` / ``compute_pos_weight``) constructs
+        # those tensors on CPU and nobody downstream ever moves them. With
+        # the model on CUDA and the loss buffers on CPU, the very first
+        # forward pass crashes with the classic "Expected all tensors to be
+        # on the same device, but found cuda:0 and cpu". Move the loss
+        # module here — the same place we validate the model device — so
+        # the buffers track the model. Safe in the no-buffer case (it's a
+        # no-op when there are no class/pos weights).
+        loss_module = getattr(self.loss_engine, "loss_module", None)
+        if isinstance(loss_module, nn.Module):
+            loss_module.to(self.device)
 
         self.use_amp = config.use_mixed_precision and self.device.type == "cuda"
         # CFG-3: resolve amp_dtype string → torch.dtype once.  bf16 does
