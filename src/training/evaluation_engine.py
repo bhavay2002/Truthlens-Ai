@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from typing import Dict, Any, Optional
+from dataclasses import dataclass, field
+from typing import Dict, Any, List, Optional
 
 import torch
 import torch.nn as nn
@@ -23,6 +23,22 @@ class EvaluationConfig:
     device: Optional[str] = None
     ignore_index: int = -100
     threshold: float = 0.5
+
+    # EVAL-MULTILABEL-SLICE: Per-task surviving multilabel column indices,
+    # identical contract to ``LossEngineConfig.valid_label_indices``. When
+    # the loss-balancer drops degenerate columns from the train split (e.g.
+    # emotion: 11 kept of 20), the dataset emits labels of shape
+    # ``[B, K_kept]`` while the model head still emits full-width logits of
+    # shape ``[B, C_full]``. The training loss path handles this by slicing
+    # logits via ``TaskLossRouter._multilabel_loss`` (lines 179-190 of
+    # ``src/models/loss/task_loss_router.py``); without the same slicing
+    # here, the multilabel evaluator hits
+    #   ``IndexError: The shape of the mask [B, K_kept]
+    #     does not match tensor [B, C_full]``
+    # at ``preds = preds[mask]`` on the very first val batch. ``None`` (the
+    # default) preserves the original full-width behaviour for callers /
+    # tasks that don't drop columns.
+    valid_label_indices: Optional[Dict[str, List[int]]] = None
 
 
 # =========================================================
@@ -311,7 +327,56 @@ class EvaluationEngine:
 
             elif ttype == "multilabel":
 
+                # EVAL-MULTILABEL-SLICE: when the loss-balancer dropped
+                # degenerate columns from the train split, ``labels`` here
+                # has shape ``[B, K_kept]`` (from
+                # ``MultiLabelDataset(valid_label_indices=…)``) while
+                # ``logits`` is still the head's full ``[B, C_full]``.
+                # Slice logits down to the same surviving columns so
+                # ``preds[mask]`` doesn't crash with
+                #   ``IndexError: shape of the mask [B, K_kept] does not
+                #     match tensor [B, C_full]``.
+                # This mirrors ``TaskLossRouter._multilabel_loss``
+                # (src/models/loss/task_loss_router.py:179-190) so the
+                # evaluation slicing can never silently disagree with the
+                # training loss slicing — both consult the same per-task
+                # ``valid_label_indices`` map produced once on the train
+                # split by ``training.loss_balancer.plan_for_dataframe``.
+                valid_idx = (
+                    (self.config.valid_label_indices or {}).get(task)
+                )
+                if (
+                    valid_idx is not None
+                    and len(valid_idx) != logits.shape[-1]
+                ):
+                    if logits.shape[-1] < max(valid_idx) + 1:
+                        raise ValueError(
+                            f"{task}: valid_label_indices reference column "
+                            f"{max(valid_idx)} but logits have width "
+                            f"{logits.shape[-1]}"
+                        )
+                    idx_t = torch.as_tensor(
+                        valid_idx, dtype=torch.long, device=logits.device,
+                    )
+                    logits = logits.index_select(-1, idx_t)
+
                 preds = (torch.sigmoid(logits) > self.config.threshold).int()
+
+                # Surface a clear error if shapes still disagree (e.g. a
+                # caller forgot to pass ``valid_label_indices`` to the
+                # EvaluationConfig but the dataset is dropping columns).
+                # Without this guard the next line crashes with the
+                # opaque PyTorch ``shape of the mask … does not match
+                # tensor …`` message that buries the real cause.
+                if preds.shape != labels.shape:
+                    raise ValueError(
+                        f"{task}: multilabel eval shape mismatch — "
+                        f"preds {tuple(preds.shape)} vs labels "
+                        f"{tuple(labels.shape)}. If the loss-balancer "
+                        f"dropped degenerate columns, pass "
+                        f"valid_label_indices={{'{task}': […]}} into "
+                        f"EvaluationConfig (mirrors LossEngineConfig)."
+                    )
 
                 mask = labels != self.config.ignore_index
                 preds = preds[mask]

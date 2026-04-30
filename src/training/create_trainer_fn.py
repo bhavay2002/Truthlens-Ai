@@ -357,6 +357,17 @@ def create_trainer_fn(
         EvaluationConfig(
             task_types={task: task_type},
             device=device,
+            # EVAL-MULTILABEL-SLICE: pass the same per-task surviving
+            # column indices the LossEngine got, so the multilabel
+            # evaluator slices the model's full-width logits down to
+            # the dataset's reduced label width. Without this the val
+            # loop crashes on the first batch with "shape of the mask
+            # [B, K_kept] does not match tensor [B, C_full]" once the
+            # loss-balancer drops any degenerate column. ``None`` keeps
+            # the original full-width behaviour for tasks that don't
+            # drop columns. ``valid_idx_map`` is built earlier in this
+            # function alongside the LossEngineConfig wiring.
+            valid_label_indices=valid_idx_map or None,
         )
     )
 
