@@ -56,6 +56,10 @@ class ModelConfig:
     encoder: str
     hidden_dim: int
     dropout: float
+    gradient_checkpointing: bool = False
+    flash_attention: bool = True
+    torch_compile: bool = False
+    compile_mode: str = "default"
 
 
 @dataclass(frozen=True)

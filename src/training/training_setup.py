@@ -28,6 +28,13 @@ class TrainingSetupConfig:
     # Performance
     cudnn_benchmark: bool = True
 
+    # Compilation
+    use_compile: bool = True
+    compile_mode: str = "reduce-overhead"   # "default" | "reduce-overhead" | "max-autotune"
+
+    # Gradient checkpointing
+    use_gradient_checkpointing: bool = True
+
     # Safety
     run_sanity_check: bool = True
     detect_anomaly: bool = False
@@ -217,7 +224,11 @@ def _compute_grad_norm(model: torch.nn.Module) -> float:
 # MODEL OPTIMIZATION (OPTIONAL)
 # =========================================================
 
-def optimize_model(model: torch.nn.Module) -> torch.nn.Module:
+def optimize_model(
+    model: torch.nn.Module,
+    *,
+    config: Optional["TrainingSetupConfig"] = None,
+) -> torch.nn.Module:
     """
     Apply optional performance optimizations.
 
@@ -229,28 +240,44 @@ def optimize_model(model: torch.nn.Module) -> torch.nn.Module:
     The Trainer enforces this order: ``optimize_model`` runs in
     ``__init__`` before ``self.distributed.wrap_model(self.model)`` is
     called. Callers using these helpers directly must do the same.
+
+    Parameters
+    ----------
+    model:
+        The model to optimize.
+    config:
+        Optional ``TrainingSetupConfig``. When provided, ``use_compile``,
+        ``compile_mode``, and ``use_gradient_checkpointing`` are read from
+        it. Falls back to safe defaults when ``None``.
     """
+
+    use_compile = config.use_compile if config is not None else True
+    compile_mode = config.compile_mode if config is not None else "reduce-overhead"
+    use_gc = config.use_gradient_checkpointing if config is not None else True
 
     # PERF-3: ``torch.compile`` adds Dynamo tracing overhead with no payoff
     # on CPU (and on the Replit dev container in particular it slows training
-    # by ~1.2-2×). The original ``except Exception`` also silently swallowed
-    # legitimate compile errors, hiding regressions. Gate on CUDA and surface
-    # failures at WARNING level so problems are visible.
-    if torch.cuda.is_available():
+    # by ~1.2-2×). Gate on CUDA and surface failures at WARNING level so
+    # problems are visible.
+    if use_compile and torch.cuda.is_available():
         try:
-            model = torch.compile(model, mode="reduce-overhead")
-            logger.info("Model compiled with torch.compile (mode=reduce-overhead)")
+            model = torch.compile(model, mode=compile_mode)
+            logger.info("Model compiled with torch.compile (mode=%s)", compile_mode)
         except Exception as e:
             logger.warning("torch.compile failed: %s", e)
     else:
-        logger.info("Skipping torch.compile (CPU device)")
+        reason = "CPU device" if not torch.cuda.is_available() else "use_compile=False"
+        logger.info("Skipping torch.compile (%s)", reason)
 
     # gradient checkpointing
-    try:
-        if hasattr(model, "gradient_checkpointing_enable"):
-            model.gradient_checkpointing_enable()
-            logger.info("Gradient checkpointing enabled")
-    except Exception:
-        logger.debug("Gradient checkpointing skipped")
+    if use_gc:
+        try:
+            if hasattr(model, "gradient_checkpointing_enable"):
+                model.gradient_checkpointing_enable()
+                logger.info("Gradient checkpointing enabled")
+        except Exception:
+            logger.debug("Gradient checkpointing skipped")
+    else:
+        logger.info("Gradient checkpointing disabled via config")
 
     return model

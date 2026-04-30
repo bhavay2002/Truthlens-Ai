@@ -129,7 +129,7 @@ class Trainer:
 
         self.device = setup_runtime(self.setup_cfg)
 
-        self.model = optimize_model(self.model)
+        self.model = optimize_model(self.model, config=self.setup_cfg)
 
         # GPU-1: the model is moved to its final device EXACTLY ONCE in
         # ``create_trainer_fn`` BEFORE ``build_optimizer`` runs, so that

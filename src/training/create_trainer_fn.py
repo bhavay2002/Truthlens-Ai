@@ -12,6 +12,7 @@ from src.models.optimization.lr_scheduler import build_scheduler
 from src.data_processing.dataloader_factory import build_dataloader, DataLoaderConfig
 from src.data_processing.dataset_factory import build_dataset
 
+from .training_setup import TrainingSetupConfig
 from .training_step import TrainingStep, TrainingStepConfig
 from .monitor_engine import MonitoringEngine
 from .experiment_tracker import ExperimentTracker
@@ -370,6 +371,15 @@ def create_trainer_fn(
     # TRAINER
     # =====================================================
 
+    setup_cfg = TrainingSetupConfig(
+        use_amp=bool(params.get("amp", True)),
+        amp_dtype=str(params.get("amp_dtype", "bf16")),
+        allow_tf32=bool(params.get("allow_tf32", True)),
+        use_compile=bool(params.get("use_compile", True)),
+        compile_mode=str(params.get("compile_mode", "reduce-overhead")),
+        use_gradient_checkpointing=bool(params.get("gradient_checkpointing", True)),
+    )
+
     trainer = Trainer(
         config_path=params.get("config_path", ""),
         model=model,
@@ -383,6 +393,7 @@ def create_trainer_fn(
         monitor_metric=params.get("monitor_metric", "val_loss"),
         maximize_metric=params.get("maximize_metric", False),
         params_override=params,  # BUG-9: thread Optuna-suggested epochs through
+        setup_config=setup_cfg,
     )
 
     logger.info(

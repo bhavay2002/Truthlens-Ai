@@ -122,6 +122,16 @@ def main():
                         "tokenizer": tokenizer,
                         "model_name": config.model.encoder,
                         "dropout": float(config.model.dropout),
+                        # GPU performance settings from config.yaml model section
+                        "gradient_checkpointing": bool(config.model.gradient_checkpointing),
+                        "use_compile": bool(config.model.torch_compile),
+                        "compile_mode": str(config.model.compile_mode),
+                        # Precision settings from config.yaml precision section
+                        "amp": bool(config.precision.use_amp),
+                        "amp_dtype": str(config.precision.amp_dtype),
+                        "allow_tf32": bool(config.precision.allow_tf32),
+                        # Device: prefer CUDA if available
+                        "device": "cuda" if torch.cuda.is_available() else "cpu",
                     },
                 )
                 trainers[task] = trainer

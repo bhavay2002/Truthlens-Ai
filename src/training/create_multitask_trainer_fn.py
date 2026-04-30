@@ -106,6 +106,7 @@ from src.training.loss_engine import LossEngine, LossEngineConfig
 from src.training.monitor_engine import MonitoringEngine
 from src.training.task_scheduler import TaskScheduler, TaskSchedulerConfig
 from src.training.trainer import Trainer
+from src.training.training_setup import TrainingSetupConfig
 from src.training.training_step import TrainingStep, TrainingStepConfig
 
 from src.utils.seed_utils import set_seed
@@ -533,6 +534,18 @@ def create_multitask_trainer_fn(
         else _get(settings, "config_path", "")
     )
 
+    # Build TrainingSetupConfig from precision + model sections of settings
+    _precision = _get(settings, "precision")
+    _model_sec = _get(settings, "model")
+    mt_setup_cfg = TrainingSetupConfig(
+        use_amp=bool(_get(_precision, "use_amp", True)),
+        amp_dtype=str(_get(_precision, "amp_dtype", "bf16")),
+        allow_tf32=bool(_get(_precision, "allow_tf32", True)),
+        use_compile=bool(_get(_model_sec, "torch_compile", True)),
+        compile_mode=str(_get(_model_sec, "compile_mode", "reduce-overhead")),
+        use_gradient_checkpointing=bool(_get(_model_sec, "gradient_checkpointing", True)),
+    )
+
     trainer = Trainer(
         config_path=resolved_config_path,
         model=model,
@@ -545,6 +558,7 @@ def create_multitask_trainer_fn(
             _get(_get(settings, "checkpoint"), "mode", "min") == "max"
         ),
         params_override={"epochs": _resolve_epochs(settings)},
+        setup_config=mt_setup_cfg,
     )
 
     logger.info(
