@@ -154,6 +154,31 @@ class NarrativeDetector(BaseModel):
         if input_ids is None or attention_mask is None:
             raise ValueError("input_ids and attention_mask must be provided")
 
+        # SHAPE-1 (mirrors the EmotionClassifier fix): if the dataset
+        # ever drops single-class narrative columns, the label tensor
+        # arrives as ``(B, K)`` with ``K < NUM_LABELS``, while the head
+        # still emits ``(B, NUM_LABELS)`` logits. The reduction to the
+        # surviving columns is handled by
+        # ``training.task_loss_router._multilabel_loss`` via
+        # ``index_select`` against ``cfg.valid_label_indices`` — passing
+        # the raw labels into ``MultiLabelHead`` would fail its strict
+        # ``labels.shape == logits.shape`` check before the loss router
+        # ever sees them, and the head's ``BCEWithLogitsLoss`` is
+        # redundant with ``LossEngine.compute`` (which reads ``logits``
+        # and ``batch["labels"]`` directly and ignores any
+        # ``outputs["loss"]`` the model emits). Validate width here and
+        # stop forwarding labels into the head.
+        if labels is not None:
+            if labels.dim() != 2:
+                raise ValueError(
+                    "labels must be a 2-D tensor of shape (batch_size, K)"
+                )
+            if labels.shape[-1] > self.NUM_LABELS:
+                raise ValueError(
+                    f"labels width {labels.shape[-1]} exceeds the model's "
+                    f"output width {self.NUM_LABELS}"
+                )
+
         encoder_outputs = self.encoder(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -164,10 +189,7 @@ class NarrativeDetector(BaseModel):
         if not pooled_output.is_contiguous():
             pooled_output = pooled_output.contiguous()
 
-        head_outputs = self.classifier_head(
-            pooled_output,
-            labels=labels,
-        )
+        head_outputs = self.classifier_head(pooled_output)
 
         outputs: Dict[str, Any] = {
             "logits": head_outputs["logits"],
@@ -181,9 +203,6 @@ class NarrativeDetector(BaseModel):
                 value = head_outputs.get(key)
                 if value is not None:
                     outputs[key] = value
-
-        if "loss" in head_outputs:
-            outputs["loss"] = head_outputs["loss"]
 
         if self.regression_head is not None:
             outputs["regression"] = self.regression_head(pooled_output)

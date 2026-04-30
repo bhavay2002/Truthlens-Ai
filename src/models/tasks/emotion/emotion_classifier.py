@@ -95,10 +95,31 @@ class EmotionClassifier(BaseModel):
         if input_ids is None or attention_mask is None:
             raise ValueError("input_ids and attention_mask must be provided")
 
-        if labels is not None and labels.shape[-1] != self.NUM_EMOTIONS:
-            raise ValueError(
-                f"labels must have shape (batch_size, {self.NUM_EMOTIONS})"
-            )
+        # SHAPE-1: ``training.loss_balancer.plan_for_dataframe`` may drop
+        # single-class (degenerate) emotion columns from the *dataset* —
+        # the resulting label tensor has shape ``(B, K)`` where ``K`` is
+        # the number of surviving columns (``K <= NUM_EMOTIONS``). The
+        # model still emits full-width ``(B, NUM_EMOTIONS)`` logits, and
+        # ``training.task_loss_router._multilabel_loss`` is the layer
+        # responsible for ``index_select``-ing those logits down to the
+        # surviving columns using ``cfg.valid_label_indices`` so the loss
+        # is computed against the reduced label set. The previous strict
+        # ``labels.shape[-1] != NUM_EMOTIONS`` check rejected exactly that
+        # legitimate path and crashed the pipeline as soon as the emotion
+        # task hit the trainer (e.g. "Dropped 9 single-class multilabel
+        # column(s) → kept 11/20" → ``ValueError: labels must have shape
+        # (batch_size, 20)``). Relax to "labels must be 2-D and not wider
+        # than the model" — the loss router enforces the exact slice.
+        if labels is not None:
+            if labels.dim() != 2:
+                raise ValueError(
+                    "labels must be a 2-D tensor of shape (batch_size, K)"
+                )
+            if labels.shape[-1] > self.NUM_EMOTIONS:
+                raise ValueError(
+                    f"labels width {labels.shape[-1]} exceeds the model's "
+                    f"output width {self.NUM_EMOTIONS}"
+                )
 
         encoder_outputs = self.encoder(
             input_ids=input_ids,
@@ -110,10 +131,18 @@ class EmotionClassifier(BaseModel):
         if not pooled_output.is_contiguous():
             pooled_output = pooled_output.contiguous()
 
-        head_outputs = self.classifier_head(
-            pooled_output,
-            labels=labels,
-        )
+        # SHAPE-1 (cont.): do NOT forward ``labels`` into the head. The
+        # head's ``BCEWithLogitsLoss`` would crash on the same shape
+        # mismatch (logits ``(B, NUM_EMOTIONS)`` vs reduced labels
+        # ``(B, K)``), and the head-computed ``loss`` is dead weight in
+        # the training loop anyway: ``LossEngine.compute`` reads
+        # ``outputs["task_logits"]`` (synthesised from ``outputs["logits"]``
+        # for single-task callers) and ``batch["labels"]`` directly,
+        # ignoring any ``outputs["loss"]`` the model might emit. Computing
+        # a second BCE inside the head was wasted work even before the
+        # column-dropping path made it crash. The external loss engine
+        # remains the single source of truth.
+        head_outputs = self.classifier_head(pooled_output)
 
         outputs: Dict[str, Any] = {
             "logits": head_outputs["logits"],
@@ -127,9 +156,6 @@ class EmotionClassifier(BaseModel):
                 value = head_outputs.get(key)
                 if value is not None:
                     outputs[key] = value
-
-        if "loss" in head_outputs:
-            outputs["loss"] = head_outputs["loss"]
 
         return outputs
 
