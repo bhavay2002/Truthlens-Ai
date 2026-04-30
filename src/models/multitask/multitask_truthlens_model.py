@@ -237,8 +237,32 @@ class MultiTaskTruthLensModel(BaseModel):
 
         # -------------------------------------------------
         # ENCODER
+        #
+        # MT-MODEL-ENC-KWARG-FIX: previously this splat the *entire*
+        # batch into the encoder — but the batch includes
+        # ``labels`` (always, set by ``src.data_processing.collate``),
+        # optional ``offset_mapping``, and any per-task auxiliary
+        # tensors. ``TransformerEncoder.forward`` has a strict
+        # ``(input_ids, attention_mask)`` signature and rejected the
+        # extra kwargs with::
+        #
+        #     TypeError: TransformerEncoder.forward() got an
+        #     unexpected keyword argument 'labels'
+        #
+        # The single-task model classes used to hide this because
+        # they happened to declare ``forward(input_ids, attention_mask,
+        # labels)``; the multi-task model is the new code path and
+        # has to filter encoder inputs itself. ``training_step``'s
+        # pre-filter still only strips ``task`` (its comment at line
+        # 411 explicitly notes the single-task ``labels``-eating
+        # behavior), so the encoder boundary is the right place.
         # -------------------------------------------------
-        encoder_outputs = self.encoder(**inputs)
+        encoder_inputs = {
+            k: inputs[k]
+            for k in ("input_ids", "attention_mask")
+            if k in inputs
+        }
+        encoder_outputs = self.encoder(**encoder_inputs)
 
         pooled = self._extract_pooled(encoder_outputs)
 
