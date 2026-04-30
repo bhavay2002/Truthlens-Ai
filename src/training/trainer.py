@@ -146,7 +146,30 @@ class Trainer:
         except StopIteration:
             model_device = self.device
 
-        if model_device != self.device:
+        # GPU-1b: ``torch.device("cuda") != torch.device("cuda:0")`` returns
+        # True even though both refer to the same physical device — the
+        # equality check is index-strict. ``setup_runtime`` returns the
+        # un-indexed form (``cuda``) while ``model.to("cuda")`` resolves the
+        # parameters to ``cuda:0``, so the naive ``!=`` comparison fired a
+        # false-positive "stale parameter refs" warning AND triggered an
+        # in-place re-move on EVERY trainer construction. That re-move
+        # happens AFTER ``build_optimizer`` ran in ``create_trainer_fn``,
+        # which is the textbook way to break optimizer state and produce
+        # the "Expected all tensors to be on the same device, but found
+        # cuda:0 and cpu" error on the first ``optimizer.step()`` (most
+        # visible on the narrative multilabel head, where multiple loss
+        # buffers + multi-class heads multiply the chance of a mixed-
+        # device graph). Compare on type + index, treating ``index is
+        # None`` as "any index of this type" — same fix already applied
+        # in ``TrainingStep.__init__``.
+        def _same_device(a: torch.device, b: torch.device) -> bool:
+            if a.type != b.type:
+                return False
+            if a.index is None or b.index is None:
+                return True
+            return a.index == b.index
+
+        if not _same_device(model_device, self.device):
             logger.warning(
                 "GPU-1: Trainer received model on %s but expected %s; "
                 "in-place moving (optimizer parameter refs may be stale). "

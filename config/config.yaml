@@ -26,7 +26,13 @@ training:
 
 optimizer:
   name: "adamw"
-  lr: 3e-5
+  # 3e-5 was triggering repeated "Gradient overflow detected" warnings
+  # under bf16 AMP on the narrative head (multilabel BCE has steeper
+  # logits than the single-class CE heads, so the same LR pushes early
+  # gradients past the dynamic-loss-scale ceiling). 2e-5 is the standard
+  # roberta-base finetune LR and stops the LR scheduler from chasing
+  # overflows down to a no-op value.
+  lr: 2e-5
   weight_decay: 0.01
 
 scheduler:
