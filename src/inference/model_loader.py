@@ -234,15 +234,16 @@ class ModelLoader:
         # fp32 — best of both worlds.
         model.to(self.device)
 
-        if (
-            self.use_torch_compile
-            and hasattr(torch, "compile")
-            and self.device.type == "cuda"
-        ):
-            try:
-                model = torch.compile(model)
-            except Exception as exc:
-                logger.warning("torch.compile failed; running eager: %s", exc)
+        # COMPILE-OFF: ``torch.compile`` removed project-wide (see
+        # ``training_setup.optimize_model`` for the full rationale).
+        # The ``use_torch_compile`` config field remains as inert
+        # back-compat plumbing for older callers; flipping it on no
+        # longer triggers compilation.
+        if self.use_torch_compile:
+            logger.info(
+                "Inference compile request ignored (COMPILE-OFF); "
+                "running in eager mode."
+            )
 
         model.eval()
         # DEV-3: ``.eval()`` only disables Dropout / BatchNorm running

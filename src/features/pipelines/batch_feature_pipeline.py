@@ -112,10 +112,11 @@ class BatchFeaturePipeline:
             except Exception:
                 logger.warning("Model device move failed")
 
-            try:
-                self.pipeline.model = torch.compile(self.pipeline.model)
-            except Exception:
-                pass
+            # COMPILE-OFF: ``torch.compile`` removed project-wide (see
+            # src/training/training_setup.py for rationale). The previous
+            # call wrapped ``self.pipeline.model`` with Dynamo tracing,
+            # which caused environment-dependent instability and spurious
+            # AMP overflow warnings. Run in eager mode.
 
         self._initialized = True
 

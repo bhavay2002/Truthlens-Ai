@@ -13,8 +13,8 @@ SEED = 42
 
 TEXT_COL = "text"
 
-# emotion_0 → emotion_19
-EMOTION_COLS = [f"emotion_{i}" for i in range(20)]
+# EMOTION-11: emotion_0 → emotion_10 (reduced from 20)
+EMOTION_COLS = [f"emotion_{i}" for i in range(11)]
 
 MIN_TEXT_LEN = 5
 
@@ -51,7 +51,7 @@ print(f"Empty text removed: {empty_text.sum()}")
 df = df[~empty_text]
 
 # ======================================================
-# 3. LABEL VALIDATION (MULTI-LABEL 20)
+# 3. LABEL VALIDATION (MULTI-LABEL 11)
 # ======================================================
 
 for col in EMOTION_COLS:

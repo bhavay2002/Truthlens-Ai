@@ -28,9 +28,15 @@ class TrainingSetupConfig:
     # Performance
     cudnn_benchmark: bool = True
 
-    # Compilation
-    use_compile: bool = True
-    compile_mode: str = "reduce-overhead"   # "default" | "reduce-overhead" | "max-autotune"
+    # COMPILE-OFF: ``torch.compile`` is fully disabled across the
+    # codebase (see ``optimize_model`` below and the matching gates in
+    # transformer_encoder, model_loader, feature_pipeline,
+    # batch_feature_pipeline). The flags below are kept as inert
+    # back-compat fields so callers that read them don't break — flipping
+    # them back to True will NOT re-enable compilation; remove the
+    # explicit no-op gates first if you want it back.
+    use_compile: bool = False
+    compile_mode: str = "default"   # inert; see COMPILE-OFF above
 
     # Gradient checkpointing
     use_gradient_checkpointing: bool = True
@@ -251,23 +257,20 @@ def optimize_model(
         it. Falls back to safe defaults when ``None``.
     """
 
-    use_compile = config.use_compile if config is not None else True
-    compile_mode = config.compile_mode if config is not None else "reduce-overhead"
     use_gc = config.use_gradient_checkpointing if config is not None else True
 
-    # PERF-3: ``torch.compile`` adds Dynamo tracing overhead with no payoff
-    # on CPU (and on the Replit dev container in particular it slows training
-    # by ~1.2-2×). Gate on CUDA and surface failures at WARNING level so
-    # problems are visible.
-    if use_compile and torch.cuda.is_available():
-        try:
-            model = torch.compile(model, mode=compile_mode)
-            logger.info("Model compiled with torch.compile (mode=%s)", compile_mode)
-        except Exception as e:
-            logger.warning("torch.compile failed: %s", e)
-    else:
-        reason = "CPU device" if not torch.cuda.is_available() else "use_compile=False"
-        logger.info("Skipping torch.compile (%s)", reason)
+    # COMPILE-OFF: model compilation is intentionally disabled. It added
+    # instability across the supported environments (Python / CUDA /
+    # kernel combinations on Replit and on user machines), surfaced as
+    # spurious "Gradient overflow detected" warnings under bf16 AMP, and
+    # was not necessary for current training stability. The previous
+    # call site has been removed; the ``use_compile`` / ``compile_mode``
+    # config fields are kept as inert back-compat plumbing (see
+    # ``TrainingSetupConfig`` above).
+    logger.info(
+        "torch.compile is disabled project-wide (COMPILE-OFF); "
+        "running model in eager mode."
+    )
 
     # gradient checkpointing
     if use_gc:

@@ -12,7 +12,10 @@ from ...config import HeadConfig, TaskConfig, MultiTaskModelConfig
 from ...encoder.encoder_config import EncoderConfig
 from ...encoder.encoder_factory import EncoderFactory
 from ...heads.multilabel_head import MultiLabelHead, MultiLabelHeadConfig
-from src.features.emotion.emotion_schema import EMOTION_LABELS
+from src.features.emotion.emotion_schema import (
+    EMOTION_LABELS,
+    NUM_EMOTION_LABELS,
+)
 
 # A1: no imports from ``src.training`` — the models package must not
 # depend on the training layer.
@@ -33,7 +36,11 @@ class EmotionClassifierConfig:
 
 class EmotionClassifier(BaseModel):
 
-    NUM_EMOTIONS = 20
+    # EMOTION-11: derived from the canonical schema (was hardcoded 20).
+    # The live count is set in src/features/emotion/emotion_schema.py;
+    # this attribute mirrors it so model code can use a class-level
+    # constant without a circular import path.
+    NUM_EMOTIONS = NUM_EMOTION_LABELS
 
     def __init__(self, config: EmotionClassifierConfig) -> None:
         super().__init__()

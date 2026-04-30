@@ -184,7 +184,7 @@ def _resolve_num_labels(name: str, task_type: str, provided: Optional[int]) -> i
     """Return ``provided`` when set, else fall back to a per-type default
     and log a loud warning. Per-task class counts are dataset-specific
     (bias=2, ideology=3, propaganda=2, narrative=3, narrative_frame=5,
-    emotion=20) so guessing from ``task_type`` alone is brittle —
+    emotion=11) so guessing from ``task_type`` alone is brittle —
     callers that hit this path almost always have a config bug.
     """
     if provided is not None:

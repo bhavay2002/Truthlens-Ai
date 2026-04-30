@@ -92,7 +92,15 @@ class TrainingStepConfig:
     # GradScaler) are both selectable via config.  Anything else falls
     # back to fp16 for backward-compat.  Mapped to ``torch.dtype`` at
     # autocast-call time so the config layer stays string-only.
-    amp_dtype: str = "fp16"
+    #
+    # AMP-DTYPE-FIX: default flipped from "fp16" to "bf16" to match the
+    # rest of the codebase (config/config.yaml `precision.amp_dtype`,
+    # TrainingSetupConfig.amp_dtype) and the user's stated bf16 setup.
+    # The previous "fp16" default would silently re-engage GradScaler
+    # for callers that didn't pass an explicit `amp_dtype=` and produce
+    # spurious "Gradient overflow detected" warnings under bf16-supported
+    # hardware (see config/config.yaml optimizer comment for context).
+    amp_dtype: str = "bf16"
 
     # N-MED-2: feature-logging cadence.  Previously hardcoded to 50
     # inside ``TrainingStep.run`` (decoupled from ``log_every_steps``).

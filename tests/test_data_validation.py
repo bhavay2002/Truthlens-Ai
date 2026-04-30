@@ -18,7 +18,8 @@ def test_validator_label_specs_range_checks() -> None:
         label_columns=["bias", "emotion"],
         label_specs={
             "bias": {"allowed_values": [0, 1]},
-            "emotion": {"min_value": 0, "max_value": 19},
+            # EMOTION-11: max valid emotion index is now 10 (was 19).
+            "emotion": {"min_value": 0, "max_value": 10},
         },
     )
 
@@ -26,7 +27,8 @@ def test_validator_label_specs_range_checks() -> None:
         {
             "text": ["sample one", "sample two"],
             "bias": [0, 2],
-            "emotion": [3, 20],
+            # 11 is out-of-range under the new 11-class schema.
+            "emotion": [3, 11],
         }
     )
 
@@ -34,4 +36,4 @@ def test_validator_label_specs_range_checks() -> None:
 
     assert not results["labels_valid"]
     assert any("Invalid values in 'bias'" in err for err in results["errors"])
-    assert any("above max_value=19 in 'emotion'" in err for err in results["errors"])
+    assert any("above max_value=10 in 'emotion'" in err for err in results["errors"])

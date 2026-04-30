@@ -9,7 +9,7 @@ Layout:
     data/train/propaganda.csv    text, propaganda_label
     data/train/frame.csv         text, CO, EC, HI, MO, RE
     data/train/narrative.csv     text, hero, villain, victim, hero_entities, villain_entities, victim_entities
-    data/train/emotion.csv       text, emotion_0..emotion_19
+    data/train/emotion.csv       text, emotion_0..emotion_10  (EMOTION-11)
     (same for val/test)
 
 The texts are unique across train/val/test to satisfy the leakage check,
@@ -158,7 +158,8 @@ def gen_narrative(texts: list[str]) -> tuple[list[dict], list[str]]:
 
 
 def gen_emotion(texts: list[str]) -> tuple[list[dict], list[str]]:
-    cols = [f"emotion_{i}" for i in range(20)]
+    # EMOTION-11: reduced from 20 → 11 columns to match the live schema.
+    cols = [f"emotion_{i}" for i in range(11)]
     rows = []
     for i, t in enumerate(texts):
         row = {"text": t}

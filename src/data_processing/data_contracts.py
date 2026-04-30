@@ -13,6 +13,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Dict, Optional
 
+# EMOTION-11: pull the live label count from the canonical schema so
+# the multilabel column list below auto-resizes if EMOTION_LABELS is
+# ever changed again. Aliased with a leading underscore because this
+# module's public API doesn't re-export it.
+from src.features.emotion.emotion_schema import (
+    NUM_EMOTION_LABELS as _NUM_EMOTION_LABELS,
+)
+
 
 # =========================================================
 # GLOBAL DEFAULTS  (CFG-D6 — single source of truth)
@@ -106,11 +114,17 @@ CONTRACTS: Dict[str, DataContract] = {
         ],
     ),
 
+    # EMOTION-11: positional column count derived from the canonical
+    # ``EMOTION_LABELS`` list (src/features/emotion/emotion_schema.py).
+    # Edit there to change the live label count; everything downstream
+    # reads from this single source of truth.
     "emotion": DataContract(
         task="emotion",
         task_type="multilabel",
         text_column="text",
-        label_columns=[f"emotion_{i}" for i in range(20)],
+        label_columns=[
+            f"emotion_{i}" for i in range(_NUM_EMOTION_LABELS)
+        ],
     ),
 }
 

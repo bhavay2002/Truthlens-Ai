@@ -59,8 +59,15 @@ model:
   dropout: 0.1
   gradient_checkpointing: true
   flash_attention: true
-  torch_compile: true
-  compile_mode: "max-autotune"
+  # COMPILE-OFF: ``torch.compile`` was removed from every call site in
+  # the codebase (see src/training/training_setup.py for the full
+  # rationale: environment instability, spurious bf16 overflow warnings,
+  # not necessary for current training stability). The fields below are
+  # kept as inert back-compat plumbing so older config readers don't
+  # crash; setting torch_compile back to true will NOT re-enable
+  # compilation — the call sites are gone.
+  torch_compile: false
+  compile_mode: "default"
 
 # =========================================================
 # TASK CONFIG (CRITICAL)
@@ -90,8 +97,14 @@ tasks:
     type: "multilabel"      # columns: CO, EC, HI, MO, RE
     num_labels: 5
   emotion:
-    type: "multilabel"      # columns: emotion_0 .. emotion_19
-    num_labels: 20
+    # EMOTION-11: reduced from 20 → 11 labels. Must match
+    # ``len(EMOTION_LABELS)`` in src/features/emotion/emotion_schema.py
+    # (the canonical source). The data contract's column list and the
+    # model head's output width both derive from that constant; this
+    # YAML field is the loss/metrics/eval surface and must be kept in
+    # sync. Update both together when changing the count.
+    type: "multilabel"      # columns: emotion_0 .. emotion_10
+    num_labels: 11
 
 task_weights:
   bias: 1.0

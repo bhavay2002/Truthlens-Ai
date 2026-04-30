@@ -42,7 +42,8 @@ REQUIRED_COLUMNS = [
     "CO", "EC", "HI", "MO", "RE",
     "hero", "villain", "victim",
     "hero_entities", "villain_entities", "victim_entities",
-    *[f"emotion_{i}" for i in range(20)],
+    # EMOTION-11: schema reduced from 20 → 11 columns.
+    *[f"emotion_{i}" for i in range(11)],
     "dataset",
 ]
 
@@ -133,12 +134,13 @@ class TestDatasetIntegrity:
             assert dataset[col].isin([0, 1]).all(), f"Non-binary values in {col}"
 
     def test_emotion_columns_are_binary(self, dataset: pd.DataFrame) -> None:
-        for i in range(20):
+        # EMOTION-11: schema reduced from 20 → 11 columns.
+        for i in range(11):
             col = f"emotion_{i}"
             assert dataset[col].isin([0, 1]).all(), f"Non-binary values in {col}"
 
     def test_each_row_has_at_least_one_emotion(self, dataset: pd.DataFrame) -> None:
-        emotion_cols = [f"emotion_{i}" for i in range(20)]
+        emotion_cols = [f"emotion_{i}" for i in range(11)]
         row_sums = dataset[emotion_cols].sum(axis=1)
         assert (row_sums >= 1).all(), "Some rows have zero emotion labels"
 

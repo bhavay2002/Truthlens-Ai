@@ -106,18 +106,26 @@ def main():
                         "epochs": int(os.environ.get(
                             "TRUTHLENS_TRAIN_EPOCHS", "1"
                         )),
-                        # Force ``num_workers=0`` for the smoke run.
-                        # Each per-task DataLoader otherwise forks
-                        # ``num_workers`` × 2 (train + val) child
-                        # processes that fork the *current* RAM image
-                        # (which by then holds previously-trained
-                        # roberta-base weights). Across 5 sequential
-                        # tasks these forks pile up, sometimes causing
-                        # the parent to be silently reaped between
-                        # tasks. Single-process loading is fast enough
-                        # for the 10-row demo data and removes the
-                        # cross-task multiprocessing fragility.
-                        "num_workers": 0,
+                        # NUM-WORKERS-FIX: respect the configured
+                        # ``data.num_workers`` from config.yaml (default 8)
+                        # instead of force-overriding to 0 for the smoke
+                        # run. The previous override was a CPU-only
+                        # safety net for a 10-row demo on Replit; on a
+                        # GPU host with the real dataset it caused a
+                        # severe DataLoader bottleneck (single-process
+                        # tokenization vs multi-worker pipelined I/O)
+                        # and GPU underutilization. Set
+                        # ``TRUTHLENS_FORCE_SINGLE_WORKER=1`` to recover
+                        # the old behaviour on memory-constrained CPU
+                        # smoke runs that fork-bomb across sequential
+                        # task trainers.
+                        "num_workers": (
+                            0
+                            if os.environ.get(
+                                "TRUTHLENS_FORCE_SINGLE_WORKER"
+                            ) == "1"
+                            else int(loader_cfg.num_workers)
+                        ),
                         "pin_memory": bool(loader_cfg.pin_memory),
                         "tokenizer": tokenizer,
                         "model_name": config.model.encoder,

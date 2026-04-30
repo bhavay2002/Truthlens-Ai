@@ -23,7 +23,7 @@ UNIFIED_REQUIRED_COLUMNS = [
     "villain_entities",
     "victim_entities",
     "dataset",
-] + [f"emotion_{idx}" for idx in range(20)]
+] + [f"emotion_{idx}" for idx in range(11)]  # EMOTION-11
 
 
 def _make_full_schema_df() -> pd.DataFrame:
@@ -47,7 +47,7 @@ def _make_full_schema_df() -> pd.DataFrame:
             "villain_entities": ["corporation"],
             "victim_entities": [""],
             "dataset": ["unit_test"],
-            **{f"emotion_{idx}": [0] for idx in range(20)},
+            **{f"emotion_{idx}": [0] for idx in range(11)},  # EMOTION-11
         }
     )
 
@@ -65,7 +65,7 @@ class TestDatasetSchema:
 
     def test_emotion_columns_are_numeric(self) -> None:
         df = _make_full_schema_df()
-        for idx in range(20):
+        for idx in range(11):  # EMOTION-11
             col = f"emotion_{idx}"
             assert pd.api.types.is_numeric_dtype(df[col]), f"{col} must be numeric"
 

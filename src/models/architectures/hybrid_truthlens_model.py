@@ -31,7 +31,7 @@ DEFAULT_TASK_NUM_LABELS: Dict[str, int] = {
     "ideology": 3,        # matches IdeologyClassifier.NUM_CLASSES
     "narrative": 3,       # hero / villain / victim role aggregation
     "narrative_frame": 5, # RE / HI / CO / MO / EC
-    "emotion": 20,        # matches EmotionClassifier.NUM_CLASSES
+    "emotion": 11,        # EMOTION-11: matches EmotionClassifier.NUM_EMOTIONS
 }
 
 

@@ -105,22 +105,18 @@ class TransformerEncoder(BaseModel):
         if freeze_encoder:
             self.freeze()
 
-        # P2.1: resolve tri-state ``use_compile`` against the resolved
-        # device. ``None`` (auto) maps to True on CUDA and False on CPU.
-        if use_compile is None:
-            resolved_use_compile = device_obj.type == "cuda"
-        else:
-            resolved_use_compile = bool(use_compile)
-
-        if resolved_use_compile and hasattr(torch, "compile"):
-            try:
-                self.encoder = torch.compile(
-                    self.encoder,
-                    mode=compile_mode,
-                )
-                logger.info("Encoder compiled (mode=%s)", compile_mode)
-            except Exception:
-                logger.warning("Compile failed", exc_info=True)
+        # COMPILE-OFF: ``torch.compile`` removed project-wide (see
+        # ``training_setup.optimize_model`` for the full rationale —
+        # instability across environments + spurious bf16 overflow
+        # warnings + not needed for current training stability). The
+        # ``use_compile`` and ``compile_mode`` parameters are still
+        # accepted by ``__init__`` for back-compat with existing callers
+        # but are now no-ops.
+        if use_compile:
+            logger.info(
+                "Encoder compile request ignored (COMPILE-OFF); "
+                "running in eager mode."
+            )
 
         self.set_device(device_obj)
 

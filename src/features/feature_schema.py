@@ -107,12 +107,15 @@ ARGUMENT_FEATURES = [
 # EMOTION
 # =========================================================
 
-EMOTION_LABELS = [
-    "neutral", "admiration", "approval", "gratitude", "annoyance", "amusement",
-    "curiosity", "disapproval", "love", "optimism", "anger", "joy", "confusion",
-    "sadness", "disappointment", "realization", "caring", "surprise",
-    "excitement", "disgust",
-]
+# EMOTION-11: import from the canonical schema (src/features/emotion/
+# emotion_schema.py) so this module can never silently disagree with
+# the live label list. The previous duplicated 20-name inline list was
+# the exact bug the user hit — feature_schema kept emitting 20 columns
+# while the rest of the pipeline had moved to 11.
+from src.features.emotion.emotion_schema import (
+    EMOTION_LABELS,
+    NUM_EMOTION_LABELS,  # noqa: F401  (re-exported for legacy callers)
+)
 
 EMOTION_FEATURES = (
     [f"emotion_{e}" for e in EMOTION_LABELS]

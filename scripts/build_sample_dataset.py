@@ -26,16 +26,20 @@ import csv
 import json
 from pathlib import Path
 
+# EMOTION-11: reduced from 20 → 11 names to match the canonical
+# schema (src/features/emotion/emotion_schema.py).
 EMOTION_NAMES = [
     "neutral", "admiration", "approval", "gratitude", "annoyance",
     "amusement", "curiosity", "disapproval", "love", "optimism",
-    "anger", "joy", "confusion", "sadness", "disappointment",
-    "realization", "caring", "surprise", "excitement", "disgust",
+    "anger",
 ]
 
 
 def emo(*active: str) -> dict[str, int]:
-    return {f"emotion_{i}": (1 if EMOTION_NAMES[i] in active else 0) for i in range(20)}
+    return {
+        f"emotion_{i}": (1 if EMOTION_NAMES[i] in active else 0)
+        for i in range(len(EMOTION_NAMES))
+    }
 
 
 def frame_flags(code: str) -> dict[str, int]:
@@ -243,7 +247,7 @@ def main() -> Path:
         "frame", "CO", "EC", "HI", "MO", "RE",
         "hero", "villain", "victim",
         "hero_entities", "villain_entities", "victim_entities",
-        *[f"emotion_{i}" for i in range(20)],
+        *[f"emotion_{i}" for i in range(len(EMOTION_NAMES))],
         "dataset",
     ]
 

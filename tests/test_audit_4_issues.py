@@ -298,7 +298,7 @@ def test_issue3_load_data_emits_no_dtype_warning(tmp_path, monkeypatch):
 def test_issue3_load_data_accepts_sparse_multitask_labels(tmp_path, monkeypatch):
     """Unified multitask rows may omit labels for unrelated tasks; load_data
     must preserve those missing values instead of failing fast."""
-    emotion_cols = [f"emotion_{i}" for i in range(20)]
+    emotion_cols = [f"emotion_{i}" for i in range(11)]  # EMOTION-11
     payload_df = pd.DataFrame(
         [
             {

@@ -2,7 +2,10 @@ import pandas as pd
 import logging
 from typing import List, Dict
 
-EXPECTED_COLS = 38
+# EMOTION-11: emotion column count reduced from 20 → 11.
+# EXPECTED_COLS = 17 non-emotion columns + N emotion columns + 1 dataset.
+_NUM_EMOTION_COLS = 11
+EXPECTED_COLS = 18 + _NUM_EMOTION_COLS  # was 38; now 29
 
 # -----------------------------
 # 🧠 SCHEMA
@@ -19,7 +22,7 @@ SCHEMA = {
     "hero_entities": "str",
     "villain_entities": "str",
     "victim_entities": "str",
-    **{f"emotion_{i}": "bin" for i in range(20)},
+    **{f"emotion_{i}": "bin" for i in range(_NUM_EMOTION_COLS)},
     "dataset": "str"
 }
 

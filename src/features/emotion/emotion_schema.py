@@ -8,14 +8,31 @@ from typing import Dict, List
 # LABELS (CANONICAL ORDER)
 # =========================================================
 
+# EMOTION-11: schema reduced from 20 → 11 labels (positional indices
+# emotion_0 .. emotion_10 in the dataset). The remaining 9 names from
+# the old 20-label set are kept below in ``_LEGACY_EMOTION_LABELS`` for
+# audit/debug only — they are NOT part of the live label space and any
+# ``emotion_<i>`` column for i >= 11 will be rejected by the data
+# contract. The polarity groups below intentionally still list the full
+# 20-name vocabulary; consumers (see ``emotion_features.py``) already
+# filter via ``if e in EMOTION_LABELS`` so dropping a name from
+# ``EMOTION_LABELS`` automatically removes it from the live polarity
+# computation without needing parallel edits here.
 EMOTION_LABELS: List[str] = [
     "neutral",
-    "admiration","approval","gratitude",
-    "annoyance","amusement","curiosity","disapproval",
-    "love","optimism","anger","joy","confusion",
-    "sadness","disappointment","realization",
-    "caring","surprise","excitement","disgust",
+    "admiration", "approval", "gratitude",
+    "annoyance", "amusement", "curiosity", "disapproval",
+    "love", "optimism", "anger",
 ]
+
+# Retained for migration/debug visibility only. DO NOT use in live code.
+_LEGACY_EMOTION_LABELS: List[str] = [
+    "joy", "confusion",
+    "sadness", "disappointment", "realization",
+    "caring", "surprise", "excitement", "disgust",
+]
+
+NUM_EMOTION_LABELS: int = len(EMOTION_LABELS)  # = 11
 
 # Fast index lookup (CRITICAL for ML)
 EMOTION_INDEX: Dict[str, int] = {

@@ -132,12 +132,10 @@ class FeaturePipeline:
 
         # Model optimization (optional)
         if self.model is not None:
-            try:
-                self.model = torch.compile(self.model)
-                logger.info("Model compiled")
-            except Exception:
-                logger.debug("torch.compile skipped")
-
+            # COMPILE-OFF: ``torch.compile`` removed project-wide (see
+            # src/training/training_setup.py for rationale). Feature
+            # pipelines now always run the underlying model in eager
+            # mode; gradient checkpointing below is unaffected.
             try:
                 if hasattr(self.model, "gradient_checkpointing_enable"):
                     self.model.gradient_checkpointing_enable()

@@ -67,7 +67,11 @@ _DEFAULT_TASK_SPEC: Dict[str, Dict[str, Any]] = {
     },
     "emotion": {
         "task_type": "multi_label",
-        "labels": [f"emotion_{i}" for i in range(20)],
+        # EMOTION-11: reduced from 20 → 11 to match the canonical
+        # schema in src/features/emotion/emotion_schema.py. Hardcoded
+        # rather than imported here to avoid a heavy import in this
+        # registry module; keep in sync with NUM_EMOTION_LABELS.
+        "labels": [f"emotion_{i}" for i in range(11)],
     },
 }
 
