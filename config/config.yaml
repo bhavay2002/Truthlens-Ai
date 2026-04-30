@@ -193,8 +193,19 @@ monitoring:
 checkpoint:
   dir: "checkpoints/"
   max_checkpoints: 3
-  monitor_metric: "val_loss"
-  mode: "min"
+  # WEIGHTED-COMPOSITE-METRIC: ``weighted_composite_score`` is a
+  # synthetic key the Trainer adds to ``val_metrics`` after every
+  # evaluation pass — it is the weighted average of the per-task
+  # ``{task}_score`` values (bias_score, ideology_score, …) using the
+  # same ``task_weights`` block defined elsewhere in this file. This
+  # makes early stopping & best-checkpoint selection track the
+  # *task-balanced* signal that matches the training objective, instead
+  # of ``val_loss`` which is dominated by the easy heads. The Trainer
+  # falls back to leaving val_metrics untouched if no per-task scores
+  # are present (e.g. single-task runs); switch back to "val_loss" /
+  # mode "min" if you ever need the legacy behaviour.
+  monitor_metric: "weighted_composite_score"
+  mode: "max"
 
 # =========================================================
 # EVALUATION

@@ -685,6 +685,16 @@ def create_multitask_trainer_fn(
             # MIN-EPOCH-EARLY-STOPPING: trainer enforces "always train at
             # least this many epochs before any patience-based stop"
             "min_epochs": _resolve_min_epochs(settings),
+            # WEIGHTED-COMPOSITE-METRIC: forward the same per-task weights
+            # already used for the loss multiplier and the batch sampler
+            # so the Trainer can synthesise a single
+            # ``weighted_composite_score`` validation metric (weighted
+            # average of the per-task ``{task}_score`` values emitted by
+            # the evaluator). Set ``checkpoint.monitor_metric`` to that
+            # key with ``mode: max`` to drive early stopping by the
+            # *task-balanced* signal instead of the easy-task-dominated
+            # ``val_loss``.
+            "task_weights": task_weights,
         },
         setup_config=mt_setup_cfg,
     )

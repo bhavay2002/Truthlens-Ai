@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import asdict
 from typing import Any, Dict, Optional
 
@@ -218,6 +219,17 @@ class Trainer:
             )
             self.min_epochs = self.epochs
 
+        # WEIGHTED-COMPOSITE-METRIC: per-task weights used to synthesise
+        # the ``weighted_composite_score`` key injected into ``val_metrics``
+        # at the end of each evaluation pass (see ``_inject_weighted_composite``
+        # below). When empty / not provided the helper is a no-op and
+        # only the raw evaluator keys (``val_loss``, ``{task}_score``)
+        # are visible to early stopping & checkpointing.
+        raw_weights = params_override.get("task_weights") or {}
+        self.task_weights: Dict[str, float] = {
+            str(k): float(v) for k, v in raw_weights.items()
+        }
+
         self.global_step = 0
         self._epoch = 0
         self.best_metric = None
@@ -315,6 +327,13 @@ class Trainer:
                         self.distributed.barrier()
 
                     val_metrics = self.evaluate()
+
+                    # WEIGHTED-COMPOSITE-METRIC: enrich the evaluator
+                    # output with a single task-balanced score before any
+                    # downstream consumer (early stopping, checkpoint,
+                    # tracker) reads it. Mutates ``val_metrics`` in-place
+                    # so the new key flows through unchanged.
+                    self._inject_weighted_composite(val_metrics)
 
                     metric_value = val_metrics.get(self.monitor_metric)
 
@@ -530,6 +549,73 @@ class Trainer:
         if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
             return self.model.module
         return self.model
+
+    # =====================================================
+    # WEIGHTED-COMPOSITE-METRIC
+    # =====================================================
+
+    def _inject_weighted_composite(self, val_metrics: Dict[str, Any]) -> None:
+        """Add ``weighted_composite_score`` to ``val_metrics`` in place.
+
+        Computed as the weighted average of the per-task ``{task}_score``
+        values emitted by ``EvaluationEngine``, using the same per-task
+        weights as the multitask loss (``self.task_weights``). The result
+        is normalised by the sum of weights of the tasks that *actually*
+        produced a score this run, so adding / removing a task from the
+        eval set doesn't silently rescale the metric.
+
+        No-ops when ``self.task_weights`` is empty (e.g. single-task
+        training, or callers that didn't forward the weights), so the
+        legacy behaviour is preserved for non-multitask paths.
+
+        Why this matters: ``val_loss`` on a multitask run is dominated
+        by the easy / large-dataset heads (``narrative``, ``propaganda``)
+        and stays "improving" by tiny amounts long after the hard heads
+        (``ideology``, ``narrative_frame``) have flatlined. A weighted
+        score over per-task validation scores tracks the
+        *task-balanced* signal that actually matches the training
+        objective, so early stopping fires when the *whole system*
+        stops improving — not when the loss curve looks busy.
+        """
+        if not self.task_weights:
+            return
+
+        total_weighted = 0.0
+        total_weight = 0.0
+        contributing: list[str] = []
+
+        for task, weight in self.task_weights.items():
+            key = f"{task}_score"
+            score = val_metrics.get(key)
+            # Skip tasks that didn't emit a score this eval pass (task
+            # absent from val loader, metric init failure, etc.) AND
+            # non-finite values (NaN/inf from a degenerate metric run)
+            # rather than letting them poison the composite.
+            if score is None:
+                continue
+            try:
+                score_f = float(score)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(score_f):
+                continue
+            total_weighted += score_f * weight
+            total_weight += weight
+            contributing.append(task)
+
+        if total_weight <= 0.0:
+            # Nothing to compose — leave val_metrics untouched rather
+            # than fabricate a 0.0 that would tank early stopping.
+            return
+
+        composite = total_weighted / total_weight
+        val_metrics["weighted_composite_score"] = composite
+
+        if self._is_main():
+            logger.debug(
+                "weighted_composite_score=%.4f over %d tasks: %s",
+                composite, len(contributing), contributing,
+            )
 
     def _is_main(self):
         return not self.distributed or self.distributed.is_main_process()
