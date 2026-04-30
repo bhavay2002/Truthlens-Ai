@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import dataclass
 from typing import Optional, Any, Dict
@@ -78,6 +79,19 @@ class TrainingStepConfig:
     max_grad_norm: float = 1.0
     use_mixed_precision: bool = True
     skip_nan_loss: bool = True
+
+    # EXPLOSION-WATCHDOG: pre-clip gradient L2 norm above which ``run()``
+    # emits a single ``Gradient spike detected`` warning per offending
+    # step. Independent of ``max_grad_norm`` (which silently clips); the
+    # warning is the *visibility* signal so post-convergence instability
+    # ("174 → 206 → 245 → 290 → 382 → 453") shows up loud in the trainer
+    # log instead of being hidden by the clipper. Set to ``0.0`` to
+    # disable. Default 100.0 is calibrated against the run that produced
+    # this code path: a healthy step in the post-fix-V4 regime sits
+    # well below 100, so anything ≥ 100 indicates the loss surface is
+    # locally too sharp for the current LR / weight mix and is worth
+    # surfacing to the operator.
+    spike_warn_threshold: float = 100.0
 
     # CFG-2: factor used by ``_reduce_lr`` when the spike / health detectors
     # (instrumentation engine OR monitor engine) raise ``REDUCE_LR``. Was
@@ -527,6 +541,29 @@ class TrainingStep:
                 )
             else:
                 grad_norm = compute_grad_norm(self.model)
+
+            # EXPLOSION-WATCHDOG: ``clip_grad_norm_`` returns the *pre-clip*
+            # L2 norm, so even when clipping is on we still see the true
+            # magnitude of the step the optimiser would otherwise have
+            # taken. Surface a warning whenever that pre-clip norm crosses
+            # ``spike_warn_threshold`` (default 100.0) so post-convergence
+            # instability ("174 → 206 → 245 → 290 → 382 → 453") is loud in
+            # the trainer log instead of being hidden by the silent clip.
+            # Guarded on ``> 0`` so a zero/disabled threshold is a true
+            # no-op, and on ``math.isfinite(grad_norm)`` so NaN / Inf
+            # gradients don't double-fire here when the AMP overflow path
+            # below already logs them.
+            if (
+                self.config.spike_warn_threshold > 0.0
+                and math.isfinite(grad_norm)
+                and grad_norm > self.config.spike_warn_threshold
+            ):
+                logger.warning(
+                    "Gradient spike detected (grad_norm=%.1f > %.1f) at step=%d",
+                    grad_norm,
+                    self.config.spike_warn_threshold,
+                    int(step),
+                )
 
             # MT-3: in dry-run validate forward + loss + backward only.
             # Skip the optimizer / scaler / scheduler / balancer mutations

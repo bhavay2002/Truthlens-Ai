@@ -250,6 +250,21 @@ def _resolve_spike_lr_scale(settings: Any) -> float:
     return float(val) if val is not None else 0.5
 
 
+def _resolve_spike_warn_threshold(settings: Any) -> float:
+    """EXPLOSION-WATCHDOG: pre-clip grad-norm threshold for the
+    ``Gradient spike detected`` warning emitted by ``TrainingStep.run``.
+
+    Read from ``training.spike_warn_threshold`` (default 100.0 to match
+    the audit-driven default in ``TrainingStepConfig``). Set to ``0.0``
+    in YAML to disable the warning entirely; raise it to (say) 200.0
+    if a particular run mix is intentionally noisier and the warning
+    becomes spam.
+    """
+    training = _get(settings, "training")
+    val = _get(training, "spike_warn_threshold")
+    return float(val) if val is not None else 100.0
+
+
 def _resolve_min_delta(settings: Any) -> float:
     """MIN-DELTA: floor for what counts as a validation improvement.
 
@@ -646,6 +661,11 @@ def create_multitask_trainer_fn(
             # SPIKE-LR-RELAX: forwards ``training.spike_lr_scale`` so a
             # YAML edit (e.g. 0.9) takes effect without code changes.
             spike_lr_scale=_resolve_spike_lr_scale(settings),
+            # EXPLOSION-WATCHDOG: forwards ``training.spike_warn_threshold``
+            # so the per-step ``Gradient spike detected`` warning is
+            # tunable from YAML. Default 100.0 matches
+            # ``TrainingStepConfig.spike_warn_threshold``.
+            spike_warn_threshold=_resolve_spike_warn_threshold(settings),
         ),
         device=str(device),
     )

@@ -33,13 +33,31 @@ training:
   # MIN-EPOCH-EARLY-STOPPING: tightened from 5 → 2 so the trainer
   # stops promptly once improvement stalls past min_epochs.
   early_stopping_patience: 2
+  # POST-CONVERGENCE-FIX: ``min_epochs`` raised from the implicit 1
+  # default to 4 so early stopping is free to fire from epoch 5
+  # onwards. The audit log showed every multi-task run peaks at
+  # epoch 4 (emotion 0.691, propaganda 0.96) and then enters a
+  # post-convergence instability regime where gradient norms
+  # explode (174→453) and per-task scores oscillate without true
+  # generalisation — see the EXPLOSION-WATCHDOG comments below and
+  # spike_warn_threshold in src/training/training_step.py. Combined
+  # with patience=2 + min_delta=0.003 this means the trainer commits
+  # to running at least 4 epochs, then bails after 2 consecutive
+  # epochs without a real improvement — which targets epoch 4–6 as
+  # the natural stop point.
+  min_epochs: 4
   # MIN-DELTA: a validation score must improve by AT LEAST this much
   # over the running best to count as "improved" — otherwise the
   # patience counter increments. Without it, multi-task validation noise
   # in the ±0.001 band oscillates above and below the previous best
   # forever, perpetually resetting the counter and making early stopping
-  # a no-op. 0.002 sits comfortably above the observed noise floor.
-  early_stopping_min_delta: 0.002
+  # a no-op. POST-CONVERGENCE-FIX: lifted from 0.002 → 0.003 because
+  # per-epoch noise on the weighted_composite_score was observed
+  # crossing the old 0.002 band on noise alone (0.689 ↔ 0.691 ↔ 0.689),
+  # which kept resetting the patience counter and made early stopping
+  # ineffective in the post-epoch-4 instability regime. 0.003 sits
+  # one band above the observed noise floor.
+  early_stopping_min_delta: 0.003
   # GRAD-CLIP-1: explicit hard cap on the L2 norm of the full parameter
   # gradient. ``TrainingStep`` already calls ``clip_grad_norm_`` whenever
   # this is non-zero; setting it here keeps the value tunable from YAML.
@@ -54,6 +72,18 @@ training:
   # smoother grad_accum=4 averaging instead. Set to <1.0 to bring it
   # back if you ever need it.
   spike_lr_scale: 1.0
+  # EXPLOSION-WATCHDOG: pre-clip gradient L2 norm above which
+  # ``TrainingStep.run`` logs a ``Gradient spike detected`` warning
+  # (uses the value returned by ``clip_grad_norm_`` BEFORE clipping,
+  # so it always reflects the true magnitude of the would-be step).
+  # The clipper above (``max_grad_norm``) silently caps the step;
+  # this knob is the *visibility* counterpart so post-convergence
+  # instability ("174 → 206 → 245 → 290 → 382 → 453") shows up loud
+  # in the trainer log instead of being hidden by the silent clip.
+  # Set to 0.0 to disable. Default 100.0 is calibrated against the
+  # post-fix-V4 healthy-training band (≪ 100); anything above is
+  # worth surfacing to the operator.
+  spike_warn_threshold: 100.0
 
 # =========================================================
 # OPTIMIZATION
@@ -71,7 +101,18 @@ optimizer:
   # is the next bisection step. If grad norms still cycle >100 after
   # this, the next lever is per-task gradient balancing (GradNorm /
   # PCGrad), not another LR cut.
-  lr: 2.5e-6
+  # POST-CONVERGENCE-FIX-V4: lowered another 30% (×0.7) from
+  # 2.5e-6 → 1.75e-6. Even after V3 the live training log still
+  # showed grad-norm spikes of 174 → 206 → 217 → 245 → 290 → 382 →
+  # 453 in the post-epoch-4 regime — i.e. the LR is still aggressive
+  # enough that once the model nears its optimum the curvature it
+  # sees is too sharp for the step size, so each step ricochets
+  # across the basin instead of settling. Combined with the new
+  # ``spike_warn_threshold=100`` in ``TrainingStepConfig`` and
+  # ``min_epochs=4 + patience=2 + min_delta=0.003`` early-stopping
+  # gates this should keep the model anchored near its epoch-4
+  # peak instead of wandering through stochastic fluctuation.
+  lr: 1.75e-6
   weight_decay: 0.01
 
 scheduler:
@@ -171,8 +212,25 @@ task_weights:
   # 1.5 keeps emotion as the most-weighted task (it is the hardest /
   # most-imbalanced label space) but stops it from drowning out the
   # other heads' gradient signal.
-  emotion: 1.5
-  ideology: 0.7
+  # POST-CONVERGENCE-FIX-V2 (emotion): lowered another notch
+  # 1.5 → 1.3. Emotion already converges by epoch 4 (0.691 score)
+  # and continues to dominate the gradient mix once the easier
+  # heads saturate. Trimming to 1.3 keeps it the joint-largest
+  # weight (tied with the new narrative_frame/ideology levels)
+  # but leaves room for the under-trained heads (ideology) to
+  # actually move the shared encoder.
+  emotion: 1.3
+  # POST-CONVERGENCE-FIX-V2 (ideology): raised 0.7 → 1.1 because
+  # ideology is the lagging task in the audit log (0.448 → 0.557
+  # across 6 epochs vs. propaganda already saturating at 0.96 by
+  # epoch 1). The previous 0.7 weight was actively *under-training*
+  # the hardest head — its loss contribution was small enough that
+  # the shared encoder gradient was dominated by emotion / propaganda
+  # signals that had nothing left to teach it. >1.0 flips that and
+  # makes ideology the head that drives shared-encoder updates in
+  # the late-training regime, which is exactly what the lagging
+  # learning curve calls for.
+  ideology: 1.1
   narrative: 1.0
   bias: 1.0
   # TASK-WEIGHT-REBALANCE: lowered narrative_frame 1.5 → 1.2 in the
@@ -181,7 +239,14 @@ task_weights:
   # gradient-norm spikes. 1.2 still flags it as "harder than baseline"
   # without amplifying its gradient noise into the shared backbone.
   narrative_frame: 1.2
-  propaganda: 0.8
+  # POST-CONVERGENCE-FIX-V2 (propaganda): lowered 0.8 → 0.7 because
+  # propaganda saturates earliest (val_score 0.92 at epoch 1, 0.96
+  # by epoch 4) — past that point its loss is essentially zero
+  # information for the shared encoder, so any non-trivial weight
+  # on it just adds noise. 0.7 keeps the head fine-tuning gently
+  # on top of an already-solved task without crowding the shared
+  # gradient budget that ideology / emotion still need.
+  propaganda: 0.7
 
 # =========================================================
 # LOSS
