@@ -66,10 +66,14 @@ Settings contract
   - ``settings.training.num_workers`` (or ``settings.data.num_workers``)
   - ``settings.training.device`` (default: ``cuda`` if available else ``cpu``)
   - ``settings.task_weights``             — per-task float dict.
-  - ``settings.config_path``              — optional, forwarded to
-                                            ``Trainer`` for its
-                                            ``ModelConfigLoader.load_multitask_config``
-                                            call.
+  - ``settings.config_path``              — accepted but ignored
+                                            (kept for back-compat with
+                                            older callers). The factory
+                                            no longer forwards it to
+                                            ``Trainer``; see the
+                                            ``MT-FACTORY-NOLEGACY-CFG``
+                                            comment near the Trainer
+                                            construction for rationale.
 
 ``data_bundle`` is the per-task DataFrame map:
 
@@ -201,6 +205,22 @@ def _resolve_max_grad_norm(settings: Any) -> float:
 def _resolve_epochs(settings: Any) -> int:
     training = _get(settings, "training")
     return int(_get(training, "epochs") or _get(training, "num_epochs") or 1)
+
+
+def _resolve_early_stopping_patience(settings: Any) -> int:
+    """Pull early-stopping patience from the YAML training section.
+
+    MT-FACTORY-NOLEGACY-CFG: previously this knob was read by
+    ``Trainer.__init__`` from ``self.cfg.training.early_stopping_patience``
+    where ``self.cfg`` came from ``ModelConfigLoader.load_multitask_config``
+    (a strict, *legacy* dataclass parser whose YAML schema diverged from
+    the one this factory uses). Resolve it here from the SAME settings
+    block every other knob is read from, and forward via
+    ``params_override`` so behavior is preserved without going through
+    the legacy loader.
+    """
+    training = _get(settings, "training")
+    return int(_get(training, "early_stopping_patience") or 3)
 
 
 def _resolve_task_weights(
@@ -583,12 +603,6 @@ def create_multitask_trainer_fn(
     # -----------------------------------------------------
     # 12. TRAINER
     # -----------------------------------------------------
-    resolved_config_path = (
-        config_path
-        if config_path is not None
-        else _get(settings, "config_path", "")
-    )
-
     # Build TrainingSetupConfig from precision + model sections of settings
     _precision = _get(settings, "precision")
     _model_sec = _get(settings, "model")
@@ -601,8 +615,33 @@ def create_multitask_trainer_fn(
         use_gradient_checkpointing=bool(_get(_model_sec, "gradient_checkpointing", True)),
     )
 
+    # MT-FACTORY-NOLEGACY-CFG: do NOT forward ``config_path`` to the
+    # Trainer. ``Trainer.__init__`` uses it to call the *legacy*
+    # ``ModelConfigLoader.load_multitask_config(config_path)``, whose
+    # strict per-section dataclass parser expects a different YAML
+    # schema than the one this factory reads from (e.g. legacy wants
+    # ``training.num_epochs`` while ``config/config.yaml`` declares
+    # ``training.epochs``; legacy ``MonitoringConfig`` has
+    # ``enable_drift_detection`` while our YAML has ``spike_threshold``).
+    # The legacy loader is still used by single-task callers
+    # (``model_factory.py``, ``encoder_factory.py``,
+    # ``inference/model_loader.py``) so we leave it untouched and
+    # simply skip the load here. Trainer already guards every
+    # ``self.cfg`` access with ``if self.cfg is not None`` (see N-LOW-4
+    # comments in trainer.py); the two values it would have pulled out
+    # — ``epochs`` and ``early_stopping_patience`` — are forwarded
+    # explicitly via ``params_override`` from the SAME ``settings``
+    # block this factory uses for every other knob, so behavior is
+    # preserved.
+    if config_path or _get(settings, "config_path"):
+        logger.debug(
+            "create_multitask_trainer_fn: ignoring config_path; epochs and "
+            "early_stopping_patience are forwarded from settings.training "
+            "directly via params_override."
+        )
+
     trainer = Trainer(
-        config_path=resolved_config_path,
+        config_path=None,
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
@@ -612,7 +651,10 @@ def create_multitask_trainer_fn(
         maximize_metric=(
             _get(_get(settings, "checkpoint"), "mode", "min") == "max"
         ),
-        params_override={"epochs": _resolve_epochs(settings)},
+        params_override={
+            "epochs": _resolve_epochs(settings),
+            "early_stopping_patience": _resolve_early_stopping_patience(settings),
+        },
         setup_config=mt_setup_cfg,
     )
 
