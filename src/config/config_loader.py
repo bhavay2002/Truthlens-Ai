@@ -42,6 +42,14 @@ class TrainingConfig:
     max_grad_norm: float = 1.0
     spike_lr_scale: float = 0.5
     early_stopping_min_delta: float = 0.0
+    # EXPLOSION-WATCHDOG: pre-clip gradient L2 norm above which
+    # ``TrainingStep.run`` emits a ``Gradient spike detected`` warning.
+    # Mirrors ``TrainingStepConfig.spike_warn_threshold`` and is read
+    # from ``training.spike_warn_threshold`` in ``config.yaml`` via
+    # ``_resolve_spike_warn_threshold`` in
+    # ``src/training/create_multitask_trainer_fn.py``. Default 100.0
+    # matches the audit-driven default; set to 0.0 in YAML to disable.
+    spike_warn_threshold: float = 100.0
 
 
 @dataclass(frozen=True)
