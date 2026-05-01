@@ -42,6 +42,28 @@ logger = logging.getLogger(__name__)
 
 
 # =========================================================
+# PREDICTION SHAPE VALIDATION
+# =========================================================
+
+def _validate_pred_shape(task: str, preds: np.ndarray) -> np.ndarray:
+    """Ensure preds is a 1-D integer class-index array.
+
+    Probability matrices / logit matrices are collapsed via argmax.
+    Raises ValueError with a clear message if shape cannot be resolved.
+    """
+    arr = np.asarray(preds)
+    if arr.ndim == 2:
+        logger.debug("[VALIDATE] task=%s converting preds %s → argmax", task, arr.shape)
+        arr = np.argmax(arr, axis=1)
+    if arr.ndim != 1:
+        raise ValueError(
+            f"[VALIDATE] {task}: y_pred must be 1-D after argmax but got shape {arr.shape}. "
+            "Pass class-index predictions (N,), not probabilities/logits (N, C)."
+        )
+    return arr
+
+
+# =========================================================
 # PREDICTION SERVICE PATH (BATCHED)
 # =========================================================
 
@@ -228,16 +250,40 @@ def run_evaluation_pipeline(
 
     for task in tasks:
         logger.info("[PIPELINE] task=%s", task)
-        task_preds = predictions.get(task, {})
 
-        logits = np.asarray(task_preds.get("logits")) if task_preds.get("logits") is not None else None
-        probs = np.asarray(task_preds.get("probabilities", task_preds.get("y_proba")))
-        preds = np.asarray(task_preds.get("predictions", task_preds.get("y_pred")))
-        # Defensive: if predictions were stored as a probability matrix, collapse
-        # to class indices now so evaluate() always receives a 1-D array.
+        # Support BOTH dict formats:
+        #   Nested: {task: {"predictions": ..., "probabilities": ..., "logits": ...}}
+        #   Flat:   {"bias_predictions": ..., "bias_probabilities": ..., "bias_logits": ...}
+        task_preds = predictions.get(task, {})
+        flat_pred_key = f"{task}_predictions"
+        flat_prob_key = f"{task}_probabilities"
+        flat_logits_key = f"{task}_logits"
+
+        if flat_pred_key in predictions:
+            # Flat-key format — use task-prefixed keys directly from top-level dict.
+            logits_raw = predictions.get(flat_logits_key)
+            probs_raw = predictions.get(flat_prob_key)
+            preds_raw = predictions.get(flat_pred_key)
+        else:
+            # Nested format — look inside the per-task sub-dict.
+            logits_raw = task_preds.get("logits")
+            probs_raw = task_preds.get("probabilities", task_preds.get("y_proba"))
+            preds_raw = task_preds.get("predictions", task_preds.get("y_pred"))
+
+        logits = np.asarray(logits_raw) if logits_raw is not None else None
+        probs = np.asarray(probs_raw) if probs_raw is not None else np.empty(0)
+        preds = np.asarray(preds_raw) if preds_raw is not None else np.empty(0)
+
+        # Always use class-index predictions (1-D). If probabilities or logits
+        # ended up in the preds slot, collapse them via argmax now.
         task_type_str = TASK_CONFIG.get(task, {}).get("type", "")
         if task_type_str in ("multiclass", "binary", "classification") and preds.ndim == 2:
             preds = np.argmax(preds, axis=1)
+
+        # Final shape guard — collapses any remaining 2-D array and gives a
+        # clear error if the shape still can't be resolved to 1-D.
+        preds = _validate_pred_shape(task, preds)
+        logger.debug("[PIPELINE] task=%s preds_shape=%s probs_shape=%s", task, preds.shape, probs.shape)
         y_true = np.asarray(labels[task])
 
         eval_result = evaluate(
