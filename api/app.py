@@ -38,6 +38,11 @@ from src.features.bias.bias_lexicon import compute_bias_features
 from src.features.emotion.emotion_lexicon import EmotionLexiconAnalyzer
 from src.explainability.emotion_explainer import explain_emotion
 from src.explainability.lime_explainer import explain_prediction
+from src.explainability.explainability_pipeline import (
+    run_explainability_pipeline,
+    ExplainabilityConfig,
+)
+from src.aggregation.aggregation_pipeline import AggregationPipeline
 from src.utils import ensure_non_empty_text, ensure_non_empty_text_list
 from src.utils.logging_utils import configure_logging
 from src.utils.settings import load_settings
@@ -139,6 +144,8 @@ RESULT_FORMATTER = ResultFormatter()
 REPORT_GENERATOR = ReportGenerator(
     ReportConfig(include_timestamp=True, pretty_json=False, validate_fields=True)
 )
+
+AGGREGATION_PIPELINE = AggregationPipeline()
 
 # InferenceEngine is initialised lazily so a missing model directory does not
 # crash the server at startup.
@@ -501,6 +508,37 @@ def _decode_prediction_result(prediction_result) -> tuple[float, str, float]:
     return prob, prediction, confidence
 
 
+def _heuristic_predict_fn(text: str) -> dict:
+    """Model-free fallback predict function using lexicon-based features.
+
+    Used when the ML model has not been trained yet. Combines bias score and
+    emotion intensity to produce a ``fake_probability`` estimate so that the
+    explainability pipeline (LIME, aggregation, etc.) can still run.
+    """
+    try:
+        bias = compute_bias_features(text)
+        bias_score = float(getattr(bias, "bias_score", 0.0))
+    except Exception:
+        bias_score = 0.0
+    try:
+        emo = EMOTION_ANALYZER.analyze(text)
+        emo_scores: dict = getattr(emo, "emotion_scores", {}) or {}
+        emo_intensity = (
+            sum(emo_scores.values()) / len(emo_scores) if emo_scores else 0.0
+        )
+    except Exception:
+        emo_intensity = 0.0
+
+    fake_prob = min(max(0.5 * bias_score + 0.3 * emo_intensity + 0.1, 0.05), 0.95)
+    return {
+        "fake_probability": round(fake_prob, 4),
+        "label": "FAKE" if fake_prob > 0.5 else "REAL",
+        "prediction": "FAKE" if fake_prob > 0.5 else "REAL",
+        "confidence": round(max(fake_prob, 1.0 - fake_prob), 4),
+        "source": "heuristic_fallback",
+    }
+
+
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
 @app.get("/")
@@ -513,6 +551,7 @@ def home():
             "predict": "/predict",
             "batch_predict": "/batch-predict",
             "analyze": "/analyze",
+            "explain": "/explain",
             "report": "/report",
             "inference_model_info": "/inference/model-info",
             "cache_clear": "/cache/clear",
@@ -771,8 +810,21 @@ def analyze_news(request: NewsRequest):
             return AnalysisResponse(**cached)
 
         # ── 1. Model prediction ────────────────────────────────────────────────
-        prediction_result = predict(text)
-        fake_probability, prediction, confidence = _decode_prediction_result(prediction_result)
+        # Use the ML model when available; fall back to a lexicon-based
+        # heuristic so every downstream linguistic / explainability step
+        # still runs even before the model has been trained.
+        _model_unavailable = False
+        try:
+            prediction_result = predict(text)
+            fake_probability, prediction, confidence = _decode_prediction_result(prediction_result)
+            _analyze_predict_fn = predict_batch
+        except FileNotFoundError:
+            _model_unavailable = True
+            _fallback = _heuristic_predict_fn(text)
+            fake_probability = _fallback["fake_probability"]
+            prediction = _fallback["prediction"]
+            confidence = _fallback["confidence"]
+            _analyze_predict_fn = _heuristic_predict_fn
 
         # ── 2. Bias + emotion (lexicon-based) ─────────────────────────────────
         bias_result = compute_bias_features(text)
@@ -839,11 +891,11 @@ def analyze_news(request: NewsRequest):
         }
         credibility_profile: dict = _safe_run(
             BIAS_PROFILE_BUILDER.build_profile,
-            bias_features={"bias_score": float(bias_result.bias_score)},
-            emotion_features=emotion_scores,
-            narrative_features=combined_narrative,
-            discourse_features=combined_discourse,
-            ideology_predictions=ideological,
+            bias={"bias_score": float(bias_result.bias_score)},
+            emotion=emotion_scores,
+            narrative=combined_narrative,
+            discourse=combined_discourse,
+            ideology=ideological,
         )
 
         # ── 9. Graph analysis ──────────────────────────────────────────────────
@@ -877,7 +929,7 @@ def analyze_news(request: NewsRequest):
         emotion_explanation = _safe_run(explain_emotion, request.text)
         try:
             lime_result = explain_prediction(
-                predict_batch,
+                _analyze_predict_fn,
                 request.text,
                 num_features=8,
                 num_samples=LIME_NUM_SAMPLES,
@@ -905,7 +957,7 @@ def analyze_news(request: NewsRequest):
             "emotion": {
                 "dominant_emotion": emotion_result.dominant_emotion,
                 "emotion_scores": emotion_scores,
-                "emotion_distribution": emotion_result.emotion_distribution,
+                "emotion_distribution": emotion_scores,
             },
             "narrative": {
                 "roles": narrative_roles,
@@ -962,6 +1014,123 @@ def analyze_news(request: NewsRequest):
         raise HTTPException(status_code=500, detail="Internal server error during analysis")
 
 
+@app.post("/explain")
+def explain_article(request: NewsRequest):
+    """
+    Full explainability pipeline with credibility aggregation.
+
+    Runs LIME token attribution, emotion explanation, graph-based explanation,
+    and the ExplanationAggregator end-to-end.  The aggregated token importances
+    are then fed into the TruthLens credibility AggregationPipeline to produce
+    a complete risk + credibility profile alongside the token-level explanation.
+
+    Works with or without a trained ML model — when the model is absent a
+    lexicon-based heuristic predict function is used automatically.
+    """
+    try:
+        text = ensure_non_empty_text(request.text, name="request.text")
+        logger.info("Received /explain request (text length: %d)", len(text))
+
+        # ── Choose predict_fn (ML model or heuristic fallback) ─────────────────
+        engine = _get_inference_engine()
+        if engine is not None:
+            def _model_predict(t: str) -> dict:
+                try:
+                    result = predict(t)
+                    return result if isinstance(result, dict) else {"fake_probability": float(result)}
+                except Exception:
+                    return _heuristic_predict_fn(t)
+            predict_fn = _model_predict
+            predict_source = "model"
+        else:
+            predict_fn = _heuristic_predict_fn
+            predict_source = "heuristic_fallback"
+
+        logger.info("Explainability predict_fn source: %s", predict_source)
+
+        # ── Run explainability pipeline ─────────────────────────────────────────
+        expl_config = ExplainabilityConfig(
+            enabled=True,
+            use_lime=True,
+            use_shap=False,
+            use_bias_emotion=False,
+            use_attention_rollout=False,
+            use_graph_explainer=True,
+            use_aggregation=True,
+            use_consistency=True,
+            use_explanation_metrics=True,
+            cache_enabled=False,
+        )
+
+        expl_result = run_explainability_pipeline(
+            text=text,
+            predict_fn=predict_fn,
+            config=expl_config,
+        )
+
+        # ── Credibility aggregation pipeline ────────────────────────────────────
+        bias_result = compute_bias_features(text)
+        emotion_result = EMOTION_ANALYZER.analyze(text)
+        emotion_scores: dict = getattr(emotion_result, "emotion_scores", {}) or {}
+
+        narrative_features: dict = _safe_run(NARRATIVE_CONFLICT_ANALYZER.analyze, text)
+        discourse_features: dict = _safe_run(DISCOURSE_ANALYZER.analyze, text)
+
+        credibility_profile: dict = _safe_run(
+            BIAS_PROFILE_BUILDER.build_profile,
+            bias={"bias_score": float(bias_result.bias_score)},
+            emotion=emotion_scores,
+            narrative=narrative_features,
+            discourse=discourse_features,
+            ideology={},
+        )
+
+        aggregation_result: dict = {}
+        try:
+            aggregation_result = AGGREGATION_PIPELINE.run(
+                profile=credibility_profile or {},
+                text=text,
+            )
+        except Exception as agg_err:
+            logger.warning("Credibility aggregation failed in /explain: %s", agg_err)
+
+        # ── Serialize explainability result ────────────────────────────────────
+        def _ser(obj: Any) -> Any:
+            if obj is None:
+                return None
+            if hasattr(obj, "model_dump"):
+                return obj.model_dump()
+            if hasattr(obj, "__dict__"):
+                return {k: v for k, v in obj.__dict__.items() if not k.startswith("_")}
+            return obj
+
+        base_pred = predict_fn(text)
+
+        return {
+            "text": _preview_text(text),
+            "prediction": base_pred,
+            "predict_source": predict_source,
+            "explainability": {
+                "lime": _ser(expl_result.lime_explanation),
+                "aggregated": _ser(expl_result.aggregated_explanation),
+                "consistency_metrics": expl_result.consistency_metrics,
+                "explanation_metrics": expl_result.explanation_metrics,
+                "explanation_quality_score": expl_result.explanation_quality_score,
+                "emotion_explanation": _ser(expl_result.emotion_explanation),
+                "module_failures": expl_result.module_failures,
+                "metadata": expl_result.metadata,
+            },
+            "aggregation": aggregation_result,
+        }
+
+    except ValueError as exc:
+        logger.error("Invalid /explain input: %s", exc)
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.error("Explain pipeline error: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Explainability pipeline error: {exc}")
+
+
 @app.post("/report", response_model=ReportResponse)
 def generate_report(request: NewsRequest):
     """
@@ -994,11 +1163,11 @@ def generate_report(request: NewsRequest):
 
         credibility_profile: dict = _safe_run(
             BIAS_PROFILE_BUILDER.build_profile,
-            bias_features={"bias_score": float(bias_result.bias_score)},
-            emotion_features=emotion_scores,
-            narrative_features=combined_narrative,
-            discourse_features=combined_discourse,
-            ideology_predictions={},
+            bias={"bias_score": float(bias_result.bias_score)},
+            emotion=emotion_scores,
+            narrative=combined_narrative,
+            discourse=combined_discourse,
+            ideology={},
         )
 
         credibility_score: Optional[float] = credibility_profile.get("credibility_score")
