@@ -125,9 +125,14 @@ class Predictor:
         return_structured: bool = False,
     ) -> Dict[str, Any]:
 
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
+        if attention_mask.dim() == 1:
+            attention_mask = attention_mask.unsqueeze(0)
+
         batch = {
-            "input_ids": input_ids.unsqueeze(0),
-            "attention_mask": attention_mask.unsqueeze(0),
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
         }
 
         result = self.predict_batch(batch, return_structured=return_structured)
