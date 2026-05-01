@@ -15,6 +15,22 @@ logger = logging.getLogger(__name__)
 # BASE ANALYZER (PRODUCTION GRADE)
 # =========================================================
 
+def _wrap_analyze_for_backward_compat(fn):
+    """Decorator that allows analyzer.analyze(text_str) as a backward-compat
+    shortcut.  If the first positional argument is a plain str, it is silently
+    promoted to a ``FeatureContext`` before the real implementation is invoked.
+    """
+    import functools
+
+    @functools.wraps(fn)
+    def _wrapper(self, ctx_or_text, **kwargs):
+        if isinstance(ctx_or_text, str):
+            ctx_or_text = FeatureContext(text=ctx_or_text)
+        return fn(self, ctx_or_text, **kwargs)
+
+    return _wrapper
+
+
 class BaseAnalyzer(ABC):
     """
     Abstract base class for all analyzers.
@@ -34,6 +50,14 @@ class BaseAnalyzer(ABC):
     name: str = "base"
     expected_keys: Optional[set[str]] = None
     use_cache: bool = True  # enable per-context caching
+
+    def __init_subclass__(cls, **kwargs):
+        """Automatically wrap the concrete ``analyze`` method so that passing a
+        plain string is accepted as backward-compatible shorthand for
+        ``analyze(FeatureContext(text=…))``."""
+        super().__init_subclass__(**kwargs)
+        if "analyze" in cls.__dict__:
+            cls.analyze = _wrap_analyze_for_backward_compat(cls.__dict__["analyze"])
 
     # =========================================================
     # PUBLIC API
@@ -109,6 +133,14 @@ class BaseAnalyzer(ABC):
     @abstractmethod
     def analyze(self, ctx: FeatureContext) -> Dict[str, float]:
         raise NotImplementedError
+
+    def analyze_doc(self, doc: Any) -> Dict[str, float]:
+        """Convenience method: run analysis on a pre-processed spaCy Doc.
+
+        Builds a FeatureContext from the Doc and delegates to analyze().
+        """
+        ctx = FeatureContext.from_doc(doc)
+        return self.analyze(ctx)
 
     # =========================================================
     # CONTEXT VALIDATION

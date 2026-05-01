@@ -103,12 +103,22 @@ def make_vector(
     *,
     strict: bool = False,
     safe: bool = True,
-    clip: Tuple[float, float] | None = (0.0, 1.0),
+    clip: Tuple[float, float] | None = None,
     return_metadata: bool = False,
 ) -> Any:
 
     if features is None:
         raise ValueError("features cannot be None")
+
+    # Strict mode: check for missing AND unknown keys up-front
+    if strict:
+        key_set = set(keys)
+        missing = [k for k in keys if k not in features]
+        unknown = [k for k in features if k not in key_set]
+        if missing:
+            raise ValueError(f"Missing required feature keys: {missing}")
+        if unknown:
+            raise ValueError(f"Unknown feature keys: {unknown}")
 
     # -----------------------------------------------------
     # FAST PATH (NUMPY ARRAY BUILD)
@@ -120,8 +130,6 @@ def make_vector(
     for i, k in enumerate(keys):
 
         if k not in features:
-            if strict:
-                raise ValueError(f"Missing required key: {k}")
             missing_keys.append(k)
             v = 0.0
         else:

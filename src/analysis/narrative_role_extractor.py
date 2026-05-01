@@ -163,6 +163,9 @@ class NarrativeRoleExtractor(BaseAnalyzer):
             "villain_ratio": self._safe(villain_r),
             "victim_ratio": self._safe(victim_r),
             "hero_vs_villain_balance": self._safe(hv_balance),
+            "hero_entities": float(len(hero_entities)),
+            "villain_entities": float(len(villain_entities)),
+            "victim_entities": float(len(victim_entities)),
         }
 
     # =========================================================
@@ -183,6 +186,9 @@ class NarrativeRoleExtractor(BaseAnalyzer):
             "villain_ratio": 0.0,
             "victim_ratio": 0.0,
             "hero_vs_villain_balance": 0.5,
+            "hero_entities": 0.0,
+            "villain_entities": 0.0,
+            "victim_entities": 0.0,
         }
 
 

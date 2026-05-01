@@ -34,3 +34,8 @@ dependencies = [
     "vadersentiment>=3.3,<4.0",
     "wordcloud>=1.9,<2.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]

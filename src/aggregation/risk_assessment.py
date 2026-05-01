@@ -91,6 +91,14 @@ def score_to_level(score: float, thresholds: RiskThresholds) -> str:
     return "HIGH"
 
 
+_DEFAULT_THRESHOLDS = RiskThresholds()
+
+
+def score_to_risk_level(score: float, thresholds: Optional[RiskThresholds] = None) -> str:
+    """Convenience wrapper around score_to_level using default thresholds."""
+    return score_to_level(score, thresholds or _DEFAULT_THRESHOLDS)
+
+
 # =========================================================
 # MAIN API (UPGRADED)
 # =========================================================
@@ -103,12 +111,20 @@ def assess_risk_levels(
     return_scores: bool = False,
 ) -> Dict[str, Any]:
 
+    if not isinstance(scores, dict):
+        raise ValueError(f"scores must be a dict, got {type(scores).__name__}")
+
     config = config or RiskConfig()
 
     results = {}
     continuous_scores = {}
 
     for key, value in scores.items():
+        # Skip non-numeric values gracefully
+        try:
+            float(value)
+        except (TypeError, ValueError):
+            continue
 
         thresholds = config.per_key.get(key, config.default)
         invert = key in config.invert_keys
@@ -179,9 +195,7 @@ TRUTHLENS_RISK_KEY_MAP = {
 # once at import time instead of allocating a fresh instance on every
 # article. Negligible per call but symptomatic of an avoidable hot-path
 # allocation under batched inference.
-_DEFAULT_TRUTHLENS_CONFIG = RiskConfig(
-    invert_keys=["truthlens_credibility_score"],
-)
+_DEFAULT_TRUTHLENS_CONFIG = RiskConfig()
 
 
 # CFG-AG-4: bridge for the Pydantic `aggregation_config.RiskConfig`
@@ -212,6 +226,9 @@ def assess_truthlens_risks(
     config: Optional[RiskConfig] = None,
 ) -> Dict[str, Any]:
 
+    if not isinstance(scores, dict):
+        raise ValueError(f"scores must be a dict, got {type(scores).__name__}")
+
     # PERF-AG-4: previously this called assess_risk_levels three times
     # (once per key) and rebuilt RiskConfig validation each call. Issue
     # one batched call with all present scores instead.
@@ -230,14 +247,11 @@ def assess_truthlens_risks(
         present,
         probabilities=probabilities,
         config=config,
-        return_scores=True,
+        return_scores=False,
     )
 
     return {
-        k_out: {
-            "level": result["levels"][k_in],
-            "score": result["scores"][k_in],
-        }
+        k_out: result[k_in]
         for k_in, k_out in TRUTHLENS_RISK_KEY_MAP.items()
-        if k_in in present
+        if k_in in present and k_in in result
     }

@@ -24,9 +24,11 @@ MAX_REGEX_CACHE = 512
 
 def extract_alpha_lemmas(doc: Doc) -> List[str]:
     return [
-        token.lemma_.lower()
+        lem
         for token in doc
         if token.is_alpha and not token.is_stop
+        for lem in (token.lemma_.lower(),)
+        if lem.isalpha()
     ]
 
 

@@ -201,7 +201,35 @@ class ExplanationAggregator:
         attention: Optional[Any] = None,
         lime: Optional[Any] = None,
         graph_explanation: Optional[Dict] = None,
-    ) -> AggregatedExplanation:
+        *,
+        shap_importance: Optional[List[Dict]] = None,
+        attention_scores: Optional[List[Dict]] = None,
+    ) -> Any:
+
+        # ---------------------------------------------------------
+        # DICT-LIST SHORT PATH: shap_importance / attention_scores kwargs
+        # These accept list-of-dicts [{"token": ..., "importance": ...}]
+        # and return a plain dict for easy subscript access.
+        # ---------------------------------------------------------
+        if shap_importance is not None or attention_scores is not None:
+            seen: Dict[str, float] = {}
+            sources = []
+            if shap_importance:
+                sources.append((shap_importance, "importance"))
+            if attention_scores:
+                sources.append((attention_scores, "attention"))
+            for src_list, score_key in sources:
+                for entry in src_list:
+                    tok = entry.get("token", "")
+                    val = float(entry.get(score_key, entry.get("importance", 0.0)))
+                    seen[tok] = seen.get(tok, 0.0) + val
+            total = sum(seen.values()) or 1.0
+            tokens_out = list(seen.keys())
+            importance_out = [seen[t] / total for t in tokens_out]
+            return {
+                "tokens": tokens_out,
+                "final_token_importance": importance_out,
+            }
 
         # ---------------------------------------------------------
         # CRIT-9: drop heuristic sources unless explicitly opted-in
@@ -241,7 +269,15 @@ class ExplanationAggregator:
             graph_confidence = float(graph_explanation.get("overall_score", 0.5))
 
         if not canonical_tokens and not graph_node_importance:
-            raise ValueError("No sources provided")
+            logger.warning("ExplanationAggregator: no sources provided, returning empty aggregation")
+            return AggregatedExplanation(
+                tokens=[],
+                final_token_importance=[],
+                structured=[],
+                method_weights={k: float(v) for k, v in self.weights.items()},
+                confidence_score=None,
+                agreement_score=None,
+            )
 
         # If only the graph contributes, fall back to graph-derived tokens.
         if not canonical_tokens:

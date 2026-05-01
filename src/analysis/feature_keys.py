@@ -203,6 +203,9 @@ NARRATIVE_ROLE_KEYS: Tuple[str, ...] = (
     "villain_ratio",
     "victim_ratio",
     "hero_vs_villain_balance",
+    "hero_entities",
+    "villain_entities",
+    "victim_entities",
 )
 
 

@@ -231,3 +231,70 @@ def percentile_clip(values: ArrayLike, low=1, high=99):
 def sigmoid_calibration(values: ArrayLike):
     arr = _to_numpy(values)
     return 1 / (1 + np.exp(-arr))
+
+
+# =========================================================
+# CONVENIENCE WRAPPERS (stateless, single-call)
+# =========================================================
+
+def clip_scores(
+    values: ArrayLike,
+    min_value: float = 0.0,
+    max_value: float = 1.0,
+) -> np.ndarray:
+    """Clip an array of scores to [min_value, max_value]."""
+    arr = _to_numpy(values)
+    return np.clip(arr, min_value, max_value)
+
+
+def normalize_minmax(
+    values: ArrayLike,
+    feature_range=(0.0, 1.0),
+) -> np.ndarray:
+    """Min-max normalize values into feature_range in one call."""
+    arr = _to_numpy(values)
+    if arr.size == 0:
+        raise ValueError("Input cannot be empty")
+    norm = ScoreNormalizer(method="minmax", feature_range=feature_range)
+    return norm.fit_transform(arr).astype(np.float32)
+
+
+def normalize_zscore(values: ArrayLike) -> np.ndarray:
+    """Z-score normalize values in one call."""
+    arr = _to_numpy(values)
+    if arr.size == 0:
+        return arr
+    norm = ScoreNormalizer(method="zscore", clip=False)
+    return norm.fit_transform(arr).astype(np.float32)
+
+
+def normalize_robust(values: ArrayLike) -> np.ndarray:
+    """Robust (median/IQR) normalize values in one call."""
+    arr = _to_numpy(values)
+    if arr.size == 0:
+        return arr
+    norm = ScoreNormalizer(method="robust", clip=False)
+    return norm.fit_transform(arr).astype(np.float32)
+
+
+def normalize_pipeline(
+    values: ArrayLike,
+    method: str = "minmax",
+    feature_range=(0.0, 1.0),
+    clip: Optional[bool] = None,
+) -> np.ndarray:
+    """Generic single-call normalizer — dispatches to the ScoreNormalizer.
+
+    ``clip`` defaults to True for minmax (output is already bounded) and
+    False for zscore/robust (which produce unbounded outputs by design).
+    """
+    arr = _to_numpy(values)
+    if arr.size == 0:
+        return arr
+    if clip is None:
+        clip = method == "minmax"
+    _SUPPORTED = {"minmax", "zscore", "robust", "quantile"}
+    if method not in _SUPPORTED:
+        raise ValueError(f"Unsupported normalization method: '{method}'. Choose from {sorted(_SUPPORTED)}")
+    norm = ScoreNormalizer(method=method, feature_range=feature_range, clip=clip)
+    return norm.fit_transform(arr).astype(np.float32)

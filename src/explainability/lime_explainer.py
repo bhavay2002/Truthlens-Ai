@@ -15,7 +15,10 @@ from src.explainability.common_schema import ExplanationOutput, TokenImportance
 if TYPE_CHECKING:
     from lime.lime_text import LimeTextExplainer
 else:
-    LimeTextExplainer = Any
+    try:
+        from lime.lime_text import LimeTextExplainer
+    except ImportError:
+        LimeTextExplainer = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 

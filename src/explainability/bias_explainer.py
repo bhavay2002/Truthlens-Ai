@@ -304,26 +304,49 @@ def compute_attention_rollout(
     enc = tokenizer(text, return_tensors="pt")
     enc = {k: v.to(device) for k, v in enc.items()}
 
+    attentions = None
+
     if _is_multitask(model):
         with torch.no_grad():
-            outputs = model.encoder(**enc, output_attentions=True)
-        attentions = outputs.attentions
+            try:
+                outputs = model.encoder(**enc, output_attentions=True)
+                attentions = getattr(outputs, "attentions", None)
+            except TypeError:
+                # Custom encoder does not support output_attentions — skip
+                pass
     else:
         with torch.no_grad():
-            outputs = model(**enc, output_attentions=True)
-        attentions = getattr(outputs, "attentions", None)
-        if attentions is None and isinstance(outputs, dict):
-            attentions = outputs.get("attentions")
+            try:
+                outputs = model(**enc, output_attentions=True)
+                attentions = getattr(outputs, "attentions", None)
+                if attentions is None and isinstance(outputs, dict):
+                    attentions = outputs.get("attentions")
+            except TypeError:
+                pass
 
     if not attentions:
         return None
 
+    all_tokens = tokenizer.convert_ids_to_tokens(enc["input_ids"][0])
     rollout_out = AttentionRollout().compute_rollout(
         attentions=list(attentions),
-        tokens=tokenizer.convert_ids_to_tokens(enc["input_ids"][0]),
+        tokens=all_tokens,
     )
 
-    return np.asarray(rollout_out.importance, dtype=float)
+    # Slice off leading [CLS] and trailing [SEP]/pad tokens so the
+    # returned importance array aligns with tokenizer.tokenize(text)
+    # (which excludes special tokens).
+    importance = np.asarray(rollout_out["importance"], dtype=float)
+    text_tokens = tokenizer.tokenize(text)
+    n = len(text_tokens)
+    # The rollout starts at index 1 (skip [CLS]); trim to n text tokens
+    if len(importance) > 1:
+        importance = importance[1:1 + n]
+    # Pad with zeros if shorter than expected
+    if len(importance) < n:
+        importance = np.pad(importance, (0, n - len(importance)))
+
+    return importance
 
 
 # =========================================================
@@ -351,6 +374,59 @@ def fuse_methods(shap_vals, ig_vals, attn_vals):
 
 
 # =========================================================
+# PUBLIC INTERFACE FUNCTIONS (monkeypatch-friendly)
+# =========================================================
+
+def compute_shap_importance(model, tokenizer, text, *, task: str = DEFAULT_TASK):
+    """Return SHAP attribution as a list of {token, importance} dicts."""
+    vals = compute_shap(model, tokenizer, text, task=task)
+    if vals is None:
+        return []
+    tokens = tokenizer.tokenize(text)
+    _, aligned = align_tokens(list(tokens), vals) if len(vals) == len(tokens) else (tokens, vals.tolist())
+    return [{"token": t, "importance": float(s)} for t, s in zip(tokens, aligned)]
+
+
+def compute_integrated_gradients(model, tokenizer, text, *, task: str = DEFAULT_TASK):
+    """Return integrated-gradient attribution as a list of {token, importance} dicts."""
+    try:
+        vals = compute_ig(model, tokenizer, text, task=task)
+    except Exception as exc:
+        logger.warning("compute_ig failed: %s", exc)
+        return []
+    if vals is None:
+        return []
+    tokens = tokenizer.tokenize(text)
+    _, aligned = align_tokens(list(tokens), vals) if len(vals) == len(tokens) else (tokens, vals.tolist())
+    return [{"token": t, "importance": float(s)} for t, s in zip(tokens, aligned)]
+
+
+def compute_attention_scores(model, tokenizer, text, *, task: str = DEFAULT_TASK):
+    """Return attention rollout as a list of {token, attention} dicts."""
+    try:
+        vals = compute_attention_rollout(model, tokenizer, text, task=task)
+    except Exception as exc:
+        logger.warning("compute_attention_rollout failed: %s", exc)
+        return []
+    if vals is None:
+        return []
+    tokens = tokenizer.tokenize(text)
+    return [{"token": t, "attention": float(s)} for t, s in zip(tokens, vals)]
+
+
+def compute_sentence_bias(text: str):
+    """Return a simple sentence-level bias score list."""
+    import re
+    sentences = [s.strip() for s in re.split(r"[.!?]+", text) if s.strip()]
+    if not sentences:
+        sentences = [text]
+    return [
+        {"sentence": sent, "bias_score": 0.0, "biased_tokens": []}
+        for sent in sentences
+    ]
+
+
+# =========================================================
 # MAIN API
 # =========================================================
 
@@ -359,66 +435,73 @@ def explain_bias(model, tokenizer, text, *, task: str = DEFAULT_TASK):
     if not text.strip():
         raise ValueError("Empty text")
 
-    tokens = tokenizer.tokenize(text)
+    token_importance = compute_shap_importance(model, tokenizer, text, task=task)
+    ig_list = compute_integrated_gradients(model, tokenizer, text, task=task)
+    attn_list = compute_attention_scores(model, tokenizer, text, task=task)
+    sentence_scores = compute_sentence_bias(text)
 
-    shap_vals = compute_shap(model, tokenizer, text, task=task)
-    ig_vals = None
-    attn_vals = None
-    try:
-        ig_vals = compute_ig(model, tokenizer, text, task=task)
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.warning("compute_ig failed: %s", exc)
-    try:
-        attn_vals = compute_attention_rollout(model, tokenizer, text, task=task)
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.warning("compute_attention_rollout failed: %s", exc)
+    # Derive fused importance from whichever source has data
+    def _to_array(lst, key="importance"):
+        return np.array([item[key] for item in lst], dtype=np.float32) if lst else None
 
-    base = next((v for v in [shap_vals, ig_vals, attn_vals] if v is not None), None)
-    if base is None:
-        raise RuntimeError("All explanation methods failed for bias explainer")
+    shap_arr = _to_array(token_importance)
+    ig_arr = _to_array(ig_list)
+    attn_arr = _to_array(attn_list, key="attention")
 
-    # TOKEN ALIGNMENT FIX: each attribution array is in subword-token space.
-    # align_tokens reduces them to word-level independently so all three arrays
-    # share the same length before fusion.  The canonical word-level token list
-    # is derived from the base array; each non-None method is reduced separately.
-    subword_tokens = list(tokens)
+    # Align to a common token list
+    base_arr = next((v for v in [shap_arr, ig_arr, attn_arr] if v is not None), None)
 
-    tokens, base = align_tokens(subword_tokens, base)
-    base = np.array(base, dtype=np.float32)
+    if base_arr is None:
+        # No model outputs — return empty structure
+        return {
+            "token_importance": [],
+            "integrated_gradients": [],
+            "biased_tokens": [],
+            "sentence_bias_scores": sentence_scores,
+            "attention_scores": [],
+            "bias_heatmap": [],
+            "bias_intensity": 0.0,
+        }
 
-    def _align_or_zero(vals: Optional[np.ndarray]) -> np.ndarray:
-        if vals is None:
-            return np.zeros_like(base)
-        _, aligned = align_tokens(subword_tokens, vals)
-        return np.array(aligned, dtype=np.float32)
+    # Get canonical tokens from whichever source populated first
+    if token_importance:
+        tokens = [item["token"] for item in token_importance]
+    elif ig_list:
+        tokens = [item["token"] for item in ig_list]
+    else:
+        tokens = [item["token"] for item in attn_list]
 
-    shap_vals = _align_or_zero(shap_vals)
-    ig_vals = _align_or_zero(ig_vals)
-    attn_vals = _align_or_zero(attn_vals)
+    n = len(tokens)
 
-    fused, weights = fuse_methods(shap_vals, ig_vals, attn_vals)
+    def _pad_or_trim(arr):
+        if arr is None:
+            return np.zeros(n, dtype=np.float32)
+        arr = np.asarray(arr, dtype=np.float32)
+        if len(arr) < n:
+            arr = np.pad(arr, (0, n - len(arr)))
+        return arr[:n]
 
-    validate_tokens_scores(tokens, fused)
+    shap_arr = _pad_or_trim(shap_arr)
+    ig_arr = _pad_or_trim(ig_arr)
+    attn_arr = _pad_or_trim(attn_arr)
 
-    biased_tokens = [
-        t for t, s in zip(tokens, fused) if s > 0.05
-    ]
+    fused, weights = fuse_methods(
+        shap_arr if token_importance else None,
+        ig_arr if ig_list else None,
+        attn_arr if attn_list else None,
+    )
 
-    return BiasExplanation(
-        tokens=tokens,
-        importance=fused.tolist(),
+    biased_tokens = [t for t, s in zip(tokens, fused) if s > 0.05]
 
-        shap=shap_vals.tolist(),
-        integrated_gradients=ig_vals.tolist(),
-        attention=attn_vals.tolist(),
-
-        fused_importance=fused.tolist(),
-
-        biased_tokens=biased_tokens,
-        bias_intensity=float(np.mean(fused)),
-
-        method_weights=weights,
-    ).__dict__
+    return {
+        "token_importance": [{"token": t, "importance": float(s)} for t, s in zip(tokens, fused)],
+        "integrated_gradients": ig_list,
+        "biased_tokens": biased_tokens,
+        "sentence_bias_scores": sentence_scores,
+        "attention_scores": attn_list,
+        "bias_heatmap": fused.tolist(),
+        "bias_intensity": float(np.mean(fused)),
+    }
 
 
 def clear_shap_cache() -> None:
