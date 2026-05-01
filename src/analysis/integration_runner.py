@@ -138,12 +138,21 @@ class AnalysisIntegrationRunner:
             raise ValueError("text must be a non-empty string")
 
         # Build a single FeatureContext so every analyzer shares the
-        # same spaCy doc cache and lazy-computed token state. Falls
-        # back to passing the raw string if context construction fails
-        # for any reason (keeps legacy callers working).
+        # same spaCy doc cache and lazy-computed token state.
+        # Use from_doc(mode="safe") so the "ner" and "syntax" cache
+        # slots are pre-seeded with the full-pipeline doc — the same
+        # Vocab that EmotionTargetAnalyzer's PhraseMatcher was built
+        # with. A plain FeatureContext(text=text) leaves those slots
+        # empty, forcing get_doc(..., task="ner") to load the NER-task
+        # nlp (different Vocab object) and triggering the
+        # "doc.vocab does not match PhraseMatcher vocab" warning on
+        # every article.
         from src.analysis.feature_context import FeatureContext
+        from src.analysis.spacy_loader import get_shared_nlp
         try:
-            ctx = FeatureContext(text=text)
+            nlp = get_shared_nlp("safe")
+            doc = nlp(text)
+            ctx = FeatureContext.from_doc(doc, mode="safe")
         except Exception:
             logger.exception("FeatureContext build failed; falling back to raw text")
             ctx = None

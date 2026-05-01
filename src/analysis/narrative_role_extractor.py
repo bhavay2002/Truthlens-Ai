@@ -120,12 +120,14 @@ class NarrativeRoleExtractor(BaseAnalyzer):
 
     def _resolve_entity(self, token) -> Optional[str]:
 
-        # named entity span
+        # named entity span — token.ent_start/ent_end only exist in
+        # spaCy 4+; in spaCy 3 we scan doc.ents instead.
         if token.ent_iob_ in {"B", "I"} and token.ent_type_:
-            span = token.doc[token.ent_start : token.ent_end]
-            text = span.text.lower().strip()
-            if len(text) > 2:
-                return text
+            for ent in token.doc.ents:
+                if ent.start <= token.i < ent.end:
+                    text = ent.text.lower().strip()
+                    if len(text) > 2:
+                        return text
 
         # fallback: noun/proper noun
         if token.pos_ in {"NOUN", "PROPN"}:

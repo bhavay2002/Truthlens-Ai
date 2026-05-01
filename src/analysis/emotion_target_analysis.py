@@ -66,8 +66,16 @@ class EmotionTargetAnalyzer(BaseAnalyzer):
         self.phrase_weights: Dict[Tuple[str, ...], float] = {}
 
         try:
-            from src.analysis.spacy_loader import get_task_nlp
-            nlp = get_task_nlp("ner")
+            # VOCAB-FIX: use get_shared_nlp("safe") — the same nlp
+            # instance that AnalysisPipeline/FeatureContext.from_doc use
+            # to create and seed the shared "ner" doc slot. Using
+            # get_task_nlp("ner") here created a *different* nlp instance
+            # (different disable tuple → different cache key → different
+            # Vocab object), so the "doc.vocab does not match PhraseMatcher
+            # vocab" guard in analyze() always fired and phrase matching
+            # was silently skipped on every article.
+            from src.analysis.spacy_loader import get_shared_nlp
+            nlp = get_shared_nlp("safe")
 
             self.matcher = PhraseMatcher(nlp.vocab, attr="LOWER")
             self._matcher_vocab = nlp.vocab
