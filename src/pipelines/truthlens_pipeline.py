@@ -560,6 +560,14 @@ class TruthLensPipeline:
         # owns its own forward pass via the model+tokenizer pair, so
         # we pass them through directly (no re-prediction here).
         evaluation: Optional[Dict[str, Any]] = None
+        if self.enable_evaluation and labels is None:
+            logger.warning(
+                "TruthLensPipeline: evaluation is enabled but no labels were "
+                "passed to analyze_batch(). Evaluation will be skipped and all "
+                "metrics will remain at 0.0. Pass labels=<dict> with one list "
+                "of integer labels per task, e.g. "
+                "{\"bias\": [0,1,0], \"emotion\": [2,3,1], ...}."
+            )
         if self.enable_evaluation and labels is not None and self.predictor is not None:
             try:
                 evaluation = run_evaluation_pipeline(

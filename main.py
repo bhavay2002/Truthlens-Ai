@@ -51,6 +51,19 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--enable-explainability", action="store_true")
     parser.add_argument("--enable-evaluation", action="store_true")
     parser.add_argument("--no-parallel-stages", action="store_true")
+    parser.add_argument(
+        "--labels-file",
+        type=str,
+        default=None,
+        help=(
+            "Path to a JSON file containing ground-truth labels for the "
+            "sample texts. Required for --enable-evaluation to produce real "
+            "metrics. Format: {\"bias\": [0,1,...], \"emotion\": [2,3,...], "
+            "\"propaganda\": [0,1,...], \"narrative\": [0,1,...], "
+            "\"narrative_frame\": [0,1,...], \"ideology\": [0,1,...]}. "
+            "The list length must match --num-samples."
+        ),
+    )
     return parser.parse_args()
 
 def main():
@@ -286,8 +299,27 @@ def main():
                 predictor = None
             pipeline = TruthLensPipeline(predictor=predictor, tokenizer=tokenizer, model_version=model_version, enable_explainability=args.enable_explainability, enable_evaluation=args.enable_evaluation, parallel_stages=not args.no_parallel_stages)
             sample_texts = ["The government clearly failed the people.", "This is a neutral statement.", "The heroic leader saved the nation."][: max(1, args.num_samples)]
-            batch_result = pipeline.analyze_batch(sample_texts)
+
+            # Load ground-truth labels for real evaluation metrics.
+            labels = None
+            if args.labels_file:
+                import json as _json
+                with open(args.labels_file) as _f:
+                    labels = _json.load(_f)
+                logger.info(" Labels loaded from %s", args.labels_file)
+            elif args.enable_evaluation:
+                logger.warning(
+                    " --enable-evaluation is set but no --labels-file was provided. "
+                    "Evaluation will be skipped and metrics will stay at 0.0. "
+                    "Pass --labels-file path/to/labels.json to get real metrics. "
+                    "Expected format: {\"bias\": [0,1,...], \"emotion\": [2,...], ...} "
+                    "with one integer label per task per sample."
+                )
+
+            batch_result = pipeline.analyze_batch(sample_texts, labels=labels)
             logger.info(" BATCH SUMMARY: n=%d total_time=%.3fs model_version=%s", batch_result["batch_metadata"]["n_articles"], batch_result["batch_metadata"]["total_time"], batch_result["batch_metadata"]["model_version"])
+            if batch_result.get("evaluation"):
+                logger.info(" EVALUATION: %s", batch_result["evaluation"])
             for i, result in enumerate(batch_result["articles"]):
                 logger.info(" RESULT %d:", i + 1)
                 logger.info("  scores: %s", result.get("scores"))
