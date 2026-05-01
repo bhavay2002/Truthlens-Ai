@@ -24,6 +24,7 @@ from src.models.inference.predictor import Predictor
 from src.aggregation.aggregation_pipeline import AggregationPipeline
 from src.graph.graph_pipeline import GraphPipeline, get_default_pipeline
 from src.explainability.explainability_pipeline import run_explainability_pipeline
+from src.explainability.orchestrator import ExplainabilityConfig
 from src.evaluation.evaluation_pipeline import run_evaluation_pipeline
 
 logger = logging.getLogger(__name__)
@@ -141,6 +142,7 @@ class TruthLensPipeline:
         graph_pipeline: Optional[GraphPipeline] = None,
         enable_explainability: bool = False,
         enable_evaluation: bool = False,
+        explainability_config: Optional[ExplainabilityConfig] = None,
         parallel_stages: bool = True,
         max_text_length: int = DEFAULT_MAX_TEXT_LEN,
         max_seq_length: int = DEFAULT_MAX_SEQ_LEN,
@@ -178,6 +180,7 @@ class TruthLensPipeline:
 
         self.enable_explainability = enable_explainability
         self.enable_evaluation = enable_evaluation
+        self.explainability_config = explainability_config
         self.parallel_stages = parallel_stages
         self.max_text_length = int(max_text_length)
         self.max_seq_length = int(max_seq_length)
@@ -437,6 +440,7 @@ class TruthLensPipeline:
                     predict_fn=_explain_predict_fn,
                     model=getattr(self.predictor, "model", None),
                     tokenizer=self.tokenizer,
+                    config=self.explainability_config,
                 ).model_dump()
             except Exception as exc:
                 logger.warning("Explainability failed", exc_info=True)

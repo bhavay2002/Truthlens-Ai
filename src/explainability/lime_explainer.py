@@ -186,12 +186,17 @@ def explain_prediction(
     explainer = get_explainer()
     predictor = _get_lime_predict_fn(predict_fn)
 
-    exp = explainer.explain_instance(
-        text,
-        predictor,
-        num_features=num_features,
-        num_samples=num_samples,
-    )
+    # LIME's ridge regression triggers numpy divide/invalid warnings when
+    # all perturbed predictions are identical (zero variance). Suppress here;
+    # the result is still valid (all feature weights become zero).
+    import numpy as _np
+    with _np.errstate(divide="ignore", invalid="ignore"):
+        exp = explainer.explain_instance(
+            text,
+            predictor,
+            num_features=num_features,
+            num_samples=num_samples,
+        )
 
     raw_features = exp.as_list()
 

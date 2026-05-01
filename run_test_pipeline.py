@@ -32,6 +32,7 @@ from src.config.config_loader import load_config
 from src.utils.logging_utils import configure_logging
 from src.utils.seed_utils import set_seed
 from src.pipelines.truthlens_pipeline import TruthLensPipeline
+from src.explainability.orchestrator import ExplainabilityConfig
 from src.evaluation.evaluation_pipeline import run_evaluation_pipeline
 
 CONFIG_PATH = Path("config/config.yaml")
@@ -195,7 +196,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--samples", type=int, default=3,
                    help="Number of samples to pull from each test dataset (default 3)")
     p.add_argument("--explainability", action="store_true",
-                   help="Enable explainability stage (requires trained model)")
+                   help="Enable explainability stage — fast mode (attention + bias, no LIME)")
+    p.add_argument("--full-explainability", dest="full_explainability",
+                   action="store_true",
+                   help="Enable explainability with LIME (slow, ~5 s/article) instead of attention-only")
     p.add_argument("--no-parallel", action="store_true",
                    help="Disable parallel analysis/graph stages")
     return p.parse_args()
@@ -211,7 +215,8 @@ def main() -> None:
     logger.info("TruthLens  End-to-End Test Pipeline")
     logger.info("datasets  : %s", list(DATASET_LOADERS))
     logger.info("samples   : %d per dataset", args.samples)
-    logger.info("explainability: %s", args.enable_explainability if hasattr(args, 'enable_explainability') else args.explainability)
+    _expl_mode = "full-LIME" if args.full_explainability else ("fast" if args.explainability else "off")
+    logger.info("explainability: %s", _expl_mode)
     logger.info("=" * 60)
 
     # ----------------------------------------------------------
@@ -273,16 +278,36 @@ def main() -> None:
             "Run `uv run python main.py --mode train` first.", ckpt_path
         )
 
+    _enable_expl = args.explainability or args.full_explainability
+    if _enable_expl:
+        if args.full_explainability:
+            _expl_cfg = ExplainabilityConfig(
+                use_lime=True,
+                use_shap=False,
+                use_attention_rollout=True,
+                use_bias_emotion=True,
+            )
+        else:
+            _expl_cfg = ExplainabilityConfig(
+                use_lime=False,
+                use_shap=False,
+                use_attention_rollout=True,
+                use_bias_emotion=True,
+            )
+    else:
+        _expl_cfg = None
+
     pipeline = TruthLensPipeline(
         predictor=predictor,
         tokenizer=tokenizer,
         model_version=config.model.encoder,
-        enable_explainability=args.explainability,
+        enable_explainability=_enable_expl,
         enable_evaluation=predictor is not None,
+        explainability_config=_expl_cfg,
         parallel_stages=not args.no_parallel,
     )
     logger.info("Pipeline ready  (explainability=%s  evaluation=%s  parallel=%s)",
-                args.explainability, predictor is not None, not args.no_parallel)
+                _expl_mode, predictor is not None, not args.no_parallel)
 
     # ----------------------------------------------------------
     # 3. RUN INFERENCE + ANALYSIS + AGGREGATION per dataset
@@ -365,20 +390,44 @@ def main() -> None:
     # ----------------------------------------------------------
     _hdr("5 / 6  EXPLAINABILITY")
 
+    _EXPL_METHOD_FIELDS = [
+        ("shap", "shap_explanation"),
+        ("lime", "lime_explanation"),
+        ("attention", "attention_explanation"),
+        ("propaganda", "propaganda_explanation"),
+        ("bias", "bias_explanation"),
+        ("emotion", "emotion_explanation"),
+    ]
+
     expl_count = 0
     for task, batch in dataset_results.items():
         for article in batch.get("articles", []):
             expl = article.get("explainability")
             if expl:
                 expl_count += 1
-                method_scores = expl.get("method_scores") or {}
-                logger.info("  %s | methods=%s", task, list(method_scores))
+                methods_used = [
+                    label for label, field in _EXPL_METHOD_FIELDS
+                    if expl.get(field) is not None
+                ]
+                agg = expl.get("aggregated_explanation")
+                top_tokens = []
+                if isinstance(agg, dict):
+                    top_tokens = (agg.get("tokens") or [])[:5]
+                logger.info(
+                    "  %s | methods=%s%s",
+                    task,
+                    methods_used,
+                    f"  top_tokens={top_tokens}" if top_tokens else "",
+                )
 
     if expl_count == 0:
         reason = "no trained model" if predictor is None else "explainability flag not set"
         logger.info("  No explanations generated (%s).", reason)
-        if not args.explainability:
-            logger.info("  Re-run with --explainability to enable SHAP/LIME/attention explanations.")
+        if not _enable_expl:
+            logger.info(
+                "  Re-run with --explainability (fast: attention+bias) or "
+                "--full-explainability (includes LIME, slower) to enable explanations."
+            )
 
     # ----------------------------------------------------------
     # 6. AGGREGATION SCORE SUMMARY
