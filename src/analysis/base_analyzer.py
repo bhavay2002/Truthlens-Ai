@@ -23,7 +23,7 @@ def _wrap_analyze_for_backward_compat(fn):
     import functools
 
     @functools.wraps(fn)
-    def _wrapper(self, ctx_or_text, **kwargs):
+    def _wrapper(self, ctx_or_text=None, **kwargs):
         if isinstance(ctx_or_text, str):
             ctx_or_text = FeatureContext(text=ctx_or_text)
         return fn(self, ctx_or_text, **kwargs)
