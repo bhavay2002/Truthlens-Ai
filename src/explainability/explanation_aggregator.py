@@ -166,6 +166,7 @@ class ExplanationAggregator:
         w = weights or AggregationWeights()
 
         total = w.shap + w.integrated_gradients + w.attention + w.lime + w.graph
+        total = max(total, 1e-8)
 
         self.weights = {
             "shap": w.shap / total,

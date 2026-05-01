@@ -388,6 +388,12 @@ class ExplanationMetrics:
             "insertion_score": self.insertion_score(tokens, scores, predict_fn, **common),
         }
 
+        # Sanitize raw metric values before confidence weighting.
+        raw = {
+            k: float(np.nan_to_num(v, nan=0.0, posinf=1.0, neginf=-1.0))
+            for k, v in raw.items()
+        }
+
         weighted = {
             k: self._apply_confidence(v, confidence)
             for k, v in raw.items()
@@ -398,7 +404,10 @@ class ExplanationMetrics:
         # map each confidence-weighted metric from [-1, 1] → [0, 1] via
         # (v + 1) / 2 and average. Metrics outside [-1, 1] (e.g. a large
         # insertion AUC) are clipped first so the formula stays bounded.
-        values_arr = np.clip(np.array(list(weighted.values()), dtype=float), -1.0, 1.0)
+        values_arr = np.clip(
+            np.nan_to_num(np.array(list(weighted.values()), dtype=float), nan=0.0),
+            -1.0, 1.0,
+        )
         norm_arr = (values_arr + 1.0) / 2.0
 
         result = {
