@@ -1177,18 +1177,19 @@ def generate_report(request: NewsRequest):
             article_text=text,
             title=None,
             source=None,
-            bias_analysis={
-                "bias_score": round(float(bias_result.bias_score), 4),
-                "media_bias": bias_result.media_bias,
-                "biased_tokens": bias_result.biased_tokens,
+            analysis={
+                "bias": {
+                    "bias_score": round(float(bias_result.bias_score), 4),
+                    "media_bias": bias_result.media_bias,
+                    "biased_tokens": bias_result.biased_tokens,
+                },
+                "emotion": {
+                    "dominant_emotion": emotion_result.dominant_emotion,
+                    "emotion_scores": emotion_scores,
+                },
+                "narrative": narrative_roles,
+                "credibility_score": credibility_score,
             },
-            emotion_analysis={
-                "dominant_emotion": emotion_result.dominant_emotion,
-                "emotion_scores": emotion_scores,
-            },
-            narrative_structure=narrative_roles,
-            entity_graph={},
-            credibility_score=credibility_score,
         )
 
         response_data = {
