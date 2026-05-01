@@ -105,6 +105,12 @@ def lime_predict_wrapper(
     if callable(batch_fn):
         try:
             results = batch_fn(text_list)
+            if isinstance(results, list):
+                return np.array(
+                    [[1 - _extract_fake_probability(r), _extract_fake_probability(r)]
+                     for r in results],
+                    dtype=float,
+                )
             return np.array(
                 [[1 - _extract_fake_probability(r), _extract_fake_probability(r)]
                  for r in results],
