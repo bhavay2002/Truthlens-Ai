@@ -235,6 +235,10 @@ class Evaluator:
             raise ValueError("y_pred must be provided if model is None")
 
         y_pred_arr = np.asarray(y_pred)
+        # Convert probability/logit matrices → class indices for classification tasks
+        if task_type in ("binary", "multiclass", "classification") and y_pred_arr.ndim == 2:
+            y_pred_arr = np.argmax(y_pred_arr, axis=1)
+        y_true_arr = np.asarray(y_true_arr).reshape(-1) if task_type in ("binary", "multiclass", "classification") else y_true_arr
         y_proba_arr = np.asarray(y_proba, dtype=float) if y_proba is not None else None
 
         collected = self.collector.collect(

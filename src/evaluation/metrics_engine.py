@@ -106,7 +106,13 @@ def compute_classification_metrics(
     del threshold, confidence
 
     y_true_arr = _as_1d_int_array(y_true, name="y_true")
-    y_pred_arr = _as_1d_int_array(y_pred, name="y_pred")
+
+    # Convert probability matrices / logit matrices → class indices before the
+    # 1D check so callers that pass raw softmax outputs don't crash here.
+    _y_pred = np.asarray(y_pred)
+    if _y_pred.ndim == 2:
+        _y_pred = np.argmax(_y_pred, axis=1)
+    y_pred_arr = _as_1d_int_array(_y_pred, name="y_pred")
     _check_shape_match(y_true_arr, y_pred_arr)
 
     unique_classes = np.unique(np.concatenate([y_true_arr, y_pred_arr]))
