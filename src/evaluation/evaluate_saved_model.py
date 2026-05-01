@@ -95,9 +95,15 @@ def evaluate_tasks(
         logger.info("[EVAL] task=%s", task)
         task_kwargs = {"task": task} if task in TASK_CONFIG else {}
         try:
+            raw_pred = np.asarray(preds[task])
+            # Predictions loaded from JSON may be probability matrices (N, C).
+            # Collapse to class indices so the metric layer always gets 1-D input.
+            task_type_cfg = (TASK_CONFIG.get(task) or {}).get("type", "")
+            if task_type_cfg in ("multiclass", "binary", "classification") and raw_pred.ndim == 2:
+                raw_pred = np.argmax(raw_pred, axis=1)
             results[task] = evaluate(
                 y_true=labels[task],
-                y_pred=preds[task],
+                y_pred=raw_pred,
                 y_proba=_normalize_probs_for_task(task, (pred_probs or {}).get(task)),
                 **task_kwargs,
             )
