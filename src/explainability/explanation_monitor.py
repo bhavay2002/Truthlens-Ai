@@ -70,7 +70,7 @@ class ExplanationMonitor:
     def _stack(self) -> np.ndarray:
         if not self.history:
             return np.empty((0,))
-        return np.stack(self.history)
+        return np.concatenate([arr.ravel() for arr in self.history])
 
     def mean(self) -> float:
         if not self.history:
