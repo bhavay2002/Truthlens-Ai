@@ -258,9 +258,7 @@ class TransformerEncoder(BaseModel):
         if attention_mask.device != device:
             attention_mask = attention_mask.to(device)
 
-        autocast_dtype = (
-            torch.bfloat16 if self.amp_dtype == "bf16" else torch.float16
-        )
+        autocast_dtype = torch.float16
 
         # INFERENCE-CONTRACT-FIX V7: build the kwargs once so the
         # ``input_ids`` vs ``inputs_embeds`` branch only lives in one
