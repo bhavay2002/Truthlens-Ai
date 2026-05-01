@@ -153,7 +153,20 @@ def collect_predictions(
                     task=task,
                 )
 
-            logits = out["logits"].detach().cpu().numpy()
+            # Multi-task model returns task-specific keys (e.g. "bias_logits").
+            # Fall back to the generic "logits" key for single-task checkpoints.
+            task_key = f"{task}_logits"
+            if task_key in out:
+                raw_logits = out[task_key]
+            elif "logits" in out:
+                raw_logits = out["logits"]
+            else:
+                raise KeyError(
+                    f"collect_predictions: no logits found for task '{task}'. "
+                    f"Expected '{task_key}' or 'logits'. "
+                    f"Model returned keys: {list(out.keys())}"
+                )
+            logits = raw_logits.detach().cpu().numpy()
             all_logits.append(logits)
 
     logits_arr = np.vstack(all_logits) if all_logits else np.empty((0,))
@@ -242,11 +255,15 @@ def collect_all_tasks(
                 )
                 for task in selected_tasks:
                     head_out = head_fn(hidden, task=task)
-                    logits = (
-                        head_out["logits"]
-                        if isinstance(head_out, dict)
-                        else head_out
-                    )
+                    if isinstance(head_out, dict):
+                        # Prefer task-specific key, fall back to generic "logits".
+                        task_key = f"{task}_logits"
+                        if task_key in head_out:
+                            logits = head_out[task_key]
+                        else:
+                            logits = head_out["logits"]
+                    else:
+                        logits = head_out
                     logits_buf[task].append(logits.detach().cpu().numpy())
 
     results = {}
