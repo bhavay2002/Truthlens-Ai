@@ -422,9 +422,19 @@ class TruthLensPipeline:
         t0 = time.time()
         if self.enable_explainability and self.predictor is not None:
             try:
+                def _explain_predict_fn(text: str) -> Dict[str, Any]:
+                    raw = self._predict_text(text)
+                    try:
+                        return self.predictor.build_fake_real_output(raw)
+                    except Exception:
+                        fp = raw.get("fake_probability")
+                        if fp is not None:
+                            return {"fake_probability": float(fp), "label": raw.get("label"), "confidence": raw.get("confidence")}
+                        return {"fake_probability": 0.0}
+
                 explanation = run_explainability_pipeline(
                     text=prep.normalized_text,
-                    predict_fn=self._predict_text,
+                    predict_fn=_explain_predict_fn,
                     model=getattr(self.predictor, "model", None),
                     tokenizer=self.tokenizer,
                 ).model_dump()
