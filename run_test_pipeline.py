@@ -330,41 +330,35 @@ def main() -> None:
             "  Then re-run:  uv run python run_test_pipeline.py"
         )
     else:
-        # Merge all texts + labels across every loaded task so the
-        # evaluation pipeline sees the full multi-task label matrix.
-        merged_texts: List[str] = []
-        merged_labels: Dict[str, Any] = {}
-
+        # Run evaluation once per dataset so each call gets its own texts +
+        # labels dict.  This avoids the KeyError that arose when evaluation
+        # defaulted to all TASK_CONFIG tasks but only one task had labels,
+        # and the shape mismatch from mixing datasets with different lengths.
+        t_eval_total = time.time()
         for task, texts in all_texts.items():
-            start_idx = len(merged_texts)
-            for _ in texts:
-                merged_texts.append("")
-            merged_labels[task] = all_labels[task]
-
-        # Use a representative common text list (first available dataset)
-        common_texts = next(iter(all_texts.values()))
-
-        try:
-            t_eval = time.time()
-            eval_report = run_evaluation_pipeline(
-                model=getattr(predictor, "model", None),
-                tokenizer=tokenizer,
-                texts=common_texts,
-                labels={t: all_labels[t] for t in all_texts
-                        if t in all_labels and len(all_labels[t]) == len(common_texts)},
-                enable_calibration=True,
-                enable_threshold_opt=True,
-                enable_uncertainty=True,
-                enable_error_analysis=True,
-                enable_correlation=True,
-            )
-            logger.info("Evaluation complete in %.2fs", time.time() - t_eval)
-
-            tasks_report = eval_report.get("tasks") or {}
-            for task_name, task_report in tasks_report.items():
-                _print_eval_report(task_name, task_report)
-        except Exception as exc:
-            logger.error("Evaluation pipeline failed: %s", exc, exc_info=True)
+            if task not in all_labels:
+                continue
+            try:
+                t_eval = time.time()
+                eval_report = run_evaluation_pipeline(
+                    model=getattr(predictor, "model", None),
+                    tokenizer=tokenizer,
+                    texts=texts,
+                    labels={task: all_labels[task]},
+                    tasks=[task],
+                    enable_calibration=True,
+                    enable_threshold_opt=True,
+                    enable_uncertainty=True,
+                    enable_error_analysis=True,
+                    enable_correlation=False,
+                )
+                logger.info("  Eval [%s] complete in %.2fs", task, time.time() - t_eval)
+                tasks_report = eval_report.get("tasks") or {}
+                for task_name, task_report in tasks_report.items():
+                    _print_eval_report(task_name, task_report)
+            except Exception as exc:
+                logger.error("  Eval [%s] failed: %s", task, exc, exc_info=True)
+        logger.info("Evaluation total: %.2fs", time.time() - t_eval_total)
 
     # ----------------------------------------------------------
     # 5. EXPLAINABILITY SUMMARY

@@ -46,12 +46,35 @@ logger = logging.getLogger(__name__)
 # =========================================================
 
 def _validate_pred_shape(task: str, preds: np.ndarray) -> np.ndarray:
-    """Ensure preds is a 1-D integer class-index array.
+    """Ensure preds has a shape consistent with the task type.
 
-    Probability matrices / logit matrices are collapsed via argmax.
+    - multilabel tasks: keep (N, C) as-is; collapse float proba matrices via
+      threshold=0.5 when values are in [0, 1].
+    - binary/multiclass: collapse (N, C) → (N,) via argmax.
+
     Raises ValueError with a clear message if shape cannot be resolved.
     """
     arr = np.asarray(preds)
+    task_type = TASK_CONFIG.get(task, {}).get("type", "")
+
+    if task_type == "multilabel":
+        # Keep 2-D; convert float probabilities to binary predictions.
+        if arr.ndim == 2:
+            if arr.dtype.kind == "f":
+                logger.debug(
+                    "[VALIDATE] task=%s multilabel: thresholding proba %s → binary",
+                    task, arr.shape,
+                )
+                arr = (arr >= 0.5).astype(np.int32)
+            return arr
+        # 1-D for multilabel: wrap into (N, 1) so downstream sees 2-D.
+        if arr.ndim == 1:
+            return arr.reshape(-1, 1)
+        raise ValueError(
+            f"[VALIDATE] {task}: multilabel y_pred must be 1-D or 2-D, got shape {arr.shape}."
+        )
+
+    # binary / multiclass path
     if arr.ndim == 2:
         logger.debug("[VALIDATE] task=%s converting preds %s → argmax", task, arr.shape)
         arr = np.argmax(arr, axis=1)
@@ -215,6 +238,14 @@ def run_evaluation_pipeline(
     """
     tasks = tasks or list(TASK_CONFIG.keys())
 
+    # Filter to only tasks that have labels supplied — avoids KeyError when a
+    # caller passes labels for a single task (e.g. "bias") but tasks defaults
+    # to the full TASK_CONFIG key list.
+    tasks = [t for t in tasks if t in labels]
+    if not tasks:
+        logger.warning("[PIPELINE] No tasks with matching labels — returning empty report")
+        return {"tasks": {}, "summary": {}}
+
     logger.info("[PIPELINE] Collecting predictions for %d tasks", len(tasks))
     if prediction_service is not None:
         predictions = _collect_via_prediction_service(prediction_service, texts, tasks)
@@ -281,17 +312,42 @@ def run_evaluation_pipeline(
             preds = np.argmax(preds, axis=1)
 
         # Final shape guard — collapses any remaining 2-D array and gives a
-        # clear error if the shape still can't be resolved to 1-D.
+        # clear error if the shape still can't be resolved to the right shape.
         preds = _validate_pred_shape(task, preds)
         logger.debug("[PIPELINE] task=%s preds_shape=%s probs_shape=%s", task, preds.shape, probs.shape)
         y_true = np.asarray(labels[task])
 
-        eval_result = evaluate(
-            y_true=y_true,
-            y_pred=preds,
-            y_proba=probs,
-            task=task,
-        )
+        # For multilabel tasks: if model output is 1D class-index but y_true
+        # is 2D multi-hot, broadcast preds to matching shape via one-hot so
+        # shape validation in evaluate() doesn't raise.
+        task_type_for_eval = TASK_CONFIG.get(task, {}).get("type", "")
+        if task_type_for_eval == "multilabel" and y_true.ndim == 2 and preds.ndim == 1:
+            n_labels = y_true.shape[1]
+            onehot = np.zeros((len(preds), n_labels), dtype=np.int32)
+            for i, cls in enumerate(preds):
+                if 0 <= int(cls) < n_labels:
+                    onehot[i, int(cls)] = 1
+            preds = onehot
+            logger.debug(
+                "[PIPELINE] task=%s multilabel: broadcast 1-D preds → one-hot %s",
+                task, preds.shape,
+            )
+
+        try:
+            eval_result = evaluate(
+                y_true=y_true,
+                y_pred=preds,
+                y_proba=probs,
+                task=task,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[PIPELINE] task=%s evaluate() failed (%s) — skipping metrics for this task",
+                task, exc,
+            )
+            report["tasks"][task] = {"metrics": {}, "error": str(exc)}
+            continue
+
         report["tasks"][task] = eval_result
 
         all_probs[task] = probs
