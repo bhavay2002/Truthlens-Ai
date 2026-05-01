@@ -25,7 +25,7 @@ from src.inference.postprocessing import Postprocessor
 # for the canonical implementation; duplicated here to avoid an import
 # cycle (pipeline imports from engine indirectly via prediction_service).
 def _resolve_amp_dtype_engine() -> torch.dtype:
-    requested = (os.environ.get("TRUTHLENS_AMP_DTYPE") or "bf16").lower()
+    requested = (os.environ.get("TRUTHLENS_AMP_DTYPE") or "float16").lower()
     if requested in ("bf16", "bfloat16"):
         return torch.bfloat16
     if requested in ("fp16", "float16", "half"):

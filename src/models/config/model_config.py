@@ -20,7 +20,7 @@ class EncoderConfig:
     enable_fused_attention: bool = True
 
     use_amp: bool = True
-    amp_dtype: str = "bf16"
+    amp_dtype: str = "float16"
 
     use_compile: bool = False
     compile_mode: str = "default"

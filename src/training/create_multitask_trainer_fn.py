@@ -814,7 +814,7 @@ def create_multitask_trainer_fn(
     _model_sec = _get(settings, "model")
     mt_setup_cfg = TrainingSetupConfig(
         use_amp=bool(_get(_precision, "use_amp", True)),
-        amp_dtype=str(_get(_precision, "amp_dtype", "bf16")),
+        amp_dtype=str(_get(_precision, "amp_dtype", "float16")),
         allow_tf32=bool(_get(_precision, "allow_tf32", True)),
         use_compile=bool(_get(_model_sec, "torch_compile", True)),
         compile_mode=str(_get(_model_sec, "compile_mode", "reduce-overhead")),

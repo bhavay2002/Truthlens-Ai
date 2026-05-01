@@ -22,7 +22,7 @@ from src.graph.graph_pipeline import GraphPipeline, get_default_pipeline
 # some logits when the trainer used bf16. Map "bf16"/"fp16"/"fp32" to the
 # matching torch dtype; default to bf16 if env is unset and CUDA is
 # available, else fp16 (legacy CUDA-only behaviour).
-def _resolve_amp_dtype(default: str = "bf16") -> torch.dtype:
+def _resolve_amp_dtype(default: str = "float16") -> torch.dtype:
     requested = (os.environ.get("TRUTHLENS_AMP_DTYPE") or default).lower()
     if requested in ("bf16", "bfloat16"):
         return torch.bfloat16

@@ -384,7 +384,7 @@ def create_trainer_fn(
 
     setup_cfg = TrainingSetupConfig(
         use_amp=bool(params.get("amp", True)),
-        amp_dtype=str(params.get("amp_dtype", "bf16")),
+        amp_dtype=str(params.get("amp_dtype", "float16")),
         allow_tf32=bool(params.get("allow_tf32", True)),
         use_compile=bool(params.get("use_compile", True)),
         compile_mode=str(params.get("compile_mode", "reduce-overhead")),

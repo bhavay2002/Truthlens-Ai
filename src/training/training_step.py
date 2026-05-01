@@ -168,14 +168,11 @@ class TrainingStepConfig:
     # back to fp16 for backward-compat.  Mapped to ``torch.dtype`` at
     # autocast-call time so the config layer stays string-only.
     #
-    # AMP-DTYPE-FIX: default flipped from "fp16" to "bf16" to match the
-    # rest of the codebase (config/config.yaml `precision.amp_dtype`,
-    # TrainingSetupConfig.amp_dtype) and the user's stated bf16 setup.
-    # The previous "fp16" default would silently re-engage GradScaler
-    # for callers that didn't pass an explicit `amp_dtype=` and produce
-    # spurious "Gradient overflow detected" warnings under bf16-supported
-    # hardware (see config/config.yaml optimizer comment for context).
-    amp_dtype: str = "bf16"
+    # AMP-DTYPE-FIX: default flipped to "float16" to match the
+    # inference-time AMP path and keep the project on a single half-
+    # precision default. The config layer still accepts explicit bf16
+    # for callers that need it.
+    amp_dtype: str = "float16"
 
     # AMP-INIT-SCALE-FIX: ``GradScaler(init_scale=...)`` override.
     # Default ``None`` keeps the torch default (2**16 = 65536) so

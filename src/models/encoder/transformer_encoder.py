@@ -48,7 +48,7 @@ class TransformerEncoder(BaseModel):
         gradient_checkpointing: bool = False,
         output_hidden_states: bool = False,
         use_amp: bool = True,
-        amp_dtype: str = "bf16",
+        amp_dtype: str = "float16",
         # P2.1: tri-state — None means "auto: on for CUDA, off for CPU".
         # See ``EncoderConfig.use_compile`` for the rationale.
         use_compile: Optional[bool] = None,

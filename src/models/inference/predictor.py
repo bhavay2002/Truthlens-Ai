@@ -29,7 +29,7 @@ _FAKE_HEAD_KEYS = ("fake_logits", "fakenews_logits", "misinformation_logits")
 # fp32 for numerical-stability debugging or fp16 to match the trained
 # checkpoint. The helper mirrors ``inference_pipeline._resolve_amp_dtype``
 # so both orchestrators interpret the env var identically.
-def _resolve_amp_dtype_from_env(default: str = "bf16") -> torch.dtype:
+def _resolve_amp_dtype_from_env(default: str = "float16") -> torch.dtype:
     requested = (os.environ.get("TRUTHLENS_AMP_DTYPE") or default).lower()
     if requested in ("bf16", "bfloat16"):
         return torch.bfloat16
