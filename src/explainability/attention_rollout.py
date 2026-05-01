@@ -196,15 +196,15 @@ class AttentionRollout:
                 ]
 
                 importance_list = scores.tolist()
-                return {
-                    "tokens": tokens,
-                    "importance": importance_list,
-                    "rollout_scores": importance_list,
-                    "structured": structured,
-                    "confidence": confidence,
-                    "entropy": entropy,
-                    "method": "attention",
-                }
+                return ExplanationOutput(
+                    method="attention",
+                    tokens=list(tokens),
+                    importance=importance_list,
+                    structured=structured,
+                    confidence=confidence,
+                    entropy=entropy,
+                    faithful=True,
+                )
 
         except Exception as exc:
             logger.exception("Attention rollout computation failed")

@@ -146,6 +146,7 @@ class TruthLensPipeline:
         parallel_stages: bool = True,
         max_text_length: int = DEFAULT_MAX_TEXT_LEN,
         max_seq_length: int = DEFAULT_MAX_SEQ_LEN,
+        max_explainability_samples: int = 50,
     ):
 
         self.preprocessor = preprocessor or PreprocessingPipeline()
@@ -184,6 +185,7 @@ class TruthLensPipeline:
         self.parallel_stages = parallel_stages
         self.max_text_length = int(max_text_length)
         self.max_seq_length = int(max_seq_length)
+        self.max_explainability_samples = int(max_explainability_samples)
 
         if self.enable_evaluation:
             logger.info(
@@ -531,12 +533,16 @@ class TruthLensPipeline:
         per_article: List[Dict[str, Any]] = []
         normalized_texts: List[str] = []
 
-        for text in texts:
+        _orig_explain = self.enable_explainability
+        for i, text in enumerate(texts):
+            if _orig_explain and i >= self.max_explainability_samples:
+                self.enable_explainability = False
             res = self.analyze(text)
             per_article.append(res)
             normalized_texts.append(
                 res.get("preprocessing", {}).get("normalized_text", text)
             )
+        self.enable_explainability = _orig_explain
 
         # GPU-1 / GPU-2: single batched prediction call. Replaces the
         # per-article ``_predict_text`` results computed in the loop

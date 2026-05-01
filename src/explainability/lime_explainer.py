@@ -132,8 +132,11 @@ def lime_predict_wrapper(
 
     outputs = []
     for t in text_list:
-        r = predict_fn(t)
-        p = _extract_fake_probability(r)
+        try:
+            r = predict_fn(t)
+            p = _extract_fake_probability(r)
+        except Exception:
+            p = 0.5
         outputs.append([1 - p, p])
 
     return np.array(outputs, dtype=float)
