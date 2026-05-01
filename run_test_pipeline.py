@@ -281,18 +281,26 @@ def main() -> None:
     _enable_expl = args.explainability or args.full_explainability
     if _enable_expl:
         if args.full_explainability:
+            # Full mode: LIME (25 samples) + IG (8 steps) + attention rollout
             _expl_cfg = ExplainabilityConfig(
                 use_lime=True,
                 use_shap=False,
                 use_attention_rollout=True,
                 use_bias_emotion=True,
+                use_graph_explainer=False,
+                use_explanation_metrics=False,
+                ig_steps=8,
             )
         else:
+            # Fast mode: attention rollout only (1 forward pass) — no LIME, no IG
             _expl_cfg = ExplainabilityConfig(
                 use_lime=False,
                 use_shap=False,
                 use_attention_rollout=True,
                 use_bias_emotion=True,
+                use_graph_explainer=False,
+                use_explanation_metrics=False,
+                ig_steps=0,
             )
     else:
         _expl_cfg = None

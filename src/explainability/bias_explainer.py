@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 EPS = 1e-12
 
 DEFAULT_TASK = "bias"
-DEFAULT_IG_STEPS = 16
+DEFAULT_IG_STEPS = 8  # reduced from 16; halves gradient-pass cost with minimal accuracy loss
 
 # PERF-3: module-level LRU cache for the (expensive) shap.Explainer.
 _SHAP_CACHE_LOCK = threading.RLock()
@@ -336,7 +336,13 @@ def compute_attention_rollout(
     # Slice off leading [CLS] and trailing [SEP]/pad tokens so the
     # returned importance array aligns with tokenizer.tokenize(text)
     # (which excludes special tokens).
-    importance = np.asarray(rollout_out["importance"], dtype=float)
+    # compute_rollout returns an ExplanationOutput object; access via attribute.
+    raw_importance = (
+        list(rollout_out.importance)
+        if hasattr(rollout_out, "importance")
+        else rollout_out.get("importance", [])
+    )
+    importance = np.asarray(raw_importance, dtype=float)
     text_tokens = tokenizer.tokenize(text)
     n = len(text_tokens)
     # The rollout starts at index 1 (skip [CLS]); trim to n text tokens
@@ -387,10 +393,10 @@ def compute_shap_importance(model, tokenizer, text, *, task: str = DEFAULT_TASK)
     return [{"token": t, "importance": float(s)} for t, s in zip(tokens, aligned)]
 
 
-def compute_integrated_gradients(model, tokenizer, text, *, task: str = DEFAULT_TASK):
+def compute_integrated_gradients(model, tokenizer, text, *, task: str = DEFAULT_TASK, steps: int = DEFAULT_IG_STEPS):
     """Return integrated-gradient attribution as a list of {token, importance} dicts."""
     try:
-        vals = compute_ig(model, tokenizer, text, task=task)
+        vals = compute_ig(model, tokenizer, text, task=task, steps=steps)
     except Exception as exc:
         logger.warning("compute_ig failed: %s", exc)
         return []
@@ -430,13 +436,21 @@ def compute_sentence_bias(text: str):
 # MAIN API
 # =========================================================
 
-def explain_bias(model, tokenizer, text, *, task: str = DEFAULT_TASK):
+def explain_bias(model, tokenizer, text, *, task: str = DEFAULT_TASK, use_shap: bool = False, ig_steps: int = DEFAULT_IG_STEPS):
+    """Run bias explainability on *text*.
 
+    ``use_shap=False`` by default — SHAP requires hundreds of model
+    forward passes per article and is extremely slow on CPU.
+
+    ``ig_steps=0`` skips integrated gradients entirely (fastest mode,
+    only attention rollout). Values 1-16 control the Riemann-sum
+    resolution; 8 is a good balance of speed and quality.
+    """
     if not text.strip():
         raise ValueError("Empty text")
 
-    token_importance = compute_shap_importance(model, tokenizer, text, task=task)
-    ig_list = compute_integrated_gradients(model, tokenizer, text, task=task)
+    token_importance = compute_shap_importance(model, tokenizer, text, task=task) if use_shap else []
+    ig_list = compute_integrated_gradients(model, tokenizer, text, task=task, steps=ig_steps) if ig_steps > 0 else []
     attn_list = compute_attention_scores(model, tokenizer, text, task=task)
     sentence_scores = compute_sentence_bias(text)
 

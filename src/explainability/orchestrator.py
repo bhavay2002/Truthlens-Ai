@@ -144,6 +144,11 @@ class ExplainabilityConfig:
     # sub-explainers fail. Default False keeps backward compatibility.
     raise_on_majority_failure: bool = False
 
+    # Number of IG interpolation steps in the bias explainer.
+    # Set to 0 to skip IG entirely (fast mode — only attention rollout).
+    # Default 8 is a good balance between speed and attribution quality.
+    ig_steps: int = 8
+
 
 # =========================================================
 # HELPERS
@@ -153,13 +158,36 @@ def _wrap_bias_ig(bias: Optional[Dict[str, Any]]) -> Optional[ExplanationOutput]
     """CRIT-8: wrap the bias explainer's ``integrated_gradients`` array
     in an ``ExplanationOutput`` so the aggregator + consistency stages
     can consume it like SHAP/LIME/attention.
+
+    ``explain_bias`` returns ``integrated_gradients`` as a list of
+    ``{"token": str, "importance": float}`` dicts (not raw floats).
+    Falls back to ``token_importance`` (fused) when IG is empty.
     """
     if not bias:
         return None
-    tokens = list(bias.get("tokens") or [])
-    ig = list(bias.get("integrated_gradients") or [])
+
+    # Prefer IG; fall back to fused token importance
+    ig_list = bias.get("integrated_gradients") or bias.get("token_importance") or []
+    if not ig_list:
+        return None
+
+    # Unpack list-of-dicts format produced by explain_bias
+    try:
+        if isinstance(ig_list[0], dict):
+            tokens = [item.get("token", "") for item in ig_list]
+            ig = [float(item.get("importance", item.get("attention", 0.0))) for item in ig_list]
+        else:
+            # Plain float list — try to get tokens from token_importance
+            ti = bias.get("token_importance") or []
+            tokens = [item.get("token", f"t{i}") for i, item in enumerate(ti)] if ti else []
+            ig = [float(v) for v in ig_list]
+    except Exception as exc:
+        logger.warning("Failed to parse bias IG list: %s", exc)
+        return None
+
     if not tokens or not ig or len(tokens) != len(ig):
         return None
+
     try:
         structured = [
             TokenImportance(token=t, importance=float(v))
@@ -168,7 +196,7 @@ def _wrap_bias_ig(bias: Optional[Dict[str, Any]]) -> Optional[ExplanationOutput]
         return ExplanationOutput(
             method="integrated_gradients",
             tokens=tokens,
-            importance=[float(v) for v in ig],
+            importance=ig,
             structured=structured,
             faithful=True,
         )
@@ -374,7 +402,12 @@ class ExplainabilityOrchestrator:
         # =================================================
         bias = None
         if self.config.use_bias_emotion and model and tokenizer:
-            bias, t1, ok1 = self._run("bias", lambda: explain_bias(model, tokenizer, text))
+            _use_shap = self.config.use_shap
+            _ig_steps = self.config.ig_steps
+            bias, t1, ok1 = self._run(
+                "bias",
+                lambda: explain_bias(model, tokenizer, text, use_shap=_use_shap, ig_steps=_ig_steps),
+            )
             emo, t2, ok2 = self._run("emotion", lambda: explain_emotion(text, model, tokenizer))
 
             _record("bias", ok1, t1)

@@ -168,13 +168,11 @@ def _get_lime_predict_fn(predict_fn):
 def explain_prediction(
     predict_fn: Callable[[Any], Any],
     text: str,
-    num_features: int = 10,
-    # PERF-2: drop default ``num_samples`` from 256 → 64. The previous
-    # default required 256 *individual* model forwards per article and
-    # dominated end-to-end pipeline latency on CPU. Empirically the
-    # ranking of the top features is stable from ~64 samples onward;
-    # callers that need finer attributions can still pass a larger value.
-    num_samples: int = 64,
+    num_features: int = 8,
+    # PERF-2: reduced from 256 → 64 → 25. Empirically the top-feature
+    # ranking is stable from ~25 samples onward on CPU; callers that
+    # need finer attributions can pass a larger value explicitly.
+    num_samples: int = 25,
 ) -> ExplanationOutput:
 
     if not isinstance(text, str) or not text.strip():
