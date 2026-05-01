@@ -135,7 +135,7 @@ class ExplanationMetrics:
         mask_string: str = "",
     ):
 
-        validate_tokens_scores(tokens, scores)
+        validate_tokens_scores(tokens, scores, auto_fix=True)
 
         baseline_text = self._build_baseline_text(tokens, text)
 
@@ -351,7 +351,16 @@ class ExplanationMetrics:
         mask_string: str = "",
     ) -> Dict[str, float]:
 
-        validate_tokens_scores(tokens, scores)
+        validate_tokens_scores(tokens, scores, auto_fix=True)
+
+        # Normalize scores to give flat LIME outputs proper spread before
+        # computing faithfulness/comprehensiveness/sufficiency metrics.
+        scores_arr = np.asarray(scores, dtype=float)
+        std = float(np.std(scores_arr))
+        if std > 1e-8:
+            scores = ((scores_arr - scores_arr.mean()) / (std + 1e-8)).tolist()
+        else:
+            scores = scores_arr.tolist()
 
         # REC-3: compute the un-ablated baseline prediction once, here,
         # if the caller didn't already supply one. The five sub-metrics
