@@ -9,11 +9,11 @@ Usage:
     uv run python run_test_pipeline.py
     uv run python run_test_pipeline.py --samples 5
     uv run python run_test_pipeline.py --samples 5 --explainability
+    uv run python run_test_pipeline.py --generate-data   # create synthetic CSVs first
 """
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import sys
@@ -23,17 +23,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
+# Lightweight imports at module level.
+# torch / transformers / TruthLensPipeline are deferred to inside main()
+# so that a "no data → exit" run finishes in ~1 s instead of 22 s.
 import numpy as np
 import pandas as pd
-import torch
-from transformers import AutoTokenizer
 
 from src.config.config_loader import load_config
 from src.utils.logging_utils import configure_logging
 from src.utils.seed_utils import set_seed
-from src.pipelines.truthlens_pipeline import TruthLensPipeline
-from src.explainability.orchestrator import ExplainabilityConfig
-from src.evaluation.evaluation_pipeline import run_evaluation_pipeline
 
 CONFIG_PATH = Path("config/config.yaml")
 DATA_DIR = Path("data/test")
@@ -202,35 +200,132 @@ def parse_args() -> argparse.Namespace:
                    help="Enable explainability with LIME (slow, ~5 s/article) instead of attention-only")
     p.add_argument("--no-parallel", action="store_true",
                    help="Disable parallel analysis/graph stages")
+    p.add_argument("--generate-data", action="store_true",
+                   help="Generate synthetic test CSVs in data/test/ before running")
     return p.parse_args()
+
+
+def _generate_synthetic_data(n: int = 100) -> None:
+    """Write synthetic test CSVs to data/test/ so the pipeline can run without real data."""
+    import random
+    import csv
+
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    random.seed(42)
+
+    _TEMPLATES = [
+        "The government announced new policies on {topic} that critics say will harm {group}.",
+        "Scientists published research showing {claim} according to data from {source}.",
+        "Protesters gathered outside {place} demanding change over {topic} amid growing tension.",
+        "The report reveals that {group} faces serious challenges due to {topic} in recent years.",
+        "Officials defended their stance on {topic} calling opposition claims misleading.",
+        "New evidence suggests {claim}, contradicting previous statements by authorities.",
+        "Analysts warn that rising {topic} could destabilise the economy over the next decade.",
+        "Lawmakers approved a bill addressing {topic} despite fierce opposition from {group}.",
+        "Experts say the recent surge in {topic} is unprecedented and demands urgent action.",
+        "The administration blamed {group} for spreading misinformation about {topic}.",
+        "Investigative journalists uncovered documents showing {claim} was known for years.",
+        "Corporate profits soared while {group} struggled with the impact of {topic}.",
+        "The media played a key role in shaping public perception of {topic} this quarter.",
+        "Civil society groups called for accountability after {claim} became public knowledge.",
+        "International observers expressed concern over {topic} and its effects on democracy.",
+    ]
+    _TOPICS = ["inflation", "immigration", "healthcare", "climate change", "election integrity",
+               "trade policy", "social welfare", "national security", "housing costs", "education reform"]
+    _GROUPS = ["working families", "minority communities", "small businesses", "the middle class",
+               "rural voters", "urban populations", "young adults", "senior citizens"]
+    _CLAIMS = ["data was manipulated", "funds were misused", "officials knew in advance",
+                "the policy failed", "numbers were underreported", "public was misled"]
+    _SOURCES = ["Nature", "Reuters", "WHO", "the UN", "a leaked report", "internal documents"]
+    _PLACES = ["the Capitol", "city hall", "corporate headquarters", "the White House", "Parliament"]
+
+    def _make_text() -> str:
+        tmpl = random.choice(_TEMPLATES)
+        return tmpl.format(
+            topic=random.choice(_TOPICS),
+            group=random.choice(_GROUPS),
+            claim=random.choice(_CLAIMS),
+            source=random.choice(_SOURCES),
+            place=random.choice(_PLACES),
+        ) + " " + random.choice(_TEMPLATES).format(
+            topic=random.choice(_TOPICS),
+            group=random.choice(_GROUPS),
+            claim=random.choice(_CLAIMS),
+            source=random.choice(_SOURCES),
+            place=random.choice(_PLACES),
+        )
+
+    texts = [_make_text() for _ in range(n)]
+
+    def _write(path: Path, rows: list, fieldnames: list) -> None:
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=fieldnames)
+            w.writeheader()
+            w.writerows(rows)
+
+    _write(DATA_DIR / "bias.csv",
+           [{"text": t, "bias_label": random.randint(0, 2)} for t in texts],
+           ["text", "bias_label"])
+
+    _write(DATA_DIR / "ideology.csv",
+           [{"text": t, "ideology_label": random.randint(0, 2)} for t in texts],
+           ["text", "ideology_label"])
+
+    _write(DATA_DIR / "propaganda.csv",
+           [{"text": t, "propaganda_label": random.randint(0, 1)} for t in texts],
+           ["text", "propaganda_label"])
+
+    _write(DATA_DIR / "frame.csv",
+           [{"text": t, "CO": random.randint(0, 1), "EC": random.randint(0, 1),
+             "HI": random.randint(0, 1), "MO": random.randint(0, 1), "RE": random.randint(0, 1)}
+            for t in texts],
+           ["text", "CO", "EC", "HI", "MO", "RE"])
+
+    _write(DATA_DIR / "narrative.csv",
+           [{"text": t, "hero": random.randint(0, 1), "villain": random.randint(0, 1),
+             "victim": random.randint(0, 1)} for t in texts],
+           ["text", "hero", "villain", "victim"])
+
+    emotion_cols = [f"emotion_{i}" for i in range(11)]
+    _write(DATA_DIR / "emotion.csv",
+           [{"text": t, **{f"emotion_{i}": random.randint(0, 1) for i in range(11)}}
+            for t in texts],
+           ["text"] + emotion_cols)
+
+    logger.info("Synthetic test data written to %s  (%d articles × 6 datasets)", DATA_DIR, n)
 
 
 def main() -> None:
     args = parse_args()
     configure_logging()
-    config = load_config(CONFIG_PATH)
-    set_seed(config.project.seed)
-
-    logger.info("=" * 60)
-    logger.info("TruthLens  End-to-End Test Pipeline")
-    logger.info("datasets  : %s", list(DATASET_LOADERS))
-    logger.info("samples   : %d per dataset", args.samples)
-    _expl_mode = "full-LIME" if args.full_explainability else ("fast" if args.explainability else "off")
-    logger.info("explainability: %s", _expl_mode)
-    logger.info("=" * 60)
 
     # ----------------------------------------------------------
-    # 1. LOAD DATASETS
+    # 0. OPTIONAL: GENERATE SYNTHETIC DATA  (fast, stdlib only)
+    # ----------------------------------------------------------
+    if args.generate_data:
+        _generate_synthetic_data(n=max(args.samples * 2, 50))
+
+    # ----------------------------------------------------------
+    # 1. CHECK DATASETS EXIST  (fast CSV check, NO heavy imports yet)
     # ----------------------------------------------------------
     _hdr("1 / 6  LOADING DATASETS")
+
     all_texts: Dict[str, List[str]] = {}
     all_labels: Dict[str, Any] = {}
     missing: List[str] = []
 
+    _csv_map = {
+        "bias": DATA_DIR / "bias.csv",
+        "ideology": DATA_DIR / "ideology.csv",
+        "propaganda": DATA_DIR / "propaganda.csv",
+        "narrative_frame": DATA_DIR / "frame.csv",
+        "narrative": DATA_DIR / "narrative.csv",
+        "emotion": DATA_DIR / "emotion.csv",
+    }
     for task, loader in DATASET_LOADERS.items():
-        csv_path = DATA_DIR / f"{task if task != 'narrative_frame' else 'frame'}.csv"
+        csv_path = _csv_map[task]
         if not csv_path.exists():
-            logger.warning("  ✗  %s — file not found: %s", task, csv_path)
+            logger.warning("  ✗  %s — file not found: %s  (use --generate-data to create synthetic CSVs)", task, csv_path)
             missing.append(task)
             continue
         try:
@@ -246,8 +341,29 @@ def main() -> None:
     if missing:
         logger.warning("Skipped datasets: %s", missing)
     if not all_texts:
-        logger.error("No datasets loaded — aborting.")
+        logger.error("No datasets loaded — aborting.  Tip: run with --generate-data to create synthetic test CSVs.")
         sys.exit(1)
+
+    # ----------------------------------------------------------
+    # Heavy imports only reach here when there IS data to process.
+    # This avoids 20+ seconds of PyTorch startup on empty runs.
+    # ----------------------------------------------------------
+    import torch
+    from transformers import AutoTokenizer
+    from src.pipelines.truthlens_pipeline import TruthLensPipeline
+    from src.explainability.orchestrator import ExplainabilityConfig
+    from src.evaluation.evaluation_pipeline import run_evaluation_pipeline
+
+    config = load_config(CONFIG_PATH)
+    set_seed(config.project.seed)
+
+    logger.info("=" * 60)
+    logger.info("TruthLens  End-to-End Test Pipeline")
+    logger.info("datasets  : %s", list(DATASET_LOADERS))
+    logger.info("samples   : %d per dataset", args.samples)
+    _expl_mode = "full-LIME" if args.full_explainability else ("fast" if args.explainability else "off")
+    logger.info("explainability: %s", _expl_mode)
+    logger.info("=" * 60)
 
     # ----------------------------------------------------------
     # 2. BUILD PIPELINE

@@ -178,6 +178,12 @@ def get_nlp(
         try:
             if resolved_model == "en":
                 nlp = spacy.blank("en")
+                # Blank model has no parser/sentencizer so doc.sents raises
+                # E030. Add a cheap rule-based sentencizer so preprocessing
+                # and any graph component that calls doc.sents always works,
+                # regardless of initialization order.
+                if not nlp.has_pipe("sentencizer"):
+                    nlp.add_pipe("sentencizer")
             else:
                 nlp = spacy.load(resolved_model, disable=list(effective_disable))
         except Exception as e:

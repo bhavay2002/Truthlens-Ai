@@ -8,7 +8,8 @@ import random
 from typing import Optional
 
 import numpy as np
-import torch
+# torch is imported lazily inside functions to avoid a ~5 s startup penalty
+# every time this module is imported.
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,8 @@ def set_seed(
     int
         Final seed used (seed + rank)
     """
+
+    import torch
 
     if not isinstance(seed, int):
         raise TypeError("seed must be int")
@@ -77,6 +80,7 @@ def set_seed(
 # =========================================================
 
 def _set_deterministic():
+    import torch
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
@@ -95,6 +99,7 @@ def _set_deterministic():
 # =========================================================
 
 def _set_fast_mode(enable_tf32: bool, matmul_precision: str):
+    import torch
     torch.backends.cudnn.benchmark = True
     torch.backends.cudnn.deterministic = False
 
@@ -136,13 +141,15 @@ def enable_full_reproducibility(seed: int = 42, rank: int = 0):
 # =========================================================
 
 def seed_worker(worker_id: int):
+    import torch
     worker_seed = torch.initial_seed() % 2**32
     np.random.seed(worker_seed)
     random.seed(worker_seed)
     torch.manual_seed(worker_seed)
 
 
-def create_generator(seed: int) -> torch.Generator:
+def create_generator(seed: int) -> "torch.Generator":
+    import torch
     g = torch.Generator()
     g.manual_seed(seed)
     return g
@@ -153,6 +160,7 @@ def create_generator(seed: int) -> torch.Generator:
 # =========================================================
 
 def get_seed_state() -> dict:
+    import torch
     return {
         "python_seed": os.environ.get("PYTHONHASHSEED"),
         "torch_seed": torch.initial_seed(),
