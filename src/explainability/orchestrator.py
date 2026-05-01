@@ -454,8 +454,9 @@ class ExplainabilityOrchestrator:
 
             if agg and self.monitor is not None:
                 scores = agg.final_token_importance
-                self.monitor.update(scores)
-                explanation["monitoring"] = self.monitor.summary()
+                if scores:
+                    self.monitor.update(scores)
+                    explanation["monitoring"] = self.monitor.summary()
 
         # =================================================
         # CONSISTENCY (CRIT-8: thread IG through)
@@ -481,7 +482,7 @@ class ExplainabilityOrchestrator:
         # =================================================
         # METRICS  (REC-3 + CRIT-11)
         # =================================================
-        if self.metrics and agg is not None:
+        if self.metrics and agg is not None and agg.final_token_importance:
             try:
                 batch_predict_fn = _make_batch_predict_fn(predict_fn)
 

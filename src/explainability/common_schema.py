@@ -133,8 +133,6 @@ class AggregatedExplanation(BaseModel):
     @field_validator("final_token_importance")
     @classmethod
     def validate_scores(cls, v):
-        if not v:
-            raise ValueError("final_token_importance cannot be empty")
         return v
 
     @field_validator("structured")

@@ -243,10 +243,13 @@ class EmotionTargetAnalyzer(BaseAnalyzer):
 
         # Named entity
         if token.ent_iob_ in {"B", "I"} and token.ent_type_:
-            span = token.doc[token.ent_start: token.ent_end]
-            text = span.text.lower().strip()
-            if len(text) > 2:
-                return text
+            ent_span = next(
+                (e for e in token.doc.ents if e.start <= token.i < e.end), None
+            )
+            if ent_span is not None:
+                text = ent_span.text.lower().strip()
+                if len(text) > 2:
+                    return text
 
         # dependency relations
         for child in token.children:
