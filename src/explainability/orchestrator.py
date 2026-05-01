@@ -74,18 +74,30 @@ def _make_batch_predict_fn(predict_fn: Callable) -> Callable:
     avoids the per-call Python overhead and uses the GPU's batched
     forward path.
     """
+    def _normalize(result: Any) -> Dict[str, Any]:
+        if isinstance(result, list) and result:
+            result = result[0]
+        if isinstance(result, dict):
+            if "fake_probability" in result:
+                return result
+            if "probabilities" in result and isinstance(result["probabilities"], (list, tuple)):
+                probs = result["probabilities"]
+                if len(probs) >= 2:
+                    return {**result, "fake_probability": float(probs[1])}
+        return {"fake_probability": 0.0}
+
     batch_fn = getattr(predict_fn, "batch_predict", None)
     if callable(batch_fn):
         def _batched(texts: List[str]) -> List[Dict]:
             try:
-                return list(batch_fn(list(texts)))
+                return [_normalize(r) for r in list(batch_fn(list(texts)))]
             except Exception:
                 logger.warning("batch_predict failed; falling back to per-text loop")
-                return [predict_fn(t) for t in texts]
+                return [_normalize(predict_fn(t)) for t in texts]
         return _batched
 
     def _loop(texts: List[str]) -> List[Dict]:
-        return [predict_fn(t) for t in texts]
+        return [_normalize(predict_fn(t)) for t in texts]
 
     return _loop
 
