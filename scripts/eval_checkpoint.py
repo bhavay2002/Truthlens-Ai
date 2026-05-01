@@ -1,21 +1,25 @@
 """
 eval_checkpoint.py
 ------------------
-Run the full TruthLens evaluation pipeline against a saved checkpoint.
+Run the full TruthLens evaluation pipeline using real test data from data/test/
+and a saved model checkpoint.
 
 Usage
 -----
-    # auto-detect checkpoint in saved_models/
+    # auto-detect checkpoint, evaluate all 6 test datasets
     uv run python scripts/eval_checkpoint.py
 
-    # explicit checkpoint file
+    # explicit checkpoint
     uv run python scripts/eval_checkpoint.py --checkpoint saved_models/checkpoint.pt
 
-    # custom data file (default: data/eval_100.json)
-    uv run python scripts/eval_checkpoint.py --data data/eval_100.json
+    # custom test directory
+    uv run python scripts/eval_checkpoint.py --test-dir data/test
 
     # save JSON report
     uv run python scripts/eval_checkpoint.py --report reports/eval_report.json
+
+    # just show what test files are present (no model needed)
+    uv run python scripts/eval_checkpoint.py --status
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.config.task_config import TASK_CONFIG
+from src.data_processing.test_loader import TestDataLoader
 from src.evaluation.evaluate_model import evaluate
 
 logging.basicConfig(
@@ -54,30 +59,28 @@ def find_checkpoint(hint: str | None) -> Path:
         return p
 
     search_root = ROOT / "saved_models"
-    candidates = [
-        search_root / "checkpoint.pt",
-        search_root / "model.pt",
-        search_root / "best_model.pt",
-    ]
-    for c in candidates:
-        if c.exists():
-            return c
+    for name in ("checkpoint.pt", "model.pt", "best_model.pt"):
+        p = search_root / name
+        if p.exists():
+            return p
 
-    step_dirs = sorted(
-        (d for d in search_root.iterdir() if d.is_dir() and d.name.startswith("checkpoint-")),
-        key=lambda d: int(d.name.split("-")[1]) if d.name.split("-")[1].isdigit() else 0,
-        reverse=True,
-    ) if search_root.exists() else []
-
-    for d in step_dirs:
-        for name in ("checkpoint.pt", "model.pt"):
-            p = d / name
-            if p.exists():
-                return p
+    if search_root.exists():
+        step_dirs = sorted(
+            (d for d in search_root.iterdir()
+             if d.is_dir() and d.name.startswith("checkpoint-")),
+            key=lambda d: int(d.name.split("-")[1]) if d.name.split("-")[1].isdigit() else 0,
+            reverse=True,
+        )
+        for d in step_dirs:
+            for name in ("checkpoint.pt", "model.pt"):
+                p = d / name
+                if p.exists():
+                    return p
 
     raise FileNotFoundError(
-        "No checkpoint found in saved_models/. "
-        "Copy your checkpoint.pt there and re-run."
+        "No checkpoint found in saved_models/.\n"
+        "  Copy your checkpoint.pt to saved_models/ and re-run,\n"
+        "  or pass --checkpoint <path>."
     )
 
 
@@ -88,24 +91,21 @@ def find_checkpoint(hint: str | None) -> Path:
 def load_checkpoint(path: Path) -> dict:
     print(f"\nLoading checkpoint: {path}")
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
-    keys = list(ckpt.keys()) if isinstance(ckpt, dict) else ["<raw tensor>"]
-    print(f"  Checkpoint keys: {keys}")
+    top_keys = list(ckpt.keys()) if isinstance(ckpt, dict) else ["<tensor>"]
+    print(f"  keys: {top_keys}")
     return ckpt
 
 
 # ─────────────────────────────────────────────────────────────
-# MODEL RECONSTRUCTION
+# MODEL + TOKENIZER
 # ─────────────────────────────────────────────────────────────
 
-def build_and_load_model(ckpt: dict):
+def build_model(ckpt: dict):
     from src.models.architectures.hybrid_truthlens_model import HybridTruthLensModel
     from src.models.config.model_config import MultiTaskModelConfig, ModelConfigLoader
 
-    model_cfg_path = ROOT / "config" / "model_config.yaml"
-    if model_cfg_path.exists():
-        cfg = ModelConfigLoader().load(model_cfg_path)
-    else:
-        cfg = MultiTaskModelConfig()
+    cfg_path = ROOT / "config" / "model_config.yaml"
+    cfg = ModelConfigLoader().load(cfg_path) if cfg_path.exists() else MultiTaskModelConfig()
 
     model = HybridTruthLensModel(cfg)
 
@@ -114,49 +114,51 @@ def build_and_load_model(ckpt: dict):
         None,
     )
     state_dict = ckpt[state_key] if state_key else ckpt
-
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     if missing:
-        print(f"  ⚠  Missing keys  ({len(missing)}): {missing[:5]}{'...' if len(missing)>5 else ''}")
+        logger.warning("Missing keys (%d): %s%s", len(missing), missing[:5],
+                       "..." if len(missing) > 5 else "")
     if unexpected:
-        print(f"  ⚠  Unexpected keys ({len(unexpected)}): {unexpected[:5]}{'...' if len(unexpected)>5 else ''}")
-
+        logger.warning("Unexpected keys (%d): %s%s", len(unexpected), unexpected[:5],
+                       "..." if len(unexpected) > 5 else "")
     model.eval()
+    print(f"  Model loaded  (missing={len(missing)}  unexpected={len(unexpected)})")
     return model
 
 
-# ─────────────────────────────────────────────────────────────
-# TOKENIZER
-# ─────────────────────────────────────────────────────────────
-
 def load_tokenizer(ckpt: dict):
     from transformers import AutoTokenizer
-
-    name = (
-        ckpt.get("tokenizer_name")
-        or ckpt.get("model_name")
-        or "roberta-base"
-    )
+    name = ckpt.get("tokenizer_name") or ckpt.get("model_name") or "roberta-base"
     print(f"  Tokenizer: {name}")
     return AutoTokenizer.from_pretrained(name)
 
 
 # ─────────────────────────────────────────────────────────────
-# INFERENCE
+# INFERENCE  (per-dataset, so texts vary per task)
 # ─────────────────────────────────────────────────────────────
 
-def run_inference(model, tokenizer, texts: list[str], batch_size: int = 16) -> dict:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def run_inference(
+    model,
+    tokenizer,
+    texts: list[str],
+    batch_size: int = 16,
+    device: torch.device | None = None,
+) -> dict[str, np.ndarray]:
+    """
+    Returns dict {task: logits_array (N, C)}.
+    Handles both dict-output and ModelOutput-with-.logits models.
+    """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
-    all_logits: dict[str, list] = {t: [] for t in TASK_CONFIG}
+    accumulated: dict[str, list] = {t: [] for t in TASK_CONFIG}
 
-    print(f"\nRunning inference on {len(texts)} texts (device={device}, batch={batch_size})")
     with torch.inference_mode():
         for i in range(0, len(texts), batch_size):
-            batch_texts = texts[i: i + batch_size]
+            batch = texts[i: i + batch_size]
             enc = tokenizer(
-                batch_texts,
+                batch,
                 return_tensors="pt",
                 padding=True,
                 truncation=True,
@@ -166,158 +168,178 @@ def run_inference(model, tokenizer, texts: list[str], batch_size: int = 16) -> d
             outputs = model(**enc)
 
             if isinstance(outputs, dict):
-                for task in TASK_CONFIG:
-                    if task in outputs:
-                        all_logits[task].append(outputs[task].cpu().float().numpy())
+                for task, lg in outputs.items():
+                    if task in accumulated:
+                        accumulated[task].append(lg.detach().cpu().float().numpy())
             elif hasattr(outputs, "logits"):
-                logits_tensor = outputs.logits
-                if isinstance(logits_tensor, dict):
-                    for task, lg in logits_tensor.items():
-                        if task in all_logits:
-                            all_logits[task].append(lg.cpu().float().numpy())
+                lg = outputs.logits
+                if isinstance(lg, dict):
+                    for task, arr in lg.items():
+                        if task in accumulated:
+                            accumulated[task].append(arr.detach().cpu().float().numpy())
                 else:
-                    all_logits.setdefault("default", []).append(
-                        logits_tensor.cpu().float().numpy()
+                    raise RuntimeError(
+                        "Model returned a single logit tensor, not per-task dict. "
+                        "Check that HybridTruthLensModel returns {'task': logits, ...}."
                     )
             else:
-                raise RuntimeError(
-                    f"Unexpected model output type: {type(outputs)}. "
-                    "Expected dict of per-task logits or ModelOutput with .logits"
-                )
+                raise RuntimeError(f"Unknown model output type: {type(outputs)}")
 
-            if (i // batch_size + 1) % 5 == 0:
-                print(f"  processed {i + len(batch_texts)}/{len(texts)}")
-
-    return {t: np.concatenate(v) for t, v in all_logits.items() if v}
+    return {t: np.concatenate(v) for t, v in accumulated.items() if v}
 
 
 # ─────────────────────────────────────────────────────────────
-# POSTPROCESS → predictions + probabilities
+# POSTPROCESS  logits → predictions + probabilities
 # ─────────────────────────────────────────────────────────────
 
-def postprocess(logits_map: dict) -> tuple[dict, dict]:
+def postprocess(
+    task: str,
+    logits: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
     from scipy.special import softmax, expit
 
-    preds, probs = {}, {}
-    for task, logits in logits_map.items():
-        cfg = TASK_CONFIG.get(task, {})
-        ttype = cfg.get("type", "multiclass")
+    cfg = TASK_CONFIG.get(task, {})
+    ttype = cfg.get("type", "multiclass")
 
-        if ttype == "multilabel":
-            p = expit(logits)
-            probs[task] = p
-            preds[task] = (p >= 0.5).astype(int)
-        else:
-            p = softmax(logits, axis=-1)
-            probs[task] = p
-            preds[task] = np.argmax(p, axis=1)
+    if ttype == "multilabel":
+        probs = expit(logits)
+        preds = (probs >= 0.5).astype(int)
+    else:
+        probs = softmax(logits, axis=-1)
+        preds = np.argmax(probs, axis=1)
 
     return preds, probs
 
 
 # ─────────────────────────────────────────────────────────────
-# EVALUATION
+# EVALUATE ONE TASK
 # ─────────────────────────────────────────────────────────────
 
-def run_evaluation(preds: dict, probs: dict, labels: dict) -> dict:
-    results = {}
-    tasks = sorted(set(preds) & set(labels))
-    print(f"\nEvaluating {len(tasks)} tasks: {tasks}")
+def evaluate_task(
+    task: str,
+    texts: list[str],
+    labels: dict[str, np.ndarray],
+    model,
+    tokenizer,
+    batch_size: int,
+) -> dict:
+    logits_map = run_inference(model, tokenizer, texts, batch_size=batch_size)
 
-    for task in tasks:
-        y_true = np.array(labels[task])
-        y_pred = np.array(preds[task])
-        y_proba = np.array(probs.get(task))
+    if task not in logits_map:
+        return {"error": f"Model did not produce logits for task '{task}'"}
 
-        try:
-            r = evaluate(y_true=y_true, y_pred=y_pred, y_proba=y_proba, task=task)
-            results[task] = r.get("metrics", r)
-        except Exception as exc:
-            logger.warning("Evaluation failed for %s: %s", task, exc)
-            results[task] = {"error": str(exc)}
+    preds, probs = postprocess(task, logits_map[task])
+    y_true = labels[task]
 
-    return results
+    try:
+        result = evaluate(y_true=y_true, y_pred=preds, y_proba=probs, task=task)
+        return result.get("metrics", result)
+    except Exception as exc:
+        logger.warning("Evaluation failed for %s: %s", task, exc)
+        return {"error": str(exc)}
 
 
 # ─────────────────────────────────────────────────────────────
 # REPORT PRINTER
 # ─────────────────────────────────────────────────────────────
 
-def print_report(results: dict, n_samples: int) -> None:
-    print("\n" + "=" * 60)
-    print(f"  TruthLens Evaluation Report  ({n_samples} samples)")
-    print("=" * 60)
+def print_report(results: dict[str, dict]) -> None:
+    print("\n" + "=" * 65)
+    print("  TruthLens Evaluation Report")
+    print("=" * 65)
 
     for task, m in results.items():
+        cfg = TASK_CONFIG.get(task, {})
+        ttype = cfg.get("type", "?")
+        n = m.get("n_samples", "?")
+
         if "error" in m:
             print(f"\n[{task:<20}]  ERROR: {m['error']}")
             continue
-        cfg = TASK_CONFIG.get(task, {})
-        ttype = cfg.get("type", "?")
-        acc = m.get("accuracy", m.get("subset_accuracy", "n/a"))
-        f1 = m.get("f1_macro", m.get("f1", "n/a"))
+
+        acc  = m.get("accuracy", m.get("subset_accuracy", "n/a"))
+        f1   = m.get("f1_macro", m.get("f1", "n/a"))
         prec = m.get("precision", "n/a")
-        rec = m.get("recall", "n/a")
-        fmt = lambda v: f"{v:.4f}" if isinstance(v, float) else str(v)
+        rec  = m.get("recall", "n/a")
+        fmt  = lambda v: f"{v:.4f}" if isinstance(v, float) else str(v)
+
         print(
-            f"\n[{task:<20}]  type={ttype:<11}"
-            f"  acc={fmt(acc)}  f1={fmt(f1)}"
-            f"  prec={fmt(prec)}  rec={fmt(rec)}"
+            f"\n[{task:<20}]  type={ttype:<11}  n={n}\n"
+            f"    acc={fmt(acc)}   f1={fmt(f1)}"
+            f"   prec={fmt(prec)}   rec={fmt(rec)}"
         )
 
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 65 + "\n")
 
 
 # ─────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────
 
-def main():
-    ap = argparse.ArgumentParser(description="Evaluate TruthLens checkpoint")
-    ap.add_argument("--checkpoint", default=None, help="Path to checkpoint.pt")
-    ap.add_argument("--data", default="data/eval_100.json", help="Labeled eval JSON")
-    ap.add_argument("--report", default=None, help="Optional path to save JSON report")
-    ap.add_argument("--batch-size", type=int, default=16)
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Evaluate TruthLens checkpoint on real test data")
+    ap.add_argument("--checkpoint", default=None,
+                    help="Path to checkpoint.pt (auto-detected from saved_models/ if omitted)")
+    ap.add_argument("--test-dir", default="data/test",
+                    help="Directory containing the 6 test dataset files (default: data/test)")
+    ap.add_argument("--report", default=None,
+                    help="Optional path to write JSON report (e.g. reports/eval_report.json)")
+    ap.add_argument("--batch-size", type=int, default=16,
+                    help="Inference batch size (default: 16; reduce to 8 if OOM)")
+    ap.add_argument("--status", action="store_true",
+                    help="Show which test files are present/missing and exit (no model needed)")
     args = ap.parse_args()
 
-    # ── load data ──────────────────────────────────────────────
-    data_path = Path(args.data)
-    if not data_path.exists():
-        print(f"Data file not found: {data_path}")
+    # ── status check only ─────────────────────────────────────
+    loader = TestDataLoader(args.test_dir)
+    if args.status:
+        loader.summary()
+        return
+
+    # ── load test datasets ────────────────────────────────────
+    print(f"\nLoading test datasets from: {args.test_dir}")
+    datasets = loader.load_all()
+
+    if not datasets:
+        print("\nNo test datasets could be loaded. "
+              "Upload your CSV/JSON files to data/test/ and re-run.")
         sys.exit(1)
 
-    data = json.loads(data_path.read_text())
-    texts = [d["text"] for d in data]
-    labels = {
-        task: [d[task] for d in data]
-        for task in TASK_CONFIG
-        if task in data[0]
-    }
-    print(f"Loaded {len(texts)} samples from {data_path}")
-    print(f"Label tasks: {list(labels.keys())}")
-
-    # ── checkpoint ─────────────────────────────────────────────
+    # ── load checkpoint + model ───────────────────────────────
     ckpt_path = find_checkpoint(args.checkpoint)
     ckpt = load_checkpoint(ckpt_path)
-
-    # ── model + tokenizer ──────────────────────────────────────
-    model = build_and_load_model(ckpt)
+    model = build_model(ckpt)
     tokenizer = load_tokenizer(ckpt)
 
-    # ── inference ──────────────────────────────────────────────
-    logits_map = run_inference(model, tokenizer, texts, batch_size=args.batch_size)
-    preds, probs = postprocess(logits_map)
+    # ── evaluate each task independently ─────────────────────
+    all_results: dict[str, dict] = {}
 
-    # ── evaluate ───────────────────────────────────────────────
-    results = run_evaluation(preds, probs, labels)
-    print_report(results, len(texts))
+    for task, (texts, labels) in datasets.items():
+        print(f"\n── {task} ({len(texts)} samples) ──")
+        all_results[task] = evaluate_task(
+            task=task,
+            texts=texts,
+            labels=labels,
+            model=model,
+            tokenizer=tokenizer,
+            batch_size=args.batch_size,
+        )
+        m = all_results[task]
+        if "error" not in m:
+            acc = m.get("accuracy", m.get("subset_accuracy", "n/a"))
+            f1  = m.get("f1_macro", m.get("f1", "n/a"))
+            fmt = lambda v: f"{v:.4f}" if isinstance(v, float) else str(v)
+            print(f"   acc={fmt(acc)}   f1={fmt(f1)}")
 
-    # ── save report ────────────────────────────────────────────
+    # ── print full report ─────────────────────────────────────
+    print_report(all_results)
+
+    # ── save JSON ─────────────────────────────────────────────
     if args.report:
-        report_path = Path(args.report)
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(json.dumps({"results": results, "n_samples": len(texts)}, indent=2))
-        print(f"Report saved → {report_path}")
+        out = Path(args.report)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(all_results, indent=2, default=str))
+        print(f"Report saved → {out}")
 
 
 if __name__ == "__main__":

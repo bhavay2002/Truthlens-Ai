@@ -9,6 +9,42 @@ TruthLens AI is a multi-layer AI platform for misinformation detection and news 
 - **ML/NLP**: PyTorch, Hugging Face Transformers, spaCy, NLTK, LIME, SHAP
 - **Port**: 5000
 
+## Evaluation Pipeline (current state)
+
+### Real Test Data
+Six CSV files in `data/test/` — one per task:
+
+| File | Task config key | Label columns |
+|---|---|---|
+| `bias.csv` | `bias` (multiclass 2) | `bias_label` |
+| `ideology.csv` | `ideology` (multiclass 3) | `ideology_label` |
+| `propaganda.csv` | `propaganda` (multiclass 2) | `propaganda_label` |
+| `frame.csv` | `narrative_frame` (multilabel 5) | `CO EC HI MO RE` |
+| `narrative.csv` | `narrative` (multilabel 3) | `hero villain victim` |
+| `emotion.csv` | `emotion` (multilabel 11) | `emotion_0 … emotion_10` |
+
+Replace the placeholder CSVs with your real test data (same column names, any row count).
+
+### Running Evaluation
+```bash
+# check which test files are present
+uv run python scripts/eval_checkpoint.py --status
+
+# full eval (auto-detects checkpoint from saved_models/)
+uv run python scripts/eval_checkpoint.py
+
+# explicit checkpoint path
+uv run python scripts/eval_checkpoint.py --checkpoint saved_models/checkpoint.pt
+
+# save JSON report
+uv run python scripts/eval_checkpoint.py --report reports/eval_report.json
+```
+
+### Key Modules
+- `src/data_processing/test_loader.py` — loads all 6 datasets, converts columns to `(texts, labels)` format
+- `scripts/eval_checkpoint.py` — loads checkpoint, runs inference per task, evaluates, prints report
+- `src/evaluation/evaluate_model.py` — shape-safe evaluate() with multiclass/multilabel fallback guard
+
 ## Latest Bug Fixes (analysis refactor tests — all 75 tracked tests now pass)
 - **BaseAnalyzer backward compat**: Added `__init_subclass__` hook that auto-wraps each concrete `analyze()` to accept a plain `str` in addition to `FeatureContext`, so `analyzer.analyze(text)` works without changing subclasses.
 - **BaseAnalyzer.analyze_doc**: Added `analyze_doc(doc)` method that converts a spaCy `Doc` to `FeatureContext` and delegates to `analyze()`, unblocking all `TestAnalyzeDoc` tests.
