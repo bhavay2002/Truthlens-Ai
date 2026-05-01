@@ -227,9 +227,16 @@ def move_batch(
     pin_memory: bool = False,
     non_blocking: bool = True,
 ) -> Dict[str, Any]:
+    # HuggingFace BatchEncoding inherits from UserDict, not dict, so a plain
+    # isinstance(batch, dict) check raises TypeError on tokenizer output.
+    # Accept anything mapping-like (has .items()) and normalise to a plain dict.
+    if hasattr(batch, "items"):
+        batch = dict(batch)
 
     if not isinstance(batch, dict):
-        raise TypeError("Batch must be dict")
+        raise TypeError(
+            f"move_batch expected a dict or mapping, got {type(batch).__name__}"
+        )
 
     return move_to_device(
         batch,

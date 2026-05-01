@@ -26,14 +26,18 @@ def get_device() -> torch.device:
 # TOKENIZATION
 # =========================================================
 
-def _tokenize(tokenizer: AutoTokenizer, texts: List[str], max_length: int):
-    return tokenizer(
+def _tokenize(tokenizer: AutoTokenizer, texts: List[str], max_length: int) -> Dict[str, Any]:
+    # HuggingFace returns a BatchEncoding (UserDict subclass, not dict).
+    # Explicitly convert to a plain dict so move_batch and any isinstance(x, dict)
+    # checks downstream never see an unexpected type.
+    encoding = tokenizer(
         texts,
         padding=True,
         truncation=True,
         max_length=max_length,
         return_tensors="pt",
     )
+    return dict(encoding)
 
 
 # =========================================================
