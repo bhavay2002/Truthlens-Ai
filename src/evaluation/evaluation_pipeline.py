@@ -233,6 +233,11 @@ def run_evaluation_pipeline(
         logits = np.asarray(task_preds.get("logits")) if task_preds.get("logits") is not None else None
         probs = np.asarray(task_preds.get("probabilities", task_preds.get("y_proba")))
         preds = np.asarray(task_preds.get("predictions", task_preds.get("y_pred")))
+        # Defensive: if predictions were stored as a probability matrix, collapse
+        # to class indices now so evaluate() always receives a 1-D array.
+        task_type_str = TASK_CONFIG.get(task, {}).get("type", "")
+        if task_type_str in ("multiclass", "binary", "classification") and preds.ndim == 2:
+            preds = np.argmax(preds, axis=1)
         y_true = np.asarray(labels[task])
 
         eval_result = evaluate(

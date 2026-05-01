@@ -206,17 +206,26 @@ def evaluate(
 
     is_multilabel = task_type == "multilabel"
 
+    # Convert probability/logit matrices → class indices for classification.
+    # Applied unconditionally here and again right before the shape check as a
+    # belt-and-suspenders guard in case any code path re-assigns y_pred_arr.
     if not is_multilabel and y_pred_arr.ndim == 2:
         y_pred_arr = np.argmax(y_pred_arr, axis=1)
 
-    y_true_arr = np.asarray(y_true_arr).reshape(-1) if not is_multilabel else y_true_arr
+    y_true_arr = y_true_arr.reshape(-1) if not is_multilabel else y_true_arr
 
     # =====================================================
     # SHAPE VALIDATION
     # =====================================================
     if not is_multilabel:
+        # Final defensive conversion — catches any re-assignment after the
+        # earlier argmax block (e.g. from calibration or postprocessing).
+        if y_pred_arr.ndim == 2:
+            y_pred_arr = np.argmax(y_pred_arr, axis=1)
         if y_pred_arr.ndim != 1:
-            raise ValueError("y_pred must be 1D for binary/multiclass tasks")
+            raise ValueError(
+                f"y_pred must be 1D for binary/multiclass tasks (got shape {y_pred_arr.shape})"
+            )
         if y_true_arr.shape != y_pred_arr.shape:
             raise ValueError(
                 f"Shape mismatch: y_true {y_true_arr.shape} vs y_pred {y_pred_arr.shape}"
