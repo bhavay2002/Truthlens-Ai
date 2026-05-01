@@ -206,6 +206,13 @@ def evaluate(
 
     is_multilabel = task_type == "multilabel"
 
+    # If config declares multilabel but y_true is 1D (caller passed class
+    # indices instead of multi-hot vectors), fall back to multiclass evaluation
+    # so the metrics layer never sees a shape it can't handle.
+    if is_multilabel and y_true_arr.ndim == 1:
+        is_multilabel = False
+        task_type = "multiclass"
+
     # Convert probability/logit matrices → class indices for classification.
     # Applied unconditionally here and again right before the shape check as a
     # belt-and-suspenders guard in case any code path re-assigns y_pred_arr.
