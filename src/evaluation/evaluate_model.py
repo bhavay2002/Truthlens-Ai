@@ -206,6 +206,11 @@ def evaluate(
 
     is_multilabel = task_type == "multilabel"
 
+    if not is_multilabel and y_pred_arr.ndim == 2:
+        y_pred_arr = np.argmax(y_pred_arr, axis=1)
+
+    y_true_arr = np.asarray(y_true_arr).reshape(-1) if not is_multilabel else y_true_arr
+
     # =====================================================
     # SHAPE VALIDATION
     # =====================================================
