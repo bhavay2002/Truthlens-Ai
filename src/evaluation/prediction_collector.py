@@ -153,20 +153,53 @@ def collect_predictions(
                     task=task,
                 )
 
-            # Multi-task model returns task-specific keys (e.g. "bias_logits").
-            # Fall back to the generic "logits" key for single-task checkpoints.
-            task_key = f"{task}_logits"
-            if task_key in out:
-                raw_logits = out[task_key]
-            elif "logits" in out:
+            # The model can return logits in three different shapes depending
+            # on whether outputs went through Predictor._format_outputs or not:
+            #
+            #   Shape A (flattened, via Predictor):
+            #     out["bias_logits"] = Tensor
+            #
+            #   Shape B (raw multi-task forward, per-task dict):
+            #     out["bias"] = {"logits": Tensor, ...}
+            #
+            #   Shape C (raw multi-task forward, parallel view):
+            #     out["task_logits"] = {"bias": Tensor, ...}
+            #
+            #   Shape D (generic single-task / legacy):
+            #     out["logits"] = Tensor
+            #
+            raw_logits: Optional[torch.Tensor] = None
+
+            # Shape A
+            if f"{task}_logits" in out and isinstance(out[f"{task}_logits"], torch.Tensor):
+                raw_logits = out[f"{task}_logits"]
+
+            # Shape B
+            elif task in out and isinstance(out[task], dict) and "logits" in out[task]:
+                raw_logits = out[task]["logits"]
+
+            # Shape C
+            elif (
+                "task_logits" in out
+                and isinstance(out["task_logits"], dict)
+                and task in out["task_logits"]
+                and isinstance(out["task_logits"][task], torch.Tensor)
+            ):
+                raw_logits = out["task_logits"][task]
+
+            # Shape D
+            elif "logits" in out and isinstance(out["logits"], torch.Tensor):
                 raw_logits = out["logits"]
+
             else:
                 raise KeyError(
                     f"collect_predictions: no logits found for task '{task}'. "
-                    f"Expected '{task_key}' or 'logits'. "
-                    f"Model returned keys: {list(out.keys())}"
+                    f"Tried keys: '{task}_logits', out['{task}']['logits'], "
+                    f"out['task_logits']['{task}'], 'logits'. "
+                    f"Model returned top-level keys: {list(out.keys())}"
                 )
-            logits = raw_logits.detach().cpu().numpy()
+
+            logits = raw_logits.detach().cpu().float().numpy()
             all_logits.append(logits)
 
     logits_arr = np.vstack(all_logits) if all_logits else np.empty((0,))
@@ -256,15 +289,20 @@ def collect_all_tasks(
                 for task in selected_tasks:
                     head_out = head_fn(hidden, task=task)
                     if isinstance(head_out, dict):
-                        # Prefer task-specific key, fall back to generic "logits".
-                        task_key = f"{task}_logits"
-                        if task_key in head_out:
-                            logits = head_out[task_key]
+                        if f"{task}_logits" in head_out and isinstance(head_out[f"{task}_logits"], torch.Tensor):
+                            logits = head_out[f"{task}_logits"]           # Shape A
+                        elif "logits" in head_out and isinstance(head_out["logits"], torch.Tensor):
+                            logits = head_out["logits"]                   # Shape B/D
+                        elif task in head_out and isinstance(head_out[task], torch.Tensor):
+                            logits = head_out[task]                       # bare task key
                         else:
-                            logits = head_out["logits"]
+                            raise KeyError(
+                                f"collect_all_tasks: no logits for task '{task}' "
+                                f"in head output keys: {list(head_out.keys())}"
+                            )
                     else:
                         logits = head_out
-                    logits_buf[task].append(logits.detach().cpu().numpy())
+                    logits_buf[task].append(logits.detach().cpu().float().numpy())
 
     results = {}
     for task in selected_tasks:
