@@ -1,0 +1,23 @@
+# Python package environment — reinstalled from requirements.txt during deployment
+.pythonlibs/
+
+# HuggingFace model cache — re-downloaded at runtime on first inference
+.cache/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Training checkpoints and local model artefacts
+checkpoints/
+saved_models/
+
+# Feature and inference runtime caches
+cache/
+
+# Development / test artefacts
+.pytest_cache/
+*.egg-info/
+dist/
+build/
