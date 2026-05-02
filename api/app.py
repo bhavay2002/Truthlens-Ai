@@ -43,9 +43,14 @@ from src.explainability.explainability_pipeline import (
     ExplainabilityConfig,
 )
 from src.aggregation.aggregation_pipeline import AggregationPipeline
-from src.utils import ensure_non_empty_text, ensure_non_empty_text_list
+from src.utils import ensure_non_empty_text, ensure_non_empty_text_list, get_device
 from src.utils.logging_utils import configure_logging
 from src.utils.settings import load_settings
+
+# ── HuggingFace Hub ────────────────────────────────────────────────────────────
+from huggingface_hub import hf_hub_download
+from transformers import AutoTokenizer
+from src.inference.postprocessing import Postprocessor
 
 # ── src.inference integration ──────────────────────────────────────────────────
 from src.inference.inference_cache import InferenceCache, InferenceCacheConfig
@@ -95,6 +100,8 @@ APP_VERSION = SETTINGS.api.version
 TEXT_PREVIEW_CHARS = max(int(SETTINGS.api.text_preview_chars), 1)
 INFERENCE_ALLOW_RAW_TEXT_FALLBACK = bool(SETTINGS.inference.allow_raw_text_fallback)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+HF_REPO_ID = "bhavaygupta2002/truthlens_v1"
+HF_CHECKPOINT_FILE = "checkpoint.pt"
 MODEL_SUBPACKAGES = (
     "emotion",
     "encoder",
@@ -152,10 +159,96 @@ AGGREGATION_PIPELINE = AggregationPipeline()
 _INFERENCE_ENGINE: Optional[InferenceEngine] = None
 
 
+def _build_engine_from_hf_checkpoint() -> Optional[InferenceEngine]:
+    """Download checkpoint.pt from HuggingFace and manually wire up an InferenceEngine.
+
+    The HF repo stores the full MultiTaskTruthLensModel object (not a standard
+    HF model directory), so AutoModelForSequenceClassification.from_pretrained
+    cannot be used directly. Instead we torch.load the checkpoint, extract the
+    model object, and set up the engine attributes by hand — bypassing the
+    path-existence checks in InferenceEngine._load_model.
+    """
+    try:
+        logger.info(
+            "Downloading model checkpoint from HuggingFace: %s / %s",
+            HF_REPO_ID,
+            HF_CHECKPOINT_FILE,
+        )
+        ckpt_path = hf_hub_download(HF_REPO_ID, HF_CHECKPOINT_FILE)
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+
+        model = ckpt["model"]
+        encoder = ckpt.get("encoder", SETTINGS.model.encoder)
+
+        device = get_device(prefer_gpu=True)
+        model.to(device)
+        model.eval()
+        for p in model.parameters():
+            p.requires_grad_(False)
+
+        tokenizer = AutoTokenizer.from_pretrained(encoder, use_fast=True)
+
+        amp_dtype = torch.float32
+        if device.type == "cuda":
+            requested = (os.environ.get("TRUTHLENS_AMP_DTYPE") or "float16").lower()
+            if requested in ("bf16", "bfloat16"):
+                amp_dtype = torch.bfloat16
+            elif requested in ("fp16", "float16", "half"):
+                amp_dtype = torch.float16
+
+        cfg = EngineConfig(
+            model_path=ckpt_path,
+            max_length=SETTINGS.model.max_length,
+            device=str(device),
+        )
+
+        engine = InferenceEngine.__new__(InferenceEngine)
+        engine.config = cfg
+        engine.device = device
+        engine.temperature_scaler = None
+        engine.isotonic_calibrator = None
+        engine.postprocessor = Postprocessor()
+        engine.use_amp = device.type == "cuda" and cfg.use_amp
+        engine.amp_dtype = amp_dtype
+        engine.model = model
+        engine.tokenizer = tokenizer
+        engine.label_map = None
+        engine.prediction_service = None
+
+        logger.warning(
+            "InferenceEngine: no calibrator attached — "
+            "'calibrated_probabilities' will equal raw softmax probabilities."
+        )
+
+        if cfg.enable_full_pipeline:
+            from src.inference.prediction_service import PredictionService
+            engine.prediction_service = PredictionService(engine=engine)
+
+        logger.info(
+            "InferenceEngine initialised from HuggingFace checkpoint "
+            "(encoder=%s, device=%s)",
+            encoder,
+            device,
+        )
+        return engine
+    except Exception as exc:
+        logger.warning("Could not build InferenceEngine from HuggingFace: %s", exc)
+        return None
+
+
 def _get_inference_engine() -> Optional[InferenceEngine]:
-    """Return the shared InferenceEngine, or None if the model is not yet trained."""
+    """Return the shared InferenceEngine.
+
+    Priority:
+      1. Already initialised singleton.
+      2. Local saved_models directory (existing trained artefact).
+      3. HuggingFace checkpoint (bhavaygupta2002/truthlens_v1/checkpoint.pt).
+    """
     global _INFERENCE_ENGINE
-    if _INFERENCE_ENGINE is None and MODEL_PATH.exists():
+    if _INFERENCE_ENGINE is not None:
+        return _INFERENCE_ENGINE
+
+    if MODEL_PATH.exists():
         try:
             _INFERENCE_ENGINE = InferenceEngine(
                 EngineConfig(
@@ -167,7 +260,13 @@ def _get_inference_engine() -> Optional[InferenceEngine]:
             )
             logger.info("InferenceEngine initialised from %s", MODEL_PATH)
         except Exception as exc:
-            logger.warning("InferenceEngine could not be initialised: %s", exc)
+            logger.warning(
+                "InferenceEngine could not be initialised from local path: %s", exc
+            )
+
+    if _INFERENCE_ENGINE is None:
+        _INFERENCE_ENGINE = _build_engine_from_hf_checkpoint()
+
     return _INFERENCE_ENGINE
 
 
