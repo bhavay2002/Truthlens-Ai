@@ -37,4 +37,5 @@ externalPort = 80
 
 [deployment]
 deploymentTarget = "autoscale"
-run = ["gunicorn", "--bind=0.0.0.0:5000", "--reuse-port", "-k", "uvicorn.workers.UvicornWorker", "api.app:app"]
+run = ["gunicorn", "--bind=0.0.0.0:5000", "--reuse-port", "-k", "uvicorn.workers.UvicornWorker", "--workers", "1", "--timeout", "120", "api.app:app"]
+build = ["bash", "-c", "pip install 'torch>=2.1,<3.0' --index-url https://download.pytorch.org/whl/cpu && pip install -r requirements.txt"]
