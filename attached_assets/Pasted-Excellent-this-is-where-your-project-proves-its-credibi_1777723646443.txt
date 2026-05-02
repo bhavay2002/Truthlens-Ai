@@ -1,0 +1,290 @@
+Excellent—this is where your project proves its **credibility and performance**. A strong `evaluation.md` shows that your model isn’t just working—it’s **measured, validated, and trustworthy**.
+
+Here’s a **production-grade prompt** for documenting your `src/evaluation` 👇
+
+---
+
+## 🔧 Prompt: Generate `evaluation.md` for `src/evaluation`
+
+You are a senior ML engineer, data scientist, and evaluation/metrics expert with deep experience in model validation and performance analysis.
+
+Your task is to generate a COMPLETE, PRODUCTION-GRADE documentation file named `evaluation.md` for the `src/evaluation` folder of a machine learning repository.
+
+---
+
+## 🎯 Objective
+
+Create a highly structured and technically rigorous document that enables any ML engineer, reviewer, or stakeholder to:
+
+* Fully understand how model performance is measured
+* Interpret all evaluation metrics correctly
+* Validate model quality and generalization
+* Identify weaknesses, biases, and risks
+* Compare models or experiments effectively
+
+---
+
+## 📁 Scope
+
+Analyze ALL files inside:
+src/evaluation/
+
+Include:
+
+* Every Python file
+* Subfolders (if any)
+* Metric utilities, evaluation scripts, report generators
+
+---
+
+## 📚 Required Output Structure (STRICT)
+
+### 1. Overview
+
+* Purpose of `src/evaluation`
+* Role in ML pipeline (post-training validation)
+* Relationship with:
+
+  * `src/models`
+  * `src/training`
+  * `src/inference`
+  * `src/analysis`
+
+---
+
+### 2. Folder Architecture
+
+* Tree structure of `src/evaluation`
+* One-line explanation per file/module
+
+Example:
+src/evaluation/
+├── metrics.py           → Metric calculations
+├── evaluator.py         → Evaluation pipeline
+├── reports.py           → Report generation
+...
+
+---
+
+### 3. End-to-End Evaluation Flow
+
+* Step-by-step workflow:
+
+  * Load trained model
+  * Load validation/test data
+  * Generate predictions
+  * Compute metrics
+  * Generate reports
+
+* Clearly describe:
+
+  * Execution order
+  * Module interactions
+  * Data flow
+
+---
+
+### 4. File-by-File Deep Dive
+
+For EACH file:
+
+#### File: <filename.py>
+
+**Purpose**
+
+* Why this file exists
+
+**Key Functions / Classes**
+For each:
+
+* Name
+* Inputs (types + shapes)
+* Outputs
+* Step-by-step logic
+* Important implementation details
+
+**Dependencies**
+
+* Internal modules
+* External libraries (sklearn, numpy, pandas, etc.)
+
+---
+
+### 5. Metrics Definitions
+
+Create a detailed table:
+
+| Metric | Formula | Description | Interpretation |
+| ------ | ------- | ----------- | -------------- |
+
+Include ALL metrics used, such as:
+
+* Accuracy
+* Precision
+* Recall
+* F1-score
+* ROC-AUC
+* Log Loss
+* Confusion Matrix components
+
+---
+
+### 6. Evaluation Strategy
+
+* Dataset used:
+
+  * Validation / test split
+* Cross-validation (if any)
+* Stratification or sampling methods
+* Frequency of evaluation
+
+---
+
+### 7. Thresholding & Decision Logic
+
+* Classification thresholds (e.g., 0.5)
+* How probabilities are converted to labels
+* Trade-offs (precision vs recall)
+
+---
+
+### 8. Output Artifacts
+
+* What is generated:
+
+  * Metrics (JSON, CSV)
+  * Reports (Markdown, HTML)
+  * Visualizations (plots, confusion matrix)
+* File structure and meaning
+
+---
+
+### 9. Error Analysis
+
+* How misclassifications are analyzed
+* Breakdown by class
+* Common failure patterns
+
+---
+
+### 10. Bias & Fairness Checks
+
+* Detection of bias across:
+
+  * Classes
+  * Categories (if applicable)
+* Any fairness metrics used
+
+---
+
+### 11. Config Integration
+
+* Metric selection from config
+* Threshold values
+* Evaluation flags
+
+---
+
+### 12. Optimization & Efficiency
+
+* Batch evaluation
+* Vectorized metric computation
+* Handling large datasets
+
+---
+
+### 13. Extensibility Guide
+
+* How to add new metrics
+* How to modify evaluation logic
+* How to integrate new reports
+
+---
+
+### 14. Common Pitfalls / Risks
+
+* Overfitting to validation data
+* Misleading metrics (e.g., accuracy in imbalanced data)
+* Data leakage in evaluation
+* Wrong threshold assumptions
+
+---
+
+### 15. Example Usage
+
+* Minimal example:
+
+  * Load model → run evaluation → view results
+
+---
+
+## ⚠️ Constraints
+
+* DO NOT skip any file
+* DO NOT give vague explanations
+* DO NOT assume undocumented behavior
+* Be precise and implementation-aware
+
+---
+
+## 💡 Style Guidelines
+
+* Clean markdown formatting
+* Use tables for metrics
+* Include formulas where applicable
+* Keep explanations concise but deep
+
+---
+
+## 🚀 Goal
+
+After reading `evaluation.md`, a developer or reviewer should:
+
+* Fully understand how model performance is measured
+* Correctly interpret all metrics
+* Identify strengths and weaknesses of the model
+* Trust the evaluation process
+
+---
+
+## ⭐ Bonus Requirement (IMPORTANT)
+
+Also include:
+
+### 16. Simple Explanation (For Non-Technical Reviewers)
+
+* Explain evaluation in plain language
+* Describe what “good performance” means
+* Avoid technical jargon
+
+---
+
+## 💡 Why this is powerful
+
+This prompt enforces:
+
+* **Metric-level clarity (with formulas, not just names)**
+* **Interpretability (huge for exams + real systems)**
+* **Error analysis (what most students miss)**
+* **Bias detection (very impressive in projects like yours)**
+
+---
+
+## 🚀 Final Suggestion (for your project)
+
+You now have almost full pipeline docs:
+
+* ✅ data
+* ✅ analysis
+* ✅ aggregation
+* ✅ features
+* ✅ models
+* ✅ training
+* ✅ evaluation
+
+👉 Only 2 left to make your project *stand out massively*:
+
+* `inference.md` (API + real-time prediction)
+* `explainability.md` (this will WOW your examiner)
+
+If you want, I can generate those next.
