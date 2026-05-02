@@ -1,0 +1,298 @@
+Now this is where your project can really stand out. A well-documented **explainability layer** shows that your model isn’t just accurate—it’s **transparent, interpretable, and trustworthy** (huge plus in exams and real-world ML).
+
+Here’s a **production-grade prompt** for generating `explainability.md` for your `src/explainability` 👇
+
+---
+
+## 🔧 Prompt: Generate `explainability.md` for `src/explainability`
+
+You are a senior ML engineer, interpretability researcher, and responsible AI expert with deep experience in model explainability techniques.
+
+Your task is to generate a COMPLETE, PRODUCTION-GRADE documentation file named `explainability.md` for the `src/explainability` folder of a machine learning repository.
+
+---
+
+## 🎯 Objective
+
+Create a highly structured and technically rigorous document that enables any ML engineer, reviewer, or stakeholder to:
+
+* Fully understand how model predictions are explained
+* Interpret feature importance and model behavior
+* Trust the model through transparent reasoning
+* Debug incorrect or biased predictions
+* Extend or modify explainability methods safely
+
+---
+
+## 📁 Scope
+
+Analyze ALL files inside:
+src/explainability/
+
+Include:
+
+* Every Python file
+* Subfolders (if any)
+* Utilities for generating explanations, visualizations, and reports
+
+---
+
+## 📚 Required Output Structure (STRICT)
+
+### 1. Overview
+
+* Purpose of `src/explainability`
+* Role in ML pipeline (post-inference interpretability layer)
+* Relationship with:
+
+  * `src/models`
+  * `src/inference`
+  * `src/evaluation`
+
+---
+
+### 2. Folder Architecture
+
+* Tree structure of `src/explainability`
+* One-line explanation per file/module
+
+Example:
+src/explainability/
+├── shap_explainer.py     → SHAP-based explanations
+├── lime_explainer.py     → LIME explanations
+├── feature_importance.py → Global importance
+├── visualization.py      → Plotting explanations
+...
+
+---
+
+### 3. End-to-End Explainability Flow
+
+* Step-by-step workflow:
+
+  * Load trained model
+  * Input data sample
+  * Generate prediction
+  * Apply explainability method
+  * Produce explanation outputs
+
+* Clearly describe:
+
+  * Execution order
+  * Module interactions
+  * Data flow
+
+---
+
+### 4. File-by-File Deep Dive
+
+For EACH file:
+
+#### File: <filename.py>
+
+**Purpose**
+
+* Why this explainability logic exists
+
+**Key Functions / Classes**
+For each:
+
+* Name
+* Inputs (types + shapes)
+* Outputs (importance scores, plots, explanations)
+* Step-by-step logic
+* Important implementation details
+
+**Explainability Techniques Used**
+
+* Specify method(s):
+
+  * SHAP (Shapley values)
+  * LIME
+  * Feature importance (model-based)
+  * Attention visualization (if DL model)
+  * Gradient-based methods (if applicable)
+
+**Dependencies**
+
+* Internal modules
+* External libraries (shap, lime, sklearn, captum, etc.)
+
+---
+
+### 5. Explanation Types
+
+Clearly define:
+
+| Type               | Description                 | Example                    |
+| ------------------ | --------------------------- | -------------------------- |
+| Global Explanation | Overall model behavior      | Feature importance ranking |
+| Local Explanation  | Single prediction reasoning | SHAP values for one sample |
+
+---
+
+### 6. Feature Importance Interpretation
+
+* How importance scores are calculated
+* Meaning of positive vs negative impact
+* Ranking methodology
+
+---
+
+### 7. Output Artifacts
+
+* Types of outputs:
+
+  * JSON explanations
+  * Plots (SHAP summary, force plots, etc.)
+  * Text explanations
+* Structure and meaning of outputs
+
+---
+
+### 8. Model Compatibility
+
+* Which models are supported:
+
+  * Tree-based
+  * Deep learning
+  * Linear models
+* Limitations per method
+
+---
+
+### 9. Config Integration
+
+* Parameters controlling explainability:
+
+  * Number of samples
+  * Background dataset (for SHAP)
+  * Approximation settings
+
+---
+
+### 10. Performance & Efficiency
+
+* Computational cost of explainability
+* Sampling strategies
+* Approximation vs exact methods
+* GPU usage (if any)
+
+---
+
+### 11. Validation of Explanations
+
+* How correctness is ensured
+* Sanity checks (e.g., randomization tests)
+* Consistency checks across runs
+
+---
+
+### 12. Bias & Fairness Insights
+
+* How explanations help detect bias
+* Identifying sensitive feature influence
+* Ethical considerations
+
+---
+
+### 13. Extensibility Guide
+
+* How to add new explainability methods
+* Where to integrate new techniques
+* Best practices
+
+---
+
+### 14. Common Pitfalls / Risks
+
+* Misinterpreting SHAP/LIME outputs
+* Correlated features misleading importance
+* High computational cost
+* Over-trusting explanations
+
+---
+
+### 15. Example Usage
+
+* Minimal example:
+
+  * Input → prediction → explanation output
+
+---
+
+## ⚠️ Constraints
+
+* DO NOT skip any file
+* DO NOT give vague explanations
+* DO NOT assume undocumented behavior
+* Be technically precise and implementation-aware
+
+---
+
+## 💡 Style Guidelines
+
+* Clean markdown formatting
+* Use tables for clarity
+* Include short explanations with examples
+* Keep explanations concise but deep
+
+---
+
+## 🚀 Goal
+
+After reading `explainability.md`, a developer or reviewer should:
+
+* Understand how predictions are explained
+* Interpret feature importance correctly
+* Trust the model’s reasoning
+* Use explanations to debug or improve the model
+
+---
+
+## ⭐ Bonus Requirement (VERY IMPORTANT)
+
+Also include:
+
+### 16. Simple Explanation (For Non-Technical Reviewers)
+
+* Explain in plain language how the model “justifies” its decisions
+* Use simple examples (no math, no jargon)
+* Focus on intuition and trust
+
+---
+
+## 💡 Why this is powerful
+
+This prompt enforces:
+
+* **True interpretability (not just feature importance)**
+* **Local + global explanations (very important)**
+* **Bias detection capability (huge impact in evaluation)**
+* **Trustworthiness (key for your TruthLens project)**
+
+---
+
+## 🚀 Final Advice (important for your demo)
+
+When you present:
+
+👉 Show:
+
+* A prediction
+* Its explanation (e.g., top 3 features influencing it)
+
+Then say:
+
+> “Our model is not a black box—we can explain every decision.”
+
+That single line + this module = **very high impression**.
+
+---
+
+If you want final step, I can generate:
+
+* 🔥 `inference.md` (API + frontend integration — crucial for your demo)
+* 📊 `pipeline.md` (one master doc connecting everything)
+
+Just tell me 👍
