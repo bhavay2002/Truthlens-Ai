@@ -1067,11 +1067,12 @@ The `Trainer` reads its loop parameters (epochs, patience, min_epochs, min_delta
 - `GradScaler` is created by `create_grad_scaler()`. Returns a no-op scaler on CPU or bfloat16 (no dynamic range scaling needed).
 - PyTorch ≥2.3 uses `torch.amp.autocast(device_type, dtype)`; ≤2.2 uses `torch.cuda.amp.autocast`. The `get_amp_components` shim handles both.
 
-### torch.compile
+### torch.compile — COMPILE-OFF (project-wide)
 
-- Enabled via `use_compile=True` (COMPILE-RE-ENABLED after audit).
-- Mode: `"reduce-overhead"` (default) — fuses kernel launches, beneficial for training loops with many small ops.
-- Must run before DDP wrap (N-LOW-3).
+- `TrainingSetupConfig.use_compile` and `torch_compile: true` in `config.yaml` are **no-ops** as of the current codebase. `torch.compile` was removed project-wide after an audit identified spurious bf16 overflow warnings and environment-specific instability across the Replit deployment target.
+- The rationale and flag history are documented in `TransformerEncoder` (`encoder/transformer_encoder.py`, annotation `COMPILE-OFF`).
+- The `use_compile` parameter is retained in `TrainingSetupConfig` for back-compatibility (future re-enablement). `optimize_model()` is a pass-through when `use_compile=True` but the compile call is absent — **do not rely on kernel fusion being active**.
+- Must run before DDP wrap when (if) re-enabled (N-LOW-3).
 
 ### Gradient Checkpointing
 

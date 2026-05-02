@@ -184,6 +184,17 @@ nn.Module
 nn.Module
 └── MultiTaskBaseModel  [base/multitask_base_model.py]
     └── Legacy multi-task abstraction (superseded by MultiTaskTruthLensModel)
+
+nn.Module
+└── BaseModel
+    └── HybridTruthLensModel  [multitask/hybrid_truthlens_model.py]
+        ├── .encoder      → TransformerEncoder (frozen or trainable)
+        ├── .feature_proj → Linear(hidden_dim → proj_dim, GELU)  ← auxiliary feature branch
+        ├── .fusion       → Linear(768 + proj_dim → fusion_dim, GELU) + dropout
+        └── .task_heads   → nn.ModuleDict  (same 6 heads as MultiTaskTruthLensModel)
+        # Xavier init on feature_proj + fusion (CFG1 in hybrid_truthlens_model.py)
+        # DEFAULT_TASK_NUM_LABELS: bias=2, propaganda=2, ideology=3,
+        #   narrative=3, narrative_frame=5, emotion=11
 ```
 
 ### 3.2 Encoder: `TransformerEncoder`
@@ -219,7 +230,9 @@ nn.Module
 | `propaganda` | ClassificationHead | `["non_propaganda", "propaganda"]` | 2 |
 | `narrative` | MultiLabelHead | `["hero", "villain", "victim"]` | 3 |
 | `narrative_frame` | MultiLabelHead | `["RE", "HI", "CO", "MO", "EC"]` | 5 |
-| `emotion` | MultiLabelHead | `emotion_0` … `emotion_10` | 11 |
+| `emotion` | MultiLabelHead | `neutral`, `admiration`, `approval`, `gratitude`, `annoyance`, `amusement`, `curiosity`, `disapproval`, `love`, `optimism`, `anger` | 11 |
+
+> **Column-name note:** Training CSV columns are `emotion_0` … `emotion_10` (auto-generated from `range(NUM_EMOTION_LABELS)` in `data_contracts.py`). The semantic label mapping is the canonical `EMOTION_LABELS` list in `src/features/emotion/emotion_schema.py`.
 
 ---
 
