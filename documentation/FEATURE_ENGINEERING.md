@@ -19,7 +19,7 @@ Tokenization
 │  Parallel Feature Extractors                     │
 │  ├── Text Features (lexical, semantic, syntactic)│
 │  ├── Bias Features (lexicon density, framing)    │
-│  ├── Emotion Features (20-label intensity)       │
+│  ├── Emotion Features (11-label intensity)       │
 │  ├── Narrative Features (frame, roles)           │
 │  ├── Propaganda Features (manipulation patterns) │
 │  ├── Discourse Features (argument structure)     │
@@ -31,7 +31,7 @@ Feature Fusion (scaling, selection)
 Unified Feature Representation → Model Input
 ```
 
-All feature extractors are located in `src/features/` and inherit from `BaseFeature` via a `FeatureContext` object.
+All feature extractors are located in `src/features/` and inherit from `BaseFeature`. Each extractor receives a `FeatureContext` object as input — `FeatureContext` is defined in `src/analysis/feature_context.py` and is spaCy-backed for NER and syntactic annotation shared across all extractors.
 
 ---
 
@@ -39,15 +39,16 @@ All feature extractors are located in `src/features/` and inherit from `BaseFeat
 
 ### `FeatureContext`
 
-Every feature extractor receives a `FeatureContext` object as input:
+Every feature extractor receives a `FeatureContext` object:
 
 ```python
-from src.features.base.base_feature import FeatureContext
+from src.analysis.feature_context import FeatureContext
 
 context = FeatureContext(text="News article text here...")
+# spaCy doc is computed once and cached inside the context object
 ```
 
-`FeatureContext` standardizes the input surface so any feature extractor can be composed into a pipeline without knowing about other extractors.
+`FeatureContext` standardizes the input surface so any feature extractor can be composed into a pipeline without knowing about other extractors. spaCy processing (tokenization, NER, POS tagging, dependency parsing) is done once per context and shared across all analyzers.
 
 ### `BaseFeature`
 
@@ -112,7 +113,7 @@ Ratio of bias-indicative tokens to total article tokens. Used directly in `compu
 
 **API wrapper:** `src/features/bias/bias_lexicon.py` provides `compute_bias_features(text)` which returns a `BiasResult` containing:
 - `bias_score` — normalized float (0.0–1.0)
-- `media_bias` — "center" / "lean" / "strong"
+- `media_bias` — `"center"` / `"lean"` / `"strong"`
 - `biased_tokens` — list of detected bias-loaded words
 - `sentence_heatmap` — per-sentence bias scores
 
@@ -120,7 +121,7 @@ Ratio of bias-indicative tokens to total article tokens. Used directly in `compu
 
 ## Emotion Features — `src/features/emotion/`
 
-Analyze the **emotional tone of articles** across 20 emotion labels.
+Analyze the **emotional tone of articles** using the **EMOTION-11 schema**.
 
 | Module                           | Features Extracted                              |
 |----------------------------------|-------------------------------------------------|
@@ -129,15 +130,33 @@ Analyze the **emotional tone of articles** across 20 emotion labels.
 | `emotion_intensity_features.py`  | Emotional intensity and volatility              |
 | `emotion_trajectory_features.py` | Emotional arc across article sections           |
 | `emotion_target_features.py`     | Target entities of emotional language           |
-| `emotion_schema.py`              | Canonical 20-label emotion schema (`EMOTION_LABELS`) |
+| `emotion_schema.py`              | Canonical EMOTION-11 schema (`EMOTION_LABELS`)  |
 
-**Emotion labels:** admiration, amusement, anger, annoyance, approval, caring, confusion, curiosity, desire, disappointment, disapproval, disgust, embarrassment, excitement, fear, gratitude, grief, joy, love, nervousness, optimism, pride, realization, relief, remorse, sadness, surprise, neutral
+### EMOTION-11 Label Schema
 
-**Feature key format:** `lexicon_emotion_{emotion_name}` → float score per emotion
+The live emotion schema contains exactly 11 labels. The canonical definition is `EMOTION_LABELS` in `src/features/emotion/emotion_schema.py`:
+
+| Index | Label        | Dataset column |
+|-------|--------------|----------------|
+| 0     | `neutral`    | `emotion_0`    |
+| 1     | `admiration` | `emotion_1`    |
+| 2     | `approval`   | `emotion_2`    |
+| 3     | `gratitude`  | `emotion_3`    |
+| 4     | `annoyance`  | `emotion_4`    |
+| 5     | `amusement`  | `emotion_5`    |
+| 6     | `curiosity`  | `emotion_6`    |
+| 7     | `disapproval`| `emotion_7`    |
+| 8     | `love`       | `emotion_8`    |
+| 9     | `optimism`   | `emotion_9`    |
+| 10    | `anger`      | `emotion_10`   |
+
+**Legacy labels (NOT in live schema):** The original GoEmotions 20-label set included `joy`, `fear`, `sadness`, `confusion`, `disappointment`, `caring`, `surprise`, `excitement`, `disgust` and others. These are tracked in `_LEGACY_EMOTION_LABELS` in `emotion_schema.py` for audit purposes only. Any dataset column named `emotion_joy`, `emotion_fear`, etc. will be rejected by the data contracts validator.
+
+**Feature key format:** `lexicon_emotion_{label_name}` → float score per emotion (e.g. `lexicon_emotion_annoyance`)
 
 **API wrapper:** `src/features/emotion/emotion_lexicon.py` provides `EmotionLexiconAnalyzer().analyze(text)` which returns an `EmotionResult` containing:
-- `dominant_emotion` — the highest-scoring emotion (or `"neutral"` if all scores are 0)
-- `emotion_scores` — dict of all 20 emotion scores
+- `dominant_emotion` — the highest-scoring label (or `"neutral"` if all scores are 0)
+- `emotion_scores` — dict of all 11 emotion scores
 - `emotion_distribution` — normalized probability distribution
 
 ---
@@ -149,18 +168,20 @@ Capture **story structure and framing techniques** used in articles.
 | Module                       | Features Extracted                                   |
 |------------------------------|------------------------------------------------------|
 | `narrative_features.py`      | General narrative signal composition                 |
-| `narrative_frame_features.py`| Frame category detection (Resolution, Human Interest, Conflict, Moral, Economic) |
+| `narrative_frame_features.py`| Frame category detection (5-class)                  |
 | `narrative_role_features.py` | Hero / Villain / Victim role assignment              |
 | `conflict_features.py`       | Adversarial framing and conflict intensity           |
 
-**Narrative frame categories (from config):**
+**Narrative frame categories (CO/EC/HI/MO/RE):**
 | Code | Frame           |
 |------|-----------------|
-| RE   | Resolution      |
-| HI   | Human Interest  |
-| CO   | Conflict        |
-| MO   | Moral           |
-| EC   | Economic        |
+| `CO` | Conflict        |
+| `EC` | Economic        |
+| `HI` | Human Interest  |
+| `MO` | Moral           |
+| `RE` | Resolution      |
+
+**Narrative role labels (multi-label binary):** `hero` · `villain` · `victim`
 
 ---
 
@@ -200,7 +221,7 @@ Capture **relationships between named entities and interactions** in articles.
 | `entity_graph_features.py`     | Entity co-occurrence, centrality, connectivity|
 | `interaction_graph_features.py`| Interaction pattern density, narrative hubs   |
 
-Graph construction uses **spaCy NER** for entity extraction and **NetworkX** for graph computation.
+Graph construction uses **spaCy NER** (via `FeatureContext`) for entity extraction and **NetworkX** for graph computation.
 
 ---
 
@@ -312,13 +333,20 @@ The TF-IDF vectorizer is trained on the training set and persisted to `models/tf
 Example:
 
 ```python
-from src.features.base.base_feature import BaseFeature, FeatureContext
+from __future__ import annotations
+import logging
+from src.features.base.base_feature import BaseFeature
+from src.analysis.feature_context import FeatureContext
+
+logger = logging.getLogger(__name__)
 
 class MyNewFeature(BaseFeature):
-    def extract(self, context: FeatureContext) -> dict:
+    """Detects [describe what this feature captures]."""
+
+    def extract(self, context: FeatureContext) -> dict[str, float]:
         tokens = context.text.lower().split()
         return {
-            "my_feature_word_count": len(tokens),
+            "my_feature_word_count": float(len(tokens)),
         }
 ```
 
@@ -332,4 +360,4 @@ class MyNewFeature(BaseFeature):
 
 **Extensibility** — The `BaseFeature` / `FeatureContext` pattern makes it straightforward to add new signal types.
 
-**Efficiency** — Feature caching and batch pipelines support large-scale dataset processing without redundant computation.
+**Efficiency** — Feature caching and batch pipelines support large-scale dataset processing without redundant computation. spaCy processing is computed once per `FeatureContext` and shared across all extractors in the same pipeline pass.

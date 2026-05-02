@@ -43,17 +43,17 @@ python -m uvicorn api.app:app --host 0.0.0.0 --port 5000 --reload \
 python main.py
 ```
 
-After training, verify the model files are present:
+After training, verify the checkpoint is present:
 ```bash
-ls models/truthlens_model/
-# config.json  tokenizer.json  model.safetensors
+ls models/checkpoints/
+# checkpoint.pt  checkpoint.meta.json
 ```
 
 ---
 
 ### `POST /predict` returns `503 Service Unavailable`
 
-**Cause:** Same as above — model files are missing.
+**Cause:** Same as above — model checkpoint is missing.
 
 **Detail message:** `"Model not available. Please train the model first."`
 
@@ -74,7 +74,7 @@ ls models/truthlens_model/
 
 ### `POST /analyze` is very slow
 
-**Cause:** LIME explanation generation runs 256 perturbation passes. This is expected.
+**Cause:** LIME explanation generation runs 256 perturbation passes. This is expected, especially on CPU.
 
 **Expected times:**
 - GPU: 2–8 seconds
@@ -130,7 +130,26 @@ python main.py
 python main.py
 ```
 
-The pipeline auto-generates `data/splits/train.csv` before training starts.
+The pipeline auto-generates split files before the training loop starts.
+
+---
+
+### Data contracts validator rejects emotion columns
+
+**Error:** `ValueError: Column 'emotion_joy' not in schema` or similar
+
+**Cause:** Emotion dataset has legacy column names (`emotion_joy`, `emotion_fear`, etc.) from the 20-label GoEmotions schema. The live EMOTION-11 schema uses positional integer column names.
+
+**Fix:** Rename emotion columns to the positional format:
+
+| Old name (reject)   | New name (required) | Label        |
+|---------------------|---------------------|--------------|
+| `emotion_0`         | `emotion_0`         | `neutral`    |
+| `emotion_joy` ✗     | `emotion_1`         | `admiration` |
+| `emotion_fear` ✗    | `emotion_4`         | `annoyance`  |
+| ...                 | `emotion_10`        | `anger`      |
+
+See `src/data_processing/data_contracts.py` and `src/features/emotion/emotion_schema.py` for the authoritative column-to-label mapping.
 
 ---
 
@@ -138,17 +157,18 @@ The pipeline auto-generates `data/splits/train.csv` before training starts.
 
 **Cause:** Batch size is too large for available GPU memory.
 
-**Fix:** Reduce batch size and increase gradient accumulation to compensate:
+**Fix:** Reduce batch size and increase gradient accumulation to maintain effective batch size:
 ```yaml
+data:
+  batch_size: 16                   # Reduce from 32
 training:
-  batch_size: 4                    # Reduce from 8
-  gradient_accumulation_steps: 4   # Effective batch = 4 × 4 = 16
+  gradient_accumulation_steps: 4   # Effective batch = 16 × 4 = 64 (unchanged)
 ```
 
-Or switch to FP16 if not already enabled:
+Or disable gradient checkpointing (trades memory efficiency for speed — only if memory is not the constraint):
 ```yaml
-training:
-  fp16: true
+model:
+  gradient_checkpointing: false
 ```
 
 ---
@@ -158,9 +178,13 @@ training:
 **Cause:** RoBERTa model training requires significant compute. CPU training can take hours per epoch.
 
 **Fix options:**
-1. Reduce model size: `encoder.name: distilroberta-base` (lighter, faster)
-2. Reduce max token length: `encoder.max_length: 128`
-3. Reduce dataset size for testing purposes
+1. Reduce model size: `encoder: distilroberta-base` (lighter, faster)
+2. Reduce batch size and accumulation for more frequent gradient updates per epoch
+3. Disable `torch_compile` on CPU if it causes overhead:
+   ```yaml
+   model:
+     torch_compile: false
+   ```
 4. Use a GPU environment if available
 
 ---
@@ -171,30 +195,25 @@ training:
 
 | Symptom                     | Likely cause                    | Fix                                    |
 |-----------------------------|----------------------------------|----------------------------------------|
-| Loss doesn't decrease at all | Learning rate too high          | Reduce `learning_rate` to `1e-5`       |
-| Loss oscillates wildly      | Gradient exploding              | Ensure `gradient_clipping: 1.0`        |
-| Fast convergence then plateau| Learning rate schedule issue    | Increase `warmup_ratio` to `0.15`      |
+| Loss doesn't decrease at all | Learning rate too high          | Reduce learning rate by 5–10×          |
+| Loss oscillates wildly      | Gradient exploding              | Ensure `max_grad_norm: 1.0`            |
+| Fast convergence then plateau| Schedule issue                  | Increase warmup ratio                  |
 | Validation loss goes up     | Overfitting                     | Add more data or increase dropout      |
-| NaN losses                  | FP16 overflow                   | Disable `fp16: false` temporarily      |
+| NaN losses under BF16       | BF16 overflow (rare on bf16)    | Switch `amp_dtype: "fp16"` and lower `grad_scaler_init_scale` |
 
 ---
 
-### Early stopping triggers immediately
+### Early stopping triggers immediately (before epoch 4)
 
-**Cause:** `patience` is set too low, or the initial validation loss happens to be at a minimum before training stabilizes.
+**Cause:** `min_epochs` guards against premature stopping. If early stopping fires before epoch 4, this indicates a configuration issue.
 
-**Fix:** Increase patience:
+**Expected behavior:** Early stopping is disabled until `min_epochs: 4` is reached. After that it requires `patience: 2` consecutive epochs without improvement exceeding `min_delta: 0.003`.
+
+**Fix if still triggering too early:**
 ```yaml
 training:
-  early_stopping:
-    patience: 3    # Increase from 2
-```
-
-Or temporarily disable early stopping for debugging:
-```yaml
-training:
-  early_stopping:
-    enabled: false
+  min_epochs: 6              # Extend the minimum run
+  early_stopping_patience: 3  # Increase grace period
 ```
 
 ---
@@ -236,21 +255,31 @@ Re-enable for final training runs.
 
 ---
 
+### Leakage check fails
+
+**Error:** `DataLeakageError: N samples from train found in test`
+
+**Cause:** Raw data contains duplicate texts that span splits.
+
+**Fix:** Review and deduplicate your raw datasets in `data/raw/`. The leakage checker compares by text hash before augmentation, so removing source duplicates is the only reliable fix. Do not disable the leakage check in production.
+
+---
+
 ## Feature Engineering Issues
 
 ### `BiasLexiconFeatures` returns all zeros
 
 **Cause:** The article uses bias terms not in the internal lexicon, or the text doesn't contain obvious bias markers.
 
-**Note:** This is expected behavior for neutral, factual text. The bias score being near zero is a correct output.
+**Note:** This is expected behavior for neutral, factual text. A bias score near zero is a correct output.
 
 ---
 
 ### `EmotionLexiconAnalyzer` returns `"neutral"` for all articles
 
-**Cause:** The lexicon-based emotion extractor may not match emotional language in your articles.
+**Cause:** The lexicon-based emotion extractor relies on a predefined lexicon mapped to the EMOTION-11 labels. If the input uses uncommon emotional vocabulary, scores will be low.
 
-**Note:** The emotion analyzer relies on a predefined lexicon. If the input text uses uncommon emotional vocabulary, scores will be low and dominant_emotion will correctly return `"neutral"`.
+**Note:** `"neutral"` is the correct output when no EMOTION-11 lexicon terms are matched. The emotion model head (transformer-based) may still detect emotion signals at inference time even when lexicon scores are zero.
 
 ---
 
@@ -259,8 +288,8 @@ Re-enable for final training runs.
 **Fix:** Enable feature caching:
 
 ```python
-# src/features/cache/cache_manager.py is available
-# Ensure batch_feature_pipeline.py is used for dataset-scale extraction
+# Use batch_feature_pipeline.py for dataset-scale extraction
+# src/features/cache/cache_manager.py handles lifecycle
 ```
 
 Or run feature extraction once and save to CSV before training.
@@ -281,9 +310,23 @@ python -c "from src.utils.settings import load_settings; print('OK')"
 
 ---
 
+### `ModuleNotFoundError: No module named 'src.data'`
+
+**Cause:** Outdated import path. The data processing module was reorganized.
+
+**Fix:** Replace `from src.data` with `from src.data_processing`:
+```python
+# Wrong:
+from src.data.data_loader import load_dataframe
+# Correct:
+from src.data_processing.data_loader import load_dataframe
+```
+
+---
+
 ### `ModuleNotFoundError: No module named 'models.inference'`
 
-**Cause:** Same — project root is not in the Python path.
+**Cause:** Project root is not in the Python path.
 
 **Fix:** Always run from `/home/runner/workspace`. The Replit workflow does this automatically.
 
@@ -306,6 +349,17 @@ def load_model_and_tokenizer():
 ```
 
 This pattern is already used in `models/inference/predictor.py`.
+
+---
+
+### Analysis registry key mismatch
+
+**Error:** `KeyError: 'bias_profiler'` or analyzer not running as expected
+
+**Cause:** A config or downstream reference uses a registry key that doesn't match the key used in `build_default_registry()`.
+
+**Fix:** Use the exact keys from `src/analysis/analysis_registry.py`:
+`rhetorical`, `argument`, `context`, `discourse`, `emotion`, `framing`, `information`, `information_omission`, `ideology`, `narrative_role`, `narrative_conflict`, `narrative_propagation`, `narrative_temporal`, `source`
 
 ---
 

@@ -23,23 +23,25 @@ Thank you for your interest in contributing to TruthLens AI. This document descr
 ## Project Structure Overview
 
 ```
-api/            REST API — only modify app.py for endpoint changes
-config/         YAML configuration — no Python logic here
-src/            All core logic
-  aggregation/  Credibility scoring engine
-  analysis/     Linguistic analysis modules
-  data/         Data loading, cleaning, splitting
-  evaluation/   Metrics and evaluation tools
-  explainability/ SHAP, LIME, attention methods
-  features/     Feature extractors (the most common place to contribute)
-  graph/        Entity and narrative graph reasoning
-  models/       Model architecture and task heads
-  pipelines/    End-to-end pipeline orchestration
-  training/     Training utilities
-  utils/        Shared configuration, logging, helpers
-models/         Trained artifacts and inference helpers
-tests/          Test suite — add tests for every change
+api/               REST API — only modify app.py for endpoint changes
+config/            YAML configuration — no Python logic here
+src/               All core logic
+  aggregation/     Credibility scoring engine (FeatureMapper → WeightManager → ScoreCalculator)
+  analysis/        14 linguistic analysis modules (AnalyzerRegistry + AnalysisPipeline)
+  data_processing/ Data loading, cleaning, validation, splitting (8-stage pipeline)
+  evaluation/      Metrics and evaluation tools
+  explainability/  SHAP, LIME, attention methods
+  features/        Feature extractors (most common place to contribute)
+  graph/           Entity and narrative graph reasoning
+  models/          Model architecture and task heads
+  pipelines/       End-to-end pipeline orchestration
+  training/        Training utilities
+  utils/           Shared configuration, logging, helpers
+models/            Trained artifacts and inference helpers
+tests/             Test suite — add tests for every change
 ```
+
+**Important path note:** Data processing code lives in `src/data_processing/` (not `src/data/`). The 8-stage pipeline is in `src/data_processing/data_pipeline.py`. Task schemas are defined in `src/data_processing/data_contracts.py`.
 
 ---
 
@@ -111,7 +113,8 @@ Feature extractors are the most common type of contribution. Follow this pattern
 
 from __future__ import annotations
 import logging
-from src.features.base.base_feature import BaseFeature, FeatureContext
+from src.features.base.base_feature import BaseFeature
+from src.analysis.feature_context import FeatureContext
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +143,7 @@ class MyNewFeature(BaseFeature):
 # tests/test_features/test_my_new_feature.py
 
 import pytest
-from src.features.base.base_feature import FeatureContext
+from src.analysis.feature_context import FeatureContext
 from src.features.bias.my_new_feature import MyNewFeature
 
 def test_basic_extraction():
@@ -153,7 +156,7 @@ def test_basic_extraction():
 
 def test_empty_text_does_not_crash():
     extractor = MyNewFeature()
-    context = FeatureContext(text="words")
+    context = FeatureContext(text="short words")
     features = extractor.extract(context)
     assert isinstance(features, dict)
 ```
@@ -161,6 +164,45 @@ def test_empty_text_does_not_crash():
 **3. Register in the feature pipeline** (`src/features/pipelines/feature_pipeline.py`)
 
 **4. Document in `documentation/FEATURE_ENGINEERING.md`**
+
+---
+
+## Adding a New Analysis Analyzer
+
+The `AnalyzerRegistry` (in `src/analysis/analysis_registry.py`) holds all 14 active analyzers, constructed by `build_default_registry()`.
+
+**1. Create the module in `src/analysis/`:**
+
+```python
+# src/analysis/my_analyzer.py
+
+from __future__ import annotations
+import logging
+from src.analysis.base_analyzer import BaseAnalyzer
+from src.analysis.feature_context import FeatureContext
+from src.analysis.output_models import AnalysisResult
+
+logger = logging.getLogger(__name__)
+
+class MyAnalyzer(BaseAnalyzer):
+    """Analyzes [describe the signal]."""
+
+    def analyze(self, context: FeatureContext) -> AnalysisResult:
+        ...
+```
+
+**2. Register in `build_default_registry()`:**
+
+```python
+# src/analysis/analysis_registry.py
+reg.register("my_analyzer", MyAnalyzer(), order=15)
+```
+
+**Critical:** The registry key must match exactly wherever it is referenced. Any downstream config or code referencing this analyzer must use the exact string `"my_analyzer"`.
+
+**3. Connect output to aggregation** (`src/aggregation/`) if the signal contributes to scoring.
+
+**4. Add tests in `tests/`.**
 
 ---
 
@@ -195,23 +237,31 @@ def my_endpoint(request: MyRequest):
 
 ---
 
-## Adding a New Analysis Module
+## Modifying the Aggregation Engine
 
-1. Create the module in `src/analysis/`
-2. Inherit from the base analysis interface (or implement standalone if no base exists)
-3. Return a structured result using a `dataclass`
-4. Connect the output to the aggregation engine in `src/aggregation/`
-5. Add tests in `tests/`
+The credibility scoring engine is in `src/aggregation/`. The weight grouping structure is defined in `src/aggregation/aggregation_config.py` as `WEIGHT_GROUPS` — this is the **single source of truth** for which signals belong to which group. Both `weight_manager.py` and `truthlens_score_calculator.py` import from here.
+
+To change how signals are weighted:
+
+1. Edit `WEIGHT_GROUPS` or `TASK_TO_GROUP` in `src/aggregation/aggregation_config.py`
+2. Ensure all weight changes are reflected in `documentation/SYSTEM_DESIGN.md`
+3. Write a test that verifies the score direction is correct (higher manipulation signals → lower credibility)
+
+Do not define group mappings in `weight_manager.py` directly — any drift from `aggregation_config.py` silently breaks per-group renormalization.
 
 ---
 
-## Modifying the Aggregation Engine
+## Modifying the Data Pipeline
 
-The credibility scoring engine is in `src/aggregation/`. To change how signals are weighted:
+The 8-stage data pipeline is orchestrated by `src/data_processing/data_pipeline.py`. Task schemas are defined in `src/data_processing/data_contracts.py` — the **single source of truth** for column names and task types.
 
-1. Edit signal weights in `src/aggregation/weight_manager.py` or via configuration
-2. Ensure all weight changes are reflected in `documentation/SYSTEM_DESIGN.md`
-3. Write a test that verifies the score direction is correct (higher manipulation signals → lower credibility)
+When adding a new task or changing column naming:
+1. Update `data_contracts.py` first
+2. Update the relevant dataset source (e.g. `data/raw/emotion/`)
+3. Update `config/data_config.yaml` dataset section
+4. Run the full pipeline to verify end-to-end compatibility
+
+**Emotion column naming:** Do not introduce new string-named emotion columns. The EMOTION-11 schema uses positional integer columns (`emotion_0` through `emotion_10`). See `src/features/emotion/emotion_schema.py` for the canonical label list.
 
 ---
 
@@ -292,5 +342,6 @@ When making changes that affect system behavior, update the relevant docs:
 | Deployment change         | `DEPLOYMENT.md`                           |
 | Directory structure change| `PROJECT_STRUCTURE.md`                    |
 | Model architecture change | `MODEL_CARD.md`                           |
+| Data schema change        | `TRAINING_GUIDE.md`, `CONFIGURATION.md`   |
 
 Also update `replit.md` for any significant architectural changes — this file is always loaded into the agent's memory.

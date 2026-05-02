@@ -172,32 +172,40 @@ Same validation as `/predict` — text between 10 and 10,000 characters.
     ]
   },
   "emotion": {
-    "dominant_emotion": "fear",
+    "dominant_emotion": "annoyance",
     "emotion_scores": {
+      "neutral": 0.0,
       "admiration": 0.0,
-      "anger": 0.0,
-      "fear": 0.0821,
-      "joy": 0.0,
-      "sadness": 0.0312,
-      "surprise": 0.0,
-      "neutral": 0.0
+      "approval": 0.0,
+      "gratitude": 0.0,
+      "annoyance": 0.0821,
+      "amusement": 0.0,
+      "curiosity": 0.0312,
+      "disapproval": 0.0,
+      "love": 0.0,
+      "optimism": 0.0,
+      "anger": 0.0
     },
     "emotion_distribution": {
+      "neutral": 0.0,
       "admiration": 0.0,
-      "anger": 0.0,
-      "fear": 0.7241,
-      "joy": 0.0,
-      "sadness": 0.2759,
-      "surprise": 0.0,
-      "neutral": 0.0
+      "approval": 0.0,
+      "gratitude": 0.0,
+      "annoyance": 0.7241,
+      "amusement": 0.0,
+      "curiosity": 0.2759,
+      "disapproval": 0.0,
+      "love": 0.0,
+      "optimism": 0.0,
+      "anger": 0.0
     }
   },
   "explainability": {
     "emotion_explanation": {
-      "dominant_emotion": "fear",
+      "dominant_emotion": "annoyance",
       "intensity": 0.0821,
-      "trigger_words": ["cancer", "hiding", "mainstream media"],
-      "sentence_breakdown": [...]
+      "trigger_words": ["hiding", "mainstream media"],
+      "sentence_breakdown": []
     },
     "lime": {
       "text": "BREAKING: Scientists have confirmed...",
@@ -234,11 +242,16 @@ Same validation as `/predict` — text between 10 and 10,000 characters.
 | `sentence_heatmap`| object[]     | Per-sentence `{sentence, bias_score}` breakdowns   |
 
 **`emotion` object:**
+
+Emotion scores use the **EMOTION-11 schema** — exactly 11 labels. Labels from the legacy GoEmotions 20-label set (e.g. `fear`, `joy`, `sadness`) are not present in the response.
+
 | Field                 | Type        | Description                                    |
 |-----------------------|-------------|------------------------------------------------|
-| `dominant_emotion`    | string      | Highest-scoring emotion label (or `"neutral"`) |
+| `dominant_emotion`    | string      | Highest-scoring label (or `"neutral"` if all 0)|
 | `emotion_scores`      | object      | Raw score per emotion label (0.0–1.0)          |
 | `emotion_distribution`| object      | Normalized probability distribution (sums to 1)|
+
+**Active emotion labels:** `neutral`, `admiration`, `approval`, `gratitude`, `annoyance`, `amusement`, `curiosity`, `disapproval`, `love`, `optimism`, `anger`
 
 **`explainability.lime` object:**
 | Field                | Type      | Description                                     |
@@ -362,9 +375,9 @@ Output model from `/analyze`.
     "sentence_heatmap": [{ "sentence": "string", "bias_score": "float" }]
   },
   "emotion": {
-    "dominant_emotion": "string",
-    "emotion_scores": "object (emotion → float)",
-    "emotion_distribution": "object (emotion → float)"
+    "dominant_emotion": "string (one of 11 EMOTION-11 labels)",
+    "emotion_scores": "object (label → float, 11 entries)",
+    "emotion_distribution": "object (label → float, 11 entries, sums to 1)"
   },
   "explainability": {
     "emotion_explanation": "object",
@@ -416,8 +429,8 @@ inference:
 
 ## Rate Limiting and Performance
 
-- `/predict` — typically responds in under 1 second once the model is warmed up
-- `/analyze` — slower due to LIME (256 samples) and parallel feature extraction; expect 2–10 seconds depending on article length and hardware
+- `/predict` — typically responds in under 1 second once the model is warmed up (GPU); 2–10 seconds on CPU
+- `/analyze` — slower due to LIME (256 samples) and parallel feature extraction; expect 10–60 seconds on CPU depending on article length
 - First request after startup is slower (model loading); subsequent requests use the cached model
 
 ---

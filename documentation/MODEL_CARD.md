@@ -12,55 +12,60 @@ This document describes the **TruthLens AI model**, including its architecture, 
 | Version            | 2.0.0                                                                 |
 | Model Type         | Transformer-based multi-task NLP system                               |
 | Base Architecture  | RoBERTa (`roberta-base`)                                              |
-| Tasks              | Fake news detection, bias detection, propaganda detection, ideology, emotion, narrative |
+| Tasks              | Bias detection, ideology detection, propaganda detection, emotion classification (11-label), narrative role assignment, narrative frame detection |
 | Framework          | PyTorch + Hugging Face Transformers                                   |
-| Tokenizer          | RoBERTa tokenizer, max length 256                                     |
+| Tokenizer          | RoBERTa tokenizer, max length 512                                     |
 | Interface          | FastAPI REST service (port 5000)                                      |
 | Language Support   | English                                                               |
-| Trained Model Path | `models/truthlens_model/`                                             |
+| Checkpoint Path    | `models/checkpoints/checkpoint.pt`                                    |
 
 ---
 
 ## Model Architecture
 
-TruthLens uses a **shared encoder with six task-specific classification heads**:
+TruthLens uses a **shared encoder with six task-specific classification heads** (`MultiTaskTruthLensModel`):
 
 ```
 Article Text
        ↓
-RoBERTa Tokenizer (max_length=256)
+RoBERTa Tokenizer (max_length=512)
        ↓
 Shared RoBERTa Encoder (roberta-base, 12 layers, 768 hidden dim)
+  + Gradient Checkpointing
        ↓
-┌───────────────────────────────────────────────────────────┐
-│  Task Heads                                               │
-│                                                           │
-│  ├── Bias Detection        3-class classification         │
-│  │                         (cross_entropy loss)           │
-│  │                                                        │
-│  ├── Ideology Detection    3-class classification         │
-│  │                         (cross_entropy loss)           │
-│  │                                                        │
-│  ├── Propaganda Detection  Binary classification          │
-│  │                         (cross_entropy loss)           │
-│  │                                                        │
-│  ├── Emotion Detection     20-label multi-label           │
-│  │                         (binary_cross_entropy loss)    │
-│  │                                                        │
-│  ├── Narrative Roles       Hero / Villain / Victim        │
-│  │                         (binary_cross_entropy loss)    │
-│  │                                                        │
-│  └── Frame Detection       RE / HI / CO / MO / EC        │
-│                            (binary_cross_entropy loss)    │
-└───────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────┐
+│  Task Heads (nn.ModuleDict)                                   │
+│                                                               │
+│  ├── Bias Detection        3-class classification             │
+│  │                         (cross_entropy loss)               │
+│  │                                                            │
+│  ├── Ideology Detection    3-class classification             │
+│  │                         (cross_entropy loss)               │
+│  │                                                            │
+│  ├── Propaganda Detection  Binary classification              │
+│  │                         (cross_entropy loss)               │
+│  │                                                            │
+│  ├── Emotion Detection     11-label multi-label               │
+│  │                         columns: emotion_0…emotion_10      │
+│  │                         (binary_cross_entropy loss)        │
+│  │                                                            │
+│  ├── Narrative Roles       hero / villain / victim            │
+│  │                         (binary_cross_entropy loss)        │
+│  │                                                            │
+│  └── Narrative Frame       CO / EC / HI / MO / RE            │
+│                            (binary_cross_entropy loss)        │
+└───────────────────────────────────────────────────────────────┘
        ↓
 Per-task softmax / sigmoid outputs
 ```
 
 **Architecture settings:**
 - Shared encoder: `roberta-base`
+- Hidden dim: 768
 - Dropout: 0.1
 - Architecture type: `multitask_transformer`
+- `torch.compile` enabled (`compile_mode: "default"`)
+- Flash attention enabled
 
 ---
 
@@ -72,12 +77,14 @@ TruthLens is trained on multiple public datasets unified under a shared label sc
 |-------------------------|----------------------------------------|
 | Fake News Detection     | ISOT, LIAR, FakeNewsNet                |
 | Bias Detection          | BABE, BASIL, MBIC                      |
-| Emotion Classification  | GoEmotions, SemEval                    |
+| Emotion Classification  | GoEmotions (11-label subset)           |
 | Ideology Detection      | AllSides                               |
 | Narrative Analysis      | FrameNet                               |
 | Propaganda Detection    | PTC Propaganda Dataset                 |
 
-Datasets are stored in `data/raw/` organized by task, then merged into `data/processed/unified_dataset.csv`.
+Datasets are stored in `data/raw/` organized by task, then processed via the 8-stage pipeline in `src/data_processing/data_pipeline.py`. The unified output is `data/processed/unified_dataset.csv`.
+
+**Task schemas** are defined in `src/data_processing/data_contracts.py` — the single source of truth for label column names and task types.
 
 **Data split ratios:**
 - Train: 70%
@@ -92,6 +99,7 @@ Datasets are stored in `data/raw/` organized by task, then merged into `data/pro
 5. Lowercasing
 6. Whitespace normalization
 7. Minimum word count filtering (≥30 words)
+8. Leakage check (cross-split contamination detection)
 
 ---
 
@@ -101,24 +109,25 @@ Datasets are stored in `data/raw/` organized by task, then merged into `data/pro
 
 **Training pipeline:**
 ```
-Dataset Loading (data/splits/train.csv)
+Dataset Loading via data_pipeline.py (8-stage)
        ↓
-Feature Engineering (TF-IDF + lexical features)
-       ↓
-MultiTaskTruthLensModel initialization
+MultiTaskTruthLensModel initialization (roberta-base)
        ↓
 Multi-task training loop
-  - Optimizer: AdamW (weight_decay=0.01)
-  - Learning rate: 2.0e-5
-  - Scheduler: linear warmup (warmup_ratio=0.1)
-  - Batch size: 8
-  - Gradient accumulation steps: 2
-  - Gradient clipping: 1.0
-  - FP16: enabled
-  - Epochs: 4
-  - Early stopping: patience=2, metric=eval_loss
+  - Optimizer: AdamW (weight_decay configurable)
+  - Learning rate: 1.75e-6 (post-convergence tuned)
+  - Scheduler: linear warmup
+  - Batch size: 32 (data.batch_size)
+  - Gradient accumulation steps: 2 → effective batch = 64
+  - Gradient clipping: max_grad_norm=1.0
+  - AMP dtype: bf16
+  - Max epochs: 10, min_epochs: 4
+  - Early stopping: patience=2, min_delta=0.003
+  - Metric: weighted_composite_score (task-balanced)
+  - Gradient checkpointing: enabled
+  - torch.compile: enabled (compile_mode: "default")
        ↓
-Checkpoint saved to models/truthlens_model/
+Checkpoint saved to models/checkpoints/checkpoint.pt
 ```
 
 Hyperparameter tuning is supported via Optuna (`hyperparameter_tuning.enabled: true` in config).
@@ -188,8 +197,20 @@ Constraints:
   },
   "emotion": {
     "dominant_emotion": "neutral",
-    "emotion_scores": { "joy": 0.0, "fear": 0.0, "anger": 0.0, "...": "..." },
-    "emotion_distribution": { "joy": 0.0, "fear": 0.0, "...": "..." }
+    "emotion_scores": {
+      "neutral": 0.0,
+      "admiration": 0.0,
+      "approval": 0.0,
+      "gratitude": 0.0,
+      "annoyance": 0.0,
+      "amusement": 0.0,
+      "curiosity": 0.0312,
+      "disapproval": 0.0,
+      "love": 0.0,
+      "optimism": 0.0,
+      "anger": 0.0
+    },
+    "emotion_distribution": { "neutral": 1.0, "...": 0.0 }
   },
   "explainability": {
     "emotion_explanation": { "...": "..." },
@@ -209,7 +230,27 @@ Constraints:
 - `"lean"` — bias_score 0.05–0.15
 - `"strong"` — bias_score ≥ 0.15
 
-**Emotion labels (20-label set):** admiration, amusement, anger, annoyance, approval, caring, confusion, curiosity, desire, disappointment, disapproval, disgust, embarrassment, excitement, fear, gratitude, grief, joy, love, nervousness, optimism, pride, realization, relief, remorse, sadness, surprise, neutral
+**Emotion labels (EMOTION-11 schema, columns `emotion_0`…`emotion_10`):**
+
+| Index | Label        |
+|-------|--------------|
+| 0     | `neutral`    |
+| 1     | `admiration` |
+| 2     | `approval`   |
+| 3     | `gratitude`  |
+| 4     | `annoyance`  |
+| 5     | `amusement`  |
+| 6     | `curiosity`  |
+| 7     | `disapproval`|
+| 8     | `love`       |
+| 9     | `optimism`   |
+| 10    | `anger`      |
+
+Labels from the legacy 20-label GoEmotions set (e.g. `joy`, `fear`, `sadness`) are **not** part of the live schema. See `src/features/emotion/emotion_schema.py` for the canonical definition.
+
+**Narrative frame labels (5-class):** `CO` (Conflict) · `EC` (Economic) · `HI` (Human Interest) · `MO` (Moral) · `RE` (Resolution)
+
+**Narrative role labels (multi-label binary):** `hero` · `villain` · `victim`
 
 ---
 
@@ -221,9 +262,10 @@ Constraints:
 | Precision    | All classification tasks      |
 | Recall       | All classification tasks      |
 | F1 Score     | All classification tasks      |
-| Micro F1     | Multi-label (emotion)         |
-| Macro F1     | Multi-label (emotion)         |
-| ROC-AUC      | Multi-label (emotion)         |
+| Micro F1     | Multi-label (emotion, frames) |
+| Macro F1     | Multi-label (emotion, frames) |
+| ROC-AUC      | Multi-label (emotion, frames) |
+| Weighted composite score | Combined task-balanced metric (early stopping monitor) |
 
 Evaluation results are saved to `reports/evaluation_results.json`. Confusion matrices are saved to `reports/confusion_matrix.png`.
 
@@ -298,7 +340,8 @@ TruthLens **must not be used as the sole authority** for determining factual tru
 - May struggle with **satire, parody, and opinion journalism** that uses exaggerated language
 - **Factual verification is not performed** — the system evaluates linguistic and structural signals, not truth of claims
 - Performance depends on **dataset quality and coverage** of the specific domain
-- Transformer encoder has a **maximum input of 256 tokens** — longer articles are truncated
+- Transformer encoder has a **maximum input of 512 tokens** — longer articles are truncated
+- **Emotion coverage is intentionally limited** to 11 labels; legacy GoEmotions labels (joy, fear, sadness, etc.) are excluded from the live schema
 - Model must be **trained before inference is available** — health endpoint reports `degraded` status on a fresh deployment
 
 ---
@@ -306,8 +349,8 @@ TruthLens **must not be used as the sole authority** for determining factual tru
 ## Versioning
 
 Model versions are tracked via:
-- Checkpoint directory: `models/truthlens_model/`
-- Required files: `config.json`, `tokenizer.json`, `model.safetensors` (or `pytorch_model.bin`)
+- Checkpoint file: `models/checkpoints/checkpoint.pt`
+- Checkpoint metadata: `models/checkpoints/checkpoint.meta.json`
 - Model registry: `src/models/registry/model_registry.py`
 
 Each model version records: configuration, training hyperparameters, dataset sources, and evaluation results.

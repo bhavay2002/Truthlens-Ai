@@ -12,39 +12,32 @@ Settings are loaded via `src/utils/settings.py` (primary interface used by the A
 
 ## `config/config.yaml`
 
-### `model.encoder`
+### `model`
 
-Controls the base transformer encoder used by the multi-task model.
-
-```yaml
-model:
-  encoder:
-    name: roberta-base             # HuggingFace model ID or local path
-    tokenizer_name: roberta-base   # Tokenizer to use (usually same as encoder)
-    max_length: 256                # Maximum token length per input
-    cache_dir: models/cache        # Where to cache downloaded model weights
-```
-
-| Key              | Default        | Description                                    |
-|------------------|----------------|------------------------------------------------|
-| `name`           | `roberta-base` | Encoder model identifier                       |
-| `tokenizer_name` | `roberta-base` | Tokenizer identifier                           |
-| `max_length`     | `256`          | Tokens per input (longer inputs are truncated) |
-| `cache_dir`      | `models/cache` | HuggingFace download cache directory           |
-
----
-
-### `model.architecture`
-
-Controls the shared architecture style.
+Controls the base transformer encoder and architectural settings.
 
 ```yaml
 model:
-  architecture:
-    type: multitask_transformer    # Architecture type
-    shared_encoder: true           # Whether to share the encoder across heads
-    dropout: 0.1                   # Dropout rate applied in task heads
+  encoder: roberta-base              # HuggingFace model ID or local path
+  hidden_dim: 768                    # Hidden dimension (768 for roberta-base)
+  dropout: 0.1                       # Dropout rate applied in task heads
+  gradient_checkpointing: true       # Trade compute for memory during training
+  flash_attention: true              # Use flash attention when available
+  torch_compile: true                # torch.compile at training time
+  compile_mode: "default"            # torch.compile mode ("default", "reduce-overhead", "max-autotune")
 ```
+
+| Key                      | Default        | Description                                     |
+|--------------------------|----------------|-------------------------------------------------|
+| `encoder`                | `roberta-base` | Encoder model identifier                        |
+| `hidden_dim`             | `768`          | Encoder hidden dimension                        |
+| `dropout`                | `0.1`          | Dropout applied in classification heads         |
+| `gradient_checkpointing` | `true`         | Reduces VRAM at cost of extra forward passes    |
+| `flash_attention`        | `true`         | Faster attention kernel (requires compatible GPU)|
+| `torch_compile`          | `true`         | Enables `torch.compile` for training speed      |
+| `compile_mode`           | `"default"`    | Compilation strategy for torch.compile          |
+
+**Note on CPU-only environments:** `flash_attention` and `torch_compile` require CUDA for full benefit. On CPU-only hosts (e.g. Replit), these settings are accepted by the config loader but their effects are environment-dependent.
 
 ---
 
@@ -56,7 +49,7 @@ Defines the task-specific classification heads attached to the shared encoder.
 model:
   heads:
     bias_detection:
-      num_labels: 3          # Number of bias classes
+      num_labels: 3          # left / center / right
       loss: cross_entropy
       label_column: bias_label
 
@@ -71,26 +64,28 @@ model:
       label_column: propaganda_label
 
     emotion_detection:
-      num_labels: 20         # 20-label multi-label classification
+      num_labels: 11         # EMOTION-11 schema (emotion_0 … emotion_10)
       type: multi_label
       loss: binary_cross_entropy
-      label_prefix: emotion_ # Column prefix in dataset (emotion_joy, emotion_fear, etc.)
+      label_prefix: emotion_ # Positional columns: emotion_0, emotion_1, ..., emotion_10
 
     narrative_roles:
-      hero: hero             # Column name for hero binary label
+      hero: hero             # Binary column for hero label
       villain: villain
       victim: victim
       loss: binary_cross_entropy
 
     frame_detection:
       labels:
-        - RE                 # Resolution
-        - HI                 # Human Interest
         - CO                 # Conflict
-        - MO                 # Moral
         - EC                 # Economic
+        - HI                 # Human Interest
+        - MO                 # Moral
+        - RE                 # Resolution
       loss: binary_cross_entropy
 ```
+
+**Emotion column naming:** The `label_prefix: emotion_` combined with `num_labels: 11` means the dataset must have columns named `emotion_0` through `emotion_10`. Legacy column names like `emotion_joy` or `emotion_fear` are rejected by the data contracts validator. See `src/data_processing/data_contracts.py` for the authoritative schema.
 
 ---
 
@@ -103,7 +98,40 @@ model:
   path: models/truthlens_model
 ```
 
-This is a relative path from the project root. After training, this directory will contain `config.json`, `tokenizer.json`, and `model.safetensors`.
+---
+
+### `checkpoint`
+
+Checkpoint lifecycle settings.
+
+```yaml
+checkpoint:
+  dir: "checkpoints/"          # Directory for checkpoint files
+  max_checkpoints: 3           # Maximum number of checkpoints to retain
+```
+
+Checkpoint files: `checkpoint.pt` (weights) and `checkpoint.meta.json` (metadata).
+
+---
+
+### `data`
+
+Dataset loading and batching settings.
+
+```yaml
+data:
+  batch_size: 32               # Per-device batch size
+  num_workers: 8               # DataLoader worker processes
+  pin_memory: true             # Pin tensors to page-locked memory (GPU only)
+  shuffle: true                # Shuffle training data each epoch
+```
+
+| Key          | Default | Description                                     |
+|--------------|---------|-------------------------------------------------|
+| `batch_size` | `32`    | Samples per gradient step                       |
+| `num_workers`| `8`     | Parallel DataLoader workers                     |
+| `pin_memory` | `true`  | GPU memory transfer optimization                |
+| `shuffle`    | `true`  | Randomize training sample order                 |
 
 ---
 
@@ -113,66 +141,37 @@ Controls all training hyperparameters.
 
 ```yaml
 training:
-  seed: 42                          # Random seed for reproducibility
-  device: auto                      # "auto", "cpu", "cuda", or "mps"
+  epochs: 10                         # Maximum training epochs (upper bound)
+  min_epochs: 4                      # Minimum epochs before early stopping activates
+  log_every: 50                      # Log metrics every N steps
+  eval_every: 1                      # Evaluate every N epochs
+  checkpoint_every: 500              # Save checkpoint every N steps
 
-  epochs: 4                         # Total training epochs
-  batch_size: 8                     # Per-device batch size
-  gradient_accumulation_steps: 2    # Effective batch = batch_size × accumulation
+  gradient_accumulation_steps: 2     # Effective batch = batch_size × accumulation = 64
+  max_grad_norm: 1.0                 # Hard L2 norm cap on gradient before optimizer step
 
-  learning_rate: 2.0e-5             # Peak learning rate for AdamW
-  weight_decay: 0.01                # L2 regularization strength
-  warmup_ratio: 0.1                 # Fraction of training steps used for warmup
+  amp_dtype: "bf16"                  # AMP dtype: "bf16" | "fp16" (bf16 preferred; CPU = no-op)
+  allow_tf32: true                   # Enable TF32 on Ampere+ GPUs
 
-  scheduler: linear                 # LR scheduler type
-  optimizer: adamw                  # Optimizer type
+  grad_scaler_init_scale: 1024       # Initial loss scale for GradScaler (fp16 only)
 
-  fp16: true                        # Enable mixed-precision training (requires CUDA)
-  gradient_clipping: 1.0            # Max gradient norm
+  early_stopping_patience: 2        # Stop after N epochs without improvement
+  early_stopping_min_delta: 0.003   # Minimum improvement threshold to reset patience counter
 
-  resume_from_checkpoint: false     # Resume training from latest checkpoint
-
-  text_column: text                 # Column name in dataset containing article text
-  title_column: title               # Column name for article title (optional)
-
-  early_stopping:
-    enabled: true
-    patience: 2                     # Stop after N epochs without improvement
-    metric: eval_loss               # Metric to monitor
+  resume_from_checkpoint: false      # Resume training from latest checkpoint
 ```
 
-| Key                          | Default  | Description                                |
-|------------------------------|----------|--------------------------------------------|
-| `seed`                       | `42`     | Random seed for all RNG sources            |
-| `device`                     | `auto`   | `auto` selects CUDA > MPS > CPU            |
-| `epochs`                     | `4`      | Training epochs                            |
-| `batch_size`                 | `8`      | Samples per gradient step                  |
-| `gradient_accumulation_steps`| `2`      | Effective batch = 8 × 2 = 16              |
-| `learning_rate`              | `2.0e-5` | AdamW peak learning rate                   |
-| `weight_decay`               | `0.01`   | AdamW weight decay                         |
-| `warmup_ratio`               | `0.1`    | Fraction of steps for LR warmup            |
-| `scheduler`                  | `linear` | LR schedule type                           |
-| `fp16`                       | `true`   | Mixed-precision (CUDA only)                |
-| `gradient_clipping`          | `1.0`    | Max gradient norm                          |
+| Key                          | Default     | Description                                          |
+|------------------------------|-------------|------------------------------------------------------|
+| `epochs`                     | `10`        | Maximum training epochs                              |
+| `min_epochs`                 | `4`         | Early stopping not active before this epoch          |
+| `gradient_accumulation_steps`| `2`         | Effective batch = `data.batch_size × steps` = 64    |
+| `max_grad_norm`              | `1.0`       | Gradient clipping norm                               |
+| `amp_dtype`                  | `"bf16"`    | Automatic mixed precision dtype                      |
+| `early_stopping_patience`    | `2`         | Epochs without improvement before stopping           |
+| `early_stopping_min_delta`   | `0.003`     | Min score change counted as improvement              |
 
----
-
-### `data`
-
-Paths to dataset split files used during training.
-
-```yaml
-data:
-  train_path: data/splits/train.csv
-  validation_path: data/splits/validation.csv
-  test_path: data/splits/test.csv
-
-  raw_dir: data/raw
-  interim_dir: data/interim
-  processed_dir: data/processed
-
-  augmentation_multiplier: 2    # Multiply training data N times via augmentation
-```
+**Early stopping metric:** `weighted_composite_score` — a task-balanced weighted average of per-task validation scores, injected into `val_metrics` by the Trainer after each evaluation pass. This ensures early stopping tracks multi-task generalization rather than the loss of the dominant head.
 
 ---
 
@@ -221,11 +220,11 @@ hyperparameter_tuning:
       min: 1e-6
       max: 5e-5
     batch_size:
-      - 8
       - 16
+      - 32
     epochs:
-      - 3
       - 4
+      - 8
 ```
 
 ---
@@ -320,6 +319,21 @@ inference:
 
 ---
 
+### `distributed`
+
+Distributed training settings (DDP).
+
+```yaml
+distributed:
+  use_ddp: true
+  backend: "gloo"              # "gloo" works on CPU and GPU; switch to "nccl" for multi-GPU CUDA
+  find_unused_parameters: false
+```
+
+**Note:** `"gloo"` is required for CPU-only environments. `"nccl"` provides higher bandwidth on multi-GPU CUDA hardware but will fail on CPU.
+
+---
+
 ## `config/data_config.yaml`
 
 ### `project`
@@ -337,7 +351,7 @@ project:
 
 ### `dataset.unified_schema`
 
-Defines the column mapping used when merging datasets from different sources into a unified format.
+Defines the column mapping used when merging datasets.
 
 ```yaml
 dataset:
@@ -353,13 +367,15 @@ dataset:
       hero: hero
       villain: villain
       victim: victim
-      emotion_prefix: emotion_    # Columns: emotion_joy, emotion_fear, etc.
-      RE: resolution
-      HI: human_interest
+      emotion_prefix: emotion_    # Positional columns: emotion_0, emotion_1, ..., emotion_10
       CO: conflict
-      MO: moral
       EC: economic
+      HI: human_interest
+      MO: moral
+      RE: resolution
 ```
+
+**Emotion column convention:** `emotion_prefix: emotion_` produces columns `emotion_0` through `emotion_10` (one per EMOTION-11 label in canonical order). These are integer-indexed, not name-indexed. See `src/data_processing/data_contracts.py` for the enforced schema.
 
 ---
 
@@ -388,14 +404,14 @@ dataset:
     narrative:
       path: data/raw/narrative
       text_column: text
-      hero_entities: hero_entities
-      villain_entities: villain_entities
-      victim_entities: victim_entities
+      hero_entities: hero
+      villain_entities: villain
+      victim_entities: victim
 
     emotion:
       path: data/raw/emotion
       text_column: text
-      emotion_columns_prefix: emotion_
+      emotion_columns_prefix: emotion_   # Columns: emotion_0 … emotion_10
 ```
 
 ---
@@ -549,7 +565,7 @@ Direct YAML access with nested key retrieval:
 from src.utils.config_loader import load_config, get_config_value
 
 config = load_config()
-max_len = get_config_value(config, "model", "encoder", "max_length", default=256)
+max_len = get_config_value(config, "model", "encoder", "max_length", default=512)
 ```
 
 ### Structured dataclass — `load_app_config()`
@@ -561,7 +577,7 @@ from src.utils.config_loader import load_app_config
 
 app_config = load_app_config()
 print(app_config.model.name)           # "roberta-base"
-print(app_config.training.batch_size)  # 8
+print(app_config.training.batch_size)  # 32
 ```
 
 Both loaders use `@lru_cache` — the YAML file is read from disk once per process.

@@ -17,13 +17,13 @@ Feature Engineering (7 feature domains)
        ↓
 MultiTask Transformer (RoBERTa + 6 task heads)
        ↓
-Linguistic Analysis (bias, narrative, propaganda, discourse)
+Linguistic Analysis (14 analyzers via AnalyzerRegistry)
        ↓
 Graph Reasoning (entity & narrative graphs)
        ↓
 Explainability (SHAP, LIME, attention rollout)
        ↓
-Aggregation Engine (weighted credibility scoring)
+Aggregation Engine (FeatureMapper → WeightManager → Scoring)
        ↓
 TruthLens Credibility Score + Risk Level
        ↓
@@ -40,34 +40,36 @@ FastAPI Response (JSON)
 Raw Datasets (data/raw/)
   bias/, emotion/, ideology/, narrative/, propaganda/
        ↓
-Data Loading (src/data/load_data.py)
+Stage 1: Path resolution (data_resolver.py)
        ↓
-Text Cleaning (src/data/clean_data.py)
+Stage 2: Load + validate + clean (data_loader, data_validator, data_cleaning)
   - Unicode normalization
-  - URL removal
-  - HTML stripping
-  - Contraction expansion
+  - URL removal, HTML stripping, contraction expansion
   - Lowercasing + whitespace normalization
   - Min word count filtering (≥30)
-       ↓
-Dataset Validation (src/data/validate_data.py)
-  - Schema integrity
-  - Null ratio check (≤10%)
-  - Duplicate ratio check (≤15%)
+  - Null ratio check (≤10%), duplicate ratio check (≤15%)
   - Class balance check (min_class_ratio ≥10%)
        ↓
-Dataset Merging (src/data/merge_datasets.py)
-  - Unified label schema across all tasks
+Stage 3: Multi-task validation + label analysis
+  (multitask_validator, label_analysis)
+  - Column presence validated against data_contracts.py schemas
        ↓
-Class Balancing (method: oversample)
+Stage 4: Leakage check on raw splits (leakage_checker.py)
        ↓
-Data Augmentation (synonym replacement, random swap, random deletion)
+Stage 5: Data augmentation — train split only
+  (synonym replacement, random swap, random deletion)
        ↓
-Train / Validation / Test Split (70% / 15% / 15%)
-  → data/splits/train.csv
-  → data/splits/validation.csv
-  → data/splits/test.csv
+Stage 6: Cache write (data_cache.py)
+  - Cache key incorporates tokenizer + max_length + cleaning + augmentation config
+       ↓
+Stage 7: Data profiling (data_profiler.py)
+       ↓
+Stage 8: Build datasets + dataloaders
+  → PyTorch Datasets (dataset_factory, dataloader_factory)
 ```
+
+**Dataset column contract for emotion task:**
+Emotion columns use positional integer suffixes: `emotion_0` (neutral) through `emotion_10` (anger). See `src/data_processing/data_contracts.py` for the authoritative per-task schema.
 
 ### Online Inference Pipeline
 
@@ -96,14 +98,14 @@ HTTP 200 Response
 
 ## Feature Engineering System
 
-TruthLens extracts features from seven dimensions of article content. All extractors use the `FeatureContext → BaseFeature → dict[str, float]` pattern.
+TruthLens extracts features from seven dimensions of article content. All extractors use the `FeatureContext → BaseFeature → dict[str, float]` pattern. `FeatureContext` (defined in `src/analysis/feature_context.py`) is spaCy-backed for NER and syntactic processing.
 
 | Feature Domain | Key Signals                                          |
 |----------------|------------------------------------------------------|
 | Text           | Token count, lexical diversity, sentence length      |
 | Bias           | Lexicon density, evaluative words, partisan framing  |
-| Emotion        | 20-label intensity scores, dominant emotion          |
-| Narrative      | Frame detection (RE/HI/CO/MO/EC), role assignment    |
+| Emotion        | 11-label intensity scores, dominant emotion          |
+| Narrative      | Frame detection (CO/EC/HI/MO/RE), role assignment    |
 | Propaganda     | Loaded language, fear appeals, exaggeration          |
 | Discourse      | Argument structure, claim-evidence relationships     |
 | Graph          | Entity co-occurrence, centrality, interaction density|
@@ -126,20 +128,22 @@ TF-IDF vectorizer artifact: `models/tfidf_vectorizer.joblib`
 
 ### Multi-Task Learning Design
 
-TruthLens uses a **single shared encoder feeding six task-specific heads**:
+TruthLens uses a **single shared encoder feeding six task-specific heads** (`MultiTaskTruthLensModel`):
 
 ```
-Shared RoBERTa Encoder (roberta-base)
+Shared RoBERTa Encoder (roberta-base, 12L, 768H)
+  + Gradient Checkpointing + Flash Attention
        ↓
-┌──────────────────────────────────────────────────┐
-│  Task Heads                    Loss              │
-│  ├── Bias Detection            cross_entropy     │
-│  ├── Ideology Detection        cross_entropy     │
-│  ├── Propaganda Detection      cross_entropy     │
-│  ├── Emotion Detection (x20)   binary_cross_entropy │
-│  ├── Narrative Roles (x3)      binary_cross_entropy │
-│  └── Frame Detection (x5)      binary_cross_entropy │
-└──────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│  Task Heads (nn.ModuleDict)       Loss               │
+│  ├── Bias Detection (3-class)     cross_entropy      │
+│  ├── Ideology Detection (3-class) cross_entropy      │
+│  ├── Propaganda (binary)          cross_entropy      │
+│  ├── Emotion (11-label)           binary_cross_entropy│
+│  │     columns: emotion_0…emotion_10                 │
+│  ├── Narrative Roles (x3)         binary_cross_entropy│
+│  └── Narrative Frame (x5)         binary_cross_entropy│
+└──────────────────────────────────────────────────────┘
        ↓
 Combined multi-task loss
        ↓
@@ -148,47 +152,58 @@ AdamW backward pass
 
 ### Training Configuration
 
-| Hyperparameter               | Value    |
-|------------------------------|----------|
-| Base model                   | roberta-base |
-| Max token length             | 256      |
-| Dropout                      | 0.1      |
-| Epochs                       | 4        |
-| Batch size                   | 8        |
-| Gradient accumulation steps  | 2        |
-| Effective batch size         | 16       |
-| Learning rate                | 2.0e-5   |
-| Weight decay                 | 0.01     |
-| Warmup ratio                 | 0.1      |
-| Scheduler                    | linear   |
-| Optimizer                    | adamw    |
-| Gradient clipping            | 1.0      |
-| FP16 mixed precision         | enabled  |
-| Early stopping patience      | 2 epochs |
-| Early stopping metric        | eval_loss|
-| Random seed                  | 42       |
+| Hyperparameter               | Value              |
+|------------------------------|--------------------|
+| Base model                   | roberta-base       |
+| Max token length             | 512                |
+| Hidden dim                   | 768                |
+| Dropout                      | 0.1                |
+| Max epochs                   | 10                 |
+| Min epochs                   | 4                  |
+| Batch size                   | 32                 |
+| Gradient accumulation steps  | 2                  |
+| Effective batch size         | 64                 |
+| Max grad norm                | 1.0                |
+| AMP dtype                    | bf16               |
+| Scheduler                    | linear warmup      |
+| Optimizer                    | AdamW              |
+| Early stopping patience      | 2 epochs           |
+| Early stopping min_delta     | 0.003              |
+| Early stopping metric        | weighted_composite_score |
+| Random seed                  | 42                 |
+| Gradient checkpointing       | enabled            |
+| torch.compile                | enabled            |
 
 ### Training Support Features
 
 - **Cross-validation** — `src/training/cross_validation.py` (configurable splits, disabled by default)
 - **Hyperparameter tuning** — Optuna integration (`src/training/hyperparameter_tuning.py`, disabled by default)
-- **Checkpoint management** — saves up to 3 recent checkpoints
+- **Checkpoint management** — saves up to 3 recent checkpoints (`models/checkpoints/`)
 - **Model registry** — `src/models/registry/model_registry.py` — loads, caches, and provides versioned access to model assets
+- **Leakage detection** — `src/data_processing/leakage_checker.py` — runs before augmentation
 
 ---
 
 ## Linguistic Analysis Layer
 
-After transformer inference, the analysis layer extracts higher-level structural signals:
+After transformer inference, the analysis layer runs 14 analyzers sequentially via `AnalysisPipeline`. Analyzers are registered via `build_default_registry()` in `src/analysis/analysis_registry.py`. **Config names must match registry keys exactly.**
 
-| Module                           | Signal Type               | Used By              |
-|----------------------------------|---------------------------|----------------------|
-| `bias_profiler.py`               | Partisan framing score    | Aggregation engine   |
-| `narrative_extractor.py`         | Hero/villain/victim roles | Narrative scoring    |
-| `propaganda_detector.py`         | Manipulation patterns     | Propaganda scoring   |
-| `rhetorical_device_detector.py`  | Hyperbole, loaded phrases | Bias and propaganda  |
-| `discourse_coherence_analyzer.py`| Argument consistency      | Credibility scoring  |
-| `context_omission_detector.py`   | Missing context detection | Credibility scoring  |
+| Order | Registry Key             | Analyzer                           | Signal Type                    |
+|-------|--------------------------|------------------------------------|--------------------------------|
+| 1     | `rhetorical`             | `RhetoricalDeviceDetector`         | Hyperbole, loaded language     |
+| 2     | `argument`               | `ArgumentMiningAnalyzer`           | Claim–evidence structure       |
+| 3     | `context`                | `ContextOmissionDetector`          | Missing/selective facts        |
+| 4     | `discourse`              | `DiscourseCoherenceAnalyzer`       | Argument consistency           |
+| 5     | `emotion`                | `EmotionTargetAnalyzer`            | Emotion targets                |
+| 6     | `framing`                | `FramingAnalyzer`                  | Narrative frame strategy       |
+| 7     | `information`            | `InformationDensityAnalyzer`       | Lexical density                |
+| 8     | `information_omission`   | `InformationOmissionDetector`      | Omitted context                |
+| 9     | `ideology`               | `IdeologicalLanguageDetector`      | Political ideology markers     |
+| 10    | `narrative_role`         | `NarrativeRoleExtractor`           | Hero/villain/victim roles      |
+| 11    | `narrative_conflict`     | `NarrativeConflictAnalyzer`        | Adversarial framing            |
+| 12    | `narrative_propagation`  | `NarrativePropagationAnalyzer`     | Propagation patterns           |
+| 13    | `narrative_temporal`     | `NarrativeTemporalAnalyzer`        | Timeline consistency           |
+| 14    | `source`                 | `SourceAttributionAnalyzer`        | Source credibility             |
 
 ---
 
@@ -197,7 +212,7 @@ After transformer inference, the analysis layer extracts higher-level structural
 Entity and narrative graph reasoning provides **relational credibility signals**:
 
 ```
-Named Entity Recognition (spaCy NER)
+Named Entity Recognition (spaCy NER via FeatureContext)
        ↓
 Entity Extraction (persons, organizations, locations)
        ↓
@@ -240,31 +255,33 @@ Every prediction can be accompanied by human-readable explanations:
 
 ## Aggregation and Scoring System
 
-The aggregation engine produces the **final TruthLens Credibility Score**:
+The aggregation engine produces the **final TruthLens Credibility Score** through five stages:
 
 ```
 Signal Inputs:
-  ├── fake_probability    (transformer output)
-  ├── bias_score          (bias module)
-  ├── propaganda_signals  (propaganda module)
-  ├── emotion_intensity   (emotion module)
-  ├── narrative_signals   (narrative module)
-  └── discourse_coherence (analysis layer)
+  ├── Model outputs (bias, ideology, propaganda, emotion, narrative, frame)
+  ├── Analysis layer signals (all 14 analyzers)
+  └── Graph signals
        ↓
-TruthLensScoreCalculator
-  ├── Signal Normalization
-  ├── Weighted Combination
-  │     Bias weight:      0.40
-  │     Emotion weight:   0.35
-  │     Narrative weight: 0.25
-  └── Risk Assessment
-        Low    0.00–0.33
-        Medium 0.34–0.66
-        High   0.67–1.00
+Stage 1: FeatureMapper
+  Maps raw scores to named feature groups
        ↓
-TruthLens Credibility Score (0.0–1.0)
-Risk Level (Low / Medium / High)
-Score Explanation (human-readable)
+Stage 2: WeightManager (adaptive, confidence + entropy-driven)
+  WEIGHT_GROUPS (single source of truth: aggregation_config.py):
+    "manipulation": bias, emotion, narrative, analysis_influence_manipulation
+    "credibility":  discourse, graph, analysis_influence_credibility
+    "final":        final_credibility, final_manipulation, final_ideology
+       ↓
+Stage 3: TruthLensScoreCalculator
+  Combines group scores into TruthLens Credibility Score
+       ↓
+Stage 4: RiskAssessment
+    Low    0.00–0.33
+    Medium 0.34–0.66
+    High   0.67–1.00
+       ↓
+Stage 5: ScoreExplainer
+  Generates human-readable breakdown of score components
 ```
 
 ---
@@ -302,7 +319,7 @@ Client (HTTPS)
        ↓
 Replit Autoscale proxy (mTLS)
        ↓
-Gunicorn (UvicornWorker, port 5000)
+Gunicorn (UvicornWorker, port 5000, 1 worker, 120s timeout)
        ↓
 FastAPI (api/app.py)
        ↓
@@ -315,7 +332,8 @@ JSON response
 
 Production run command:
 ```
-gunicorn --bind=0.0.0.0:5000 --reuse-port -k uvicorn.workers.UvicornWorker api.app:app
+gunicorn --bind=0.0.0.0:5000 --reuse-port --workers 1 --timeout 120 \
+  -k uvicorn.workers.UvicornWorker api.app:app
 ```
 
 Development run command:
@@ -323,6 +341,8 @@ Development run command:
 python -m uvicorn api.app:app --host 0.0.0.0 --port 5000 --reload \
   --reload-dir api --reload-dir src --reload-dir config --reload-dir models
 ```
+
+**Worker count rationale:** One worker is used because the production environment is CPU-only. Each Gunicorn worker loads the full RoBERTa model independently — additional workers multiply memory usage without providing throughput benefit on a single CPU core. UvicornWorker handles async concurrency within the single process.
 
 ---
 
@@ -357,4 +377,4 @@ Run: `pytest` · Or with coverage: `pytest --cov=src --cov=api --cov=models`
 
 **Fail-Safe Inference** — The API catches errors at each layer (LIME, model loading, feature extraction) and degrades gracefully rather than crashing, returning structured error information to the caller.
 
-**Production Readiness** — The system is designed for Replit Autoscale deployment with Gunicorn + UvicornWorker, model caching on first load, and health check endpoints for monitoring.
+**Production Readiness** — The system is designed for Replit Autoscale deployment with Gunicorn + UvicornWorker (1 worker, 120s timeout), model caching on first load, and health check endpoints for monitoring.

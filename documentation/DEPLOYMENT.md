@@ -40,6 +40,8 @@ TruthLens is configured for **Replit Autoscale** deployment.
 gunicorn \
   --bind=0.0.0.0:5000 \
   --reuse-port \
+  --workers 1 \
+  --timeout 120 \
   -k uvicorn.workers.UvicornWorker \
   api.app:app
 ```
@@ -48,12 +50,14 @@ This is pre-configured in `.replit`:
 ```toml
 [deployment]
 deploymentTarget = "autoscale"
-run = ["gunicorn", "--bind=0.0.0.0:5000", "--reuse-port", "-k", "uvicorn.workers.UvicornWorker", "api.app:app"]
+run = ["gunicorn", "--bind=0.0.0.0:5000", "--reuse-port", "-k", "uvicorn.workers.UvicornWorker", "--workers", "1", "--timeout", "120", "api.app:app"]
 ```
+
+**Why 1 worker?** The production environment is CPU-only. Each Gunicorn worker loads the full RoBERTa model independently into memory (~500 MB per worker). Multiple workers would multiply memory usage without providing throughput benefit on a single CPU core. `UvicornWorker` handles async concurrency within the single process. The 120-second timeout accommodates `/analyze` requests that run LIME (256 perturbation passes) on CPU.
 
 ### Deploying
 
-1. Train the model first: `python main.py` (ensure `models/truthlens_model/` exists)
+1. Train the model first: `python main.py` (ensure `models/checkpoints/checkpoint.pt` exists)
 2. Verify the health check passes: `curl http://localhost:5000/health`
 3. Click the **Deploy** button in Replit, or use the deployment workflow
 4. Replit handles TLS, load balancing, health checks, and scaling automatically
@@ -62,7 +66,7 @@ The deployed app will be accessible at your `.replit.app` domain.
 
 ### Pre-Deployment Checklist
 
-- [ ] `models/truthlens_model/` exists and contains `config.json`, `tokenizer.json`, `model.safetensors`
+- [ ] `models/checkpoints/checkpoint.pt` exists
 - [ ] `GET /health` returns `"status": "healthy"`
 - [ ] `POST /predict` returns a valid response
 - [ ] `config/config.yaml` has correct `model.path` and `paths.tfidf_vectorizer_path`
@@ -103,24 +107,40 @@ Port 5000 maps to external port 80 (standard HTTP). Replit's proxy handles HTTPS
 
 ## Gunicorn Configuration
 
-For production, additional Gunicorn settings can improve performance:
+The production `.replit` configuration uses:
 
 ```bash
 gunicorn \
   --bind=0.0.0.0:5000 \
   --reuse-port \
-  --workers=2 \
-  --worker-connections=1000 \
-  --timeout=120 \
-  --keepalive=5 \
+  --workers 1 \
+  --timeout 120 \
   -k uvicorn.workers.UvicornWorker \
   api.app:app
 ```
 
-**Worker count guidance:**
-- CPU-only: `2 × CPU_cores + 1` workers, but note that each worker loads the model independently — this multiplies memory usage
-- GPU inference: 1–2 workers maximum (model must be loaded once per worker process)
-- For memory-constrained environments: 1 worker with async request handling (UvicornWorker handles concurrency within a single process)
+**Key parameters:**
+| Parameter              | Value                    | Reason                                           |
+|------------------------|--------------------------|--------------------------------------------------|
+| `--workers 1`          | 1                        | CPU-only environment; multiple workers multiply model memory usage |
+| `--timeout 120`        | 120 seconds              | Accommodates slow LIME inference on CPU          |
+| `--reuse-port`         | enabled                  | Allows faster restarts without port binding delay|
+| `-k uvicorn.workers.UvicornWorker` | —           | Enables async request handling within the worker |
+
+**If deploying on GPU hardware** (not Replit), you can scale workers:
+```bash
+gunicorn \
+  --bind=0.0.0.0:5000 \
+  --reuse-port \
+  --workers 2 \
+  --worker-connections 1000 \
+  --timeout 120 \
+  --keepalive 5 \
+  -k uvicorn.workers.UvicornWorker \
+  api.app:app
+```
+
+Even on GPU hardware, limit to 2 workers maximum — each worker loads the full model into GPU memory.
 
 ---
 
@@ -175,11 +195,11 @@ Configure your monitoring tool to alert if:
 **Memory:**
 - `roberta-base` model: ~500 MB RAM per worker process
 - Full `analyze` endpoint (with LIME): adds ~200 MB peak usage during explanation generation
-- Plan for at least 2–3 GB RAM in production
+- Plan for at least 2–3 GB RAM in production with 1 worker
 
 **Latency:**
 - `/predict`: ~100–500ms per request (GPU) or ~2–10s (CPU)
-- `/analyze` with LIME: ~2–15s per request depending on article length and hardware
+- `/analyze` with LIME (256 samples): ~2–15s per request (GPU) or ~10–60s (CPU)
 
 **Throughput:**
 - LIME is the main bottleneck in `/analyze` — it runs 256 perturbations per request
@@ -196,7 +216,7 @@ Configure your monitoring tool to alert if:
 
 Log format:
 ```
-2026-04-05 04:20:02 | INFO | src.utils.config_loader | Loading configuration from /workspace/config/config.yaml
+2026-05-02 04:20:02 | INFO | src.utils.config_loader | Loading configuration from /workspace/config/config.yaml
 INFO:     Started server process [891]
 INFO:     Application startup complete.
 INFO:     10.81.19.32:0 - "GET / HTTP/1.1" 200 OK
@@ -217,7 +237,7 @@ logging:
 3. Verify changes work in development
 4. Re-deploy by clicking **Deploy** again in Replit
 
-**Important:** If you retrain the model, the new `models/truthlens_model/` files must be present before re-deploying. The production environment reads model files from the deployment snapshot.
+**Important:** If you retrain the model, the new `models/checkpoints/checkpoint.pt` must be present before re-deploying. The production environment reads model files from the deployment snapshot.
 
 ---
 
