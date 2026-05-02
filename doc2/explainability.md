@@ -1,887 +1,1244 @@
-# TruthLens Explainability-Layer Audit
+# TruthLens AI — Explainability System Documentation
 
-Scope: `src/explainability/*` — 22 files audited (orchestrator, explainability_pipeline, common_schema, model_explainer, shap_explainer, lime_explainer, attention_rollout, attention_visualizer, bias_explainer, emotion_explainer, propaganda_explainer, explanation_aggregator, explanation_cache, explanation_calibrator, explanation_consistency, explanation_metrics, explanation_monitor, explanation_report_generator, explanation_visualizer, token_alignment, utils_validation, __init__).
-
-Format: v9 strict — no fixes performed, report only. All findings carry file:line references and code-level fixes.
-
----
-
-## 1. CRITICAL EXPLANATION BUGS
-
-### CRIT-1 — `bias_explainer.compute_shap` / `compute_ig` / `compute_attention_rollout` assume single-head model; multitask model has no `out.logits`
-
-- **File / Function:** `src/explainability/bias_explainer.py:68-116`.
-- **Issue:** all three functions call `model(...).logits` or `model(...).logits.max().backward()`. The TruthLens model is a multitask `nn.Module` with `model.heads = ModuleDict({task: head})` (per `src/inference/analyze_article.py` and the `_integrated_gradients` path in `score_explainer.py:88-94` which uses `model.encoder(...)` then `model.heads[task](cls)`). Calling `model(**enc)` returns either a dict or raises depending on the wrapper, and `.logits` does not exist.
-- **Why explanation is misleading:** the `_run("bias", ...)` wrapper in `orchestrator.py:122-125` swallows the `AttributeError` and returns `None`. The orchestrator then stores `bias_explanation=None`, and the aggregator/consistency silently skip it. The user sees "bias_explanation: null" without any indication that the entire bias path is dead.
-- **Exact fix:**
-  ```python
-  def compute_ig(model, tokenizer, text, *, task: str = "bias", target_idx: int = 0, steps: int = 32):
-      device = next(model.parameters()).device
-      enc = tokenizer(text, return_tensors="pt").to(device)
-      emb = model.encoder.embeddings(enc["input_ids"])
-      baseline = torch.zeros_like(emb)
-      alphas = torch.linspace(0, 1, steps, device=device).view(-1, 1, 1, 1)
-      scaled = (baseline + alphas * (emb - baseline)).flatten(0, 1).requires_grad_(True)
-      attn = enc["attention_mask"].repeat(steps, 1)
-      out = model.encoder(inputs_embeds=scaled, attention_mask=attn)
-      logits = model.heads[task](out.last_hidden_state[:, 0])
-      logits[:, target_idx].sum().backward()
-      grads = scaled.grad.view(steps, *emb.shape).mean(dim=0)
-      ig = ((emb - baseline) * grads).sum(-1).detach()[0]
-      return _normalize(ig.cpu().numpy())
-  ```
-  Apply the same multitask-aware pattern to `compute_shap` and `compute_attention_rollout`.
+**Module:** `src/explainability/`  
+**File count:** 19 Python files  
+**Python:** 3.12 · **Encoder:** `roberta-base` · **Tasks:** `emotion`, `narrative`, `propaganda`, `bias`, `ideology`, `narrative_frame`
 
 ---
 
-### CRIT-2 — `emotion_explainer.fuse(lexicon, gradients)` mixes word-level and subword-level vectors of different lengths
+## Table of Contents
 
-- **File / Function:** `src/explainability/emotion_explainer.py:91-128, 175-205`.
-- **Issue:**
-  - `tokens = tokenize(text)` → word-level regex `\b[a-z]+\b` (length = N_words).
-  - `gradients = compute_gradients(...)` → subword-level from `tokenizer(text)` (length = N_subwords ≠ N_words).
-  - `fuse(lexicon, gradients)` → `0.6 * normalize(lexicon) + 0.4 * normalize(gradients)`. NumPy will either **raise `ValueError`** for non-broadcastable shapes or, if N_words happens to equal N_subwords, **silently misalign** every position.
-- **Why explanation is misleading:** the per-token scores are claimed to align with `tokens` (word level), but 40 % of the value comes from arbitrarily-indexed subword gradients. Token-position semantics are destroyed.
-- **Exact fix:** project gradients to word level using offset alignment from `tokenizer(text, return_offsets_mapping=True)`:
-  ```python
-  enc = tokenizer(text, return_tensors="pt", return_offsets_mapping=True)
-  offsets = enc.pop("offset_mapping")[0].tolist()
-  emb = model.encoder.embeddings(enc["input_ids"]).requires_grad_(True)
-  ...                                             # backward
-  subword_imp = emb.grad.abs().sum(-1)[0].cpu().numpy()
-  word_imp = align_subwords_to_words(subword_imp, offsets, text, word_tokens=tokens)
-  return word_imp
-  ```
-  Or — simpler and faster — drop the gradient term entirely and use the lexicon plus a `model.predict_proba`-derived global emotion confidence multiplier.
-
----
-
-### CRIT-3 — `explanation_aggregator.aggregate` sorts tokens alphabetically, destroying positional order
-
-- **File / Function:** `src/explainability/explanation_aggregator.py:110-113`.
-- **Issue:** `tokens = sorted(set().union(*[set(s.keys()) for s in sources.values()]))`. The output `AggregatedExplanation.tokens` is now alphabetically sorted, with `final_token_importance[i]` aligned to the sorted token at position `i`, **not** to the original text position.
-- **Why explanation is misleading:** the report generator and visualizer (`explanation_visualizer.plot_token_heatmap`, `explanation_report_generator._highlight_tokens`) render tokens in the order they receive them. Users see an alphabetic strip of tokens, not the original sentence. The downstream `explanation_metrics.faithfulness` then constructs `" ".join(tokens)` (`explanation_metrics.py:60, 62-65`) producing a string in alphabetical order — a sentence the model has never seen — and computes faithfulness on **that**.
-- **Exact fix:** preserve order from the first source whose tokens are in input order (which is all explainers except SHAP `_process_shap_values`, which already returns in input order). Use a stable accumulator:
-  ```python
-  ordered_tokens = []
-  seen = set()
-  for src in sources.values():
-      for tok in src.keys():
-          if tok not in seen:
-              ordered_tokens.append(tok); seen.add(tok)
-  for tok in graph_node_importance:
-      if tok not in seen:
-          ordered_tokens.append(tok); seen.add(tok)
-  tokens = ordered_tokens
-  ```
-  And add a unit test that asserts `agg.tokens == shap.tokens` when only SHAP is enabled.
+1. [Overview](#1-overview)
+2. [Folder Architecture](#2-folder-architecture)
+3. [End-to-End Explainability Flow](#3-end-to-end-explainability-flow)
+4. [File-by-File Deep Dive](#4-file-by-file-deep-dive)
+5. [Explanation Types](#5-explanation-types)
+6. [Feature Importance Interpretation](#6-feature-importance-interpretation)
+7. [Output Artifacts](#7-output-artifacts)
+8. [Model Compatibility](#8-model-compatibility)
+9. [Config Integration](#9-config-integration)
+10. [Performance and Efficiency](#10-performance-and-efficiency)
+11. [Validation of Explanations](#11-validation-of-explanations)
+12. [Bias and Fairness Insights](#12-bias-and-fairness-insights)
+13. [Extensibility Guide](#13-extensibility-guide)
+14. [Common Pitfalls and Risks](#14-common-pitfalls-and-risks)
+15. [Example Usage](#15-example-usage)
+16. [Simple Explanation for Non-Technical Reviewers](#16-simple-explanation-for-non-technical-reviewers)
 
 ---
 
-### CRIT-4 — `explanation_aggregator.aggregate` collapses duplicate tokens via `dict(zip(...))` → loses every repeated word
+## 1. Overview
 
-- **File / Function:** `src/explainability/explanation_aggregator.py:82, 86, 90, 94`.
-- **Issue:** `dict(zip(shap.tokens, shap.importance))` keeps only the **last** occurrence of each token. For an article that says "the truth is the truth", the final aggregated explanation has **one** `the` instead of three.
-- **Why explanation is misleading:** propaganda relies heavily on **repetition** (encoded explicitly in `propaganda_explainer.PROPAGANDA_PATTERNS["repetition"]`). The aggregator silently kills this signal. Token-level faithfulness metrics applied to the aggregated output then operate on the wrong sequence length.
-- **Exact fix:** index by `(position, token)` rather than `token`:
-  ```python
-  sources["shap"] = {(i, t): v for i, (t, v) in enumerate(zip(shap.tokens, shap.importance))}
-  ```
-  All downstream lookups and `tokens` enumeration use position as the key, with `t` carried alongside.
+The explainability system is TruthLens AI's transparency and interpretability layer. It sits between the model inference layer and the end user — after the model decides whether an article is fake or real, this system explains **why** it made that decision.
 
----
+### Purpose
 
-### CRIT-5 — `common_schema.ExplanationOutput.normalize_importance` validator silently re-normalizes the importance list, but `structured` keeps the un-normalized values → numerical disagreement
+Every prediction from TruthLens AI is accompanied by a full explanation that:
+- Highlights which words most influenced the decision (token-level attribution)
+- Shows agreement across multiple independent explanation methods (cross-method consistency)
+- Detects emotion, bias, and propaganda signals in the text
+- Measures how trustworthy and faithful each explanation is
+- Provides a single aggregated importance score per token across all methods
 
-- **File / Function:** `src/explainability/common_schema.py:60-78` (`mode="before"` validator).
-- **Issue:** every explainer calls `calibrate_explanation(...)` which already L1-normalizes scores, then constructs:
-  ```python
-  ExplanationOutput(
-      tokens=tokens,
-      importance=scores.tolist(),                                # passes through normalize_importance
-      structured=[TokenImportance(token=t, importance=float(s)) for t, s in zip(tokens, scores)],
-      ...
-  )
-  ```
-  The validator runs on `importance` (re-normalizes again — `abs() / sum`) but `structured[i].importance` is the raw `s` value passed in. After construction, `out.importance[i] != out.structured[i].importance` for any non-trivial input. Worse: `TokenImportance.importance` is `Field(ge=0.0, le=1.0)` — if a calibrator returns a value > 1.0 (numerically possible when sharpening + EPS), construction raises `ValidationError` even though the L1-norm of the same value would have been < 1.
-- **Why explanation is misleading:** consumers read either `out.importance` (re-normalized) or `out.structured[i].importance` (raw) and silently disagree on the magnitude of every token's contribution. The aggregator uses `shap.importance` (re-normalized), the consistency module uses `shap.structured[i].importance` (raw) — different inputs.
-- **Exact fix:** make the schema a strict pass-through and let callers normalize **once**:
-  ```python
-  class ExplanationOutput(BaseModel):
-      ...
-      @field_validator("importance")
-      @classmethod
-      def validate_finite(cls, v):
-          arr = np.asarray(v, dtype=float)
-          if not np.all(np.isfinite(arr)):
-              raise ValueError("importance must be finite")
-          return v
-      @field_validator("structured")
-      @classmethod
-      def validate_aligned(cls, v, info):
-          tokens = info.data.get("tokens", [])
-          importance = info.data.get("importance", [])
-          if len(v) != len(tokens) or len(importance) != len(tokens):
-              raise ValueError("tokens, importance, and structured must align")
-          for s, i in zip(v, importance):
-              if abs(s.importance - i) > 1e-6:
-                  raise ValueError("structured importance must equal flat importance")
-          return v
-  ```
-  Then drop `TokenImportance.Field(ge=0.0, le=1.0)` since explainers may legitimately produce signed attributions.
+### Role in the ML Pipeline
 
----
+```
+src/models/           → Trained MultiTaskTruthLensModel (encoder + task heads)
+    ↓
+src/inference/        → Produces predict_fn(text) → {fake_probability, ...}
+    ↓
+src/explainability/   ← YOU ARE HERE
+    ↓
+API /explain endpoint → ExplainabilityResult (JSON)
+```
 
-### CRIT-6 — Two `ExplainabilityResult` classes with divergent fields → silent schema confusion
+The explainability system does **not** re-train or modify the model. It is a post-inference, read-only interpretability layer. It calls the model many times (for SHAP/LIME perturbations) and reads attention weights (for rollout), but never updates weights.
 
-- **Files:**
-  - `src/explainability/common_schema.py:162-179` (with `extra="forbid"`, includes `propaganda_explanation`, `explanation_quality_score`).
-  - `src/explainability/explainability_pipeline.py:28-50` (with `extra="forbid"`, **no** `propaganda_explanation`, **no** `explanation_quality_score`).
-- **Issue:** `run_explainability_pipeline` constructs the **second** `ExplainabilityResult` (the local one). If the orchestrator includes `propaganda_explanation` or `explanation_quality_score` in its output dict, **the second class is built without them** — silent data loss. Conversely, if a downstream consumer imports from `common_schema`, it expects fields the pipeline never populates.
-- **Why explanation is misleading:** `model_explainer.py:51-94` constructs a third hand-rolled dict (not a Pydantic model at all). Three mutually inconsistent representations of "the explanation result" coexist.
-- **Exact fix:** delete `explainability_pipeline.ExplainabilityResult` and `model_explainer.py` outright. Use `common_schema.ExplainabilityResult` as the single source of truth and have `run_explainability_pipeline` and any backward-compat function build that one.
+### Relationship with Other Modules
+
+| Upstream module | How it is used |
+|----------------|----------------|
+| `src/models` | `MultiTaskTruthLensModel` is passed to `bias_explainer.py` for IG and SHAP; tokenizer is used for subword alignment |
+| `src/inference` | `predict_fn(text) → dict` is the universal prediction callback used by SHAP, LIME, and ExplanationMetrics |
+| `src/evaluation` | `ExplanationMetrics` re-uses ablation patterns; `ExplanationConsistency` cross-checks with evaluation correlation logic |
+| `src/graph` | `GraphExplainer` is integrated into the aggregator via `graph_explanation` for entity-level attribution |
+
+### Design invariants
+
+| Invariant | Location |
+|-----------|----------|
+| `ExplainabilityResult` has a single definition — `common_schema.py` (CRIT-6/7) | `common_schema.py`, `explainability_pipeline.py` |
+| Faithful flag: heuristic explainers (propaganda, emotion-lexicon) set `faithful=False` (CRIT-9) | `propaganda_explainer.py`, `emotion_explainer.py`, `common_schema.py` |
+| Aggregator never mixes subword (IG) and word-level (lexicon) vectors (CRIT-2) | `emotion_explainer.py`, `explanation_aggregator.py` |
+| Token order preserved — `sorted(set(...))` vocab banned (CRIT-3) | `explanation_aggregator.py` |
+| Repeated tokens handled by-position, not by-name (CRIT-4) | `explanation_aggregator.py` |
+| Text-level ablation via character offsets, not `" ".join(tokens)` (CRIT-11) | `explanation_metrics.py`, `orchestrator.py` |
+| Base prediction computed once per article, forwarded to all 5 metrics (REC-3) | `orchestrator.py`, `explanation_metrics.py` |
+| Spearman correlation uses ranks, not sort indices (CRIT-10) | `explanation_consistency.py` |
+| SHAP explainer instances cached per (tokenizer, task) — never re-built per article (PERF-3) | `bias_explainer.py`, `shap_explainer.py` |
+| Orchestrator singleton keyed by config hash — never re-instantiated per article (PERF-6) | `orchestrator.py` |
 
 ---
 
-### CRIT-7 — `model_explainer.py` and `explainability_pipeline.py` are duplicated, divergent entry points
+## 2. Folder Architecture
 
-- **Files:** `src/explainability/model_explainer.py` (139 lines) and `src/explainability/explainability_pipeline.py` (175 lines) both define `explain_prediction_full` and `explain_fast` with **different behavior**:
-  - `model_explainer.explain_prediction_full` enables `cache_enabled=True`, `use_attention_rollout=True`.
-  - `explainability_pipeline.explain_prediction_full` enables `cache_enabled=False`, `use_attention_rollout=False`.
-- **Issue:** depending on which file the caller imports, the same function name produces a different explanation. `__init__.py` exports neither, so callers must import explicitly — and there is no signal which is canonical.
-- **Why explanation is misleading:** users running the same input twice (once via each path) get different importance vectors with no failure mode visible.
-- **Exact fix:** delete `model_explainer.py`. Re-export `run_explainability_pipeline`, `explain_prediction_full`, `explain_fast` from `__init__.py`. Add a deprecation shim if any external import is detected.
-
----
-
-### CRIT-8 — `orchestrator.explain` discards integrated_gradients computed inside `bias_explainer` → IG never reaches the aggregator or consistency module
-
-- **File / Function:** `src/explainability/orchestrator.py:230-241, 263-271`.
-- **Issue:**
-  - The aggregator call passes `integrated_gradients=None` even though `bias.integrated_gradients` (a length-N float list) was computed.
-  - The consistency call passes `integrated_gradients=None` for the same reason.
-- **Why explanation is misleading:** the aggregator advertises a 0.25 weight for IG (`AggregationWeights.integrated_gradients=0.25`); since IG is never supplied, that weight is silently redistributed to the others — but `_normalize` at construction (`explanation_aggregator.py:42-50`) hardcoded the normalization at init. So the 0.25 share goes to nothing, leaving sum < 1.0 effectively (other weights still sum to 0.75 in the dict). The fusion formula `weighted_sum += val * w * c` then under-weights every token.
-- **Exact fix:**
-  ```python
-  ig_out = None
-  if isinstance(bias_out := explanation.get("bias_explanation"), dict):
-      tokens_ig = bias_out.get("tokens")
-      ig_vals = bias_out.get("integrated_gradients")
-      if tokens_ig and ig_vals:
-          ig_out = ExplanationOutput(
-              method="integrated_gradients",
-              tokens=tokens_ig,
-              importance=ig_vals,
-              structured=[TokenImportance(token=t, importance=float(v))
-                          for t, v in zip(tokens_ig, ig_vals)],
-          )
-  ...
-  agg = self.aggregator.aggregate(
-      shap=shap_out, integrated_gradients=ig_out,
-      attention=attention_out, lime=lime_out, graph_explanation=graph_expl,
-  )
-  ```
-
----
-
-### CRIT-9 — `propaganda_explainer.explain_propaganda` is text-only (no model), but is presented in the same `ExplanationOutput` schema as faithful explainers
-
-- **File / Function:** `src/explainability/propaganda_explainer.py:122-182`.
-- **Issue:** the function does pure regex + lexicon scoring with no model call. It is then wrapped as `ExplanationOutput(method="propaganda", ...)` and merged into the same downstream pipeline as SHAP/LIME/IG/attention.
-- **Why explanation is misleading:** consumers reading `result.shap_explanation`, `result.lime_explanation`, `result.propaganda_explanation` cannot distinguish model-faithful from heuristic-only signals. The aggregator does not distinguish either — propaganda scores influence `final_token_importance` even though the model never saw any of those tokens.
-- **Exact fix:**
-  - Add a `faithful: bool` flag to `ExplanationOutput`:
-    ```python
-    faithful: bool = True   # False for heuristic / lexicon-only
-    ```
-  - In the propaganda explainer, set `faithful=False`.
-  - In `ExplanationAggregator.aggregate`, gate inclusion of non-faithful sources by an explicit policy:
-    ```python
-    if propaganda and self.weights.get("include_heuristic", False):
-        sources["propaganda"] = ...
-    ```
+```
+src/explainability/
+├── __init__.py                    → Namespace package (empty)
+│
+├── common_schema.py               → Pydantic schemas: TokenImportance, ExplanationOutput,
+│                                    AggregatedExplanation, ExplainabilityResult (CRIT-6/7)
+│
+├── explainability_pipeline.py     → Public API: run_explainability_pipeline(),
+│                                    explain_prediction_full(), explain_fast()
+│
+├── orchestrator.py                → ExplainabilityOrchestrator — coordinates all sub-explainers,
+│                                    applies faithfulness gate (FAITH-1), surfaces failures (FAITH-6)
+│
+├── model_explainer.py             → Legacy backward-compat wrapper around the orchestrator
+│
+│── shap_explainer.py              → SHAP text explainer with LRU explainer + value caches
+├── lime_explainer.py              → LIME text explainer with bounded explanation cache
+├── attention_rollout.py           → Transformer attention rollout (multi-layer, vectorised)
+├── attention_visualizer.py        → Extracts attention tensors + plots heatmaps / bar charts
+├── bias_explainer.py              → SHAP + Integrated Gradients + Attention fusion for bias task
+├── emotion_explainer.py           → Lexicon-based emotion signal + gradient-based model attribution
+├── propaganda_explainer.py        → Pattern-matching propaganda technique detection
+│
+├── token_alignment.py             → Sub-word → word merging (WordPiece / SentencePiece / BPE)
+│
+├── explanation_aggregator.py      → Multi-method weighted fusion into AggregatedExplanation
+├── explanation_calibrator.py      → L1 normalization + entropy-based confidence scoring
+├── explanation_consistency.py     → Pairwise Pearson / Spearman / cosine cross-method agreement
+├── explanation_metrics.py         → Faithfulness, comprehensiveness, sufficiency, deletion, insertion
+├── explanation_monitor.py         → Running stats + drift detection on importance score history
+├── explanation_cache.py           → Memory + disk LRU cache with TTL, compression, versioning
+├── explanation_report_generator.py→ JSON + HTML report generation with token highlighting
+├── explanation_visualizer.py      → Matplotlib/Plotly token heatmap, bar chart, multi-method overlay
+│
+└── utils_validation.py            → validate_tokens_scores() — shared input guard for all explainers
+```
 
 ---
 
-### CRIT-10 — `explanation_consistency._spearman` uses `np.corrcoef(np.argsort(a), np.argsort(b))` — that is **not** Spearman
+## 3. End-to-End Explainability Flow
 
-- **File / Function:** `src/explainability/explanation_consistency.py:73-75`.
-- **Issue:** `np.argsort(a)` returns the **indices** that would sort `a`, not the **ranks** of each element. Spearman correlation requires ranks (i.e., `scipy.stats.rankdata` or `np.argsort(np.argsort(a))`). The current implementation correlates index permutations and produces nonsense values that happen to lie in `[-1, 1]`.
-- **Why explanation is misleading:** the value reported as `spearman` in `consistency_metrics` is mathematically incorrect. Consumers comparing explainer agreement see a number that has no statistical interpretation.
-- **Exact fix:**
-  ```python
-  @staticmethod
-  def _spearman(a, b):
-      ra = np.argsort(np.argsort(a))   # ranks of a
-      rb = np.argsort(np.argsort(b))   # ranks of b
-      if np.std(ra) < 1e-12 or np.std(rb) < 1e-12:
-          return 0.0
-      return float(np.corrcoef(ra, rb)[0, 1])
-  ```
-  Or import `scipy.stats.spearmanr` and use it directly.
+### 3.1 Standard pipeline (full mode)
 
----
+```
+User calls run_explainability_pipeline(text, predict_fn, model, tokenizer, config)
+         │
+         ▼
+[0] CACHE CHECK
+    ExplanationCache.get(text) → hit? return cached result : continue
+         │
+         ▼
+[1] SUB-EXPLAINERS (each wrapped in _run() for safe isolation)
+    │
+    ├─ SHAP (if config.use_shap)
+    │     shap_explainer.explain_text(predict_fn, text)
+    │     → shap.Explainer(text masker) → SHAP values → calibrate → ExplanationOutput
+    │
+    ├─ LIME (if config.use_lime)
+    │     lime_explainer.explain_prediction(predict_fn, text)
+    │     → LimeTextExplainer.explain_instance() → calibrate → ExplanationOutput
+    │
+    ├─ BIAS + EMOTION (if config.use_bias_emotion AND model AND tokenizer)
+    │     bias_explainer.explain_bias(model, tokenizer, text)
+    │       → compute_ig() [Riemann-sum IG, 8 steps]
+    │       → compute_attention_rollout() [AttentionRollout]
+    │       → fuse_methods(shap=None, ig, attn) → BiasExplanation
+    │     emotion_explainer.explain_emotion(text, model, tokenizer)
+    │       → compute_lexicon() [word-level] + compute_gradients() [subword]
+    │       → EmotionExplanation (faithful=False for lexicon signal)
+    │     _wrap_bias_ig(bias) → ExplanationOutput[method="integrated_gradients"]
+    │
+    ├─ PROPAGANDA (if config.use_propaganda_explainer)
+    │     propaganda_explainer.explain_propaganda(text)
+    │     → _score_tokens + _apply_phrase_scores → calibrate → ExplanationOutput(faithful=False)
+    │
+    ├─ ATTENTION ROLLOUT (if config.use_attention_rollout AND tokens AND attentions)
+    │     AttentionRollout.compute_rollout(attentions, tokens)
+    │     → head-aggregate → residual-add → matrix product across layers → calibrate
+    │     → ExplanationOutput[method="attention"]
+    │     [FAITH-1 gate]: if |Spearman(attention, IG)| < threshold → drop attention
+    │
+    └─ GRAPH (if config.use_graph_explainer)
+          GraphExplainer.explain_from_text(text)
+          → node_importance dict from NER + graph centrality
+         │
+         ▼
+[2] AGGREGATION (if config.use_aggregation)
+    ExplanationAggregator.aggregate(shap, ig, attention, lime, graph_explanation)
+    │
+    ├─ Filter faithful sources (CRIT-9: propaganda excluded by default)
+    ├─ Pick canonical token sequence (shap → ig → attn → lime priority)
+    ├─ Align all sources to canonical by position or first-occurrence fallback (CRIT-3/4)
+    ├─ Build [methods × tokens] matrix → vectorised weighted fusion (PERF-5)
+    ├─ Compute per-token confidence = 1 - std across active methods
+    ├─ Compute agreement_score via ExplanationConsistency.compute()
+    └─ Return AggregatedExplanation (tokens, final_token_importance, method_weights, confidence)
+         │
+         ▼
+[3] CONSISTENCY (if config.use_consistency)
+    ExplanationConsistency.compute(shap, ig, attention, lime)
+    → pairwise Pearson / Spearman / cosine (CRIT-10: real ranks, not sort indices)
+    → overall_agreement, token_agreement_mean
+         │
+         ▼
+[4] FAITHFULNESS METRICS (if config.use_explanation_metrics AND agg available)
+    base_proba = predict_fn(text)["fake_probability"]  [once — REC-3]
+    offsets = _compute_offsets(tokenizer, canonical_tokens, text)  [CRIT-11]
+    ExplanationMetrics.evaluate(tokens, scores, batch_predict_fn,
+                                text, offsets, base_proba)
+    → faithfulness, comprehensiveness, sufficiency, deletion_score,
+      insertion_score, overall_score
+         │
+         ▼
+[5] MONITORING (if aggregation succeeded)
+    ExplanationMonitor.update(final_token_importance)
+    → running mean/std/min/max/drift
+         │
+         ▼
+[6] ASSEMBLE ExplainabilityResult
+    { prediction, shap_explanation, lime_explanation, attention_explanation,
+      propaganda_explanation, bias_explanation, emotion_explanation,
+      aggregated_explanation, consistency_metrics, explanation_metrics,
+      monitoring, explanation_quality_score, module_failures, metadata }
+         │
+         ▼
+[7] CACHE WRITE + RETURN
+```
 
-### CRIT-11 — `explanation_metrics.faithfulness` (and `comprehensiveness`/`sufficiency`/`deletion`/`insertion`) constructs ablated text by joining tokens with `" "`
+### 3.2 Fast pipeline
 
-- **File / Function:** `src/explainability/explanation_metrics.py:56-75, 80-89, 95-104, 110-124, 130-143`.
-- **Issue:** tokens passed in are subword tokens (`Ġevery`, `Ġone`, `##the`, `<s>`, `</s>`) **or** sorted-alphabetic tokens from the aggregator (CRIT-3). `" ".join(tokens)` produces strings like `"</s> <s> Ġabandoned Ġabhorrent ..."` that the model has never seen. The model's response on that string has no relationship to its response on the original sentence.
-- **Why explanation is misleading:** every faithfulness metric reports a value computed on garbage text. The "explanation_quality_score" is meaningless.
-- **Exact fix:** ablate at the **input text** level using offsets, not at the token list level:
-  ```python
-  def faithfulness(self, text, tokens, offsets, scores, predict_fn):
-      base = predict_fn([text])[0]["fake_probability"]
-      ablated = []
-      for (start, end) in offsets:
-          ablated.append(text[:start] + "[MASK]" + text[end:])
-      preds = self._extract_fake_prob_batch(predict_fn(ablated))
-      deltas = base - preds
-      ...
-  ```
-  And require the orchestrator to pass `offsets` end-to-end.
+`explain_fast()` uses LIME only, skips SHAP/bias/emotion/attention/aggregation/consistency/metrics. Latency target: < 200 ms on CPU.
 
----
+### 3.3 Module interaction summary
 
-### CRIT-12 — `explanation_metrics.evaluate` runs **3·N + 2 forward passes per article** and orchestrator wraps with `_make_batch_predict_fn` that loops in Python
-
-- **File / Function:** `src/explainability/explanation_metrics.py:159-192` and `src/explainability/orchestrator.py:33-38`.
-- **Issue:**
-  - `faithfulness`: 1 base + N ablations.
-  - `comprehensiveness`: 1 base + 1 perturbed (already cached if same `text`).
-  - `sufficiency`: 1 base + 1 kept.
-  - `deletion_score`: N progressive deletions.
-  - `insertion_score`: N progressive insertions.
-  - Total ≥ **3N + 2** forwards per article.
-  - Each batch call goes through `_make_batch_predict_fn` which is `[predict_fn(t) for t in texts]` — Python loop, no batching.
-- **Why explanation is misleading:** for a 200-token article, that is 600+ sequential forwards just for one metrics call. A single explanation call on a moderate article takes tens of seconds; "fast mode" still triggers `lime` which adds another 256 forwards.
-- **Exact fix:** propagate true batched prediction:
-  ```python
-  def _make_batch_predict_fn(predict_fn) -> Callable:
-      batch_fn = getattr(predict_fn, "batch_predict", None)
-      if callable(batch_fn):
-          return batch_fn
-      def _batch(texts: List[str], chunk: int = 32) -> List[Dict]:
-          out = []
-          for i in range(0, len(texts), chunk):
-              out.extend(predict_fn(t) for t in texts[i:i+chunk])  # still per-text but at least documented
-          return out
-      return _batch
-  ```
-  And require `predict_fn` to expose `batch_predict` for production use.
-
----
-
-## 2. PERFORMANCE BOTTLENECKS
-
-### PERF-1 — Sequential, redundant model forward passes across explainers
-
-- **Location:** `orchestrator.py:158-226`.
-- **Issue:** SHAP, LIME, IG (in `bias_explainer`), attention rollout (in `bias_explainer`), gradient (in `emotion_explainer`), and `predict_fn` itself all do **independent** forward passes on the **same** text. For one article: ≥ 6 model forwards plus the `explanation_metrics` (`3N+2` more). No tensors shared.
-- **Fix:** introduce a `ModelForwardCache` that caches `(input_ids, attention_mask) → (logits_dict, hidden_states, attentions, embeddings)` on the first pass and re-uses for SHAP/LIME wrapping (they need the prediction), IG (needs embeddings), attention rollout (needs attentions). For the orchestrator:
-  ```python
-  fwd = self._cached_forward(text)      # one model call
-  shap_out = self._shap_from_cache(fwd, text) if self.config.use_shap else None
-  ig_out = self._ig_from_cache(fwd, model, tokenizer, task="bias") if self.config.use_bias_emotion else None
-  attn_out = self._rollout_from_cache(fwd, tokens) if self.config.use_attention_rollout else None
-  ```
-- **Expected speedup:** **5–10×** end-to-end per article.
-
----
-
-### PERF-2 — `lime_explainer.num_samples=256` default with per-sample non-batched `predict_fn`
-
-- **Location:** `lime_explainer.py:152-175` and `lime_predict_wrapper:88-125`.
-- **Issue:** LIME generates 256 perturbation samples by default; `lime_predict_wrapper` tries `predict_fn.batch_predict` first but falls back to a Python `for t in text_list: predict_fn(t)`. If the wrapped `predict_fn` lacks `batch_predict`, LIME does 256 sequential forwards.
-- **Fix:** require batched prediction at the orchestrator boundary (PERF-1 fix); reduce LIME default `num_samples` to 64 with explicit override; add `batch_size=32` chunking to `_batched_predict` (already present, but only kicks in if outer wrapper batched first).
-- **Expected speedup:** **8–16×** on the LIME path.
-
----
-
-### PERF-3 — `bias_explainer` builds a fresh `shap.Explainer` on every call
-
-- **Location:** `bias_explainer.py:79-80`.
-- **Issue:** `shap.Explainer(predict, tokenizer)` is constructed inside `compute_shap` per article — no caching like `shap_explainer.get_explainer`. SHAP explainer construction is expensive (builds the `Text` masker tokenizer state).
-- **Fix:** use the cached `get_explainer` from `shap_explainer.py`, or maintain a module-level `OrderedDict` mirror inside `bias_explainer.py`.
-- **Expected speedup:** **2-3×** on the bias path.
-
----
-
-### PERF-4 — `attention_rollout._add_residual` uses `clamp_min(EPS)` then `attention.sum(dim=-1, keepdim=True)` per layer per call → many small ops
-
-- **Location:** `attention_rollout.py:86-91, 130`.
-- **Issue:** for each of L layers, we do `+ identity`, `.sum(...)`, `clamp_min(EPS)`, `/`. Then `multi_dot(processed[::-1])` is a cascade of L matrix multiplies of `(seq_len, seq_len)` matrices. For seq_len=512, L=12: 12 × 512² = 3.1M ops per residual normalization, 11 × 512³ = 1.5B ops in `multi_dot` — substantial on CPU if `attentions[i].device == "cpu"`.
-- **Fix:** stack first, then vectorize:
-  ```python
-  attn = torch.stack([self._aggregate_heads(a, sample_index).float()
-                      for a in attentions])           # [L, S, S]
-  identity = torch.eye(attn.shape[-1], device=attn.device).expand_as(attn)
-  attn = attn + identity
-  attn = attn / attn.sum(-1, keepdim=True).clamp_min(EPS)
-  rollout = attn[0]
-  for i in range(1, attn.shape[0]):
-      rollout = attn[i] @ rollout
-  ```
-  Or use `torch.linalg.multi_dot(list(attn.flip(0)))` once.
-- **Expected speedup:** **2-4×** on rollout.
+| Caller | Calls | Returns |
+|--------|-------|---------|
+| `explainability_pipeline` | `orchestrator.get_default_orchestrator()` | singleton `ExplainabilityOrchestrator` |
+| `orchestrator` | `shap_explainer`, `lime_explainer`, `bias_explainer`, `emotion_explainer`, `propaganda_explainer`, `AttentionRollout`, `GraphExplainer` | `ExplanationOutput` per method |
+| `orchestrator` | `ExplanationAggregator.aggregate()` | `AggregatedExplanation` |
+| `orchestrator` | `ExplanationConsistency.compute()` | `Dict[str, float]` |
+| `orchestrator` | `ExplanationMetrics.evaluate()` | `Dict[str, float]` |
+| `orchestrator` | `ExplanationMonitor.update()` | nothing |
+| `shap_explainer`, `lime_explainer`, `attention_rollout` | `explanation_calibrator.calibrate_explanation()` | `{scores, confidence, entropy}` |
+| `bias_explainer` | `attention_rollout.AttentionRollout`, `token_alignment.align_tokens` | importance arrays |
+| `explanation_aggregator` | `explanation_consistency.ExplanationConsistency` | agreement score |
 
 ---
 
-### PERF-5 — `explanation_aggregator.aggregate` per-token Python loop with dict lookups
-
-- **Location:** `explanation_aggregator.py:142-174`.
-- **Issue:** for N tokens × 4 explainers, each iteration does dict lookup, multiplication, list append. For a 500-token article, this is ~2k Python operations.
-- **Fix:** vectorize via numpy. Build a `[n_methods, n_tokens]` matrix indexed by token position once, then `final_scores = (W * C * importance_matrix).sum(0)`:
-  ```python
-  imp = np.zeros((len(method_names), len(tokens)), dtype=np.float32)
-  for mi, name in enumerate(method_names):
-      imp[mi] = [sources[name].get(t, 0.0) for t in tokens]
-  weights = np.array([self.weights[m] * confidences[m] for m in method_names])
-  final = (weights[:, None] * imp).sum(0)
-  ```
-- **Expected speedup:** **3-5×** on aggregation.
+## 4. File-by-File Deep Dive
 
 ---
 
-### PERF-6 — `orchestrator` instantiated on every `run_explainability_pipeline` call
+### File: `common_schema.py`
 
-- **Location:** `explainability_pipeline.py:71-73` and `model_explainer.py:46`.
-- **Issue:** `orchestrator = ExplainabilityOrchestrator(config=config)` constructs `ExplanationCache`, `AttentionRollout`, `ExplanationAggregator`, `ExplanationConsistency`, `ExplanationMetrics`, `ExplanationMonitor`, `GraphExplainer` on every call. `GraphExplainer.__init__` itself loads spaCy/regex tables.
-- **Fix:** keep a module-level singleton keyed by `config` hash, or make `run_explainability_pipeline` accept `orchestrator: Optional[ExplainabilityOrchestrator] = None`.
-- **Expected speedup:** **30-100ms** saved per call.
+**Purpose**
 
----
+Single source of truth for all Pydantic data contracts used across the explainability system. Prevents schema drift between modules (CRIT-6/7).
 
-## 3. FAITHFULNESS ISSUES
+**Key Classes**
 
-### FAITH-1 — Attention rollout used as a faithful explanation without validation
+| Class | Description |
+|-------|-------------|
+| `TokenImportance` | Immutable `(token: str, importance: float)` pair. Token must be non-empty; importance must be finite. |
+| `ExplanationOutput` | Output of a single explainer method. Contains `method`, `tokens`, `importance`, `structured` (list of `TokenImportance`), optional `confidence`, `entropy`, `raw`, and `faithful` flag. Validators enforce alignment between flat `importance` list and `structured` list (any drift > 1e-6 raises ValueError). |
+| `AggregatedExplanation` | Output of the aggregator. Contains `tokens`, `final_token_importance`, `structured`, `method_weights`, `confidence_score`, `agreement_score`, and optional `text` + `offsets` for CRIT-11 ablation. |
+| `ConsistencyMetrics` | Pairwise consistency scores between explainer pairs (shap_vs_lime, shap_vs_attention, etc.). |
+| `ExplanationMetricsOutput` | Five faithfulness metrics: `faithfulness`, `comprehensiveness`, `sufficiency`, `deletion_score`, `insertion_score`, `overall_score`. |
+| `ExplainabilityResult` | Top-level canonical result. All optional except `prediction`. Carries all sub-explanations, `consistency_metrics`, `explanation_metrics`, `monitoring`, `explanation_quality_score`, `module_failures`, and `metadata`. Uses `extra="ignore"` so orchestrator can pass extra fields without crashing. |
 
-- **Files:** `attention_rollout.py` (full module), `orchestrator.py:206-214`.
-- **Issue:** attention has well-known issues as an explanation (Jain & Wallace 2019, "Attention is not Explanation"; Wiegreffe & Pinter 2019, "Attention is not not Explanation"). The current implementation feeds raw rollout values directly into `AggregatedExplanation` with **no validation that rollout correlates with model output sensitivity**. The default `AggregationWeights.attention=0.20` is a fixed 20 % weight regardless of whether attention actually predicts the target.
-- **Fix:**
-  1. Compute attention rollout AND a sensitivity check (gradient × input on the same tokens). If `pearson(rollout, |grad·x|) < 0.3`, downweight or drop.
-  2. Add config knob `attention_faithfulness_threshold` and skip the attention term when the per-call agreement is below it:
-     ```python
-     if attention_out and ig_out:
-         agreement = np.corrcoef(attention_out.importance, ig_out.importance)[0,1]
-         if agreement < self.config.attention_faithfulness_threshold:
-             attention_out = None
-     ```
+**Key invariants**
+
+- `ExplanationOutput.importance[i]` and `ExplanationOutput.structured[i].importance` are enforced equal (tolerance 1e-6)
+- `faithful=True` is the default — heuristic explainers must explicitly override to `False`
+- Importance values are not bounded to [0, 1] — signed SHAP values are allowed (CRIT-5)
 
 ---
 
-### FAITH-2 — `bias_explainer.compute_ig` is not integrated gradients — it is single-step gradient × embedding
+### File: `explainability_pipeline.py`
 
-- **File / Function:** `bias_explainer.py:92-102`.
-- **Issue:**
-  ```python
-  emb = model.get_input_embeddings()(inputs["input_ids"]).detach().requires_grad_(True)
-  out = model(inputs_embeds=emb)
-  out.logits.max().backward()
-  grads = emb.grad.abs().sum(dim=-1)[0]
-  ```
-  This is **gradient-input**, not integrated gradients. Real IG integrates over an interpolation path from a baseline to the input (per `score_explainer._integrated_gradients`). Single-step gradient is highly sensitive to local saturation and produces unfaithful attributions for nonlinear models.
-- **Fix:** copy the path-integration loop from `src/aggregation/score_explainer.py:74-107` (or use the corrected version proposed in the aggregation audit GPU-2) and remove the `.abs()` to preserve sign:
-  ```python
-  ig = ((emb - baseline) * mean_grad).sum(-1)[0]   # signed
-  return _normalize(ig.cpu().numpy())
-  ```
+**Purpose**
 
----
+Public entry point. Re-exports `ExplainabilityResult` from `common_schema` (not a redefinition). Delegates all work to `get_default_orchestrator()` — a process-wide singleton that avoids the overhead of rebuilding `GraphExplainer` / `ExplanationCache` / etc. on every article (PERF-6).
 
-### FAITH-3 — `explanation_calibrator.calibrate_by_method` applies arbitrary `power 0.8` (lime) and `power 1.2` (attention) with no theoretical basis
+**Key Functions**
 
-- **File / Function:** `explanation_calibrator.py:79-98`.
-- **Issue:** these "shaping" exponents are not motivated by any calibration theory; they bias LIME toward sharper distributions and attention toward flatter ones, then renormalize. The transformation is irreversible and changes the relative ordering of low-importance tokens.
-- **Fix:** drop the per-method shaping. Calibration of explanations should mean "make the magnitudes comparable across explainers" (e.g. quantile-mapping to a common reference distribution), not "apply a hardcoded exponent". Use a learned monotone calibration trained on a labeled faithfulness dataset, or no calibration at all.
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `run_explainability_pipeline` | `(text, predict_fn, *, model, tokenizer, tokens, attentions, config)` | Main entry point. Validates text, gets/creates orchestrator singleton, calls `orchestrator.explain()`, assembles `ExplainabilityResult`. |
+| `explain_prediction_full` | `(text, predict_fn, model, tokenizer, use_lime, use_shap)` | Backward-compat wrapper: LIME + SHAP + bias/emotion + aggregation + consistency + metrics. |
+| `explain_fast` | `(text, predict_fn)` | Minimal config: LIME only, no model required, no aggregation. |
+
+**Dependencies:** `orchestrator`, `common_schema`  
+**External:** none
 
 ---
 
-### FAITH-4 — `propaganda_explainer` produces explanations divorced from model behavior
+### File: `orchestrator.py`
 
-- See CRIT-9.
+**Purpose**
 
----
+Central coordinator. Runs every sub-explainer under `_run()` (safe isolation with timing), applies the FAITH-1 faithfulness gate on attention, and assembles the final explanation dict. The process-wide singleton `get_default_orchestrator()` is keyed by the SHA-256 hash of the config dataclass (via `json.dumps(asdict(config))`).
 
-### FAITH-5 — `emotion_explainer` lexicon-derived "explanation" is not tied to model predictions
+**Key Classes / Functions**
 
-- **File:** `emotion_explainer.py:175-205`.
-- **Issue:** even if `compute_gradients` were fixed (CRIT-2), `fuse(lexicon, gradients)` weights lexicon at 0.6 and gradients at 0.4 — most of the "explanation" is a fixed lexicon lookup that has no relationship to what the model actually attended to.
-- **Fix:** treat the lexicon path as a separate "feature signal" not as an explanation. Return two outputs: `model_attribution` (gradient-only, faithful) and `lexicon_signal` (heuristic, marked as such).
+| Name | Description |
+|------|-------------|
+| `ExplainabilityConfig` | 17-field dataclass controlling which modules run. Key fields: `use_shap` (default False — too slow on CPU), `use_lime` (True), `use_attention_rollout` (True), `use_bias_emotion` (True), `use_graph_explainer` (True), `attention_faithfulness_threshold` (0.0 = disabled), `ig_steps` (8), `raise_on_majority_failure` (False), `aggregation_weights` (AggregationWeights). |
+| `ExplainabilityOrchestrator.__init__` | Instantiates: `ExplanationCache`, `AttentionRollout`, `ExplanationAggregator`, `ExplanationConsistency`, `ExplanationMetrics`, `ExplanationMonitor`, `GraphExplainer`. All gated by config flags. |
+| `ExplainabilityOrchestrator.explain` | Main pipeline method. Runs all enabled modules, applies FAITH-1 gate, builds aggregation, consistency, metrics, monitoring, and metadata. |
+| `ExplainabilityOrchestrator.explain_fast` | LIME-only fast path. Caches base prediction before calling LIME (avoids extra model forward). |
+| `_make_batch_predict_fn` | Wraps `predict_fn(text) → dict` into `(texts: List[str]) → List[dict]` for SHAP/LIME. Uses `predict_fn.batch_predict` when available (CRIT-12). |
+| `_wrap_bias_ig` | Extracts `integrated_gradients` or `token_importance` from `explain_bias` output and wraps it in an `ExplanationOutput` so the aggregator and consistency stages can consume it (CRIT-8). |
+| `_spearman_safe` | Nan-safe Spearman for FAITH-1 gate without scipy dependency. |
+| `_compute_offsets` | Character-offset alignment between aggregated canonical tokens and original text for CRIT-11 ablation. Returns `None` if alignment breaks. |
+| `get_default_orchestrator` | Thread-safe singleton factory. Config hash → cached `ExplainabilityOrchestrator`. |
 
----
-
-### FAITH-6 — Orchestrator silently swallows explainer failures and returns `None` outputs
-
-- **File:** `orchestrator.py:116-125`.
-- **Issue:** `_run("name", fn)` catches every exception and returns `(None, latency, False)`. The aggregator then runs with whatever survived. The aggregated explanation is still presented to the user as if all explainers contributed, but `metadata.modules.shap=False` is the only signal — which the report generator does not surface.
-- **Fix:** propagate failures into the final result schema so consumers can check:
-  ```python
-  result["module_failures"] = [k for k, ok in metadata["modules"].items() if not ok]
-  if len(result["module_failures"]) > len(metadata["modules"]) // 2:
-      raise RuntimeError(f"Majority of explainers failed: {result['module_failures']}")
-  ```
+**Dependencies:** all other explainability files, `src.graph.graph_explainer`  
+**External:** `numpy`, `torch`, `threading`, `hashlib`
 
 ---
 
-## 4. TOKEN ALIGNMENT ISSUES
+### File: `shap_explainer.py`
 
-### ALIGN-1 — Mixed tokenization across the pipeline
+**Purpose**
 
-- **Files:** `bias_explainer.py:152` (`tokenizer.tokenize(text)` — subword), `emotion_explainer.py:57-58` (regex word-level), `propaganda_explainer.py:70-71` (regex word-level), `shap_explainer.py:202` (SHAP's `Text` masker tokens — splits by whitespace by default), `lime_explainer.py:177` (LIME's word-level tokens from `as_list()`), `attention_rollout` (subword tokens supplied externally).
-- **Issue:** the aggregator's `tokens = sorted(set(...))` (CRIT-3) merges these incompatible token spaces by string equality. `Ġworld` ≠ `world` ≠ `World` ≠ `WORLD` — the same surface form gets fragmented across methods and the aggregator's per-token lookup misses every match.
-- **Fix:** introduce a single canonical token space at the orchestrator boundary:
-  ```python
-  enc = tokenizer(text, return_offsets_mapping=True, return_tensors="pt")
-  offsets = enc["offset_mapping"][0].tolist()
-  tokens = [text[s:e] for s, e in offsets if (e - s) > 0]
-  ```
-  Pass `tokens, offsets` to every explainer; require explainers to output in this canonical token space (provide an alignment helper that maps subword IG → word level using offsets, and word-level lexicon scores → subword level by repetition).
+SHAP-based local explanation of a single article's prediction. Uses `shap.maskers.Text` + `shap.Explainer` to compute token-level Shapley values, then calibrates and returns an `ExplanationOutput`.
 
----
+**Key Functions**
 
-### ALIGN-2 — `align_tokens` in `token_alignment.py` only handles `##` (WordPiece) and `▁` (SentencePiece) — doesn't handle RoBERTa BPE `Ġ`
+| Function | Inputs | Outputs | Logic |
+|----------|--------|---------|-------|
+| `get_explainer(predict_fn)` | callable | `shap.Explainer` | LRU cache (max 8) keyed by stable predict_fn identity; builds `shap.maskers.Text` + `shap.Explainer` on miss. |
+| `_get_shap_values(predict_fn, text)` | callable, str | `shap.Explanation` | Value cache (max 64) keyed by (predict_fn_key, sha1(text)); runs `explainer([text])` on miss. |
+| `explain_text(predict_fn, text)` | callable, str | `ExplanationOutput` | Calls `_get_shap_values`, extracts `data[0]` (tokens) and `values[0]` (SHAP values), filters special tokens, calibrates via `calibrate_explanation`, returns `ExplanationOutput(method="shap")`. |
+| `shap_predict_wrapper(texts, predict_fn)` | List[str], callable | `ndarray (N, 2)` | Wraps predict_fn into SHAP's expected `[p_real, p_fake]` format. Uses `batch_predict` when available. |
+| `plot_explanation / save_explanation_html` | — | HTML file | Delegates to `shap.plots.text`. |
 
-- **File:** `src/explainability/token_alignment.py:94-126`.
-- **Issue:** the model is RoBERTa-based (per `src/aggregation/score_explainer.py:88` and the project stack). RoBERTa BPE uses `Ġ` for word-initial tokens. `align_tokens` does not recognize it, so subword merging never happens — every token is treated as a standalone word.
-- **Fix:**
-  ```python
-  if tokenizer_type == "bpe":
-      if token.startswith("Ġ"):
-          if parts:
-              val, var = agg(vals); merged_tokens.append("".join(parts))
-              merged_scores.append(val); merged_variance.append(var)
-          parts = [token[1:]]; vals = [score]
-      else:
-          parts.append(token); vals.append(score)
-  ```
-  Add `"bpe"` to the `tokenizer_type` literal and update default to detect the family from `tokenizer.__class__.__name__`.
+**SHAP value shape negotiation (`_process_shap_values`):**
+
+| Shape | Meaning | Action |
+|-------|---------|--------|
+| 3D `(samples, seq_len, classes)` | Multi-class | Take `[:, :, -1]` (positive class) |
+| 2D `(seq_len, 1)` | Binary single | Flatten `[:, 0]` |
+| 2D `(seq_len, classes)` | Multi-class 2D | Take `[:, -1]` |
+| 1D | Already correct | Pass through |
+
+**Explainability technique:** SHAP (Shapley Additive Explanations) with `Text` masker (masks words by replacing with baseline mask string).  
+**Dependencies:** `explanation_calibrator`, `utils_validation`, `common_schema`  
+**External:** `shap` (optional — ImportError if absent), `numpy`
 
 ---
 
-### ALIGN-3 — `bias_explainer` calls `align_tokens(tokens, base)` with `base` derived from one explainer; `shap_vals`, `ig_vals`, `attn_vals` are kept un-aligned
+### File: `lime_explainer.py`
 
-- **File / Function:** `bias_explainer.py:159-166`.
-- **Issue:**
-  ```python
-  base = next((v for v in [shap_vals, ig_vals, attn_vals] if v is not None), None)
-  tokens, base = align_tokens(tokens, base)
-  shap_vals = shap_vals if shap_vals is not None else np.zeros_like(base)
-  ig_vals   = ig_vals   if ig_vals   is not None else np.zeros_like(base)
-  attn_vals = attn_vals if attn_vals is not None else np.zeros_like(base)
-  ```
-  Only `base` is aligned to the merged token list. The other two arrays remain at the **original** subword length. `fuse_methods` then computes `weights["shap"] * shap_vals + weights["ig"] * ig_vals + ...` with mismatched shapes → broadcast error or silent misalignment.
-- **Fix:** align all three arrays jointly:
-  ```python
-  shap_vals = align_array(tokens_in, shap_vals, tokens) if shap_vals is not None else np.zeros(len(tokens))
-  ig_vals   = align_array(tokens_in, ig_vals,   tokens) if ig_vals   is not None else np.zeros(len(tokens))
-  attn_vals = align_array(tokens_in, attn_vals, tokens) if attn_vals is not None else np.zeros(len(tokens))
-  ```
-  Where `align_array` collapses subwords using the same merge function as `align_tokens`.
+**Purpose**
 
----
+LIME-based local explanation. Perturbs the input text (word removal), calls the model on each perturbation, fits a local linear regression to explain which words most affect the prediction.
 
-### ALIGN-4 — Truncation in `attention_rollout._validate_inputs` allows `len(tokens) ≤ seq_len` but doesn't enforce equality
+**Key Functions**
 
-- **File:** `attention_rollout.py:69-70`.
-- **Issue:** if `len(tokens) < seq_len` (caller stripped CLS/SEP), the rollout matrix is `seq_len × seq_len` but `tokens[i]` aligns to `attention[i+1]` (off-by-one for stripped CLS). The `mask_tokens` loop in `compute_rollout:139-142` then checks tokens by index without correcting.
-- **Fix:** require `len(tokens) == seq_len` and have callers pass the full subword sequence including special tokens; mask CLS/SEP via `mask_tokens=["<s>","</s>","[CLS]","[SEP]"]` instead of stripping.
+| Function | Inputs | Outputs | Logic |
+|----------|--------|---------|-------|
+| `get_explainer(model_id)` | str | `LimeTextExplainer` | LRU cache (max 4) keyed by model_id. Creates `LimeTextExplainer(class_names=["Real", "Fake"])`. |
+| `explain_prediction(predict_fn, text, num_features, num_samples)` | callable, str, int=8, int=25 | `ExplanationOutput` | Cache check (SHA-256 key) → `explainer.explain_instance()` → `exp.as_list()` → calibrate → `ExplanationOutput(method="lime")`. `num_samples=25` reduced from 256 (PERF-2). |
+| `lime_predict_wrapper(texts, predict_fn)` | Sequence[str], callable | `ndarray (N, 2)` | Wraps predict_fn. Tries `batch_predict` → list call → per-text loop with 0.5 fallback on error. |
+| `save_explanation_html` | — | HTML file | Calls `exp.save_to_file`. |
+
+**Explanation cache:** bounded `OrderedDict` capped at 256 entries (key = `sha256(text|num_features|num_samples)`).
+
+**Explainability technique:** LIME — local interpretable model-agnostic explanations. Fits ridge regression on perturbed neighborhood.  
+**Dependencies:** `explanation_calibrator`, `common_schema`  
+**External:** `lime.lime_text.LimeTextExplainer` (optional), `numpy`
 
 ---
 
-### ALIGN-5 — `explanation_metrics.faithfulness` joins tokens with " " and re-tokenizes implicitly via predict_fn
+### File: `attention_rollout.py`
 
-- See CRIT-11.
+**Purpose**
 
----
+Propagates attention through all transformer layers using the rollout algorithm (Abnar & Zuidema, 2020). Returns per-token importance from the `[CLS]` token's perspective.
 
-## 5. SCALE / NORMALIZATION ISSUES
+**Key Class: `AttentionRollout`**
 
-### SCALE-1 — Triple normalization: explainer normalizes → schema validator re-normalizes → aggregator re-normalizes
+| Method | Inputs | Outputs | Logic |
+|--------|--------|---------|-------|
+| `_validate_inputs` | attentions, tokens, sample_index, source_token_index | `seq_len` | Validates 4D tensors `(batch, heads, seq, seq)`, consistent batch/seq across layers. |
+| `_aggregate_heads` | `(batch, heads, seq, seq)`, sample_index | `(seq, seq)` | `mean(dim=1)[sample_index]` |
+| `_add_residual` | `(seq, seq)` | `(seq, seq)` | Add identity matrix → row-normalize |
+| `_stack_add_residual_normalize` | List of `(seq, seq)` | `(layers, seq, seq)` | **PERF-4**: stack all layers → fused residual-add + normalize in 2 kernel launches (vs 24 per-layer calls). float16/bfloat16 upcast to float32. |
+| `compute_rollout` | attentions, tokens, *, sample_index, source_token_index, mask_tokens, layer_weights, top_k | `ExplanationOutput` | Head-aggregate per layer → vectorised stack → residual → optional layer weights → matrix product all layers → `scores = rollout[source_token_index]` → calibrate → return. |
 
-- **Files:** every explainer calls `calibrate_explanation` (L1 normalize). `ExplanationOutput.normalize_importance` validator L1 normalizes again. `ExplanationAggregator._normalize` L1 normalizes the fused scores again.
-- **Issue:** three independent normalization steps with no shared state. After the first normalization, every importance vector sums to 1 — so the **relative scale across methods is destroyed**. SHAP's "this token contributed +0.7 to the prediction" becomes "this token has 0.012 of the total mass" indistinguishable from any other method's 0.012.
-- **Fix:**
-  - Explainers return **raw signed magnitudes** (no calibration).
-  - `ExplanationOutput` validates finiteness only (CRIT-5 fix).
-  - `ExplanationAggregator` normalizes **once**, after weighted fusion, with method-specific rescaling derived from offline calibration on a labeled faithfulness dataset (e.g., temperature per method estimated by maximum-likelihood faithfulness fit).
-
----
-
-### SCALE-2 — Mixing signed (gradients, SHAP) and non-negative (attention, lexicon) signals via L1 of `abs`
-
-- **Files:** `explanation_calibrator.normalize_scores:34` does `np.abs(arr) / sum(abs(arr))`. `bias_explainer._normalize:53-54` does `np.maximum(x, 0); x / sum(x)`. Inconsistent.
-- **Issue:** SHAP returns signed values (positive = pushes prediction toward "fake", negative = pushes toward "real"). Taking `abs()` collapses both into magnitudes, losing direction. `np.maximum(x, 0)` drops the entire negative half. The two utilities behave differently on the same input.
-- **Fix:** preserve sign. Maintain two separate fields on `TokenImportance`:
-  ```python
-  importance: float          # |attribution|, in [0,1]
-  direction: Literal["positive","negative","neutral"]
-  ```
-  And let the visualizer/report colorize accordingly.
+**Explainability technique:** Attention rollout — faithful attention-based attribution that accounts for residual connections and layer-wise propagation.  
+**Dependencies:** `explanation_calibrator`, `common_schema`  
+**External:** `torch`, `numpy`
 
 ---
 
-### SCALE-3 — `explanation_calibrator.compute_confidence` normalizes entropy by `log(N+EPS)`, where N is the number of input scores — confounds scale with vocabulary size
+### File: `attention_visualizer.py`
 
-- **File:** `explanation_calibrator.py:55-72`.
-- **Issue:** for two articles with very different token counts (50 vs 500), the same uniform distribution gets reported as confidence 0 for both — but the confidence should reflect how peaked the distribution is, not the article length. Currently `confidence = 1 - entropy / log(N)` — the denominator changes per call, so confidences are not comparable across articles.
-- **Fix:** report entropy in nats and confidence as a fixed-reference quantity:
-  ```python
-  effective_size = math.exp(entropy)              # perplexity-equivalent
-  confidence = 1.0 - min(effective_size / 50.0, 1.0)  # 50 = chosen reference
-  ```
-  Or expose the raw entropy and let consumers decide.
+**Purpose**
 
----
+High-level wrapper that combines attention extraction (model forward pass with `output_attentions=True`), aggregation, rollout, and visualization.
 
-### SCALE-4 — `explanation_aggregator` per-token confidence formula `1 - std(vals)` can go negative
+**Key Class: `AttentionVisualizer`**
 
-- **File:** `explanation_aggregator.py:171`.
-- **Issue:** `vals` are already L1-normalized importance values. For 4 methods that completely disagree, `std` can be > 1 if the normalization differs across articles (different N tokens). `1 - 1.5 = -0.5` is then `np.clip(conf, 0.0, 1.0) = 0` — perfect-disagreement and complete-collapse-to-zero are reported identically.
-- **Fix:** normalize std by max-possible std for the given methods:
-  ```python
-  max_std = 0.5   # for L1-normalized vectors over 4 methods, theoretical max ≈ 0.5
-  conf = float(np.clip(1.0 - np.std(vals) / max_std, 0.0, 1.0))
-  ```
-  Or use cosine similarity over method-vectors instead of std.
+| Method | Inputs | Outputs | Description |
+|--------|--------|---------|-------------|
+| `extract_attention` | `input_ids`, `attention_mask` | `{"attentions": List[Tensor]}` | Runs model forward with `output_attentions=True`. Handles `return_dict=True` and legacy tuple returns. |
+| `aggregate_attention` | attentions, sample_index | `ndarray` | Stack all layers → mean over heads and layers → `(seq, seq)` heatmap. |
+| `compute_rollout` | attentions, tokens | `ExplanationOutput` | Delegates to `AttentionRollout.compute_rollout`. |
+| `plot_attention` | attention_matrix, tokens, *, title, save_path, normalize | figure | Matplotlib `imshow` heatmap with token labels on both axes. |
+| `plot_token_importance` | tokens, scores, *, title, save_path | figure | Matplotlib bar chart of normalized scores. |
+| `analyze` | input_ids, attention_mask, tokens | `{attention_matrix, rollout}` | Full pipeline: extract → aggregate → rollout. |
+
+**External:** `torch`, `numpy`, `matplotlib` (lazy import GPU-5)
 
 ---
 
-### SCALE-5 — `explanation_metrics._normalize` uses min-max on 5 metric values then averages — destroys magnitude
+### File: `bias_explainer.py`
 
-- **File:** `explanation_metrics.py:34-44, 184-191`.
-- **Issue:** the 5 raw metrics (`faithfulness, comprehensiveness, sufficiency, deletion_score, insertion_score`) are min-max normalized **per call** to `[0,1]`, then averaged. So the largest metric is always 1, smallest always 0, and `overall_score = mean = 0.5` for any input. The `overall_score` is a constant.
-- **Fix:** use a population-fitted normalizer (loaded from disk) so per-call normalization is comparable across calls. Or simply average the raw metrics with documented domain semantics:
-  ```python
-  result = {
-      **weighted,
-      "variance": self.variance(scores),
-      "overall_score": float((weighted["faithfulness"]
-                              + weighted["comprehensiveness"]
-                              + (1.0 - weighted["sufficiency"])) / 3.0),
-  }
-  ```
+**Purpose**
 
----
+Model-aware bias explainer that fuses three attribution signals (SHAP, Integrated Gradients, Attention Rollout) on the `MultiTaskTruthLensModel`. Routes through `model.encoder` + `model.heads[task]` — not `model(...).logits` which does not exist on the multitask wrapper (CRIT-1).
 
-## 6. GPU / TORCH ISSUES
+**Key Functions**
 
-### GPU-1 — `attention_rollout.compute_rollout` casts `bf16/fp16 → fp32` per-layer in a Python loop; no batched cast
+| Function | Description |
+|----------|-------------|
+| `_forward_logits(model, enc, task)` | Single forward pass returning task-head logits. Supports both multitask and vanilla HF models (CRIT-1). |
+| `compute_shap(model, tokenizer, text, task)` | Cached `shap.Explainer` per `(id(tokenizer), task)` (PERF-3). Returns normalized attribution per token. |
+| `compute_ig(model, tokenizer, text, target_idx, steps)` | **Real Riemann-sum IG** (FAITH-2). Interpolates `steps` embeddings between zero baseline and input, averages gradients along the path. Pads gradients on masked positions. |
+| `compute_attention_rollout(model, tokenizer, text, task)` | Calls encoder with `output_attentions=True`, delegates to `AttentionRollout`. Slices off `[CLS]`/`[SEP]` to align with `tokenizer.tokenize(text)`. |
+| `fuse_methods(shap_vals, ig_vals, attn_vals)` | Weighted fusion: SHAP=0.4, IG=0.3, Attention=0.3 (weights zeroed and renormalized when method unavailable). Returns `(fused, weights)`. |
+| `explain_bias(model, tokenizer, text, task, use_shap, ig_steps)` | Main API. `use_shap=False` by default (too slow on CPU). `ig_steps=0` skips IG entirely. Returns dict with `token_importance`, `integrated_gradients`, `biased_tokens`, `sentence_bias_scores`, `attention_scores`, `bias_heatmap`, `bias_intensity`. |
 
-- **File:** `attention_rollout.py:120-123`.
-- **Issue:** for each layer, `attn = attn.to(torch.float32)` allocates a new tensor on device. For 12 layers × seq_len² = 12 × 512² × 4 bytes = 12 MB of allocations per article.
-- **Fix:** stack first, cast once:
-  ```python
-  attn_stack = torch.stack([self._aggregate_heads(a, sample_index) for a in attentions]).to(torch.float32)
-  ```
+**Explainability techniques:** SHAP (model-specific, tokenizer masker), Integrated Gradients (gradient × path integral), Attention Rollout  
+**Dependencies:** `token_alignment`, `utils_validation`, `attention_rollout`  
+**External:** `shap` (optional), `torch`, `numpy`
 
 ---
 
-### GPU-2 — `attention_rollout.compute_rollout` does `.detach().cpu().numpy()` mid-pipeline, then `np.maximum`, then numpy ops — kills device parallelism
+### File: `emotion_explainer.py`
 
-- **File:** `attention_rollout.py:132-142`.
-- **Issue:** the rollout is computed on GPU, then immediately moved to CPU for `np.nan_to_num`, `np.maximum`, the mask loop, and the `calibrate_explanation` call. The remainder of the pipeline (top-k, structured assembly) runs on CPU.
-- **Fix:** keep on device until all tensor ops are done:
-  ```python
-  scores = rollout[source_token_index].clamp_min(0)
-  scores = torch.nan_to_num(scores, nan=0.0, posinf=0.0, neginf=0.0)
-  if mask_tokens:
-      mask_idx = torch.tensor([i for i, t in enumerate(tokens) if t in mask_tokens],
-                              device=scores.device, dtype=torch.long)
-      scores[mask_idx] = 0
-  scores = scores.cpu().numpy().astype(np.float32)   # single transfer
-  ```
+**Purpose**
 
----
+Emotion explainer that explicitly separates **heuristic** (lexicon-based, word-level) from **faithful** (gradient-based, subword-level) signals to prevent the CRIT-2 tokenization alignment bug where lexicon and gradient arrays were silently mixed at different granularities.
 
-### GPU-3 — `bias_explainer.compute_ig` runs a single forward pass on default device, ignoring whether `model` is on CUDA
+**Key Functions**
 
-- **File:** `bias_explainer.py:92-102`.
-- **Issue:** `inputs = tokenizer(text, return_tensors="pt")` returns CPU tensors. `emb = model.get_input_embeddings()(inputs["input_ids"])` then triggers `Tensor.to(model.device)` implicitly only if the embeddings layer detects mismatch — older PyTorch raises `RuntimeError: Tensor on CPU passed to module on cuda`.
-- **Fix:**
-  ```python
-  device = next(model.parameters()).device
-  inputs = {k: v.to(device) for k, v in tokenizer(text, return_tensors="pt").items()}
-  ```
+| Function | Description |
+|----------|-------------|
+| `compute_lexicon(tokens)` | Assigns `1.0` per emotion-lexicon word (from `EMOTION_TERMS`), `+0.5` per intensifier. Word-level. |
+| `compute_gradients(model, tokenizer, text, task)` | Gradient × input on `model.encoder.embeddings`. Returns `(subword_tokens, scores)` pair — the tokens are subword (BPE), not word-level (CRIT-2/FAITH-5). |
+| `fuse(lexicon, gradients)` | **Returns lexicon signal only** (CRIT-2: dropped 0.6×lex + 0.4×grad cross-tokenization mixing). `gradients` kwarg kept for API compatibility. |
+| `emotion_distribution(tokens)` | Fraction of detected emotion-category words per emotion class. |
+| `explain_emotion(text, model, tokenizer)` | Main API. Returns `EmotionExplanation` dict with `lexicon_intensity`, `gradient_importance=[]` (deprecated), `fused_importance` (lexicon), `sentence_scores`, `emotion_distribution`, `intensity_score`, `faithful=False`, `model_attribution={tokens, importance, faithful=True, token_space="subword"}`. |
+
+**Explainability techniques:** Lexicon scoring (heuristic, `faithful=False`) + gradient×input (faithful, `faithful=True`)  
+**Dependencies:** `src.features.emotion.emotion_schema.EMOTION_TERMS`  
+**External:** `torch`, `numpy`
 
 ---
 
-### GPU-4 — `lime_explainer` and `shap_explainer` run their `predict` callback in a Python loop over 256 perturbed strings
+### File: `propaganda_explainer.py`
 
-- See PERF-1 and PERF-2. From a GPU perspective: the GPU sits idle 90 % of the time because each forward is single-text.
-- **Fix:** require `predict_fn.batch_predict(texts: List[str]) -> List[Dict]` that internally batches to GPU. Without it, `lime_predict_wrapper` falls back to per-text calls.
+**Purpose**
 
----
+Pattern-matching detection of eight classical propaganda techniques using a fixed lexicon. Explicitly marked `faithful=False` (CRIT-9) — this is a rule-based heuristic, not a model attribution.
 
-### GPU-5 — `explanation_visualizer` and `attention_visualizer` import `matplotlib` at module level
+**Techniques detected:**
 
-- **Files:** `explanation_visualizer.py:7`, `attention_visualizer.py:11`.
-- **Issue:** `import matplotlib.pyplot as plt` is heavyweight (~200 ms) and unused on the API hot path. Always-imported even when no plotting requested.
-- **Fix:** lazy-import inside plotting methods:
-  ```python
-  def plot_token_heatmap(self, ...):
-      import matplotlib.pyplot as plt
-      ...
-  ```
+| Technique | Weight | Examples |
+|-----------|--------|---------|
+| `name_calling` | 1.0 | terrorist, criminal, extremist |
+| `glittering_generalities` | 0.6 | freedom, democracy, patriot |
+| `fear_appeal` | 0.9 | danger, crisis, catastrophe |
+| `loaded_language` | 1.0 | regime, hoax, conspiracy, rigged |
+| `false_dilemma` | 0.7 | either, never, always, inevitable |
+| `appeal_to_authority` | 0.5 | experts say, scientists confirm |
+| `bandwagon` | 0.6 | everyone, majority, all Americans |
+| `repetition` | 0.8 | tokens appearing > 2 times (boosted proportionally) |
 
----
+**Key Functions**
 
-## 7. RECOMPUTATION ISSUES
+| Function | Description |
+|----------|-------------|
+| `explain_propaganda(text, top_k)` | `_score_tokens` (single-word) + `_apply_phrase_scores` (multi-word) → calibrate → `ExplanationOutput(method="propaganda", faithful=False)`. Returns empty output if no patterns match. |
+| `detect_techniques(text)` | Returns `{technique: [matched_tokens]}` dict without full ExplanationOutput. |
 
-### REC-1 — Same forward pass repeated by every explainer (see PERF-1)
-
-SHAP, LIME, IG, attention rollout, gradient (in emotion), and `predict_fn` all forward the same input independently. Fix via shared `ModelForwardCache`.
-
----
-
-### REC-2 — `ExplanationCache` not consulted when sub-modules are computed
-
-- **File:** `orchestrator.py:145-148`.
-- **Issue:** the orchestrator's top-level cache stores **the whole assembled explanation**. But `shap_explainer._VALUE_CACHE`, `lime_explainer._EXPLANATION_CACHE`, and the orchestrator cache are three independent caches with three independent eviction policies and three independent keys. A cache hit at the top level skips everything; a miss at top level re-runs every sub-explainer even if `_VALUE_CACHE` would have hit.
-- **Fix:** unify under one cache layer keyed by `(text, model_version, config_hash)`. Sub-explainers receive a cache view and store/look up under their own sub-keys.
+**Explainability technique:** Lexicon pattern matching (heuristic)  
+**Dependencies:** `common_schema`, `explanation_calibrator`  
+**External:** `numpy`
 
 ---
 
-### REC-3 — `orchestrator.explain` runs `predict_fn(text)` inside `explanation_metrics.evaluate` but had already run it in `explainability_pipeline.run_explainability_pipeline` (line 77)
+### File: `token_alignment.py`
 
-- **Files:** `explainability_pipeline.py:77`, `explanation_metrics.faithfulness:60`, `comprehensiveness:82`, `sufficiency:97`.
-- **Issue:** `prediction = predict_fn(text)` is computed at the top, then thrown away after wrapping. Inside metrics, `base = predict_fn([" ".join(tokens)])[0]["fake_probability"]` is computed three more times with slight variants of the input.
-- **Fix:** thread `prediction` and `base_text_proba` through to `metrics.evaluate(...)`:
-  ```python
-  metrics = self.metrics.evaluate(
-      tokens, scores, batch_predict_fn,
-      base_proba=prediction.get("fake_probability"),
-      original_text=text,
-  )
-  ```
+**Purpose**
 
----
+Merges subword tokens (WordPiece `##`, SentencePiece `▁`, BPE `Ġ`) into word-level tokens for human-readable output. Aggregates per-subtoken scores into a single word score.
 
-### REC-4 — `explanation_consistency._compare` re-normalizes every source dict each time `compute()` is called
+**Key Function: `align_tokens`**
 
-- **File:** `explanation_consistency.py:163-177`.
-- **Issue:** `self._normalize(shap_m)`, `self._normalize(ig_m)` etc. are computed once per `compute()` call but the sources are unchanged across calls (orchestrator runs consistency only once per article). OK in isolation. But `_token_consistency` then iterates `for t in tokens: vals = [src[t] for src in sources.values() if t in src]` — Python loop over tokens × sources.
-- **Fix:** stack into a numpy matrix and compute std along axis 0:
-  ```python
-  tokens = sorted(set().union(*[set(s) for s in sources.values()]))
-  mat = np.full((len(sources), len(tokens)), np.nan)
-  for mi, src in enumerate(sources.values()):
-      for ti, t in enumerate(tokens):
-          if t in src: mat[mi, ti] = src[t]
-  per_token_std = np.nanstd(mat, axis=0)
-  token_scores = dict(zip(tokens, np.clip(1.0 - per_token_std, 0, 1)))
-  ```
+```python
+align_tokens(
+    tokens: Sequence[str],
+    scores: Sequence[float],
+    tokenizer_type: str = "wordpiece",  # "wordpiece" | "sentencepiece" | "bpe"
+    aggregation: str = "mean",          # "mean" | "sum" | "max"
+    normalize: bool = False,
+    clip: bool = False,
+    max_tokens: int | None = None,
+    return_structured: bool = False,
+    return_variance: bool = False,
+) -> Tuple[List[str], List[float]] | Dict
+```
 
----
+| Tokenizer | Merge rule |
+|-----------|-----------|
+| WordPiece | Tokens starting with `##` are continuations; flush on new root token |
+| SentencePiece | Tokens starting with `▁` (U+2581) begin new words |
+| BPE (RoBERTa/GPT-2) | Tokens starting with `Ġ` (U+0120) begin new words |
 
-## 8. UNUSED EXPLAINERS
+**Aggregation:** `mean` (default), `sum`, or `max` by absolute value. `return_variance=True` returns per-word score variance across constituent subtokens.
 
-| Explainer / Module | Status | Action |
-|---|---|---|
-| `model_explainer.py` (entire file) | DUPLICATE of `explainability_pipeline.py`, divergent defaults | Delete |
-| `explanation_visualizer.ExplanationVisualizer` (`explanation_visualizer.py:18-244`) | Defined, never imported by orchestrator or report generator | Either wire from `explanation_report_generator.save_html` or delete |
-| `attention_visualizer.AttentionVisualizer` (`attention_visualizer.py:19-218`) | Imports `matplotlib` at module load, never instantiated by orchestrator | Make optional; lazy-import |
-| `attention_visualizer.analyze` (`attention_visualizer.py:198-217`) | Provides full attention extraction → rollout pipeline; orchestrator's attention path requires caller to manually compute attentions instead | Wire as the canonical attention path: `orchestrator.explain(...)` should accept `model` and call `AttentionVisualizer(model).analyze(...)` if `attentions is None` |
-| `propaganda_explainer.detect_techniques` (`propaganda_explainer.py:189-198`) | Defined, no caller | Either expose via `__init__.py` or fold into `explain_propaganda` output |
-| `bias_explainer.BiasExplanation` dataclass | Returned as `.__dict__`, type info lost downstream | Return dataclass or `ExplanationOutput`; never `.__dict__` |
-| `emotion_explainer.EmotionExplanation` dataclass | Same as above | Same fix |
-| `explanation_aggregator.AggregationWeights.graph` | Configured (default 0.10) but `graph_explanation` only injected from `GraphExplainer.explain_from_text(text)` which may not return `node_importance` for short inputs | Either guarantee graph_explanation contract or remove graph weight |
-| `lime_explainer._EXPLANATION_CACHE` (`lime_explainer.py:31`) | Unbounded `dict` (not OrderedDict, no eviction) → memory leak | Replace with `OrderedDict` + `_MAX_CACHE_SIZE` eviction (already done for explainer cache) |
-| `lime_explainer.save_explanation_html` (`lime_explainer.py:226-251`) | Public, no caller | Expose via `__init__.py` or delete |
-| `shap_explainer.plot_explanation`, `save_explanation_html` (`shap_explainer.py:253-277`) | Public, no caller | Same |
-| `explanation_calibrator.calibrate_by_method` per-method shaping | See FAITH-3 — arbitrary, no theory | Drop the power transforms |
-| `explanation_metrics.evaluate_batch` (`explanation_metrics.py:200-232`) | Public, no caller | Acceptable; keep but expose via `__init__.py` |
-| `explanation_metrics.variance` (`explanation_metrics.py:149-153`) | Trivial, exposed as a method | Inline at the call site |
-| `token_alignment.return_variance, return_structured` modes | Defined, no caller | Either wire into orchestrator (variance is a faithfulness signal!) or delete |
-| `utils_validation.auto_fix, return_fixed, allow_duplicates` modes | Defined, no caller | Same |
-| `__init__.py` exports `ExplainabilityConfig` and `ExplainabilityOrchestrator` only | `run_explainability_pipeline`, `explain_prediction_full`, `explain_fast`, `ExplainabilityResult`, `AggregatedExplanation`, `TokenImportance`, etc. all hidden | Expand `__all__` |
+**External:** `numpy`
 
 ---
 
-## 9. CONFIG ISSUES
+### File: `explanation_aggregator.py`
 
-### CFG-1 — Hardcoded explainer choices in `bias_explainer` and `emotion_explainer`
+**Purpose**
 
-- **Files:** `bias_explainer.py:147-189`, `emotion_explainer.py:175-205`.
-- **Issue:** these functions hardcode "compute SHAP, IG, attention rollout" with no config. The `ExplainabilityConfig.use_shap` / `use_attention_rollout` / etc. flags are ignored inside `explain_bias`.
-- **Fix:** thread the config through:
-  ```python
-  def explain_bias(model, tokenizer, text, *, config: ExplainabilityConfig):
-      shap_vals = compute_shap(...) if config.use_shap else None
-      ig_vals   = compute_ig(...)   if config.use_ig else None
-      attn_vals = compute_attention_rollout(...) if config.use_attention_rollout else None
-      ...
-  ```
+Fuses per-method `ExplanationOutput` objects into a single `AggregatedExplanation`. Implements four critical correctness fixes (CRIT-3/4/9/PERF-5).
 
----
+**Key Class: `ExplanationAggregator`**
 
-### CFG-2 — `ExplainabilityConfig` lacks `use_graph_explainer` flag, but graph explainer always runs
+| Method | Description |
+|--------|-------------|
+| `__init__(weights, include_heuristic, config_path)` | Normalizes `AggregationWeights` to sum 1. Optionally loads weights from YAML (CFG-3). `include_heuristic=False` gates propaganda/emotion out of fusion. |
+| `aggregate(shap, integrated_gradients, attention, lime, graph_explanation)` | Full pipeline: faithfulness filter → canonical token selection → `[methods × tokens]` matrix build → vectorised `weighted * confidence` sum (PERF-5) → graph contribution → normalize → per-token confidence = `1 - std` → agreement score → `AggregatedExplanation`. |
 
-- **Files:** `orchestrator.py:108, 219-226`.
-- **Issue:** `self.graph_explainer = GraphExplainer()` is unconditional; the explain method always invokes it. There is no way to disable.
-- **Fix:** add the flag:
-  ```python
-  use_graph_explainer: bool = True
-  ...
-  self.graph_explainer = GraphExplainer() if config.use_graph_explainer else None
-  ...
-  if self.graph_explainer:
-      graph_expl, t, ok = self._run("graph_explainer", lambda: self.graph_explainer.explain_from_text(text))
-  ```
+**Default fusion weights:**
 
----
+| Method | Default weight |
+|--------|---------------|
+| SHAP | 0.35 |
+| Integrated Gradients | 0.25 |
+| Attention Rollout | 0.20 |
+| LIME | 0.10 |
+| Graph | 0.10 |
 
-### CFG-3 — `AggregationWeights` not loaded from YAML config
+**Token alignment contract (CRIT-3/4):**
+- Canonical token sequence: first non-empty source in `shap → ig → attn → lime` order
+- Positional alignment when `len(src_tokens) == len(canonical)` (preserves duplicates)
+- First-occurrence name lookup otherwise (best-effort for mismatched tokenisations)
 
-- **Files:** `orchestrator.py:63-65` defaults to `AggregationWeights()` (the dataclass defaults).
-- **Issue:** users editing `config/config.yaml` cannot override `shap=0.35, integrated_gradients=0.25, attention=0.20, lime=0.10, graph=0.10`.
-- **Fix:** add to `AggregationConfig` (or a new `ExplainabilityConfig` Pydantic model in `aggregation_config.py`):
-  ```yaml
-  explainability:
-    aggregation_weights:
-      shap: 0.35
-      integrated_gradients: 0.25
-      attention: 0.20
-      lime: 0.10
-      graph: 0.10
-  ```
+**Dependencies:** `explanation_consistency`, `common_schema`  
+**External:** `numpy`, `yaml` (optional, for config loading)
 
 ---
 
-### CFG-4 — `lime_explainer.num_samples=256` and `num_features=10` hardcoded as defaults; not in config
+### File: `explanation_calibrator.py`
 
-- **File:** `lime_explainer.py:154-155`.
-- **Fix:** expose:
-  ```python
-  @dataclass
-  class LimeConfig:
-      num_features: int = 10
-      num_samples: int = 256
-      batch_size: int = 32
-  ```
-  And read from `ExplainabilityConfig.lime`.
+**Purpose**
 
----
+Normalizes raw explanation scores (which may be signed SHAP values, positive attention scores, or lexicon counts) into a common [0, 1]-probability-like scale, and derives confidence and entropy metrics.
 
-### CFG-5 — `attention_rollout` `top_k` is per-call, but no global default in config
+**Key Functions**
 
-Acceptable, but inconsistent with `lime`/`shap` which have module-level defaults. Consolidate.
+| Function | Description |
+|----------|-------------|
+| `normalize_scores(scores)` | L1 normalization: `abs(arr) / sum(abs(arr))`. Returns zeros on empty or all-zero input. |
+| `compute_entropy(probs)` | Shannon entropy `H = -sum(p * log(p))`. |
+| `compute_confidence(probs)` | `1 - H / log(512)` — **fixed reference entropy** `log(512)` regardless of token count (SCALE-3). A 5-token peaked explanation and a 100-token peaked explanation get the same confidence when equally concentrated. |
+| `calibrate_by_method(scores, method)` | **FAITH-3**: all methods now receive identical L1 normalization. Removed the previous per-method `power 0.8 / 1.2` shaping that had no theoretical basis and changed token ranking irreversibly. |
+| `calibrate_explanation(scores, method)` | Main entry point. Returns `{scores: ndarray, confidence: float, entropy: float}`. |
 
----
-
-### CFG-6 — `explanation_cache_max_size`, `cache_dir`, `ttl_seconds`, `enable_compression` configurable on `ExplanationCache` but not on `ExplainabilityConfig`
-
-- **File:** `orchestrator.py:77-84`.
-- **Issue:** `ttl_seconds` and `enable_compression` not exposed in `ExplainabilityConfig`.
-- **Fix:** add `cache_ttl_seconds: Optional[int] = None`, `cache_compression: bool = True`.
+**External:** `numpy`
 
 ---
 
-## 10. EDGE CASE FAILURES
+### File: `explanation_consistency.py`
 
-| Edge case | File / line | Failure | Fix |
-|---|---|---|---|
-| Empty text | `explainability_pipeline.py:68-69` raises `ValueError`; OK. But `bias_explainer.explain_bias:149-150` also raises. `emotion_explainer.explain_emotion` does NOT validate → `tokenize("")=[]` → `compute_lexicon([])=array([])` → `np.mean(fused)` returns `nan` | partial | Add `if not text.strip(): raise ValueError` to all explainers |
-| All padding tokens | `attention_rollout.compute_rollout` produces all-zero scores after `np.maximum(0)`; `calibrate_explanation` returns `np.zeros_like(arr)` (correct); but `ExplanationOutput.normalize_importance` then returns `[0.0]*N`; `TokenImportance.importance` field is `ge=0.0, le=1.0` so OK | partial | Fine as-is |
-| Long sequences > 512 | Caller truncates at tokenizer; rollout sees 512 tokens; tokens list externally provided may be longer → `_validate_inputs:69-70` raises `"tokens exceed seq_len"` | OK | Add explicit truncation in orchestrator to seq_len before passing |
-| Batch size = 1 | `attention_rollout` works; SHAP/LIME work; explanation_metrics.faithfulness `if len(deltas) < 2: return 0.0` → returns 0 silently for 1-token text | poor | Surface as a metadata flag rather than 0 |
-| `predict_fn` raises | `_run` catches; `shap_out=None`; aggregator runs without SHAP; metrics fail because `agg.tokens=[]` if all explainers failed | poor | Add `if not agg or not agg.tokens: skip metrics` and report `error_summary` |
-| `predict_fn` returns missing `fake_probability` | `_extract_fake_probability` raises `KeyError`; `_run` catches; SHAP returns None; same downstream | partial | Allow alternative key via config (`predict_fn_target_key: str = "fake_probability"`) |
-| Tokenizer returns 0 tokens for special-only text (e.g. `"<s></s>"`) | `shap_explainer:209-217` handles via `if not filtered`; `lime_explainer:179-185` handles via `if not raw_features`; `attention_rollout._validate_inputs:37-38` raises | OK |
-| Numerical NaN/Inf in scores | `calibrate_explanation` does `nan_to_num`; `attention_rollout` does `nan_to_num`; `bias_explainer.compute_shap` does NOT (see fix) | partial | Add `nan_to_num` in `_normalize` for bias and emotion |
-| `model` on `cuda`, inputs on `cpu` | `bias_explainer.compute_ig`, `emotion_explainer.compute_gradients` will raise `RuntimeError` | broken | GPU-3 fix |
-| Cache key collision across model versions | `lime_explainer._make_cache_key` ignores model version; `explanation_cache._make_key` includes `model_version="default"` | partial | Plumb `model_version` from orchestrator into all sub-caches |
-| `orchestrator.cache.get(text)` returns dict | The dict is what the orchestrator emits, but `ExplainabilityResult` consumer expects pydantic model | partial | Cache the validated model, not the raw dict |
-| Single-token text | `validate_tokens_scores:122-126` raises `"scores have near-zero variance"` for single-token (variance = 0) — blocks legitimate single-word inputs | bad | Skip variance check when `len(scores) <= 1` |
-| LIME fails to converge | `explainer.explain_instance` may return empty `as_list`; `lime_explainer:179-185` returns empty `ExplanationOutput`; aggregator skips the missing source | OK |
-| `shap_values.values[0]` shape unexpected | `_process_shap_values` handles `ndim==3` and `ndim==2,shape[1]==1`; other shapes pass through unchanged → may break downstream | partial | Add `assert values.ndim == 1` after the branches and raise informative error |
-| `attentions` on different devices | `_aggregate_heads` uses tensor's own device; `_add_residual` builds identity on `attention.device` — OK | OK |
-| `tokens` contain non-string | `attention_rollout._validate_inputs:37-38` only checks list; rollout proceeds; `mask_tokens in tokens` may fail downstream | poor | Add `if not all(isinstance(t, str) for t in tokens): raise TypeError` |
-| `confidence == None` propagated to aggregator | `confidences[name] = shap.confidence or 0.5` — fine | OK |
-| `explanation_aggregator.aggregate(shap=None, ig=None, attn=None, lime=None, graph_explanation=None)` | `if not sources and not graph_node_importance: raise ValueError("No sources provided")` — OK |
-| Cache disk write fails (permission denied) | `explanation_cache.set:178-183` catches and ignores → silent data loss; consumer thinks cache write succeeded | poor | Log a warning at minimum |
+**Purpose**
 
----
+Measures agreement between explanation methods by computing pairwise correlation metrics across their shared token vocabularies.
 
-## 11. VERIFIED COMPONENTS
+**Key Class: `ExplanationConsistency`**
 
-| Component | Status |
-|---|---|
-| Pydantic schemas (`common_schema.TokenImportance`, `ExplanationOutput`, `AggregatedExplanation`) validate types and finiteness | OK |
-| `EPS = 1e-12` consistently used for division-safe normalization | OK (all 22 files) |
-| `np.nan_to_num` guards on probability arrays (`shap_explainer`, `attention_rollout`, `explanation_calibrator`, `token_alignment`) | OK |
-| `RLock` for thread-safe SHAP / LIME / cache mutation | OK |
-| `OrderedDict` + LRU eviction on `_EXPLAINER_CACHE` and `_VALUE_CACHE` in `shap_explainer` | OK |
-| `attention_rollout._validate_inputs` checks 4D shape, square seq, batch consistency, sample-index range | OK |
-| `explanation_cache.CACHE_VERSION` validates disk-cache compatibility on read | OK |
-| `explanation_cache._is_expired` honors TTL | OK |
-| `explanation_cache.stats` reports hit/miss rate | OK |
-| `propaganda_explainer.PROPAGANDA_PATTERNS` weights documented per technique | OK |
-| `attention_rollout` uses `multi_dot` (the right primitive for serial matmul cascade) | OK |
-| `attention_rollout` correctly reverses processed list before `multi_dot` | OK |
-| `attention_rollout._add_residual` clamps row-sum with `EPS` to prevent zero-division | OK |
-| `shap_explainer.SPECIAL_TOKENS` filter strips CLS/SEP/PAD/UNK before output | OK |
-| `shap_explainer._stable_predict_fn_key` attempts to stabilize cache key across reloads | OK (partial) |
-| `explanation_metrics.faithfulness` handles `< 2` deltas by returning 0.0 | OK (defensive) |
-| `explanation_metrics.deletion_score` and `insertion_score` use ranked-importance ordering | OK |
-| `explanation_consistency._pearson` guards against zero-variance inputs | OK |
-| `explanation_consistency._cosine` uses EPS in denominator | OK |
-| `token_alignment` handles WordPiece (`##`) and SentencePiece (`▁`) prefixes | OK (partial — BPE missing per ALIGN-2) |
-| `explainability_pipeline.run_explainability_pipeline` validates non-empty text | OK |
-| `explanation_aggregator._normalize` uses `np.abs` + EPS for division safety | OK |
-| `explanation_monitor.update` clamps history to `max_history` | OK |
+| Method | Description |
+|--------|-------------|
+| `_pearson(a, b)` | `np.corrcoef(a, b)[0, 1]`. Returns 0.0 if std < 1e-12. |
+| `_spearman(a, b)` | `corrcoef(rank(a), rank(b))` using `argsort(argsort(x))` for true ranks (CRIT-10). Returns 0.0 on degenerate input. |
+| `_cosine(a, b)` | `dot(a,b) / (norm(a)*norm(b) + EPS)`. |
+| `_compare(a, b, conf_a, conf_b)` | Computes all three metrics on shared tokens. Confidence-weights by `min(conf_a, conf_b)`. |
+| `_token_consistency(sources)` | **REC-4**: vectorised `np.nanstd` over `[n_sources × n_tokens]` matrix. Per-token consistency = `clip(1 - std, 0, 1)`. NaN for tokens present in only one source. |
+| `compute(shap, ig, attention, lime)` | Returns dict with all pairwise metrics + `overall_agreement` + `token_agreement_mean`. Returns `{}` when fewer than 2 sources available. |
+
+**Pairwise metric keys** (example when shap + lime available):
+```
+shap_vs_lime_pearson, shap_vs_lime_spearman, shap_vs_lime_cosine,
+overall_agreement, token_agreement_mean
+```
+
+**External:** `numpy`
 
 ---
 
-## 12. FINAL SCORE
+### File: `explanation_metrics.py`
 
-**Score: 4.0 / 10**
+**Purpose**
 
-### Why not 10
+Faithfulness evaluation: quantifies how well the explanation reflects the model's actual decision logic by ablating tokens and measuring prediction changes.
 
-1. **`bias_explainer` and `emotion_explainer` cannot run on the multitask model** — `out.logits` doesn't exist (CRIT-1, CRIT-2). All bias/emotion explanations return `None`, silently masked by `_run`.
-2. **Aggregator sorts tokens alphabetically** (CRIT-3) and **collapses duplicates** (CRIT-4) — destroys positional and repetition signals critical for propaganda detection.
-3. **Schema validator silently re-normalizes `importance` while `structured` keeps raw values** (CRIT-5) — `out.importance[i] != out.structured[i].importance`.
-4. **Two `ExplainabilityResult` classes and two duplicate entry-point modules** (CRIT-6, CRIT-7) — schema confusion across the codebase.
-5. **IG output computed in `bias_explainer` is never wired to aggregator or consistency** (CRIT-8) — 25 % of aggregation weight goes to nothing.
-6. **`propaganda_explainer` is text-only (no model) but presented as a faithful explanation** (CRIT-9, FAITH-4).
-7. **`_spearman` is mathematically wrong** (CRIT-10) — uses `argsort` instead of ranks.
-8. **`explanation_metrics` ablates by joining tokens with `" "`** (CRIT-11) — computes faithfulness on text the model has never seen, especially when tokens come from the alphabetic aggregator (CRIT-3).
-9. **3·N + 2 sequential forward passes per article in metrics, plus 256 in LIME, plus 6+ across other explainers** (CRIT-12, PERF-1, PERF-2) — single article takes tens of seconds.
-10. **Triple normalization** (SCALE-1) — explainer → schema → aggregator each L1-normalize independently, destroying cross-method magnitude semantics.
-11. **`compute_ig` in `bias_explainer` is single-step gradient × input, not integrated gradients** (FAITH-2).
-12. **Calibrator's per-method `power 0.8` / `power 1.2` shaping has no theoretical basis** (FAITH-3).
-13. **Tokenization mismatch across explainers** (ALIGN-1, ALIGN-2, ALIGN-3) — word-regex, BPE, WordPiece, LIME-internal, SHAP-Text all collide in the aggregator.
-14. **GPU underutilization**: matplotlib loaded eagerly (GPU-5), mid-pipeline `.cpu().numpy()` (GPU-2), per-call orchestrator instantiation with full graph-explainer load (PERF-6).
-15. **Three independent caches** (orchestrator, SHAP, LIME) with no coordination (REC-2).
-16. **`explainability_pipeline.run_explainability_pipeline` re-instantiates orchestrator every call** (PERF-6).
-17. **No `use_graph_explainer` config flag** (CFG-2) — graph explainer always runs.
-18. **`AggregationWeights` not loaded from YAML** (CFG-3) — config knobs ignored.
-19. **`lime_explainer._EXPLANATION_CACHE` is unbounded** (UNUSED) — memory leak.
+**Key Class: `ExplanationMetrics`**
 
-### Steps to reach ≥ 9.5
+| Method | What it measures | How |
+|--------|-----------------|-----|
+| `faithfulness` | Correlation between importance scores and prediction drops per removed token | Pearson(scores, base - preds_per_removed_token) |
+| `comprehensiveness` | How much the prediction drops when top-k tokens are removed | base - pred(text_without_top_k) |
+| `sufficiency` | How well top-k tokens alone preserve the prediction | base - pred(top_k_tokens_only) |
+| `deletion_score` | Average prediction drop as tokens deleted highest-to-lowest | base - mean(pred at each deletion step) |
+| `insertion_score` | Cumulative prediction gain as tokens revealed highest-first | trapz(preds at each insertion step) |
+| `evaluate` | Runs all 5 metrics, confidence-weights, normalizes to [0,1] via `(v+1)/2`, returns `overall_score` | — |
 
-1. **Fix multitask model integration** in `bias_explainer.compute_shap/_ig/_attention_rollout` and `emotion_explainer.compute_gradients`. Pattern: `model.encoder(...)` → `model.heads[task](cls)`. (CRIT-1, CRIT-2, FAITH-2, GPU-3)
-2. **Replace alphabetic-sort + dict-zip in aggregator with positional indexing** preserving original token order and duplicates. (CRIT-3, CRIT-4)
-3. **Make `ExplanationOutput.normalize_importance` a pass-through validator** that only checks finiteness and length consistency; assert `structured[i].importance == importance[i]`. (CRIT-5)
-4. **Delete `model_explainer.py` and `explainability_pipeline.ExplainabilityResult`**; consolidate on `common_schema.ExplainabilityResult`. (CRIT-6, CRIT-7)
-5. **Wire IG output from `bias_explainer` into aggregator and consistency**. (CRIT-8)
-6. **Mark `propaganda_explainer` outputs with `faithful=False`** and gate aggregator inclusion via config. (CRIT-9, FAITH-4)
-7. **Fix `_spearman`** to use `np.argsort(np.argsort(a))` or `scipy.stats.rankdata`. (CRIT-10)
-8. **Re-architect `explanation_metrics` to ablate text** using `(start,end)` offsets, not token-string joining. Pass original `text` and `offsets` end-to-end. (CRIT-11, ALIGN-1)
-9. **Introduce `ModelForwardCache`** — one model forward per article shared by SHAP, LIME, IG, attention rollout, gradient. (PERF-1, REC-1, REC-2, REC-3)
-10. **Require `predict_fn.batch_predict`** at the orchestrator boundary; fail loudly if missing in production. (PERF-2, CRIT-12, GPU-4)
-11. **Single normalization point** in the aggregator, with method-specific calibration learned offline rather than hardcoded power transforms. (SCALE-1, FAITH-3)
-12. **Add BPE (`Ġ`) handling to `align_tokens`** and detect tokenizer family automatically. (ALIGN-2)
-13. **Align all three arrays in `bias_explainer.fuse_methods`** to a common token space, not just `base`. (ALIGN-3)
-14. **Add `use_graph_explainer` config flag** and honor it in `orchestrator.__init__` and `explain`. (CFG-2)
-15. **Plumb `AggregationWeights`, `LimeConfig`, `cache_ttl_seconds`, `cache_compression` from `config/config.yaml`** through `ExplainabilityConfig`. (CFG-3, CFG-4, CFG-6)
-16. **Replace `lime_explainer._EXPLANATION_CACHE` `dict` with bounded `OrderedDict` + LRU eviction** (mirroring `_EXPLAINER_CACHE`). (UNUSED, leak)
-17. **Lazy-import `matplotlib`** in plotting methods; do not load at module import. (GPU-5)
-18. **Stop `.detach().cpu().numpy()` mid-pipeline in `attention_rollout`**; keep on device until final assembly. (GPU-2)
-19. **Make orchestrator a singleton** keyed by config hash; stop re-instantiating per call. (PERF-6)
-20. **Surface `module_failures` in the final result** and raise when more than half the explainers fail. (FAITH-6)
-21. **Replace `.__dict__` returns with `dataclasses.asdict` or proper `ExplanationOutput`** in bias/emotion explainers. (UNUSED)
+**CRIT-11 ablation paths:**
 
-### After fix and error solving: **9.5 / 10**
+| Context | Ablation method |
+|---------|----------------|
+| `text` + `offsets` available | `_ablate_offsets`: replaces character spans in original text (character-accurate) |
+| Fallback | `" ".join([t for j,t in enumerate(tokens) if j != i])` (legacy, may corrupt subwords) |
 
-The remaining 0.5 reflects the inherent fragility of multi-explainer fusion: even with all fixes, attention-as-explanation remains contested in the literature (FAITH-1), and the per-method calibration weights are policy choices that need empirical validation on a labeled faithfulness dataset.
+**REC-3:** `evaluate()` computes `base_proba` once if not supplied, then passes it to all 5 sub-metrics, collapsing 5 redundant model forwards into 1.
+
+**External:** `numpy`
+
+---
+
+### File: `explanation_monitor.py`
+
+**Purpose**
+
+Lightweight production monitoring of explanation quality. Tracks running statistics over the last `max_history=500` importance score distributions.
+
+**Key Class: `ExplanationMonitor`**
+
+| Method | Description |
+|--------|-------------|
+| `update(scores)` | Normalizes scores (L1), appends to bounded history. Evicts oldest when full. |
+| `mean / std / min / max` | Aggregate statistics over concatenated history. |
+| `drift()` | L1 distance between last two history entries — detects explanation distribution shift. |
+| `summary()` | Returns `{mean, std, min, max, drift, history_size}` |
+| `reset()` | Clears history for testing or after model updates. |
+
+**External:** `numpy`
+
+---
+
+### File: `explanation_cache.py`
+
+**Purpose**
+
+Two-level (memory + disk) explanation cache with TTL, LRU eviction, zlib compression, and versioning.
+
+**Key Class: `ExplanationCache`**
+
+| Method | Description |
+|--------|-------------|
+| `_make_key(text, model_version, method)` | `sha256(text|model_version|method)` — method-specific keys prevent cross-method cache collisions |
+| `get(text, model_version, method)` | Memory LRU → disk read → deserialize → TTL check → version check → return |
+| `set(text, data, model_version, method)` | Write to memory (evict to max_size) + write compressed bytes to disk |
+| `stats()` | Returns `{hits, misses, hit_rate}` |
+| `clear_memory / clear_disk` | Eviction utilities |
+
+**Serialization:** `json.dumps` → `zlib.compress` (when `enable_compression=True`). Version tag `"v2"` invalidates stale disk entries after schema changes.
+
+**External:** `hashlib`, `zlib`, `json`, `pathlib`, `threading`
+
+---
+
+### File: `explanation_report_generator.py`
+
+**Purpose**
+
+Writes per-article explanation reports as JSON and HTML. The HTML report includes token-level importance highlighting with red-intensity color coding.
+
+**Key Class: `ExplanationReportGenerator`**
+
+| Method | Description |
+|--------|-------------|
+| `save_json(article_id, explanation)` | Writes `{article_id, generated_at, version="v3", explanation}` to `{output_dir}/{safe_id}.json` |
+| `save_html(article_id, explanation)` | Writes 9-section HTML: Prediction, Scores, Risks, Token Importance (highlighted), Explainability Metrics, Method Contributions, Confidence, Entropy, Monitoring |
+| `_highlight_tokens(tokens, scores)` | `<span style="background:rgba(255,0,0,{s/max})">token</span>` for each token — opacity maps to relative importance |
+| `generate(article_id, explanation, *, save_json, save_html)` | Calls both save functions, returns `{json: Path, html: Path}` |
+
+**Output format:** `reports/explanations/{safe_article_id}.json` and `.html`
+
+---
+
+### File: `explanation_visualizer.py`
+
+**Purpose**
+
+Static (matplotlib) and interactive (Plotly) visualization of token importance.
+
+**Key Class: `ExplanationVisualizer`**
+
+| Method | Output | Description |
+|--------|--------|-------------|
+| `plot_token_heatmap` | PNG | 1×N color matrix with token labels on x-axis |
+| `plot_importance_bar` | PNG | Horizontal bar chart, top-k tokens sorted by importance |
+| `plot_multi_method_overlay` | PNG | Line plot overlaying SHAP, LIME, IG, Attention on same token axis |
+| `plot_interactive` | Browser | Plotly scatter with hover — one trace per method |
+| `visualize_aggregated` | multiple | Runs heatmap + bar + multi-method overlay in one call |
+
+All matplotlib plots use lazy imports (`import matplotlib.pyplot as plt` inside method body) to avoid GPU process import cost (GPU-5).
+
+**External:** `matplotlib`, `plotly` (optional)
+
+---
+
+### File: `model_explainer.py`
+
+**Purpose**
+
+Backward-compatibility wrapper. Contains `explain_prediction_full()` and `explain_fast()` that instantiate a fresh `ExplainabilityOrchestrator` per call (not using the process-level singleton). Present for callers that still use the old interface directly.
+
+> **Note:** New code should use `explainability_pipeline.run_explainability_pipeline()` which routes through the singleton orchestrator.
+
+---
+
+### File: `utils_validation.py`
+
+**Purpose**
+
+Shared input validator used by SHAP, LIME, attention rollout, consistency, and metrics modules.
+
+**Key Function: `validate_tokens_scores`**
+
+```python
+validate_tokens_scores(
+    tokens, scores,
+    enforce_range=False,   # raise if score outside [0, 1]
+    normalized=False,      # raise if sum ≠ 1
+    allow_duplicates=True, # if False: merge duplicates by summing scores
+    auto_fix=False,        # coerce non-finite / out-of-range to 0.0
+    return_fixed=False,    # return (tokens, scores) after fixes
+)
+```
+
+Checks: type correctness, length match, all strings, all numeric, all finite, optional range `[0,1]`, optional sum-to-1, optional low-variance signal warning.
+
+**External:** `numpy`, `math`
+
+---
+
+## 5. Explanation Types
+
+| Type | Description | Example | Faithful? |
+|------|-------------|---------|-----------|
+| **Global** | Overall model behavior across the entire article | Feature importance ranking over all tokens, propaganda technique distribution | Partial |
+| **Local — SHAP** | Token-level Shapley value for a single prediction | "The word *radical* pushed fake probability from 0.62 → 0.74" | Yes |
+| **Local — LIME** | Token-level linear approximation for a single prediction | "Removing *invasion* reduced fake probability by 0.11" | Approximate |
+| **Local — IG** | Gradient-based token attribution via path integration | Smooth gradient attribution along interpolation path from zero to input | Yes |
+| **Local — Attention** | Layer-propagated attention weight per token | "[CLS] attends most to *crisis* across all 12 layers" | Conditional (FAITH-1 gated) |
+| **Heuristic — Propaganda** | Pattern-matched propaganda technique per token | *terrorist*: name-calling (weight=1.0) | No (`faithful=False`) |
+| **Heuristic — Emotion** | Lexicon-based emotional intensity per word | *incredibly*: intensifier (+0.5) | No (`faithful=False`) |
+| **Aggregated** | Weighted combination of all faithful explanations | Final importance vector from 0.35×SHAP + 0.25×IG + 0.20×attention + 0.10×LIME + 0.10×graph | Best-effort |
+
+---
+
+## 6. Feature Importance Interpretation
+
+### How scores are calculated
+
+1. Each method produces a raw score vector over its tokens (SHAP values: signed; attention: positive; LIME: signed coefficients; lexicon: positive counts)
+2. `calibrate_explanation()` applies L1 normalization → all scores become non-negative, summing to 1.0
+3. The aggregator builds a `[methods × tokens]` matrix, multiplies each row by `weight × confidence`, sums across methods, normalizes
+4. Final `final_token_importance[i]` = relative contribution of token `i` to the prediction
+
+### Positive vs negative impact
+
+- **Raw SHAP values** can be negative (token pushes toward "real") or positive (pushes toward "fake")
+- After `calibrate_explanation`, scores are **absolute-valued** and L1-normalized — the directionality is lost but the magnitude is preserved
+- For signed-value analysis, use `ExplanationOutput.raw` (available in LIME, contains `(token, signed_score)` list)
+
+### Ranking
+
+`ExplanationOutput.structured` is returned in **token-occurrence order**, not ranked. To get top-k:
+```python
+ranked = sorted(zip(out.tokens, out.importance), key=lambda x: x[1], reverse=True)
+top_3 = ranked[:3]
+```
+
+---
+
+## 7. Output Artifacts
+
+### 7.1 `ExplainabilityResult` (in-memory / JSON via API)
+
+```json
+{
+  "prediction": {"fake_probability": 0.87, "prediction": "FAKE", "confidence": 0.87},
+  "shap_explanation": {
+    "method": "shap",
+    "tokens": ["breaking", "news", "radical", "attack"],
+    "importance": [0.05, 0.02, 0.41, 0.52],
+    "structured": [{"token": "radical", "importance": 0.41}, ...],
+    "confidence": 0.81,
+    "entropy": 1.23
+  },
+  "lime_explanation": {...},
+  "attention_explanation": {...},
+  "bias_explanation": {
+    "token_importance": [{"token": "radical", "importance": 0.41}],
+    "integrated_gradients": [...],
+    "biased_tokens": ["radical", "attack"],
+    "bias_intensity": 0.34,
+    "bias_heatmap": [0.05, 0.02, 0.41, 0.52]
+  },
+  "emotion_explanation": {
+    "lexicon_intensity": [...],
+    "emotion_distribution": {"fear": 0.6, "anger": 0.4},
+    "intensity_score": 0.21,
+    "faithful": false,
+    "model_attribution": {"tokens": [...], "importance": [...], "faithful": true}
+  },
+  "aggregated_explanation": {
+    "tokens": ["breaking", "news", "radical", "attack"],
+    "final_token_importance": [0.04, 0.01, 0.53, 0.42],
+    "method_weights": {"shap": 0.35, "ig": 0.25, "attn": 0.20, "lime": 0.10, "graph": 0.10},
+    "confidence_score": 0.77,
+    "agreement_score": 0.68
+  },
+  "consistency_metrics": {
+    "shap_vs_lime_spearman": 0.71,
+    "overall_agreement": 0.69,
+    "token_agreement_mean": 0.73
+  },
+  "explanation_metrics": {
+    "faithfulness": 0.63,
+    "comprehensiveness": 0.18,
+    "sufficiency": 0.14,
+    "deletion_score": 0.09,
+    "insertion_score": 0.42,
+    "overall_score": 0.74
+  },
+  "monitoring": {"mean": 0.22, "std": 0.08, "drift": 0.03, "history_size": 42},
+  "explanation_quality_score": 0.74,
+  "module_failures": [],
+  "metadata": {"pipeline_version": "v5", "latency_ms": {"lime": 140, "aggregation": 3}}
+}
+```
+
+### 7.2 HTML report (`ExplanationReportGenerator`)
+
+- Token importance highlighted with red-intensity color coding
+- Sections: Prediction, Scores, Risks, Token Importance, Metrics, Method Contributions, Confidence, Entropy, Monitoring
+- Saved to `reports/explanations/{article_id}.html`
+
+### 7.3 SHAP HTML (`shap_explainer.save_explanation_html`)
+
+- `shap.plots.text` interactive force-plot style highlight
+- Saved to `reports/shap.html`
+
+### 7.4 LIME HTML (`lime_explainer.save_explanation_html`)
+
+- `LimeExplanation.save_to_file` — browser-viewable explanation with class probabilities, word contribution bars
+- Saved to `reports/lime_explanation.html`
+
+### 7.5 Plot images (`ExplanationVisualizer`)
+
+- `{prefix}_heatmap.png` — token importance as a 1-row color matrix
+- `{prefix}_bar.png` — horizontal bar chart (top 20 tokens)
+- `{prefix}_overlay.png` — line overlay of all methods on same token axis
+
+---
+
+## 8. Model Compatibility
+
+### Which models are supported
+
+| Model type | SHAP | LIME | IG | Attention Rollout |
+|-----------|------|------|----|------------------|
+| TruthLens `MultiTaskTruthLensModel` (roberta-base) | Yes (via tokenizer masker) | Yes | Yes (multitask path) | Yes |
+| Any HF model with `.logits` output | Yes | Yes | Yes (fallback path) | Yes (if `output_attentions=True`) |
+| Any model exposing `predict_fn(text) → {fake_probability}` | Yes | Yes | No | No |
+| Sklearn / tree-based | No (not supported) | Yes | No | No |
+
+### Limitations per method
+
+| Method | Limitations |
+|--------|------------|
+| SHAP | Requires hundreds of model forwards per article. On CPU, ~5–30 seconds. Disabled by default (`use_shap=False`). |
+| LIME | `num_samples=25` (reduced from 256 for speed). Lower samples = noisier attributions. |
+| IG | Requires access to model embedding layer. `ig_steps=8` is a speed/accuracy tradeoff. |
+| Attention Rollout | Requires `output_attentions=True` support. May not correlate with predictions (gated by FAITH-1). |
+| Propaganda | Lexicon-only — cannot detect novel propaganda that isn't in the pattern list. |
+| Emotion | Lexicon signal is heuristic. Gradient attribution requires model + tokenizer. |
+
+---
+
+## 9. Config Integration
+
+All explainability behavior is controlled by `ExplainabilityConfig`:
+
+```python
+@dataclass
+class ExplainabilityConfig:
+    enabled: bool = True
+    use_lime: bool = True
+    use_shap: bool = False              # off by default (CPU cost)
+    use_attention_rollout: bool = True
+    use_bias_emotion: bool = True
+    use_propaganda_explainer: bool = False  # off by default (heuristic)
+    use_aggregation: bool = True
+    use_consistency: bool = True
+    use_explanation_metrics: bool = True
+    use_graph_explainer: bool = True
+
+    aggregator_include_heuristic: bool = False  # include propaganda in fusion?
+    cache_enabled: bool = True
+    cache_max_size: int = 128
+    cache_dir: Optional[str] = None
+
+    aggregation_weights: AggregationWeights = ...  # SHAP=0.35, IG=0.25, Att=0.20, LIME=0.10, Graph=0.10
+
+    attention_faithfulness_threshold: float = 0.0  # 0 = no gate; 0.3 = drop if |Spearman(attn,IG)| < 0.3
+    raise_on_majority_failure: bool = False
+    ig_steps: int = 8                  # 0 = skip IG entirely (fastest mode)
+```
+
+**YAML config for aggregation weights (CFG-3):**
+```yaml
+explainability:
+  aggregation_weights:
+    shap: 0.35
+    integrated_gradients: 0.25
+    attention: 0.20
+    lime: 0.10
+    graph: 0.10
+```
+
+Load via `ExplanationAggregator(config_path="config/config.yaml")`.
+
+---
+
+## 10. Performance and Efficiency
+
+### Computational cost per article
+
+| Method | CPU cost | GPU cost | Notes |
+|--------|----------|----------|-------|
+| LIME (25 samples) | ~120–200 ms | ~30 ms | `num_samples=25` (reduced from 256) |
+| SHAP | ~5–30 s | ~1–3 s | Disabled by default |
+| IG (8 steps) | ~200–400 ms | ~50 ms | Linear in `ig_steps` |
+| Attention Rollout | ~20 ms | ~10 ms | Cheap — no extra model forward |
+| Aggregation | < 5 ms | — | Vectorised matrix ops |
+| Consistency | < 5 ms | — | Pure numpy |
+| Metrics (5 per article, batched) | ~1–5 s | ~200 ms | 5 ablation sweeps |
+
+### Efficiency fixes implemented
+
+| Fix | Impact |
+|-----|--------|
+| PERF-2: LIME `num_samples` 256 → 25 | ~10× speedup |
+| PERF-3: SHAP explainer cached per `(tokenizer, task)` | Avoids masker rebuild per article |
+| PERF-4: Attention rollout vectorised (stack + fused residual) | 24 kernel launches → 2 |
+| PERF-5: Aggregator vectorised `[methods × tokens]` matrix | Eliminates per-token Python loop |
+| PERF-6: Orchestrator singleton per config hash | No re-instantiation of GraphExplainer per article |
+| CRIT-12: Batch predict via `predict_fn.batch_predict` | Single GPU call for all SHAP/LIME perturbations |
+| REC-3: Base prediction computed once, forwarded | 5 redundant model forwards → 1 |
+| GPU-5: Matplotlib lazy imports | Avoids matplotlib CUDA context at startup |
+
+### Approximation strategy
+
+- LIME uses a linear local approximation (not exact)
+- IG uses Riemann sum with 8 steps (not exact integration — use 20–50 steps for research)
+- SHAP uses the `shap.Explainer` partition-based estimator (approximate for large token counts)
+- Attention rollout is exact given the model's actual attention weights
+
+---
+
+## 11. Validation of Explanations
+
+### Input validation
+
+Every explainer calls `validate_tokens_scores(tokens, scores)` before returning. It checks:
+- Type correctness (str tokens, numeric scores)
+- Length match
+- All finite values
+- Near-zero variance warning (low-signal explanation)
+
+`auto_fix=True` mode coerces non-finite values to 0.0 instead of raising.
+
+### Cross-method consistency (`ExplanationConsistency`)
+
+Cross-method Pearson, Spearman, cosine correlation. Reported in `consistency_metrics`. An `overall_agreement` > 0.6 indicates the methods agree on which tokens are important.
+
+### Faithfulness gate (FAITH-1)
+
+When `attention_faithfulness_threshold > 0`, attention rollout is dropped from aggregation if its Spearman correlation with IG falls below the threshold. This prevents unreliable attention patterns from diluting the aggregated signal.
+
+### Faithfulness metrics (`ExplanationMetrics`)
+
+Measures whether token importance actually reflects the model's decision:
+- **Faithfulness > 0.5**: Strong — removing high-importance tokens substantially changes prediction
+- **Comprehensiveness > 0.1**: Removing top-5 tokens drops prediction
+- **Sufficiency ≈ 0**: Top-5 tokens alone preserve most of the prediction
+
+### Schema synchronization
+
+`ExplanationOutput` validator enforces that `importance[i] == structured[i].importance` (tolerance 1e-6). This prevents the calibrator and the flat list from drifting.
+
+### `faithful` flag (CRIT-9)
+
+Every `ExplanationOutput` carries a `faithful: bool` flag:
+- `True` (default): SHAP, LIME, IG, Attention — derived from model computations
+- `False`: Propaganda, Emotion-lexicon — derived from rule-based heuristics
+
+The aggregator only fuses `faithful=True` sources by default (`include_heuristic=False`).
+
+---
+
+## 12. Bias and Fairness Insights
+
+### How explanations help detect bias
+
+1. **Bias explainer**: `biased_tokens` = tokens with fused importance > 0.05. High fused importance on identity-related terms (*radical*, *invasion*, *regime*) suggests the model latches onto loaded language rather than factual content.
+
+2. **Propaganda explainer**: Surfaces specific loaded-language and fear-appeal tokens that may disproportionately affect predictions on articles about certain groups or topics.
+
+3. **Emotion distribution**: `emotion_distribution` shows which emotional categories are activated. An article about a marginalized group triggering high `fear` or `anger` emotion class proportions warrants review.
+
+4. **Cross-task attention**: When the same article has high `ideology` and `bias` task scores, the bias explainer can surface which tokens drove both — revealing ideological framing driving the fake-news classification.
+
+### Identifying sensitive feature influence
+
+- Pass `token_importance` output to `src/evaluation/fairness.py` for group-level auditing
+- Compare `aggregated_explanation.final_token_importance` across demographic subgroups in your evaluation dataset
+
+### Ethical considerations
+
+- The propaganda and emotion explainers use **fixed English lexicons** — performance degrades on non-English text or domain-specific jargon
+- SHAP explanations explain a **local linear approximation** — high importance on a token does not prove causation
+- Explanations should be presented alongside confidence scores, not as definitive verdicts
+
+---
+
+## 13. Extensibility Guide
+
+### Adding a new explainability method
+
+1. **Create your explainer** (e.g. `src/explainability/my_explainer.py`):
+   ```python
+   from src.explainability.common_schema import ExplanationOutput, TokenImportance
+   from src.explainability.explanation_calibrator import calibrate_explanation
+
+   def explain_my_method(predict_fn, text) -> ExplanationOutput:
+       tokens = ...   # list of str
+       raw_scores = ...  # list of float
+       cal = calibrate_explanation(raw_scores, method="custom")
+       structured = [TokenImportance(token=t, importance=float(s))
+                     for t, s in zip(tokens, cal["scores"])]
+       return ExplanationOutput(
+           method="custom",
+           tokens=tokens,
+           importance=cal["scores"].tolist(),
+           structured=structured,
+           confidence=cal["confidence"],
+           entropy=cal["entropy"],
+           faithful=True,  # or False if heuristic
+       )
+   ```
+
+2. **Wire it into `ExplainabilityConfig`**: add a `use_my_method: bool = False` field
+
+3. **Call it in `orchestrator.py`** inside `explain()`:
+   ```python
+   if self.config.use_my_method:
+       my_out, t, ok = self._run("my_method", lambda: explain_my_method(predict_fn, text))
+       _record("my_method", ok, t)
+       explanation["my_method_explanation"] = my_out
+   ```
+
+4. **Add it to `ExplainabilityResult`** in `common_schema.py`:
+   ```python
+   my_method_explanation: Optional[Any] = None
+   ```
+
+5. **Add it to the aggregator** (if faithful):
+   - Add a weight field to `AggregationWeights`
+   - Pass it as a kwarg to `ExplanationAggregator.aggregate()`
+   - Extend the `method_names` list inside `aggregate`
+
+### Adding a new propaganda pattern
+
+Add entries to `PROPAGANDA_PATTERNS` dict in `propaganda_explainer.py`:
+```python
+"whataboutism": ["but what about", "you also", "they do it too"],
+```
+And a corresponding weight in `TECHNIQUE_WEIGHTS`.
+
+### Tuning aggregation weights
+
+Pass a custom `AggregationWeights` to `ExplainabilityConfig`:
+```python
+from src.explainability.explanation_aggregator import AggregationWeights
+config = ExplainabilityConfig(
+    aggregation_weights=AggregationWeights(shap=0.5, lime=0.5, attention=0.0, integrated_gradients=0.0, graph=0.0)
+)
+```
+
+---
+
+## 14. Common Pitfalls and Risks
+
+| Pitfall | Cause | Mitigation |
+|---------|-------|-----------|
+| Inconsistent importance between methods | SHAP and LIME use different perturbation strategies | Check `consistency_metrics.overall_agreement`; < 0.4 means methods disagree |
+| SHAP returns all-zero scores | Single-word article or all tokens masked | Check `ExplanationOutput.tokens` is non-empty before displaying |
+| Attention scores don't match LIME/SHAP | Attention and prediction don't always correlate in transformers | Use FAITH-1 gate (`attention_faithfulness_threshold=0.3`) to auto-drop |
+| High `fake_probability` on neutral article | Loaded lexicon in propaganda patterns triggering high scores | `propaganda_explanation.faithful=False` — treat as signal, not verdict |
+| Slow response from `/explain` endpoint | SHAP enabled, CPU inference | Set `use_shap=False` in config (already the default) |
+| Importance scores don't sum to 1 | Pre-calibration values passed to downstream code | Always use `ExplanationOutput.importance` (post-calibration), not raw model outputs |
+| Correlated features mislead importance | High SHAP on "the" in a biased model | Check `explanation_metrics.faithfulness` — low value = tokens don't actually affect prediction |
+| Cross-tokenization alignment errors | Mixing subword IG with word-level lexicon scores | `emotion_explainer.fuse()` now returns only the lexicon signal; access gradient separately via `model_attribution` |
+| Cache staleness after model update | Old explanations served from disk cache | Use `model_version` kwarg in `ExplanationCache.get/set`, or call `clear_disk()` after deployment |
+| Over-trusting explanation quality score | `overall_score` is an average of 5 ablation metrics, itself an approximation | Report alongside `module_failures` — if most modules failed, quality score is unreliable |
+
+---
+
+## 15. Example Usage
+
+### Minimal — LIME only (fast mode)
+
+```python
+from src.explainability.explainability_pipeline import explain_fast
+
+def my_predict_fn(text):
+    return {"fake_probability": 0.87, "prediction": "FAKE", "confidence": 0.87}
+
+result = explain_fast("Breaking news: Radical extremists attack the nation!", my_predict_fn)
+
+# Top feature from LIME
+lime = result.lime_explanation
+ranked = sorted(zip(lime.tokens, lime.importance), key=lambda x: x[1], reverse=True)
+print(f"Top token: {ranked[0][0]!r} (importance={ranked[0][1]:.3f})")
+# → Top token: 'extremists' (importance=0.412)
+```
+
+### Full pipeline with model
+
+```python
+from src.explainability.explainability_pipeline import run_explainability_pipeline, ExplainabilityConfig
+
+config = ExplainabilityConfig(
+    use_lime=True,
+    use_shap=False,          # too slow on CPU
+    use_bias_emotion=True,
+    use_attention_rollout=True,
+    use_aggregation=True,
+    use_consistency=True,
+    use_explanation_metrics=True,
+    attention_faithfulness_threshold=0.3,  # gate attention on IG correlation
+)
+
+result = run_explainability_pipeline(
+    text="Scientists confirm new radical cure for pandemic.",
+    predict_fn=my_predict_fn,
+    model=model,
+    tokenizer=tokenizer,
+    config=config,
+)
+
+# Aggregated top-3 tokens
+agg = result.aggregated_explanation
+ranked = sorted(zip(agg.tokens, agg.final_token_importance), key=lambda x: x[1], reverse=True)
+print("Top 3 tokens influencing prediction:")
+for token, score in ranked[:3]:
+    print(f"  {token!r}: {score:.3f}")
+
+# Explanation quality
+print(f"Explanation quality: {result.explanation_quality_score:.2f}")
+print(f"Method agreement: {result.consistency_metrics.get('overall_agreement', 0):.2f}")
+print(f"Failed modules: {result.module_failures}")
+```
+
+### Generate HTML report
+
+```python
+from src.explainability.explanation_report_generator import ExplanationReportGenerator
+
+gen = ExplanationReportGenerator(output_dir="reports/explanations")
+paths = gen.generate(
+    article_id="article_001",
+    explanation=result.model_dump(),
+    save_json=True,
+    save_html=True,
+)
+print(f"Report saved: {paths['html']}")
+```
+
+### Visualize multi-method overlay
+
+```python
+from src.explainability.explanation_visualizer import ExplanationVisualizer
+
+viz = ExplanationVisualizer()
+viz.visualize_aggregated(
+    aggregated_output={
+        "tokens": agg.tokens,
+        "final_token_importance": agg.final_token_importance,
+    },
+    method_outputs={
+        "lime": result.lime_explanation.importance,
+        "attention": result.attention_explanation.importance,
+    },
+    save_prefix="reports/article_001",
+)
+```
+
+---
+
+## 16. Simple Explanation for Non-Technical Reviewers
+
+### What does TruthLens actually do?
+
+When you give TruthLens an article, it reads every word and decides whether the article is likely real or fake news. It gives you a probability — for example, "87% likely fake."
+
+### But why did it say that?
+
+That's where the explainability system comes in. Instead of just giving you a number, TruthLens also highlights **which specific words made it suspicious**.
+
+Imagine the AI is like a detective. After reading a news article, it doesn't just say "this looks like a lie" — it also points to the evidence:
+
+> "I'm 87% sure this is fake news, and here's why: the word **'extremists'** was the biggest red flag (importance 0.41), followed by **'radical'** (0.37), and **'attack'** (0.22). These three words together pushed my score strongly toward 'fake.'"
+
+### How do we know the AI is telling the truth about its reasoning?
+
+The system doesn't just ask the AI "why did you decide this?" It **tests** the reasoning by running an experiment:
+
+1. It removes the word "extremists" from the article
+2. It re-checks the AI's score — if the score drops significantly, that proves the word truly mattered
+3. It does this for every highlighted word
+
+This is called a **faithfulness test**, and it's how we verify that the highlighted words actually drove the decision rather than being invented explanations.
+
+### What about the different colored words?
+
+The explainability system uses three independent methods (SHAP, LIME, and Integrated Gradients) that each highlight important words differently. If all three agree that "extremists" is important, that's a very trustworthy signal. We report an **agreement score** (0 to 1) — above 0.6 means the methods are consistent.
+
+### What does "biased tokens" mean in the bias analysis?
+
+This shows words that the AI found particularly loaded — terms that tend to appear in propaganda or biased reporting, like *"regime," "invasion," "threat."* Finding these words doesn't prove the article is fake, but it tells you the model is reacting to emotionally charged language rather than objective facts.
+
+### The one-line pitch
+
+> "Our model is not a black box — for every decision it makes, we can tell you exactly which words influenced it, prove that those words actually mattered by testing what happens when we remove them, and show that three independent explanation methods all agree."
