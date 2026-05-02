@@ -1,4 +1,15 @@
 # =========================================================
+# Index override — CPU-only PyTorch wheels (~700 MB vs ~2.5 GB CUDA).
+# This extra-index-url is consulted for ALL packages so that any
+# transitive torch dependency (sentence-transformers, accelerate, etc.)
+# also resolves against the CPU wheel index rather than PyPI's CUDA
+# default.  The deployment build command pre-installs torch from this
+# index first; this line ensures a subsequent `pip install -r
+# requirements.txt` never upgrades it to a CUDA build.
+# =========================================================
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# =========================================================
 # Core Scientific Stack
 # =========================================================
 numpy==1.26.4
