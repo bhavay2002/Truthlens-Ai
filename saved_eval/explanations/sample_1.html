@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>TruthLens Explainability — art_0001</title>
+<style>
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: #0f1117; color: #e2e8f0; margin: 0; padding: 24px; }
+  h1 { color: #63b3ed; font-size: 1.4rem; border-bottom: 1px solid #2d3748; padding-bottom: 8px; }
+  h2 { color: #90cdf4; font-size: 1.05rem; margin-top: 24px; }
+  .meta { color: #718096; font-size: 0.82rem; margin-bottom: 18px; }
+  .text-block { background: #1a202c; border-left: 3px solid #4299e1; padding: 12px 16px; border-radius: 4px; font-size: 0.95rem; line-height: 1.7; margin-bottom: 20px; }
+  .predictions { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+  .pred-card { background: #1a202c; border: 1px solid #2d3748; border-radius: 6px; padding: 10px 14px; min-width: 140px; }
+  .pred-card .task { font-size: 0.72rem; color: #718096; text-transform: uppercase; letter-spacing: 0.05em; }
+  .pred-card .label { font-size: 1rem; font-weight: 600; margin: 2px 0; }
+  .pred-card .conf { font-size: 0.78rem; color: #68d391; }
+  .label-biased     { color: #fc8181; }
+  .label-left       { color: #76e4f7; }
+  .label-propaganda { color: #fbb6ce; }
+  .bar-row { display: flex; align-items: center; margin: 5px 0; font-size: 0.82rem; }
+  .bar-label { width: 130px; color: #a0aec0; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar-track { flex: 1; background: #2d3748; border-radius: 3px; height: 10px; margin: 0 10px; }
+  .bar-fill-pos { background: #fc8181; height: 10px; border-radius: 3px; }
+  .bar-fill-neg { background: #68d391; height: 10px; border-radius: 3px; }
+  .bar-score { width: 46px; color: #e2e8f0; text-align: right; }
+  .trigger-row { background: #1a202c; border: 1px solid #2d3748; border-radius: 4px; padding: 8px 12px; margin: 6px 0; font-size: 0.83rem; }
+  .trigger-type { display: inline-block; background: #2d3748; border-radius: 3px; padding: 1px 7px; font-size: 0.72rem; color: #90cdf4; margin-left: 8px; }
+  .trigger-task { display: inline-block; background: #1e3a5f; border-radius: 3px; padding: 1px 7px; font-size: 0.72rem; color: #63b3ed; margin-left: 6px; }
+  .highlight-strong { background: rgba(252,129,129,0.30); border-radius: 2px; padding: 0 2px; }
+  .highlight-medium { background: rgba(252,129,129,0.18); border-radius: 2px; padding: 0 2px; }
+  .highlight-light  { background: rgba(252,129,129,0.08); border-radius: 2px; padding: 0 2px; }
+  .footer { color: #4a5568; font-size: 0.74rem; margin-top: 32px; border-top: 1px solid #2d3748; padding-top: 10px; }
+</style>
+</head>
+<body>
+<h1>TruthLens — Prediction Explanation</h1>
+<div class="meta">
+  Sample ID: <strong>art_0001</strong> &nbsp;|&nbsp;
+  Trace: <strong>tr_a1b2c3d4</strong> &nbsp;|&nbsp;
+  Model: <strong>TruthLens v2.1.0 / roberta-base / epoch_4</strong> &nbsp;|&nbsp;
+  Method: <strong>SHAP + Integrated Gradients</strong> &nbsp;|&nbsp;
+  Generated: <strong>2026-05-04 05:30:00 UTC</strong>
+</div>
+
+<h2>Input Text</h2>
+<div class="text-block">
+  The <span class="highlight-light">government</span> has
+  <span class="highlight-strong">completely</span>
+  <span class="highlight-strong">failed</span> to address the
+  <span class="highlight-light">growing</span> crisis.
+  Citizens are <span class="highlight-strong">outraged</span> as officials continue to
+  <span class="highlight-medium">ignore</span>
+  <span class="highlight-light">mounting</span> evidence of
+  <span class="highlight-medium">systemic</span>
+  <span class="highlight-strong">corruption</span>.
+</div>
+
+<h2>Predictions</h2>
+<div class="predictions">
+  <div class="pred-card">
+    <div class="task">Bias</div>
+    <div class="label label-biased">BIASED</div>
+    <div class="conf">Confidence: 89.1%</div>
+  </div>
+  <div class="pred-card">
+    <div class="task">Ideology</div>
+    <div class="label label-left">LEFT</div>
+    <div class="conf">Confidence: 72.3%</div>
+  </div>
+  <div class="pred-card">
+    <div class="task">Propaganda</div>
+    <div class="label label-propaganda">PROPAGANDA</div>
+    <div class="conf">Confidence: 83.4%</div>
+  </div>
+  <div class="pred-card">
+    <div class="task">Emotion</div>
+    <div class="label" style="color:#fbd38d">ANGER · DISGUST</div>
+    <div class="conf">Multi-label (11 classes)</div>
+  </div>
+  <div class="pred-card">
+    <div class="task">Narrative Role</div>
+    <div class="label" style="color:#f6ad55">ANTAGONIST</div>
+    <div class="conf">Confidence: 81.2%</div>
+  </div>
+  <div class="pred-card">
+    <div class="task">Narrative Frame</div>
+    <div class="label" style="color:#b794f4">CONFLICT · RESPONSIBILITY</div>
+    <div class="conf">Multi-label (5 classes)</div>
+  </div>
+</div>
+
+<h2>Token Importance — Bias Task</h2>
+<div class="bar-row"><div class="bar-label">failed</div><div class="bar-track"><div class="bar-fill-pos" style="width:95%"></div></div><div class="bar-score">+0.381</div></div>
+<div class="bar-row"><div class="bar-label">corruption</div><div class="bar-track"><div class="bar-fill-pos" style="width:82%"></div></div><div class="bar-score">+0.320</div></div>
+<div class="bar-row"><div class="bar-label">outraged</div><div class="bar-track"><div class="bar-fill-pos" style="width:76%"></div></div><div class="bar-score">+0.297</div></div>
+<div class="bar-row"><div class="bar-label">completely</div><div class="bar-track"><div class="bar-fill-pos" style="width:60%"></div></div><div class="bar-score">+0.234</div></div>
+<div class="bar-row"><div class="bar-label">ignore</div><div class="bar-track"><div class="bar-fill-pos" style="width:55%"></div></div><div class="bar-score">+0.213</div></div>
+<div class="bar-row"><div class="bar-label">systemic</div><div class="bar-track"><div class="bar-fill-pos" style="width:47%"></div></div><div class="bar-score">+0.182</div></div>
+<div class="bar-row"><div class="bar-label">mounting</div><div class="bar-track"><div class="bar-fill-pos" style="width:29%"></div></div><div class="bar-score">+0.112</div></div>
+<div class="bar-row"><div class="bar-label">evidence</div><div class="bar-track"><div class="bar-fill-neg" style="width:18%"></div></div><div class="bar-score">−0.071</div></div>
+
+<h2>Token Importance — Propaganda Task</h2>
+<div class="bar-row"><div class="bar-label">outraged</div><div class="bar-track"><div class="bar-fill-pos" style="width:80%"></div></div><div class="bar-score">+0.312</div></div>
+<div class="bar-row"><div class="bar-label">failed</div><div class="bar-track"><div class="bar-fill-pos" style="width:77%"></div></div><div class="bar-score">+0.301</div></div>
+<div class="bar-row"><div class="bar-label">corruption</div><div class="bar-track"><div class="bar-fill-pos" style="width:74%"></div></div><div class="bar-score">+0.289</div></div>
+<div class="bar-row"><div class="bar-label">completely</div><div class="bar-track"><div class="bar-fill-pos" style="width:72%"></div></div><div class="bar-score">+0.281</div></div>
+<div class="bar-row"><div class="bar-label">ignore</div><div class="bar-track"><div class="bar-fill-pos" style="width:60%"></div></div><div class="bar-score">+0.234</div></div>
+<div class="bar-row"><div class="bar-label">officials</div><div class="bar-track"><div class="bar-fill-pos" style="width:37%"></div></div><div class="bar-score">+0.146</div></div>
+<div class="bar-row"><div class="bar-label">evidence</div><div class="bar-track"><div class="bar-fill-neg" style="width:14%"></div></div><div class="bar-score">−0.053</div></div>
+
+<h2>Top Linguistic Triggers</h2>
+<div class="trigger-row">
+  <strong>"completely failed"</strong>
+  <span class="trigger-type">absolute_language</span>
+  <span class="trigger-task">bias · propaganda</span>
+</div>
+<div class="trigger-row">
+  <strong>"outraged"</strong>
+  <span class="trigger-type">emotion_loading</span>
+  <span class="trigger-task">bias · emotion</span>
+</div>
+<div class="trigger-row">
+  <strong>"systemic corruption"</strong>
+  <span class="trigger-type">conspiracy_framing</span>
+  <span class="trigger-task">propaganda</span>
+</div>
+<div class="trigger-row">
+  <strong>"continue to ignore"</strong>
+  <span class="trigger-type">agency_denial</span>
+  <span class="trigger-task">bias</span>
+</div>
+
+<h2>Feature Contributions</h2>
+<div class="bar-row"><div class="bar-label">bias_lexicon</div><div class="bar-track"><div class="bar-fill-pos" style="width:87%"></div></div><div class="bar-score">+0.341</div></div>
+<div class="bar-row"><div class="bar-label">propaganda_pattern</div><div class="bar-track"><div class="bar-fill-pos" style="width:74%"></div></div><div class="bar-score">+0.234</div></div>
+<div class="bar-row"><div class="bar-label">loaded_language</div><div class="bar-track"><div class="bar-fill-pos" style="width:73%"></div></div><div class="bar-score">+0.289</div></div>
+<div class="bar-row"><div class="bar-label">emotion_intensity</div><div class="bar-track"><div class="bar-fill-pos" style="width:57%"></div></div><div class="bar-score">+0.223</div></div>
+<div class="bar-row"><div class="bar-label">narrative_conflict</div><div class="bar-track"><div class="bar-fill-pos" style="width:31%"></div></div><div class="bar-score">+0.123</div></div>
+<div class="bar-row"><div class="bar-label">source_attribution</div><div class="bar-track"><div class="bar-fill-neg" style="width:14%"></div></div><div class="bar-score">−0.053</div></div>
+<div class="bar-row"><div class="bar-label">hedge_words</div><div class="bar-track"><div class="bar-fill-neg" style="width:18%"></div></div><div class="bar-score">−0.071</div></div>
+
+<div class="footer">
+  TruthLens AI v2.1.0 &nbsp;·&nbsp; encoder: roberta-base &nbsp;·&nbsp; checkpoint: epoch_4 &nbsp;·&nbsp;
+  explainability: SHAP + Integrated Gradients &nbsp;·&nbsp; attention_entropy: 2.341 &nbsp;·&nbsp;
+  inference_latency: 187ms &nbsp;·&nbsp; entropy: 0.384 (low uncertainty)
+</div>
+</body>
+</html>
