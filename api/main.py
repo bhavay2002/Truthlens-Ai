@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-# TOKENIZERS-FORK-FIX: must be set BEFORE ``transformers`` is imported.
-# See main.py for the full rationale.
 import os
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
@@ -10,6 +8,8 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 import torch
+import torch.nn.functional as F
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, ConfigDict
@@ -47,12 +47,8 @@ from src.utils import ensure_non_empty_text, ensure_non_empty_text_list, get_dev
 from src.utils.logging_utils import configure_logging
 from src.utils.settings import load_settings
 
-# ── HuggingFace Hub ────────────────────────────────────────────────────────────
 from huggingface_hub import hf_hub_download
-from transformers import AutoTokenizer
 from src.inference.postprocessing import Postprocessor
-
-# ── src.inference integration ──────────────────────────────────────────────────
 from src.inference.inference_cache import InferenceCache, InferenceCacheConfig
 from src.inference.inference_logger import InferenceLogger
 from src.inference.result_formatter import ResultFormatter
@@ -61,8 +57,6 @@ from src.inference.inference_engine import (
     InferenceEngine,
     InferenceConfig as EngineConfig,
 )
-
-# ── src.models.calibration integration ────────────────────────────────────────
 from src.models.calibration.calibration_metrics import (
     CalibrationMetrics,
     CalibrationMetricConfig,
@@ -75,12 +69,8 @@ from src.models.calibration.isotonic_calibration import (
     IsotonicCalibrator,
     IsotonicCalibrationConfig,
 )
-
-# ── src.models.ensemble integration ───────────────────────────────────────────
 from src.models.ensemble.ensemble_model import EnsembleConfig
 from src.models.ensemble.weighted_ensemble import WeightedEnsembleConfig
-
-# ── src.models.export integration ─────────────────────────────────────────────
 from src.models.export.onnx_export import ONNXExporter, ONNXExportConfig
 from src.models.export.torchscript_export import (
     TorchScriptExporter,
@@ -100,19 +90,17 @@ APP_VERSION = SETTINGS.api.version
 TEXT_PREVIEW_CHARS = max(int(SETTINGS.api.text_preview_chars), 1)
 INFERENCE_ALLOW_RAW_TEXT_FALLBACK = bool(SETTINGS.inference.allow_raw_text_fallback)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-HF_REPO_ID = "bhavaygupta2002/truthlens_v1"
+
+HF_REPO_V1 = "bhavaygupta2002/truthlens_v1"
 HF_CHECKPOINT_FILE = "checkpoint.pt"
+HF_REPO_V2 = "bhavaygupta2002/truthlens2"
+MAX_LENGTH = 512
+
 MODEL_SUBPACKAGES = (
-    "emotion",
-    "encoder",
-    "ideology",
-    "multitask",
-    "narrative",
-    "propaganda",
+    "emotion", "encoder", "ideology", "multitask", "narrative", "propaganda",
 )
 LIME_NUM_SAMPLES = 16
 
-# ── Singleton analyzers ────────────────────────────────────────────────────────
 EMOTION_ANALYZER = EmotionLexiconAnalyzer()
 ARGUMENT_ANALYZER = ArgumentMiningAnalyzer()
 BIAS_PROFILE_BUILDER = BiasProfileBuilder()
@@ -130,11 +118,10 @@ NARRATIVE_TEMPORAL_ANALYZER = NarrativeTemporalAnalyzer()
 PROPAGANDA_PATTERN_DETECTOR = PropagandaPatternDetector()
 RHETORICAL_DETECTOR = RhetoricalDeviceDetector()
 SOURCE_ATTRIBUTION_ANALYZER = SourceAttributionAnalyzer()
-GRAPH_PIPELINE = get_default_pipeline()  # G-R1: process-wide singleton
+GRAPH_PIPELINE = get_default_pipeline()
 GRAPH_EMBEDDING_GENERATOR = GraphEmbeddingGenerator()
 TEMPORAL_GRAPH_ANALYZER = TemporalGraphAnalyzer()
 
-# ── src.inference singletons ───────────────────────────────────────────────────
 INFERENCE_CACHE = InferenceCache(
     InferenceCacheConfig(
         cache_dir="cache/inference",
@@ -143,37 +130,34 @@ INFERENCE_CACHE = InferenceCache(
         ttl_seconds=3600,
     )
 )
-
 INFERENCE_LOGGER = InferenceLogger(service_name="truthlens-api", enable_json_logs=True)
-
 RESULT_FORMATTER = ResultFormatter()
-
 REPORT_GENERATOR = ReportGenerator(
     ReportConfig(include_timestamp=True, pretty_json=False, validate_fields=True)
 )
-
 AGGREGATION_PIPELINE = AggregationPipeline()
 
-# InferenceEngine is initialised lazily so a missing model directory does not
-# crash the server at startup.
 _INFERENCE_ENGINE: Optional[InferenceEngine] = None
 
 
+# ---------------------------------------------------------------------------
+# Multitask model adapter (truthlens_v1/checkpoint.pt)
+# ---------------------------------------------------------------------------
+
 class _ForwardResult:
-    """Minimal namespace returned by _MultiTaskModelWrapper.forward()."""
     __slots__ = ("logits",)
 
-    def __init__(self, logits: "torch.Tensor") -> None:
+    def __init__(self, logits: torch.Tensor) -> None:
         self.logits = logits
 
 
 class _MultiTaskModelWrapper(torch.nn.Module):
-    """Adapts MultiTaskTruthLensModel so InferenceEngine._forward() works.
+    """Makes MultiTaskTruthLensModel compatible with InferenceEngine._forward().
 
-    InferenceEngine._forward() calls ``self.model(**encoded).logits``, but the
-    multitask model returns a plain dict.  This wrapper extracts the logits
-    from the best available 2-class task head (propaganda → bias → first head)
-    and returns a _ForwardResult with a ``.logits`` attribute.
+    InferenceEngine._forward() calls model(**encoded).logits, but the multitask
+    model returns a dict.  This wrapper picks the best 2-class task head
+    (propaganda → bias → first available) and returns a _ForwardResult with a
+    .logits attribute so the rest of the engine pipeline works unchanged.
     """
 
     _PREFERRED_TASKS = ("propaganda", "bias")
@@ -188,33 +172,77 @@ class _MultiTaskModelWrapper(torch.nn.Module):
         )
         logger.info("_MultiTaskModelWrapper: primary task head = %s", self._primary)
 
-    def forward(self, **inputs: Any) -> "_ForwardResult":
+    def forward(self, **inputs: Any) -> _ForwardResult:
         outputs = self._inner(**inputs)
         if self._primary and self._primary in outputs:
             logits = outputs[self._primary]["logits"]
         else:
-            # Fall back to first task_logits entry
             task_logits = outputs.get("task_logits", {})
             logits = next(iter(task_logits.values()))
         return _ForwardResult(logits=logits)
 
 
-def _build_engine_from_hf_checkpoint() -> Optional[InferenceEngine]:
-    """Download checkpoint.pt from HuggingFace and manually wire up an InferenceEngine.
-
-    The HF repo stores the full MultiTaskTruthLensModel object (not a standard
-    HF model directory), so AutoModelForSequenceClassification.from_pretrained
-    cannot be used directly. Instead we torch.load the checkpoint, extract the
-    model object, and set up the engine attributes by hand — bypassing the
-    path-existence checks in InferenceEngine._load_model.
-    """
+def _patch_checkpoint_model(model: torch.nn.Module, device: torch.device) -> None:
+    """Back-fill instance attributes missing after unpickling from an older
+    transformers version, and reset any cached CUDA device references."""
     try:
-        logger.info(
-            "Downloading model checkpoint from HuggingFace: %s / %s",
-            HF_REPO_ID,
-            HF_CHECKPOINT_FILE,
+        from transformers.models.roberta.modeling_roberta import (
+            RobertaAttention,
+            RobertaSelfAttention,
         )
-        ckpt_path = hf_hub_download(HF_REPO_ID, HF_CHECKPOINT_FILE)
+        _hf_config = None
+        for _m in model.modules():
+            if hasattr(_m, "config") and hasattr(
+                getattr(_m, "config", None), "_attn_implementation"
+            ):
+                _hf_config = _m.config
+                break
+
+        for _m in model.modules():
+            if hasattr(_m, "_device"):
+                _m._device = device
+            if hasattr(_m, "_cached_device"):
+                _m._cached_device = device
+
+            if isinstance(_m, RobertaAttention):
+                if not hasattr(_m, "is_cross_attention"):
+                    _m.is_cross_attention = False
+                if not hasattr(_m, "pruned_heads"):
+                    _m.pruned_heads = set()
+
+            if isinstance(_m, RobertaSelfAttention):
+                if not hasattr(_m, "is_cross_attention"):
+                    _m.is_cross_attention = False
+                if not hasattr(_m, "pruned_heads"):
+                    _m.pruned_heads = set()
+                if not hasattr(_m, "position_embedding_type"):
+                    _m.position_embedding_type = "absolute"
+                if not hasattr(_m, "config") and _hf_config is not None:
+                    _m.config = _hf_config
+                if not hasattr(_m, "scaling"):
+                    head_size = getattr(_m, "attention_head_size", 64)
+                    _m.scaling = head_size ** -0.5
+                if not hasattr(_m, "is_decoder"):
+                    _m.is_decoder = False
+                if not hasattr(_m, "is_causal"):
+                    _m.is_causal = False
+                if not hasattr(_m, "layer_idx"):
+                    _m.layer_idx = None
+
+    except ImportError:
+        for _m in model.modules():
+            if hasattr(_m, "_device"):
+                _m._device = device
+            if hasattr(_m, "_cached_device"):
+                _m._cached_device = device
+
+
+def _build_engine_from_hf_checkpoint() -> Optional[InferenceEngine]:
+    """Download checkpoint.pt from bhavaygupta2002/truthlens_v1 and wire up
+    an InferenceEngine using the multitask model's propaganda/bias head."""
+    try:
+        logger.info("Downloading checkpoint from HuggingFace: %s/%s", HF_REPO_V1, HF_CHECKPOINT_FILE)
+        ckpt_path = hf_hub_download(HF_REPO_V1, HF_CHECKPOINT_FILE)
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
 
         model = ckpt["model"]
@@ -226,78 +254,7 @@ def _build_engine_from_hf_checkpoint() -> Optional[InferenceEngine]:
         for p in model.parameters():
             p.requires_grad_(False)
 
-        # Reset any cached device attributes set during training (e.g. on
-        # CUDA) so that CPU-only deployments don't hit "Torch not compiled
-        # with CUDA enabled" when the encoder's _device / _cached_device
-        # Python attributes still point at cuda after map_location="cpu".
-        #
-        # Also patch transformers version-mismatch: the checkpoint was pickled
-        # with an older transformers that stored is_cross_attention,
-        # position_embedding_type, and pruned_heads as instance attributes on
-        # RobertaAttention / RobertaSelfAttention. The current transformers
-        # version still reads them in forward() but no longer sets them via
-        # __init__ for pre-serialized objects, so we back-fill the defaults.
-        # Patch transformers version-mismatch: the checkpoint was pickled with
-        # an older transformers. The current version reads instance attributes
-        # (is_cross_attention, config, scaling, is_decoder, is_causal,
-        # layer_idx, pruned_heads) in forward() that the old __init__ never
-        # set. Back-fill safe defaults so inference works on CPU-only deploys.
-        try:
-            from transformers.models.roberta.modeling_roberta import (
-                RobertaAttention,
-                RobertaSelfAttention,
-            )
-
-            # Grab the HF config from the first RobertaModel submodule found;
-            # RobertaSelfAttention.forward reads self.config._attn_implementation.
-            _hf_config = None
-            for _m in model.modules():
-                if hasattr(_m, "config") and hasattr(getattr(_m, "config", None), "_attn_implementation"):
-                    _hf_config = _m.config
-                    break
-
-            for _idx, _m in enumerate(model.modules()):
-                # Device reset
-                if hasattr(_m, "_device"):
-                    _m._device = device
-                if hasattr(_m, "_cached_device"):
-                    _m._cached_device = device
-
-                # RobertaAttention: needs is_cross_attention
-                if isinstance(_m, RobertaAttention):
-                    if not hasattr(_m, "is_cross_attention"):
-                        _m.is_cross_attention = False
-                    if not hasattr(_m, "pruned_heads"):
-                        _m.pruned_heads = set()
-
-                # RobertaSelfAttention: needs config, scaling, is_decoder,
-                # is_causal, layer_idx (all read in the new forward signature)
-                if isinstance(_m, RobertaSelfAttention):
-                    if not hasattr(_m, "is_cross_attention"):
-                        _m.is_cross_attention = False
-                    if not hasattr(_m, "pruned_heads"):
-                        _m.pruned_heads = set()
-                    if not hasattr(_m, "position_embedding_type"):
-                        _m.position_embedding_type = "absolute"
-                    if not hasattr(_m, "config") and _hf_config is not None:
-                        _m.config = _hf_config
-                    if not hasattr(_m, "scaling"):
-                        head_size = getattr(_m, "attention_head_size", 64)
-                        _m.scaling = head_size ** -0.5
-                    if not hasattr(_m, "is_decoder"):
-                        _m.is_decoder = False
-                    if not hasattr(_m, "is_causal"):
-                        _m.is_causal = False
-                    if not hasattr(_m, "layer_idx"):
-                        _m.layer_idx = None
-
-        except ImportError:
-            # Transformers not installed with RoBERTa — skip patching
-            for module in model.modules():
-                if hasattr(module, "_device"):
-                    module._device = device
-                if hasattr(module, "_cached_device"):
-                    module._cached_device = device
+        _patch_checkpoint_model(model, device)
 
         tokenizer = AutoTokenizer.from_pretrained(encoder, use_fast=True)
 
@@ -323,13 +280,8 @@ def _build_engine_from_hf_checkpoint() -> Optional[InferenceEngine]:
         engine.postprocessor = Postprocessor()
         engine.use_amp = device.type == "cuda" and cfg.use_amp
         engine.amp_dtype = amp_dtype
-        # Wrap multitask model so _forward() gets a .logits attribute back.
-        # The wrapper picks the best 2-class head (propaganda → bias) as a
-        # proxy for misinformation likelihood.
         engine.model = _MultiTaskModelWrapper(model)
         engine.tokenizer = tokenizer
-        # Map labels so _is_legacy_binary_label_map() returns True and
-        # fake_probability is populated in engine.predict() results.
         engine.label_map = {0: "real", 1: "fake"}
         engine.prediction_service = None
 
@@ -344,9 +296,7 @@ def _build_engine_from_hf_checkpoint() -> Optional[InferenceEngine]:
 
         logger.info(
             "InferenceEngine initialised from HuggingFace checkpoint "
-            "(encoder=%s, device=%s)",
-            encoder,
-            device,
+            "(encoder=%s, device=%s)", encoder, device,
         )
         return engine
     except Exception as exc:
@@ -358,9 +308,9 @@ def _get_inference_engine() -> Optional[InferenceEngine]:
     """Return the shared InferenceEngine.
 
     Priority:
-      1. Already initialised singleton.
-      2. Local saved_models directory (existing trained artefact).
-      3. HuggingFace checkpoint (bhavaygupta2002/truthlens_v1/checkpoint.pt).
+      1. Already-initialised singleton.
+      2. Local saved_models directory (trained artefact).
+      3. HuggingFace checkpoint — bhavaygupta2002/truthlens_v1/checkpoint.pt.
     """
     global _INFERENCE_ENGINE
     if _INFERENCE_ENGINE is not None:
@@ -378,9 +328,7 @@ def _get_inference_engine() -> Optional[InferenceEngine]:
             )
             logger.info("InferenceEngine initialised from %s", MODEL_PATH)
         except Exception as exc:
-            logger.warning(
-                "InferenceEngine could not be initialised from local path: %s", exc
-            )
+            logger.warning("InferenceEngine could not load local model: %s", exc)
 
     if _INFERENCE_ENGINE is None:
         _INFERENCE_ENGINE = _build_engine_from_hf_checkpoint()
@@ -388,24 +336,132 @@ def _get_inference_engine() -> Optional[InferenceEngine]:
     return _INFERENCE_ENGINE
 
 
-# ── src.models.calibration singletons ─────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# TruthLens2 model (bhavaygupta2002/truthlens2) — simple REAL/FAKE classifier
+# ---------------------------------------------------------------------------
+
+_v2_model: Optional[AutoModelForSequenceClassification] = None
+_v2_tokenizer: Optional[AutoTokenizer] = None
+_v2_idx_to_label: Optional[dict[int, str]] = None
+_v2_device: Optional[torch.device] = None
+
+
+def _build_idx_to_label(model) -> dict[int, str]:
+    idx_to_label: dict[int, str] = {}
+    id2label = getattr(model.config, "id2label", None) or {}
+    for idx, label in id2label.items():
+        idx_to_label[int(idx)] = str(label).strip().upper()
+    if idx_to_label:
+        return idx_to_label
+    label2id = getattr(model.config, "label2id", None) or {}
+    for label, idx in label2id.items():
+        idx_to_label[int(idx)] = str(label).strip().upper()
+    if not idx_to_label:
+        idx_to_label = {0: "REAL", 1: "FAKE"}
+    return idx_to_label
+
+
+def _get_label_index(idx_to_label: dict[int, str], target: str) -> Optional[int]:
+    target = target.strip().upper()
+    for idx, label in idx_to_label.items():
+        if label == target:
+            return idx
+    return None
+
+
+def _load_v2_model():
+    global _v2_model, _v2_tokenizer, _v2_idx_to_label, _v2_device
+    if _v2_model is not None:
+        return _v2_model, _v2_tokenizer, _v2_idx_to_label, _v2_device
+
+    logger.info("Loading TruthLens2 model from HuggingFace: %s", HF_REPO_V2)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    tokenizer = AutoTokenizer.from_pretrained(HF_REPO_V2)
+    model = AutoModelForSequenceClassification.from_pretrained(HF_REPO_V2)
+    model.to(device)
+    model.eval()
+    idx_to_label = _build_idx_to_label(model)
+    logger.info("TruthLens2 loaded on %s | labels: %s", device, idx_to_label)
+    _v2_model = model
+    _v2_tokenizer = tokenizer
+    _v2_idx_to_label = idx_to_label
+    _v2_device = device
+    return _v2_model, _v2_tokenizer, _v2_idx_to_label, _v2_device
+
+
+def _v2_predict_single(text: str) -> dict[str, Any]:
+    model, tokenizer, idx_to_label, device = _load_v2_model()
+    inputs = tokenizer(
+        text, return_tensors="pt", truncation=True, padding=True, max_length=MAX_LENGTH
+    )
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    with torch.no_grad():
+        outputs = model(**inputs)
+    probs = F.softmax(outputs.logits, dim=1)[0]
+    pred_idx = int(torch.argmax(probs).item())
+    pred_label = idx_to_label.get(pred_idx, f"CLASS_{pred_idx}")
+    real_idx = _get_label_index(idx_to_label, "REAL")
+    fake_idx = _get_label_index(idx_to_label, "FAKE")
+    fake_prob = float(probs[fake_idx].item()) if fake_idx is not None else 0.0
+    real_prob = float(probs[real_idx].item()) if real_idx is not None else 0.0
+    confidence = float(probs[pred_idx].item())
+    class_probabilities = {
+        idx_to_label[i]: round(float(probs[i].item()), 6)
+        for i in sorted(idx_to_label.keys())
+    }
+    return {
+        "prediction": pred_label,
+        "fake_probability": round(fake_prob, 6),
+        "real_probability": round(real_prob, 6),
+        "confidence": round(confidence, 6),
+        "class_probabilities": class_probabilities,
+    }
+
+
+def _v2_predict_batch(texts: list[str]) -> list[dict[str, Any]]:
+    model, tokenizer, idx_to_label, device = _load_v2_model()
+    inputs = tokenizer(
+        texts, return_tensors="pt", truncation=True, padding=True, max_length=MAX_LENGTH
+    )
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    with torch.no_grad():
+        outputs = model(**inputs)
+    all_probs = F.softmax(outputs.logits, dim=1)
+    real_idx = _get_label_index(idx_to_label, "REAL")
+    fake_idx = _get_label_index(idx_to_label, "FAKE")
+    results = []
+    for probs in all_probs:
+        pred_idx = int(torch.argmax(probs).item())
+        pred_label = idx_to_label.get(pred_idx, f"CLASS_{pred_idx}")
+        fake_prob = float(probs[fake_idx].item()) if fake_idx is not None else 0.0
+        real_prob = float(probs[real_idx].item()) if real_idx is not None else 0.0
+        confidence = float(probs[pred_idx].item())
+        class_probabilities = {
+            idx_to_label[j]: round(float(probs[j].item()), 6)
+            for j in sorted(idx_to_label.keys())
+        }
+        results.append({
+            "prediction": pred_label,
+            "fake_probability": round(fake_prob, 6),
+            "real_probability": round(real_prob, 6),
+            "confidence": round(confidence, 6),
+            "class_probabilities": class_probabilities,
+        })
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Calibration singletons
+# ---------------------------------------------------------------------------
+
 CALIBRATION_METRICS = CalibrationMetrics()
-
-# TemperatureScaler and IsotonicCalibrator require validation data to fit, so
-# they are exposed only through info/metrics endpoints rather than as eager
-# singletons that would call .fit() at startup.
-
-# ── src.models.export singletons ──────────────────────────────────────────────
 ONNX_EXPORTER = ONNXExporter(ONNXExportConfig(verify_export=False))
 TORCHSCRIPT_EXPORTER = TorchScriptExporter(TorchScriptExportConfig(verify_export=False))
 
-# QuantizationEngine raises ValueError if the requested backend is not
-# available (e.g. 'fbgemm' on some ARM builds), so it is initialised lazily.
 _QUANTIZATION_ENGINE: Optional[QuantizationEngine] = None
 
 
 def _get_quantization_engine(method: str = "dynamic") -> Optional[QuantizationEngine]:
-    """Return a QuantizationEngine for the given method, or None if unavailable."""
     global _QUANTIZATION_ENGINE
     if _QUANTIZATION_ENGINE is None:
         try:
@@ -417,22 +473,20 @@ def _get_quantization_engine(method: str = "dynamic") -> Optional[QuantizationEn
     return _QUANTIZATION_ENGINE
 
 
+# ---------------------------------------------------------------------------
+# FastAPI app
+# ---------------------------------------------------------------------------
+
 app = FastAPI(
-    title=APP_TITLE,
-    description=APP_DESCRIPTION,
+    title="TruthLens AI — Unified API",
+    description=(
+        "Unified misinformation detection and news credibility platform. "
+        "Combines the deep-analysis pipeline (truthlens_v1) with the fast "
+        "REAL/FAKE classifier (truthlens2). All models load automatically "
+        "from HuggingFace — no local training required."
+    ),
     version=APP_VERSION,
 )
-
-
-# ── Startup hook: prune the on-disk feature cache (audit fix #1.5) ────────────
-#
-# Without an eviction policy the on-disk feature cache grew unbounded and
-# orphan tempfiles from killed processes were never cleaned up.  On every
-# server start we now sweep every namespace under the configured cache
-# root, dropping anything older than `FEATURE_CACHE_MAX_AGE_DAYS` and
-# (after that) trimming each namespace down to `FEATURE_CACHE_MAX_BYTES`
-# by oldest-first eviction.  Both knobs are env-tunable; sensible
-# production defaults below.
 
 FEATURE_CACHE_MAX_AGE_DAYS = float(
     getattr(SETTINGS, "feature_cache_max_age_days", 0) or 14.0
@@ -446,7 +500,6 @@ FEATURE_CACHE_MAX_BYTES = int(
 def _prune_feature_cache_on_startup() -> None:
     try:
         from src.features.cache.cache_manager import CacheManager
-
         cache_root = getattr(getattr(SETTINGS, "paths", None), "cache_dir", None)
         manager = CacheManager(base_cache_dir=Path(cache_root) if cache_root else None)
         results = manager.prune_all(
@@ -460,22 +513,20 @@ def _prune_feature_cache_on_startup() -> None:
             )
             logger.info(
                 "Feature cache prune complete | namespaces=%d removed=%d",
-                len(results),
-                total_removed,
+                len(results), total_removed,
             )
     except Exception as exc:
-        # Pruning must NEVER block the server from starting.
         logger.warning("Feature cache prune skipped: %s", exc)
 
 
-# ── Request / response models ──────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Request / response schemas
+# ---------------------------------------------------------------------------
 
 class NewsRequest(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
-            "example": {
-                "text": "Breaking news: Scientists discover new species in Amazon rainforest."
-            }
+            "example": {"text": "Breaking news: Scientists discover new species in Amazon rainforest."}
         }
     )
     text: str = Field(..., min_length=10, max_length=10_000, description="News article text to analyze")
@@ -485,24 +536,19 @@ class BatchNewsRequest(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
-                "texts": [
-                    "First news article text here.",
-                    "Second news article text here.",
-                ]
+                "texts": ["First news article text here.", "Second news article text here."]
             }
         }
     )
     texts: list[str] = Field(
-        ...,
-        min_length=1,
-        max_length=50,
+        ..., min_length=1, max_length=50,
         description="List of news article texts to analyze (max 50 items)",
     )
 
 
 class NewsResponse(BaseModel):
     text: str
-    fake_probability: float = Field(..., ge=0, le=1, description="Probability of being fake news (0-1)")
+    fake_probability: float = Field(..., ge=0, le=1)
     prediction: str
     confidence: float
 
@@ -548,8 +594,6 @@ class ModelInfoResponse(BaseModel):
     label_map: Optional[dict[str, Any]]
 
 
-# ── Calibration models ─────────────────────────────────────────────────────────
-
 class CalibrationMetricsRequest(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
@@ -561,79 +605,59 @@ class CalibrationMetricsRequest(BaseModel):
         }
     )
     probabilities: List[List[float]] = Field(
-        ...,
-        description="Per-sample probability distributions [[p_real, p_fake], ...] for each article",
+        ..., description="Per-sample probability distributions [[p_real, p_fake], ...]",
     )
     labels: List[int] = Field(
-        ...,
-        description="Ground-truth class indices (0=real, 1=fake) for each article",
+        ..., description="Ground-truth class indices (0=real, 1=fake)",
     )
-    n_bins: int = Field(default=15, ge=2, le=100, description="Number of calibration bins (2–100)")
+    n_bins: int = Field(default=15, ge=2, le=100)
 
 
 class CalibrationMetricsResponse(BaseModel):
-    ece: float = Field(..., description="Expected Calibration Error (lower is better)")
-    mce: float = Field(..., description="Maximum Calibration Error (lower is better)")
-    brier_score: float = Field(..., description="Brier Score (lower is better)")
-    nll: float = Field(..., description="Negative Log-Likelihood (lower is better)")
+    ece: float
+    mce: float
+    brier_score: float
+    nll: float
     n_samples: int
     n_bins: int
 
-
-# ── Ensemble models ────────────────────────────────────────────────────────────
 
 class EnsemblePredictRequest(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
-                "model_probabilities": [
-                    [0.7, 0.3],
-                    [0.4, 0.6],
-                    [0.6, 0.4],
-                ],
+                "model_probabilities": [[0.7, 0.3], [0.4, 0.6], [0.6, 0.4]],
                 "weights": [0.5, 0.3, 0.2],
                 "strategy": "weighted_average",
             }
         }
     )
     model_probabilities: List[List[float]] = Field(
-        ...,
-        description=(
-            "Probability vectors from each model [[p_real, p_fake], ...]. "
-            "Each inner list must have exactly 2 values that sum to 1."
-        ),
+        ..., description="Probability vectors [[p_real, p_fake], ...] from each model",
     )
     weights: Optional[List[float]] = Field(
-        default=None,
-        description="Per-model weights for 'weighted_average' strategy. Must match length of model_probabilities.",
+        default=None, description="Per-model weights for weighted_average strategy",
     )
     strategy: str = Field(
         default="average",
-        description="Combination strategy: 'average', 'weighted_average', or 'majority_vote'",
+        description="Combination strategy: average | weighted_average | majority_vote",
     )
 
 
 class EnsemblePredictResponse(BaseModel):
     strategy: str
-    ensemble_probabilities: List[float] = Field(
-        ..., description="Combined [p_real, p_fake] probability pair"
-    )
+    ensemble_probabilities: List[float]
     prediction: str
     fake_probability: float
     confidence: float
     num_models: int
 
 
-# ── Export models ──────────────────────────────────────────────────────────────
-
 class ExportRequest(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={"example": {"output_path": "exports/model.onnx"}}
     )
-    output_path: str = Field(
-        ...,
-        description="Destination file path for the exported model artifact",
-    )
+    output_path: str = Field(..., description="Destination file path for the exported model")
 
 
 class ExportResponse(BaseModel):
@@ -643,7 +667,50 @@ class ExportResponse(BaseModel):
     message: str
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+# TruthLens2 (v2) schemas
+
+class V2PredictRequest(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "text": "Mixed messages from Trump leave more questions than answers over war's end"
+            }
+        }
+    )
+    text: str = Field(..., min_length=10, max_length=10_000, description="News article text to classify")
+
+
+class V2PredictResponse(BaseModel):
+    text_preview: str
+    prediction: str = Field(..., description='"REAL" or "FAKE"')
+    fake_probability: float = Field(..., ge=0, le=1)
+    real_probability: float = Field(..., ge=0, le=1)
+    confidence: float = Field(..., ge=0, le=1)
+    class_probabilities: dict[str, float]
+
+
+class V2BatchPredictRequest(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "texts": [
+                    "Scientists confirm climate change is accelerating based on new data.",
+                    "Government hiding truth about vaccines, insider reveals shocking secret.",
+                ]
+            }
+        }
+    )
+    texts: List[str] = Field(..., min_length=1, max_length=50, description="List of news texts to classify (max 50)")
+
+
+class V2BatchPredictResponse(BaseModel):
+    results: List[V2PredictResponse]
+    total: int
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _preview_text(text: str) -> str:
     if len(text) <= TEXT_PREVIEW_CHARS:
@@ -652,8 +719,6 @@ def _preview_text(text: str) -> str:
 
 
 def _safe_run(fn, *args, **kwargs) -> dict:
-    """Call an analysis function; return empty dict on any error so other
-    sections of the /analyze response are unaffected."""
     try:
         result = fn(*args, **kwargs)
         return result if isinstance(result, dict) else {}
@@ -664,8 +729,6 @@ def _safe_run(fn, *args, **kwargs) -> dict:
 
 
 def _serialize_graph_result(result: dict) -> dict:
-    """Convert any numpy arrays in a graph pipeline result to Python lists
-    so the response is JSON-serializable."""
     out = {}
     for k, v in result.items():
         if hasattr(v, "tolist"):
@@ -678,7 +741,6 @@ def _serialize_graph_result(result: dict) -> dict:
 def _build_project_view() -> dict[str, Any]:
     src_dir = PROJECT_ROOT / "src"
     model_dir = src_dir / "models"
-
     model_subpackages = {}
     for subpackage in MODEL_SUBPACKAGES:
         package_dir = model_dir / subpackage
@@ -686,14 +748,9 @@ def _build_project_view() -> dict[str, Any]:
             "directory_exists": package_dir.exists(),
             "package_init_exists": (package_dir / "__init__.py").exists(),
         }
-
     return {
         "project_root": str(PROJECT_ROOT),
-        "api": {
-            "title": APP_TITLE,
-            "version": APP_VERSION,
-            "description": APP_DESCRIPTION,
-        },
+        "api": {"title": APP_TITLE, "version": APP_VERSION, "description": APP_DESCRIPTION},
         "config": {
             "model_name": SETTINGS.model.name,
             "model_path": str(MODEL_PATH),
@@ -712,8 +769,6 @@ def _build_project_view() -> dict[str, Any]:
 
 
 def _decode_prediction_result(prediction_result) -> tuple[float, str, float]:
-    """Normalise the output of models.inference.predictor.predict into
-    (fake_probability, prediction_label, confidence)."""
     if isinstance(prediction_result, dict):
         prob = float(prediction_result.get("fake_probability", 0.0))
         prediction = str(prediction_result.get("label", "Fake")).upper()
@@ -726,12 +781,6 @@ def _decode_prediction_result(prediction_result) -> tuple[float, str, float]:
 
 
 def _heuristic_predict_fn(text: str) -> dict:
-    """Model-free fallback predict function using lexicon-based features.
-
-    Used when the ML model has not been trained yet. Combines bias score and
-    emotion intensity to produce a ``fake_probability`` estimate so that the
-    explainability pipeline (LIME, aggregation, etc.) can still run.
-    """
     try:
         bias = compute_bias_features(text)
         bias_score = float(getattr(bias, "bias_score", 0.0))
@@ -740,12 +789,9 @@ def _heuristic_predict_fn(text: str) -> dict:
     try:
         emo = EMOTION_ANALYZER.analyze(text)
         emo_scores: dict = getattr(emo, "emotion_scores", {}) or {}
-        emo_intensity = (
-            sum(emo_scores.values()) / len(emo_scores) if emo_scores else 0.0
-        )
+        emo_intensity = sum(emo_scores.values()) / len(emo_scores) if emo_scores else 0.0
     except Exception:
         emo_intensity = 0.0
-
     fake_prob = min(max(0.5 * bias_score + 0.3 * emo_intensity + 0.1, 0.05), 0.95)
     return {
         "fake_probability": round(fake_prob, 4),
@@ -756,20 +802,29 @@ def _heuristic_predict_fn(text: str) -> dict:
     }
 
 
-# ── Routes ─────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Routes — root + health
+# ---------------------------------------------------------------------------
 
 @app.get("/")
 def home():
-    """Health check endpoint."""
     return {
-        "message": APP_TITLE,
+        "message": "TruthLens AI — Unified API",
         "status": "online",
+        "models": {
+            "truthlens_v1": f"https://huggingface.co/{HF_REPO_V1}",
+            "truthlens2": f"https://huggingface.co/{HF_REPO_V2}",
+        },
         "endpoints": {
             "predict": "/predict",
             "batch_predict": "/batch-predict",
             "analyze": "/analyze",
             "explain": "/explain",
             "report": "/report",
+            "v2_predict": "/v2/predict",
+            "v2_batch_predict": "/v2/batch-predict",
+            "v2_health": "/v2/health",
+            "health": "/health",
             "inference_model_info": "/inference/model-info",
             "cache_clear": "/cache/clear",
             "calibration_info": "/calibration/info",
@@ -779,68 +834,95 @@ def home():
             "export_info": "/export/info",
             "export_onnx": "/export/onnx",
             "export_torchscript": "/export/torchscript",
-            "health": "/health",
             "project_view": "/project-view",
             "docs": "/docs",
         },
     }
 
 
+@app.get("/health")
+def health_check():
+    try:
+        model_exists = MODEL_PATH.exists()
+        vectorizer_required = TRAINING_TEXT_COLUMN == "engineered_text"
+        vectorizer_exists = (not vectorizer_required) or VECTORIZER_PATH.exists()
+        vectorizer_fallback_enabled = INFERENCE_ALLOW_RAW_TEXT_FALLBACK
+        vectorizer_effective_ready = (
+            vectorizer_exists if not vectorizer_required
+            else (vectorizer_exists or vectorizer_fallback_enabled)
+        )
+        required_files = ["config.json", "tokenizer.json"]
+        weight_files = ["model.safetensors", "pytorch_model.bin"]
+        has_weight_file = any((MODEL_PATH / f).exists() for f in weight_files) if model_exists else False
+        model_files_exist = (
+            all((MODEL_PATH / f).exists() for f in required_files) and has_weight_file
+            if model_exists else False
+        )
+        engine = _get_inference_engine()
+        hf_engine_ready = engine is not None
+        v2_ready = _v2_model is not None
+        cache_size = len(INFERENCE_CACHE.memory_cache)
+        return {
+            "status": "healthy" if (hf_engine_ready or model_files_exist) else "degraded",
+            "model_path": str(MODEL_PATH),
+            "model_exists": model_exists,
+            "model_files_complete": model_files_exist,
+            "hf_engine_ready": hf_engine_ready,
+            "hf_repo_v1": HF_REPO_V1,
+            "hf_repo_v2": HF_REPO_V2,
+            "v2_model_loaded": v2_ready,
+            "training_text_column": TRAINING_TEXT_COLUMN,
+            "vectorizer_required": vectorizer_required,
+            "vectorizer_exists": vectorizer_exists,
+            "vectorizer_fallback_enabled": vectorizer_fallback_enabled,
+            "vectorizer_effective_ready": vectorizer_effective_ready,
+            "vectorizer_path": str(VECTORIZER_PATH),
+            "inference_cache_entries": cache_size,
+        }
+    except Exception as exc:
+        logger.error("Health check failed: %s", exc)
+        return {"status": "unhealthy", "error": str(exc)}
+
+
 @app.get("/project-view")
 def project_view():
-    """Project-level view of API metadata, configuration, and package layout."""
     return _build_project_view()
 
 
+# ---------------------------------------------------------------------------
+# Routes — predict (truthlens_v1 multitask engine)
+# ---------------------------------------------------------------------------
+
 @app.post("/predict", response_model=NewsResponse)
 def predict_news(request: NewsRequest):
-    """
-    Predict whether a news article is fake or real.
-
-    Results are cached in memory for one hour — repeated submissions of
-    identical text are served instantly without rerunning the model.
-    """
+    """Predict whether a news article is fake or real using the truthlens_v1
+    HuggingFace checkpoint.  Results are cached for one hour."""
     try:
         text = ensure_non_empty_text(request.text, name="request.text")
         logger.info("Received /predict request (text length: %d)", len(text))
         timer_start = INFERENCE_LOGGER.start_timer()
 
-        # ── Cache lookup ───────────────────────────────────────────────────────
         cached = INFERENCE_CACHE.get(text)
         if cached is not None:
-            logger.debug("Cache hit for /predict")
             return NewsResponse(**cached)
 
-        # ── Model inference ────────────────────────────────────────────────────
-        # Priority: local trained model → HF checkpoint (truthlens_v1) → heuristic
-        try:
-            prediction_result = predict(text)
-            prob, prediction, confidence = _decode_prediction_result(prediction_result)
-        except FileNotFoundError:
-            engine = _get_inference_engine()
-            if engine is not None:
-                engine_result = engine.predict_single(text)
-                fake_prob = engine_result.get("fake_probability")
-                confidence = float(engine_result.get("confidence") or 0.5)
-                if fake_prob is not None:
-                    prob = float(fake_prob)
-                else:
-                    label = int(engine_result.get("label", 0))
-                    prob = confidence if label == 1 else 1.0 - confidence
-                prediction = "FAKE" if prob > 0.5 else "REAL"
+        engine = _get_inference_engine()
+        if engine is not None:
+            engine_result = engine.predict_single(text)
+            fake_prob = engine_result.get("fake_probability")
+            confidence = float(engine_result.get("confidence") or 0.5)
+            if fake_prob is not None:
+                prob = round(float(fake_prob), 4)
             else:
-                fallback = _heuristic_predict_fn(text)
-                prob = fallback["fake_probability"]
-                prediction = fallback["prediction"]
-                confidence = fallback["confidence"]
-
-        raw_prediction = {
-            "bias": None,
-            "ideology": None,
-            "propaganda_probability": None,
-            "credibility_score": round(1.0 - prob, 4),
-        }
-        RESULT_FORMATTER.format_api_response(raw_prediction)
+                label = int(engine_result.get("label", 0))
+                prob = round(confidence if label == 1 else 1.0 - confidence, 4)
+            confidence = round(confidence, 4)
+            prediction = "FAKE" if prob > 0.5 else "REAL"
+        else:
+            fallback = _heuristic_predict_fn(text)
+            prob = fallback["fake_probability"]
+            prediction = fallback["prediction"]
+            confidence = fallback["confidence"]
 
         response_data = {
             "text": _preview_text(text),
@@ -848,7 +930,6 @@ def predict_news(request: NewsRequest):
             "prediction": prediction,
             "confidence": round(confidence, 4),
         }
-
         INFERENCE_CACHE.set(text, response_data)
         INFERENCE_LOGGER.log_prediction(
             article_id=None,
@@ -857,12 +938,10 @@ def predict_news(request: NewsRequest):
             feature_count=0,
             prediction_confidence=round(confidence, 4),
         )
-
         logger.info("Prediction: %s (confidence: %.4f)", prediction, confidence)
         return NewsResponse(**response_data)
 
     except ValueError as exc:
-        logger.error("Invalid input: %s", exc)
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         logger.error("Prediction error: %s", exc)
@@ -871,12 +950,7 @@ def predict_news(request: NewsRequest):
 
 @app.post("/batch-predict", response_model=BatchNewsResponse)
 def batch_predict_news(request: BatchNewsRequest):
-    """
-    Predict fake/real for a batch of news articles (up to 50 at a time).
-
-    Each text is individually checked against the cache before running the
-    model, so cached entries are served without additional inference cost.
-    """
+    """Batch predict fake/real for up to 50 news articles using truthlens_v1."""
     try:
         normalized_texts = ensure_non_empty_text_list(request.texts, name="request.texts")
         logger.info("Received /batch-predict request (%d texts)", len(normalized_texts))
@@ -886,27 +960,21 @@ def batch_predict_news(request: BatchNewsRequest):
         uncached_texts: list[str] = []
         uncached_indices: list[int] = []
 
-        # ── Separate cache hits from texts that need inference ─────────────────
         for i, text in enumerate(normalized_texts):
             cached = INFERENCE_CACHE.get(text)
             if cached is not None:
                 results.append(NewsResponse(**cached))
                 cache_hits += 1
             else:
-                results.append(None)  # placeholder
+                results.append(None)
                 uncached_texts.append(text)
                 uncached_indices.append(i)
 
-        # ── Run batch inference on uncached texts ──────────────────────────────
         if uncached_texts:
             timer_start = INFERENCE_LOGGER.start_timer()
-
             engine = _get_inference_engine()
 
             if engine is not None:
-                # Use InferenceEngine for batch inference.
-                # engine.predict() returns a list of plain dicts with keys:
-                # text, label, confidence, fake_probability
                 engine_results = engine.predict(uncached_texts)
                 for idx, engine_result in zip(uncached_indices, engine_results):
                     text = normalized_texts[idx]
@@ -915,7 +983,6 @@ def batch_predict_news(request: BatchNewsRequest):
                     if fake_prob is not None:
                         prob = round(float(fake_prob), 4)
                     else:
-                        # No binary label map: use label + confidence as proxy
                         label = int(engine_result.get("label", 0))
                         prob = round(confidence if label == 1 else 1.0 - confidence, 4)
                     confidence = round(confidence, 4)
@@ -929,7 +996,6 @@ def batch_predict_news(request: BatchNewsRequest):
                     INFERENCE_CACHE.set(text, response_data)
                     results[idx] = NewsResponse(**response_data)
             else:
-                # Fall back to existing predict_batch function
                 batch_probs = predict_batch(uncached_texts)
                 for idx, probs, text in zip(uncached_indices, batch_probs, uncached_texts):
                     prob_real, prob_fake = float(probs[0]), float(probs[1])
@@ -953,150 +1019,124 @@ def batch_predict_news(request: BatchNewsRequest):
                 prediction_confidence=None,
             )
 
-        return BatchNewsResponse(
-            results=results,
-            total=len(normalized_texts),
-            cache_hits=cache_hits,
-        )
+        return BatchNewsResponse(results=results, total=len(normalized_texts), cache_hits=cache_hits)
 
-    except FileNotFoundError as exc:
-        logger.error("Model not found: %s", exc)
-        raise HTTPException(status_code=503, detail="Model not available. Please train the model first.")
     except ValueError as exc:
-        logger.error("Invalid batch input: %s", exc)
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         logger.error("Batch prediction error: %s", exc)
         raise HTTPException(status_code=500, detail="Internal server error during batch prediction")
 
 
-@app.get("/health")
-def health_check():
-    """Detailed health check."""
+# ---------------------------------------------------------------------------
+# Routes — v2 predict (truthlens2 — fast REAL/FAKE classifier)
+# ---------------------------------------------------------------------------
+
+@app.get("/v2/health")
+def v2_health():
+    """Health check for the TruthLens2 (bhavaygupta2002/truthlens2) model."""
+    loaded = _v2_model is not None
+    return {
+        "status": "healthy" if loaded else "model_not_loaded",
+        "model_repo": HF_REPO_V2,
+        "model_loaded": loaded,
+        "device": str(_v2_device) if _v2_device is not None else None,
+        "labels": _v2_idx_to_label,
+    }
+
+
+@app.post("/v2/predict", response_model=V2PredictResponse, tags=["TruthLens2"])
+def v2_predict_news(request: V2PredictRequest):
+    """Classify a single news article as REAL or FAKE using
+    bhavaygupta2002/truthlens2 (RoBERTa fine-tuned on multi-source news datasets)."""
     try:
-        model_exists = MODEL_PATH.exists()
-        vectorizer_required = TRAINING_TEXT_COLUMN == "engineered_text"
-        vectorizer_exists = (not vectorizer_required) or VECTORIZER_PATH.exists()
-        vectorizer_fallback_enabled = INFERENCE_ALLOW_RAW_TEXT_FALLBACK
-        vectorizer_effective_ready = (
-            vectorizer_exists
-            if not vectorizer_required
-            else (vectorizer_exists or vectorizer_fallback_enabled)
-        )
-
-        required_files = ["config.json", "tokenizer.json"]
-        weight_files = ["model.safetensors", "pytorch_model.bin"]
-        has_weight_file = any((MODEL_PATH / f).exists() for f in weight_files) if model_exists else False
-        model_files_exist = (
-            all((MODEL_PATH / f).exists() for f in required_files) and has_weight_file
-            if model_exists
-            else False
-        )
-
-        cache_size = len(INFERENCE_CACHE.memory_cache)
-
-        return {
-            "status": (
-                "healthy"
-                if model_exists and model_files_exist and vectorizer_effective_ready
-                else "degraded"
-            ),
-            "model_path": str(MODEL_PATH),
-            "model_exists": model_exists,
-            "model_files_complete": model_files_exist,
-            "training_text_column": TRAINING_TEXT_COLUMN,
-            "vectorizer_required": vectorizer_required,
-            "vectorizer_exists": vectorizer_exists,
-            "vectorizer_fallback_enabled": vectorizer_fallback_enabled,
-            "vectorizer_effective_ready": vectorizer_effective_ready,
-            "vectorizer_path": str(VECTORIZER_PATH),
-            "inference_cache_entries": cache_size,
-        }
+        result = _v2_predict_single(request.text)
+        return V2PredictResponse(text_preview=request.text[:200], **result)
     except Exception as exc:
-        logger.error("Health check failed: %s", exc)
-        return {
-            "status": "unhealthy",
-            "error": str(exc),
-            "error_type": type(exc).__name__,
-        }
+        logger.error("V2 prediction failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Prediction error: {exc}")
 
+
+@app.post("/v2/batch-predict", response_model=V2BatchPredictResponse, tags=["TruthLens2"])
+def v2_batch_predict_news(request: V2BatchPredictRequest):
+    """Classify up to 50 news articles in a single batched forward pass using
+    bhavaygupta2002/truthlens2."""
+    try:
+        if not request.texts:
+            raise ValueError("texts list is empty")
+        raw_results = _v2_predict_batch(request.texts)
+        responses = [
+            V2PredictResponse(text_preview=text[:200], **result)
+            for text, result in zip(request.texts, raw_results)
+        ]
+        return V2BatchPredictResponse(results=responses, total=len(responses))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.error("V2 batch prediction failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Batch prediction error: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Routes — deep analysis
+# ---------------------------------------------------------------------------
 
 @app.post("/analyze", response_model=AnalysisResponse)
 def analyze_news(request: NewsRequest):
-    """
-    Unified deep-analysis endpoint.
-
-    Returns model prediction plus the full suite of linguistic, narrative,
-    framing, rhetoric, discourse, propaganda-pattern, and credibility-profile
-    analyses.
-
-    Full analysis results are cached for one hour so repeated requests for
-    the same text are served without re-running all subsystems.
-    """
+    """Unified deep-analysis endpoint: prediction + linguistic, narrative,
+    framing, rhetoric, discourse, propaganda, and credibility analysis."""
     try:
         text = ensure_non_empty_text(request.text, name="request.text")
         logger.info("Received /analyze request (text length: %d)", len(text))
         timer_start = INFERENCE_LOGGER.start_timer()
 
-        # ── Cache lookup ───────────────────────────────────────────────────────
         cache_key = f"analyze:{text}"
         cached = INFERENCE_CACHE.get(cache_key)
         if cached is not None:
-            logger.debug("Cache hit for /analyze")
             return AnalysisResponse(**cached)
 
-        # ── 1. Model prediction ────────────────────────────────────────────────
-        # Use the ML model when available; fall back to a lexicon-based
-        # heuristic so every downstream linguistic / explainability step
-        # still runs even before the model has been trained.
         _model_unavailable = False
         try:
             prediction_result = predict(text)
             fake_probability, prediction, confidence = _decode_prediction_result(prediction_result)
             _analyze_predict_fn = predict_batch
         except FileNotFoundError:
-            _model_unavailable = True
-            _fallback = _heuristic_predict_fn(text)
-            fake_probability = _fallback["fake_probability"]
-            prediction = _fallback["prediction"]
-            confidence = _fallback["confidence"]
-            _analyze_predict_fn = _heuristic_predict_fn
+            engine = _get_inference_engine()
+            if engine is not None:
+                er = engine.predict_single(text)
+                fake_probability = float(er.get("fake_probability") or 0.5)
+                confidence = float(er.get("confidence") or 0.5)
+                prediction = "FAKE" if fake_probability > 0.5 else "REAL"
+                _analyze_predict_fn = predict_batch
+            else:
+                _model_unavailable = True
+                _fallback = _heuristic_predict_fn(text)
+                fake_probability = _fallback["fake_probability"]
+                prediction = _fallback["prediction"]
+                confidence = _fallback["confidence"]
+                _analyze_predict_fn = _heuristic_predict_fn
 
-        # ── 2. Bias + emotion (lexicon-based) ─────────────────────────────────
         bias_result = compute_bias_features(text)
         emotion_result = EMOTION_ANALYZER.analyze(text)
         emotion_scores: dict[str, float] = getattr(emotion_result, "emotion_scores", {})
 
-        # ── 3. Narrative analysis ──────────────────────────────────────────────
         narrative_roles: dict = _safe_run(NARRATIVE_ROLE_EXTRACTOR.analyze, request.text)
         hero_entities: list = narrative_roles.get("hero_entities", [])
         villain_entities: list = narrative_roles.get("villain_entities", [])
         victim_entities: list = narrative_roles.get("victim_entities", [])
 
         narrative_conflict: dict = _safe_run(
-            NARRATIVE_CONFLICT_ANALYZER.analyze,
-            request.text,
-            hero_entities=hero_entities,
-            villain_entities=villain_entities,
-            victim_entities=victim_entities,
+            NARRATIVE_CONFLICT_ANALYZER.analyze, request.text,
+            hero_entities=hero_entities, villain_entities=villain_entities, victim_entities=victim_entities,
         )
         narrative_propagation: dict = _safe_run(
-            NARRATIVE_PROPAGATION_ANALYZER.analyze,
-            request.text,
-            hero_entities=hero_entities,
-            villain_entities=villain_entities,
-            victim_entities=victim_entities,
+            NARRATIVE_PROPAGATION_ANALYZER.analyze, request.text,
+            hero_entities=hero_entities, villain_entities=villain_entities, victim_entities=victim_entities,
         )
         narrative_temporal: dict = _safe_run(NARRATIVE_TEMPORAL_ANALYZER.analyze, request.text)
-
-        # ── 4. Framing ─────────────────────────────────────────────────────────
         framing: dict = _safe_run(FRAMING_ANALYZER.analyze, request.text)
-
-        # ── 5. Rhetoric + argument structure ──────────────────────────────────
         rhetorical: dict = _safe_run(RHETORICAL_DETECTOR.analyze, request.text)
         argument: dict = _safe_run(ARGUMENT_ANALYZER.analyze, request.text)
-
-        # ── 6. Discourse-level analyses ────────────────────────────────────────
         info_density: dict = _safe_run(INFO_DENSITY_ANALYZER.analyze, request.text)
         info_omission: dict = _safe_run(INFO_OMISSION_DETECTOR.analyze, request.text)
         context_omission: dict = _safe_run(CONTEXT_OMISSION_DETECTOR.analyze, request.text)
@@ -1105,7 +1145,6 @@ def analyze_news(request: NewsRequest):
         emotion_target: dict = _safe_run(EMOTION_TARGET_ANALYZER.analyze, request.text)
         source_attribution: dict = _safe_run(SOURCE_ATTRIBUTION_ANALYZER.analyze, request.text)
 
-        # ── 7. Propaganda pattern detection ───────────────────────────────────
         combined_narrative: dict = {**narrative_conflict, **narrative_propagation, **narrative_temporal}
         combined_info: dict = {**info_density, **info_omission}
         propaganda_patterns: dict = _safe_run(
@@ -1117,13 +1156,9 @@ def analyze_news(request: NewsRequest):
             information_features=combined_info,
         )
 
-        # ── 8. Credibility profile ─────────────────────────────────────────────
         combined_discourse: dict = {
-            **discourse_coherence,
-            **context_omission,
-            **info_density,
-            **info_omission,
-            **source_attribution,
+            **discourse_coherence, **context_omission,
+            **info_density, **info_omission, **source_attribution,
         }
         credibility_profile: dict = _safe_run(
             BIAS_PROFILE_BUILDER.build_profile,
@@ -1134,10 +1169,8 @@ def analyze_news(request: NewsRequest):
             ideology=ideological,
         )
 
-        # ── 9. Graph analysis ──────────────────────────────────────────────────
         raw_graph_result: dict = _safe_run(GRAPH_PIPELINE.run, request.text)
         graph_result: dict = _serialize_graph_result(raw_graph_result)
-
         entity_graph: dict = graph_result.get("entity_graph", {})
         entity_embeddings: list = []
         if entity_graph:
@@ -1147,10 +1180,7 @@ def analyze_news(request: NewsRequest):
             except Exception as emb_err:
                 logger.warning("Entity graph embedding failed: %s", emb_err)
 
-        raw_temporal = _safe_run(
-            lambda t: TEMPORAL_GRAPH_ANALYZER.analyze(t).to_dict(), request.text
-        )
-
+        raw_temporal = _safe_run(lambda t: TEMPORAL_GRAPH_ANALYZER.analyze(t).to_dict(), request.text)
         graph_analysis: dict = {
             "entity_graph": entity_graph,
             "entity_graph_metrics": graph_result.get("entity_graph_metrics", {}),
@@ -1161,24 +1191,15 @@ def analyze_news(request: NewsRequest):
             "temporal_graph": raw_temporal,
         }
 
-        # ── 10. Explainability ─────────────────────────────────────────────────
         emotion_explanation = _safe_run(explain_emotion, request.text)
         try:
             lime_result = explain_prediction(
-                _analyze_predict_fn,
-                request.text,
-                num_features=8,
-                num_samples=LIME_NUM_SAMPLES,
+                _analyze_predict_fn, request.text, num_features=8, num_samples=LIME_NUM_SAMPLES,
             )
         except Exception as lime_error:
             logger.warning("LIME explanation unavailable: %s", lime_error)
-            lime_result = {
-                "text": request.text,
-                "important_features": [],
-                "error": "lime_unavailable",
-            }
+            lime_result = {"text": request.text, "important_features": [], "error": "lime_unavailable"}
 
-        # ── 11. Build response dict ────────────────────────────────────────────
         response_data: dict[str, Any] = {
             "text": _preview_text(request.text),
             "prediction": prediction,
@@ -1202,10 +1223,7 @@ def analyze_news(request: NewsRequest):
                 "temporal": narrative_temporal,
             },
             "framing": framing,
-            "rhetoric": {
-                "rhetorical_devices": rhetorical,
-                "argument_structure": argument,
-            },
+            "rhetoric": {"rhetorical_devices": rhetorical, "argument_structure": argument},
             "discourse": {
                 "coherence": discourse_coherence,
                 "context_omission": context_omission,
@@ -1218,16 +1236,10 @@ def analyze_news(request: NewsRequest):
             "propaganda_analysis": propaganda_patterns,
             "credibility_profile": credibility_profile,
             "graph_analysis": graph_analysis,
-            "explainability": {
-                "emotion_explanation": emotion_explanation,
-                "lime": lime_result,
-            },
+            "explainability": {"emotion_explanation": emotion_explanation, "lime": lime_result},
         }
 
-        # ── Cache the full analysis result ─────────────────────────────────────
         INFERENCE_CACHE.set(cache_key, response_data)
-
-        # ── Structured inference log ───────────────────────────────────────────
         credibility_score = credibility_profile.get("credibility_score")
         INFERENCE_LOGGER.log_prediction(
             article_id=None,
@@ -1236,14 +1248,9 @@ def analyze_news(request: NewsRequest):
             feature_count=len(combined_info) + len(combined_narrative),
             prediction_confidence=round(confidence, 4),
         )
-
         return AnalysisResponse(**response_data)
 
-    except FileNotFoundError as exc:
-        logger.error("Model not found during analysis: %s", exc)
-        raise HTTPException(status_code=503, detail="Model not available. Please train the model first.")
     except ValueError as exc:
-        logger.error("Invalid analysis input: %s", exc)
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         logger.error("Analysis error: %s", exc)
@@ -1252,22 +1259,11 @@ def analyze_news(request: NewsRequest):
 
 @app.post("/explain")
 def explain_article(request: NewsRequest):
-    """
-    Full explainability pipeline with credibility aggregation.
-
-    Runs LIME token attribution, emotion explanation, graph-based explanation,
-    and the ExplanationAggregator end-to-end.  The aggregated token importances
-    are then fed into the TruthLens credibility AggregationPipeline to produce
-    a complete risk + credibility profile alongside the token-level explanation.
-
-    Works with or without a trained ML model — when the model is absent a
-    lexicon-based heuristic predict function is used automatically.
-    """
+    """Full explainability pipeline with credibility aggregation."""
     try:
         text = ensure_non_empty_text(request.text, name="request.text")
         logger.info("Received /explain request (text length: %d)", len(text))
 
-        # ── Choose predict_fn (ML model or heuristic fallback) ─────────────────
         engine = _get_inference_engine()
         if engine is not None:
             def _model_predict(t: str) -> dict:
@@ -1284,7 +1280,6 @@ def explain_article(request: NewsRequest):
 
         logger.info("Explainability predict_fn source: %s", predict_source)
 
-        # ── Run explainability pipeline ─────────────────────────────────────────
         expl_config = ExplainabilityConfig(
             enabled=True,
             use_lime=True,
@@ -1297,18 +1292,11 @@ def explain_article(request: NewsRequest):
             use_explanation_metrics=True,
             cache_enabled=False,
         )
+        expl_result = run_explainability_pipeline(text=text, predict_fn=predict_fn, config=expl_config)
 
-        expl_result = run_explainability_pipeline(
-            text=text,
-            predict_fn=predict_fn,
-            config=expl_config,
-        )
-
-        # ── Credibility aggregation pipeline ────────────────────────────────────
         bias_result = compute_bias_features(text)
         emotion_result = EMOTION_ANALYZER.analyze(text)
         emotion_scores: dict = getattr(emotion_result, "emotion_scores", {}) or {}
-
         narrative_features: dict = _safe_run(NARRATIVE_CONFLICT_ANALYZER.analyze, text)
         discourse_features: dict = _safe_run(DISCOURSE_ANALYZER.analyze, text)
 
@@ -1323,14 +1311,10 @@ def explain_article(request: NewsRequest):
 
         aggregation_result: dict = {}
         try:
-            aggregation_result = AGGREGATION_PIPELINE.run(
-                profile=credibility_profile or {},
-                text=text,
-            )
+            aggregation_result = AGGREGATION_PIPELINE.run(profile=credibility_profile or {}, text=text)
         except Exception as agg_err:
             logger.warning("Credibility aggregation failed in /explain: %s", agg_err)
 
-        # ── Serialize explainability result ────────────────────────────────────
         def _ser(obj: Any) -> Any:
             if obj is None:
                 return None
@@ -1341,7 +1325,6 @@ def explain_article(request: NewsRequest):
             return obj
 
         base_pred = predict_fn(text)
-
         return {
             "text": _preview_text(text),
             "prediction": base_pred,
@@ -1360,7 +1343,6 @@ def explain_article(request: NewsRequest):
         }
 
     except ValueError as exc:
-        logger.error("Invalid /explain input: %s", exc)
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         logger.error("Explain pipeline error: %s", exc)
@@ -1369,32 +1351,21 @@ def explain_article(request: NewsRequest):
 
 @app.post("/report", response_model=ReportResponse)
 def generate_report(request: NewsRequest):
-    """
-    Generate a structured analysis report for a news article.
-
-    Runs bias and emotion analysis then packages the results into a
-    standardised report using ReportGenerator.  Lighter than /analyze —
-    no graph, LIME, or discourse sub-systems are invoked.
-    """
+    """Generate a structured analysis report (lighter than /analyze)."""
     try:
         text = ensure_non_empty_text(request.text, name="request.text")
         logger.info("Received /report request (text length: %d)", len(text))
 
-        # ── Cache lookup ───────────────────────────────────────────────────────
         cache_key = f"report:{text}"
         cached = INFERENCE_CACHE.get(cache_key)
         if cached is not None:
-            logger.debug("Cache hit for /report")
             return ReportResponse(**cached)
 
-        # ── Lightweight analysis ───────────────────────────────────────────────
         bias_result = compute_bias_features(text)
         emotion_result = EMOTION_ANALYZER.analyze(text)
         emotion_scores: dict[str, float] = getattr(emotion_result, "emotion_scores", {})
-
         narrative_roles: dict = _safe_run(NARRATIVE_ROLE_EXTRACTOR.analyze, text)
         combined_narrative: dict = {**_safe_run(NARRATIVE_CONFLICT_ANALYZER.analyze, text)}
-
         combined_discourse: dict = {**_safe_run(DISCOURSE_ANALYZER.analyze, text)}
 
         credibility_profile: dict = _safe_run(
@@ -1405,10 +1376,8 @@ def generate_report(request: NewsRequest):
             discourse=combined_discourse,
             ideology={},
         )
-
         credibility_score: Optional[float] = credibility_profile.get("credibility_score")
 
-        # ── Generate report via ReportGenerator ────────────────────────────────
         report = REPORT_GENERATOR.generate_report(
             article_text=text,
             title=None,
@@ -1436,44 +1405,32 @@ def generate_report(request: NewsRequest):
             "entity_graph": report.get("entity_graph", {}),
             "credibility_score": report.get("credibility_score"),
         }
-
         INFERENCE_CACHE.set(cache_key, response_data)
-
         return ReportResponse(**response_data)
 
     except ValueError as exc:
-        logger.error("Invalid report input: %s", exc)
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         logger.error("Report generation error: %s", exc)
         raise HTTPException(status_code=500, detail="Internal server error during report generation")
 
 
+# ---------------------------------------------------------------------------
+# Routes — inference model info + cache
+# ---------------------------------------------------------------------------
+
 @app.get("/inference/model-info", response_model=ModelInfoResponse)
 def inference_model_info():
-    """
-    Return metadata about the InferenceEngine's loaded model.
-
-    If the model directory does not yet exist (i.e. the model has not been
-    trained), returns available=false with a descriptive message.
-    """
     engine = _get_inference_engine()
     if engine is None:
         return ModelInfoResponse(
-            available=False,
-            model_path=str(MODEL_PATH),
-            device=None,
-            num_parameters=None,
-            num_trainable_parameters=None,
-            label_map=None,
+            available=False, model_path=str(MODEL_PATH), device=None,
+            num_parameters=None, num_trainable_parameters=None, label_map=None,
         )
-
     try:
         info = engine.get_model_info()
         label_map = (
-            {str(k): v for k, v in engine.label_map.items()}
-            if engine.label_map
-            else None
+            {str(k): v for k, v in engine.label_map.items()} if engine.label_map else None
         )
         return ModelInfoResponse(
             available=True,
@@ -1490,12 +1447,6 @@ def inference_model_info():
 
 @app.post("/cache/clear")
 def clear_inference_cache():
-    """
-    Clear all cached inference results.
-
-    Useful after retraining the model to ensure stale predictions are
-    not served from cache.
-    """
     try:
         INFERENCE_CACHE.clear()
         logger.info("Inference cache cleared via /cache/clear")
@@ -1505,25 +1456,17 @@ def clear_inference_cache():
         raise HTTPException(status_code=500, detail="Failed to clear inference cache")
 
 
-# ── Calibration endpoints ──────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Routes — calibration
+# ---------------------------------------------------------------------------
 
 @app.get("/calibration/info")
 def calibration_info():
-    """
-    Describe the calibration strategies available in TruthLens.
-
-    Returns metadata about each method — no ground-truth labels required.
-    To evaluate your model's calibration, call POST /calibration/metrics.
-    """
     return {
         "methods": {
             "temperature_scaling": {
                 "class": "TemperatureScaler",
-                "description": (
-                    "Learns a single scalar temperature T that divides logits before "
-                    "softmax.  T > 1 softens (reduces over-confidence), T < 1 sharpens. "
-                    "Very fast to fit; requires only a validation set of logits + labels."
-                ),
+                "description": "Learns a scalar temperature T that divides logits before softmax.",
                 "reference": "Guo et al. (2017) — 'On Calibration of Modern Neural Networks'",
                 "parameters": {
                     "lr": TemperatureScalingConfig().lr,
@@ -1533,12 +1476,8 @@ def calibration_info():
             },
             "isotonic_regression": {
                 "class": "IsotonicCalibrator",
-                "description": (
-                    "Fits a non-parametric monotonically non-decreasing function per class "
-                    "using scikit-learn IsotonicRegression.  More flexible than temperature "
-                    "scaling but requires more calibration data.  Uses a one-vs-rest strategy."
-                ),
-                "reference": "Zadrozny & Elkan (2002) — 'Transforming Classifier Scores into Accurate Multiclass Probability Estimates'",
+                "description": "Non-parametric monotone calibration using scikit-learn IsotonicRegression.",
+                "reference": "Zadrozny & Elkan (2002)",
                 "parameters": {
                     "out_of_bounds": IsotonicCalibrationConfig().out_of_bounds,
                     "increasing": IsotonicCalibrationConfig().increasing,
@@ -1546,26 +1485,11 @@ def calibration_info():
             },
         },
         "metrics_endpoint": "POST /calibration/metrics",
-        "note": (
-            "Both calibration methods require a held-out validation set with ground-truth "
-            "labels. They should be applied after training — not during live inference."
-        ),
     }
 
 
 @app.post("/calibration/metrics", response_model=CalibrationMetricsResponse)
 def compute_calibration_metrics(request: CalibrationMetricsRequest):
-    """
-    Compute calibration quality metrics for a set of model predictions.
-
-    Accepts probability distributions and corresponding ground-truth labels,
-    then returns ECE, MCE, Brier Score, and NLL.  Useful for evaluating how
-    well-calibrated the current model is before deciding whether to apply
-    temperature scaling or isotonic regression.
-
-    **probabilities** — one row per sample: [p_real, p_fake]
-    **labels**        — ground-truth index per sample (0=real, 1=fake)
-    """
     try:
         n = len(request.probabilities)
         if n == 0:
@@ -1575,21 +1499,10 @@ def compute_calibration_metrics(request: CalibrationMetricsRequest):
                 status_code=400,
                 detail=f"probabilities has {n} rows but labels has {len(request.labels)} entries",
             )
-
         metrics_obj = CalibrationMetrics(CalibrationMetricConfig(n_bins=request.n_bins))
-
         probs_tensor = torch.tensor(request.probabilities, dtype=torch.float32)
         labels_tensor = torch.tensor(request.labels, dtype=torch.long)
-
         metrics = metrics_obj.compute_all_metrics(probs_tensor, labels_tensor)
-
-        logger.info(
-            "Calibration metrics computed for %d samples: ECE=%.4f MCE=%.4f",
-            n,
-            metrics["ece"],
-            metrics["mce"],
-        )
-
         return CalibrationMetricsResponse(
             ece=round(metrics["ece"], 6),
             mce=round(metrics["mce"], 6),
@@ -1598,84 +1511,31 @@ def compute_calibration_metrics(request: CalibrationMetricsRequest):
             n_samples=n,
             n_bins=request.n_bins,
         )
-
     except HTTPException:
         raise
-    except ValueError as exc:
-        logger.error("Calibration metrics input error: %s", exc)
-        raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         logger.error("Calibration metrics computation failed: %s", exc)
         raise HTTPException(status_code=500, detail="Internal server error during calibration metric computation")
 
 
-# ── Ensemble endpoints ─────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Routes — ensemble
+# ---------------------------------------------------------------------------
 
 @app.get("/ensemble/info")
 def ensemble_info():
-    """
-    Describe the ensemble strategies supported by TruthLens.
-
-    Because ensemble models require multiple pre-loaded PyTorch modules,
-    they are built at training/evaluation time — not during live inference.
-    This endpoint documents what's available and how to use it via the
-    POST /ensemble/predict convenience endpoint.
-    """
     return {
         "strategies": {
-            "average": {
-                "class": "EnsembleModel",
-                "description": "Averages logits from all member models before applying softmax.",
-                "requires_weights": False,
-            },
-            "weighted_average": {
-                "class": "EnsembleModel / WeightedEnsembleModel",
-                "description": (
-                    "Each model's logits are multiplied by its assigned weight before "
-                    "summation.  Weights are automatically normalised to sum to 1."
-                ),
-                "requires_weights": True,
-            },
-            "majority_vote": {
-                "class": "EnsembleModel",
-                "description": (
-                    "Each model votes for a class; the class with the most votes wins. "
-                    "Final probabilities are the vote counts divided by total votes."
-                ),
-                "requires_weights": False,
-            },
-            "stacking": {
-                "class": "StackingEnsembleModel",
-                "description": (
-                    "Base models produce intermediate probability vectors which are "
-                    "concatenated and fed to a trainable meta-learner for the final prediction."
-                ),
-                "requires_weights": False,
-                "requires_meta_model": True,
-            },
+            "average": {"description": "Averages logits from all member models before applying softmax."},
+            "weighted_average": {"description": "Each model's logits multiplied by its weight before summation."},
+            "majority_vote": {"description": "Each model votes for a class; the class with most votes wins."},
         },
         "predict_endpoint": "POST /ensemble/predict",
-        "note": (
-            "POST /ensemble/predict accepts raw probability vectors from multiple sources "
-            "and combines them without needing physical model instances. "
-            "For full nn.Module-level ensembling, use EnsembleModel or WeightedEnsembleModel "
-            "directly in your training pipeline."
-        ),
     }
 
 
 @app.post("/ensemble/predict", response_model=EnsemblePredictResponse)
 def ensemble_predict(request: EnsemblePredictRequest):
-    """
-    Combine probability predictions from multiple model sources.
-
-    Accepts a list of [p_real, p_fake] probability vectors — one per model —
-    and combines them using the chosen strategy.  No physical PyTorch models
-    are required; this endpoint operates on already-computed probabilities,
-    making it useful for model-agnostic ensembling at inference time.
-
-    **strategies**: average, weighted_average, majority_vote
-    """
     try:
         valid_strategies = {"average", "weighted_average", "majority_vote"}
         if request.strategy not in valid_strategies:
@@ -1683,42 +1543,31 @@ def ensemble_predict(request: EnsemblePredictRequest):
                 status_code=400,
                 detail=f"Unknown strategy '{request.strategy}'. Must be one of {sorted(valid_strategies)}.",
             )
-
         n_models = len(request.model_probabilities)
         if n_models == 0:
             raise HTTPException(status_code=400, detail="model_probabilities must not be empty")
-
         for i, probs in enumerate(request.model_probabilities):
             if len(probs) != 2:
                 raise HTTPException(
                     status_code=400,
                     detail=f"model_probabilities[{i}] must have exactly 2 values [p_real, p_fake]",
                 )
-
         probs_tensor = torch.tensor(request.model_probabilities, dtype=torch.float32)
 
         if request.strategy == "average":
             combined = torch.mean(probs_tensor, dim=0)
-
         elif request.strategy == "weighted_average":
             if request.weights is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail="weights must be provided for 'weighted_average' strategy",
-                )
+                raise HTTPException(status_code=400, detail="weights required for weighted_average")
             if len(request.weights) != n_models:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"weights length ({len(request.weights)}) must match number of models ({n_models})",
-                )
+                raise HTTPException(status_code=400, detail="weights length must match number of models")
             weights_tensor = torch.tensor(request.weights, dtype=torch.float32)
             weight_sum = weights_tensor.sum()
             if weight_sum <= 0:
                 raise HTTPException(status_code=400, detail="Sum of weights must be positive")
             weights_tensor = weights_tensor / weight_sum
             combined = torch.sum(probs_tensor * weights_tensor.unsqueeze(1), dim=0)
-
-        else:  # majority_vote
+        else:
             votes = torch.argmax(probs_tensor, dim=1)
             n_classes = probs_tensor.shape[1]
             vote_counts = torch.zeros(n_classes)
@@ -1731,14 +1580,6 @@ def ensemble_predict(request: EnsemblePredictRequest):
         confidence = round(float(combined.max().item()), 4)
         prediction = "FAKE" if fake_prob > 0.5 else "REAL"
 
-        logger.info(
-            "Ensemble predict (%s, %d models): %s (fake_prob=%.4f)",
-            request.strategy,
-            n_models,
-            prediction,
-            fake_prob,
-        )
-
         return EnsemblePredictResponse(
             strategy=request.strategy,
             ensemble_probabilities=[round(p, 4) for p in combined_list],
@@ -1747,160 +1588,77 @@ def ensemble_predict(request: EnsemblePredictRequest):
             confidence=confidence,
             num_models=n_models,
         )
-
     except HTTPException:
         raise
-    except ValueError as exc:
-        logger.error("Ensemble predict input error: %s", exc)
-        raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         logger.error("Ensemble predict failed: %s", exc)
         raise HTTPException(status_code=500, detail="Internal server error during ensemble prediction")
 
 
-# ── Export endpoints ───────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Routes — export
+# ---------------------------------------------------------------------------
 
 @app.get("/export/info")
 def export_info():
-    """
-    Describe the model export and quantization formats supported by TruthLens.
-
-    Exporting requires the model to be trained and available at the configured
-    path.  Use POST /export/onnx or POST /export/torchscript to trigger an
-    export once the model is ready.
-    """
     engine = _get_inference_engine()
-    model_ready = engine is not None
-
     return {
-        "model_ready": model_ready,
+        "model_ready": engine is not None,
         "model_path": str(MODEL_PATH),
         "formats": {
             "onnx": {
-                "class": "ONNXExporter",
                 "endpoint": "POST /export/onnx",
-                "description": (
-                    "Exports the model to ONNX (Open Neural Network Exchange) format. "
-                    "Enables deployment on ONNX Runtime, TensorRT, CoreML, and other "
-                    "hardware-accelerated inference engines."
-                ),
-                "config": {
-                    "opset_version": ONNXExportConfig().opset_version,
-                    "dynamic_batch": ONNXExportConfig().dynamic_batch,
-                    "verify_export": False,
-                },
-                "dependencies": ["onnx", "onnxruntime"],
+                "config": {"opset_version": ONNXExportConfig().opset_version, "dynamic_batch": ONNXExportConfig().dynamic_batch},
             },
             "torchscript": {
-                "class": "TorchScriptExporter",
                 "endpoint": "POST /export/torchscript",
-                "description": (
-                    "Exports the model to TorchScript (.pt) format using tracing. "
-                    "Enables Python-free deployment via the PyTorch C++ runtime, "
-                    "mobile environments, and high-performance inference services."
-                ),
-                "config": {
-                    "method": TorchScriptExportConfig().method,
-                    "verify_export": False,
-                },
+                "config": {"method": TorchScriptExportConfig().method},
             },
-        },
-        "quantization": {
-            "class": "QuantizationEngine",
-            "methods": {
-                "dynamic": "Quantizes weights at load time; activations at run time.  No calibration data needed.",
-                "static": "Quantizes both weights and activations using calibration data. Requires a representative dataset.",
-                "qat": "Quantization Aware Training — inserts fake-quantization nodes before fine-tuning.",
-            },
-            "note": (
-                "Quantization is applied to the exported model artifact, not the live "
-                "serving model. Integrate QuantizationEngine into your training/export pipeline."
-            ),
         },
     }
 
 
 @app.post("/export/onnx", response_model=ExportResponse)
 def export_onnx(request: ExportRequest):
-    """
-    Export the loaded TruthLens model to ONNX format.
-
-    Requires the model to be trained and the InferenceEngine to be available.
-    The exported .onnx file is written to the path specified in output_path.
-    """
     try:
         engine = _get_inference_engine()
         if engine is None:
-            raise HTTPException(
-                status_code=503,
-                detail="Model not available. Train the model first before exporting.",
-            )
-
+            raise HTTPException(status_code=503, detail="Model not available.")
         model = engine.model
         if model is None:
             raise HTTPException(status_code=503, detail="Model not loaded in InferenceEngine")
-
         max_length = SETTINGS.model.max_length
         example_input = torch.zeros(1, max_length, dtype=torch.long)
-
         output_path = ONNX_EXPORTER.export(model, example_input, request.output_path)
-
-        logger.info("ONNX export completed: %s", output_path)
         return ExportResponse(
-            format="onnx",
-            output_path=str(output_path),
-            success=True,
-            message=f"Model successfully exported to ONNX at '{output_path}'",
+            format="onnx", output_path=str(output_path), success=True,
+            message=f"Model exported to ONNX at '{output_path}'",
         )
-
     except HTTPException:
         raise
-    except RuntimeError as exc:
+    except Exception as exc:
         logger.error("ONNX export failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"ONNX export failed: {exc}")
-    except Exception as exc:
-        logger.error("Unexpected ONNX export error: %s", exc)
-        raise HTTPException(status_code=500, detail="Internal server error during ONNX export")
 
 
 @app.post("/export/torchscript", response_model=ExportResponse)
 def export_torchscript(request: ExportRequest):
-    """
-    Export the loaded TruthLens model to TorchScript (.pt) format.
-
-    Requires the model to be trained and the InferenceEngine to be available.
-    The exported .pt file is written to the path specified in output_path.
-    """
     try:
         engine = _get_inference_engine()
         if engine is None:
-            raise HTTPException(
-                status_code=503,
-                detail="Model not available. Train the model first before exporting.",
-            )
-
+            raise HTTPException(status_code=503, detail="Model not available.")
         model = engine.model
         if model is None:
             raise HTTPException(status_code=503, detail="Model not loaded in InferenceEngine")
-
         max_length = SETTINGS.model.max_length
         example_input = torch.zeros(1, max_length, dtype=torch.long)
-
         output_path = TORCHSCRIPT_EXPORTER.export(model, example_input, request.output_path)
-
-        logger.info("TorchScript export completed: %s", output_path)
         return ExportResponse(
-            format="torchscript",
-            output_path=str(output_path),
-            success=True,
-            message=f"Model successfully exported to TorchScript at '{output_path}'",
+            format="torchscript", output_path=str(output_path), success=True,
+            message=f"Model exported to TorchScript at '{output_path}'",
         )
-
     except HTTPException:
         raise
-    except RuntimeError as exc:
+    except Exception as exc:
         logger.error("TorchScript export failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"TorchScript export failed: {exc}")
-    except Exception as exc:
-        logger.error("Unexpected TorchScript export error: %s", exc)
-        raise HTTPException(status_code=500, detail="Internal server error during TorchScript export")

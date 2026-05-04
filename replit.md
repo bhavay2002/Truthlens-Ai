@@ -6,6 +6,21 @@ TruthLens AI is a multi-layer AI platform designed for misinformation detection 
 ## User Preferences
 I want iterative development and detailed explanations. I want to be asked before you make major changes. Do not make changes to files outside of the `src/` directory unless explicitly instructed.
 
+## API Entry Points
+
+| File | Usage | Start command |
+|------|-------|---------------|
+| `api/app.py` | Original deep-analysis API | `uvicorn api.app:app --host 0.0.0.0 --port 5000` |
+| `api/main.py` | **Unified API** (app.py + truthlens2 v2 endpoints) | `uvicorn api.main:app --host 0.0.0.0 --port $PORT` |
+
+`api/main.py` is the recommended entry point for Render deployment (configured in `render.yaml`).
+
+### HuggingFace Models
+- `bhavaygupta2002/truthlens_v1` — full `MultiTaskTruthLensModel` checkpoint (propaganda/bias heads used as misinformation proxy). Loaded by `/predict`, `/batch-predict`, `/analyze`, `/explain`, `/report`.
+- `bhavaygupta2002/truthlens2` — standard `AutoModelForSequenceClassification` (RoBERTa, REAL/FAKE). Loaded by `/v2/predict` and `/v2/batch-predict`.
+
+Both models are downloaded automatically from HuggingFace at first request — no local training required.
+
 ## System Architecture
 The system is built on a FastAPI REST API using Python 3.12, served by Uvicorn. Machine learning and natural language processing tasks leverage PyTorch, Hugging Face Transformers, spaCy, NLTK, LIME, and SHAP.
 
