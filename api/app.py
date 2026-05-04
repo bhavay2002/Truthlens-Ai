@@ -159,6 +159,46 @@ AGGREGATION_PIPELINE = AggregationPipeline()
 _INFERENCE_ENGINE: Optional[InferenceEngine] = None
 
 
+class _ForwardResult:
+    """Minimal namespace returned by _MultiTaskModelWrapper.forward()."""
+    __slots__ = ("logits",)
+
+    def __init__(self, logits: "torch.Tensor") -> None:
+        self.logits = logits
+
+
+class _MultiTaskModelWrapper(torch.nn.Module):
+    """Adapts MultiTaskTruthLensModel so InferenceEngine._forward() works.
+
+    InferenceEngine._forward() calls ``self.model(**encoded).logits``, but the
+    multitask model returns a plain dict.  This wrapper extracts the logits
+    from the best available 2-class task head (propaganda → bias → first head)
+    and returns a _ForwardResult with a ``.logits`` attribute.
+    """
+
+    _PREFERRED_TASKS = ("propaganda", "bias")
+
+    def __init__(self, model: torch.nn.Module) -> None:
+        super().__init__()
+        self._inner = model
+        task_keys = list(getattr(model, "task_heads", {}).keys())
+        self._primary = next(
+            (t for t in self._PREFERRED_TASKS if t in task_keys),
+            task_keys[0] if task_keys else None,
+        )
+        logger.info("_MultiTaskModelWrapper: primary task head = %s", self._primary)
+
+    def forward(self, **inputs: Any) -> "_ForwardResult":
+        outputs = self._inner(**inputs)
+        if self._primary and self._primary in outputs:
+            logits = outputs[self._primary]["logits"]
+        else:
+            # Fall back to first task_logits entry
+            task_logits = outputs.get("task_logits", {})
+            logits = next(iter(task_logits.values()))
+        return _ForwardResult(logits=logits)
+
+
 def _build_engine_from_hf_checkpoint() -> Optional[InferenceEngine]:
     """Download checkpoint.pt from HuggingFace and manually wire up an InferenceEngine.
 
@@ -186,6 +226,79 @@ def _build_engine_from_hf_checkpoint() -> Optional[InferenceEngine]:
         for p in model.parameters():
             p.requires_grad_(False)
 
+        # Reset any cached device attributes set during training (e.g. on
+        # CUDA) so that CPU-only deployments don't hit "Torch not compiled
+        # with CUDA enabled" when the encoder's _device / _cached_device
+        # Python attributes still point at cuda after map_location="cpu".
+        #
+        # Also patch transformers version-mismatch: the checkpoint was pickled
+        # with an older transformers that stored is_cross_attention,
+        # position_embedding_type, and pruned_heads as instance attributes on
+        # RobertaAttention / RobertaSelfAttention. The current transformers
+        # version still reads them in forward() but no longer sets them via
+        # __init__ for pre-serialized objects, so we back-fill the defaults.
+        # Patch transformers version-mismatch: the checkpoint was pickled with
+        # an older transformers. The current version reads instance attributes
+        # (is_cross_attention, config, scaling, is_decoder, is_causal,
+        # layer_idx, pruned_heads) in forward() that the old __init__ never
+        # set. Back-fill safe defaults so inference works on CPU-only deploys.
+        try:
+            from transformers.models.roberta.modeling_roberta import (
+                RobertaAttention,
+                RobertaSelfAttention,
+            )
+
+            # Grab the HF config from the first RobertaModel submodule found;
+            # RobertaSelfAttention.forward reads self.config._attn_implementation.
+            _hf_config = None
+            for _m in model.modules():
+                if hasattr(_m, "config") and hasattr(getattr(_m, "config", None), "_attn_implementation"):
+                    _hf_config = _m.config
+                    break
+
+            for _idx, _m in enumerate(model.modules()):
+                # Device reset
+                if hasattr(_m, "_device"):
+                    _m._device = device
+                if hasattr(_m, "_cached_device"):
+                    _m._cached_device = device
+
+                # RobertaAttention: needs is_cross_attention
+                if isinstance(_m, RobertaAttention):
+                    if not hasattr(_m, "is_cross_attention"):
+                        _m.is_cross_attention = False
+                    if not hasattr(_m, "pruned_heads"):
+                        _m.pruned_heads = set()
+
+                # RobertaSelfAttention: needs config, scaling, is_decoder,
+                # is_causal, layer_idx (all read in the new forward signature)
+                if isinstance(_m, RobertaSelfAttention):
+                    if not hasattr(_m, "is_cross_attention"):
+                        _m.is_cross_attention = False
+                    if not hasattr(_m, "pruned_heads"):
+                        _m.pruned_heads = set()
+                    if not hasattr(_m, "position_embedding_type"):
+                        _m.position_embedding_type = "absolute"
+                    if not hasattr(_m, "config") and _hf_config is not None:
+                        _m.config = _hf_config
+                    if not hasattr(_m, "scaling"):
+                        head_size = getattr(_m, "attention_head_size", 64)
+                        _m.scaling = head_size ** -0.5
+                    if not hasattr(_m, "is_decoder"):
+                        _m.is_decoder = False
+                    if not hasattr(_m, "is_causal"):
+                        _m.is_causal = False
+                    if not hasattr(_m, "layer_idx"):
+                        _m.layer_idx = None
+
+        except ImportError:
+            # Transformers not installed with RoBERTa — skip patching
+            for module in model.modules():
+                if hasattr(module, "_device"):
+                    module._device = device
+                if hasattr(module, "_cached_device"):
+                    module._cached_device = device
+
         tokenizer = AutoTokenizer.from_pretrained(encoder, use_fast=True)
 
         amp_dtype = torch.float32
@@ -210,9 +323,14 @@ def _build_engine_from_hf_checkpoint() -> Optional[InferenceEngine]:
         engine.postprocessor = Postprocessor()
         engine.use_amp = device.type == "cuda" and cfg.use_amp
         engine.amp_dtype = amp_dtype
-        engine.model = model
+        # Wrap multitask model so _forward() gets a .logits attribute back.
+        # The wrapper picks the best 2-class head (propaganda → bias) as a
+        # proxy for misinformation likelihood.
+        engine.model = _MultiTaskModelWrapper(model)
         engine.tokenizer = tokenizer
-        engine.label_map = None
+        # Map labels so _is_legacy_binary_label_map() returns True and
+        # fake_probability is populated in engine.predict() results.
+        engine.label_map = {0: "real", 1: "fake"}
         engine.prediction_service = None
 
         logger.warning(
@@ -774,14 +892,21 @@ def batch_predict_news(request: BatchNewsRequest):
             engine = _get_inference_engine()
 
             if engine is not None:
-                # Use InferenceEngine for batch inference
+                # Use InferenceEngine for batch inference.
+                # engine.predict() returns a list of plain dicts with keys:
+                # text, label, confidence, fake_probability
                 engine_results = engine.predict(uncached_texts)
                 for idx, engine_result in zip(uncached_indices, engine_results):
                     text = normalized_texts[idx]
-                    probs = engine_result.probabilities or [0.5, 0.5]
-                    fake_index = 1
-                    prob = round(float(probs[fake_index]), 4)
-                    confidence = round(max(probs), 4)
+                    fake_prob = engine_result.get("fake_probability")
+                    confidence = float(engine_result.get("confidence") or 0.5)
+                    if fake_prob is not None:
+                        prob = round(float(fake_prob), 4)
+                    else:
+                        # No binary label map: use label + confidence as proxy
+                        label = int(engine_result.get("label", 0))
+                        prob = round(confidence if label == 1 else 1.0 - confidence, 4)
+                    confidence = round(confidence, 4)
                     prediction = "FAKE" if prob > 0.5 else "REAL"
                     response_data = {
                         "text": _preview_text(text),

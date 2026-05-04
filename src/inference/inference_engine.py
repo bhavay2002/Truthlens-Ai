@@ -238,7 +238,7 @@ class InferenceEngine:
     def _validate_input(self, texts):
         if isinstance(texts, str):
             texts = [texts]
-        return ensure_non_empty_text_list(texts, "texts")
+        return ensure_non_empty_text_list(texts, name="texts")
 
     def _batchify(self, items, size):
         return [items[i:i + size] for i in range(0, len(items), size)]
