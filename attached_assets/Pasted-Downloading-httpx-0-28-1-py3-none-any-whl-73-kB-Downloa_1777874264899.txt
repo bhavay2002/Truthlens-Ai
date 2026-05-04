@@ -1,0 +1,197 @@
+Downloading httpx-0.28.1-py3-none-any.whl (73 kB)
+Downloading httpcore-1.0.9-py3-none-any.whl (78 kB)
+Downloading tokenizers-0.22.2-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (3.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.3/3.3 MB 73.2 MB/s  0:00:00
+Downloading datasets-4.8.5-py3-none-any.whl (528 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 529.0/529.0 kB 14.1 MB/s  0:00:00
+Downloading dill-0.4.1-py3-none-any.whl (120 kB)
+Downloading fsspec-2026.2.0-py3-none-any.whl (202 kB)
+Downloading multiprocess-0.70.19-py314-none-any.whl (160 kB)
+Downloading sentence_transformers-5.4.1-py3-none-any.whl (571 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 571.3/571.3 kB 10.7 MB/s  0:00:00
+Downloading accelerate-1.13.0-py3-none-any.whl (383 kB)
+Downloading spacy-3.8.13-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (32.5 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 32.5/32.5 MB 67.4 MB/s  0:00:00
+Downloading typer-0.25.1-py3-none-any.whl (58 kB)
+Downloading pydantic-2.13.3-py3-none-any.whl (471 kB)
+Downloading pydantic_core-2.46.3-cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (2.1 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.1/2.1 MB 44.7 MB/s  0:00:00
+Downloading tqdm-4.67.3-py3-none-any.whl (78 kB)
+Downloading catalogue-2.0.10-py3-none-any.whl (17 kB)
+Downloading confection-1.3.3-py3-none-any.whl (35 kB)
+Downloading cymem-2.0.13-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (252 kB)
+Downloading murmurhash-1.0.15-cp314-cp314-manylinux1_x86_64.manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_5_x86_64.whl (131 kB)
+Downloading preshed-3.0.13-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (834 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 834.9/834.9 kB 34.0 MB/s  0:00:00
+Downloading requests-2.33.1-py3-none-any.whl (64 kB)
+Downloading charset_normalizer-3.4.7-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (215 kB)
+Downloading idna-3.13-py3-none-any.whl (68 kB)
+Downloading spacy_legacy-3.0.12-py2.py3-none-any.whl (29 kB)
+Downloading spacy_loggers-1.0.5-py3-none-any.whl (22 kB)
+Downloading srsly-2.5.3-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (1.2 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.2/1.2 MB 53.5 MB/s  0:00:00
+Downloading thinc-8.3.13-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (3.8 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.8/3.8 MB 95.4 MB/s  0:00:00
+Downloading blis-1.3.3-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (11.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 11.3/11.3 MB 19.6 MB/s  0:00:00
+Downloading urllib3-2.6.3-py3-none-any.whl (131 kB)
+Downloading wasabi-1.1.3-py3-none-any.whl (27 kB)
+Downloading weasel-1.0.0-py3-none-any.whl (50 kB)
+Downloading nltk-3.9.4-py3-none-any.whl (1.6 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.6/1.6 MB 9.5 MB/s  0:00:00
+Downloading vaderSentiment-3.3.2-py2.py3-none-any.whl (125 kB)
+Downloading contractions-0.1.73-py2.py3-none-any.whl (8.7 kB)
+Downloading fastapi-0.136.1-py3-none-any.whl (117 kB)
+Downloading uvicorn-0.46.0-py3-none-any.whl (70 kB)
+Downloading gunicorn-25.3.0-py3-none-any.whl (208 kB)
+Downloading shap-0.51.0-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (1.1 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.1/1.1 MB 38.7 MB/s  0:00:00
+Downloading slicer-0.0.8-py3-none-any.whl (15 kB)
+Downloading networkx-3.6.1-py3-none-any.whl (2.1 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.1/2.1 MB 33.7 MB/s  0:00:00
+Downloading matplotlib-3.10.9-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (9.9 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 9.9/9.9 MB 33.0 MB/s  0:00:00
+Downloading seaborn-0.13.2-py3-none-any.whl (294 kB)
+Downloading wordcloud-1.9.6-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (546 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 546.3/546.3 kB 16.8 MB/s  0:00:00
+Downloading reportlab-4.5.0-py3-none-any.whl (2.0 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.0/2.0 MB 46.3 MB/s  0:00:00
+Downloading joblib-1.5.3-py3-none-any.whl (309 kB)
+Downloading pyyaml-6.0.3-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (794 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 794.2/794.2 kB 9.6 MB/s  0:00:00
+Downloading portalocker-3.2.0-py3-none-any.whl (22 kB)
+Downloading tarsafe-0.0.5-py3-none-any.whl (5.4 kB)
+Downloading aiohttp-3.13.5-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (1.7 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.7/1.7 MB 39.5 MB/s  0:00:00
+Downloading multidict-6.7.1-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (248 kB)
+Downloading yarl-1.23.0-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (101 kB)
+Downloading aiohappyeyeballs-2.6.1-py3-none-any.whl (15 kB)
+Downloading aiosignal-1.4.0-py3-none-any.whl (7.5 kB)
+Downloading annotated_doc-0.0.4-py3-none-any.whl (5.3 kB)
+Downloading annotated_types-0.7.0-py3-none-any.whl (13 kB)
+Downloading attrs-26.1.0-py3-none-any.whl (67 kB)
+Downloading certifi-2026.4.22-py3-none-any.whl (135 kB)
+Downloading click-8.3.3-py3-none-any.whl (110 kB)
+Downloading cloudpathlib-0.24.0-py3-none-any.whl (63 kB)
+Downloading contourpy-1.3.3-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (363 kB)
+Downloading cycler-0.12.1-py3-none-any.whl (8.3 kB)
+Downloading filelock-3.29.0-py3-none-any.whl (39 kB)
+Downloading fonttools-4.62.1-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (4.9 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 4.9/4.9 MB 29.8 MB/s  0:00:00
+Downloading frozenlist-1.8.0-cp314-cp314-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl (231 kB)
+Downloading h11-0.16.0-py3-none-any.whl (37 kB)
+Downloading kiwisolver-1.5.0-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (1.5 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.5/1.5 MB 19.1 MB/s  0:00:00
+Downloading packaging-26.2-py3-none-any.whl (100 kB)
+Downloading pillow-12.2.0-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (7.1 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 7.1/7.1 MB 125.7 MB/s  0:00:00
+Downloading propcache-0.4.1-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (201 kB)
+Downloading pyarrow-24.0.0-cp314-cp314-manylinux_2_28_x86_64.whl (48.9 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 48.9/48.9 MB 33.6 MB/s  0:00:01
+Downloading pyparsing-3.3.2-py3-none-any.whl (122 kB)
+Downloading python_dateutil-2.9.0.post0-py2.py3-none-any.whl (229 kB)
+Downloading regex-2026.4.4-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (800 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 800.6/800.6 kB 2.4 MB/s  0:00:00
+Downloading rich-15.0.0-py3-none-any.whl (310 kB)
+Downloading pygments-2.20.0-py3-none-any.whl (1.2 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.2/1.2 MB 20.1 MB/s  0:00:00
+Downloading markdown_it_py-4.0.0-py3-none-any.whl (87 kB)
+Downloading mdurl-0.1.2-py3-none-any.whl (10.0 kB)
+Downloading safetensors-0.7.0-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (507 kB)
+Downloading scikit_image-0.26.0-cp314-cp314-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl (13.7 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 13.7/13.7 MB 18.4 MB/s  0:00:00
+Downloading imageio-2.37.3-py3-none-any.whl (317 kB)
+Downloading lazy_loader-0.5-py3-none-any.whl (8.0 kB)
+Downloading shellingham-1.5.4-py2.py3-none-any.whl (9.8 kB)
+Downloading six-1.17.0-py2.py3-none-any.whl (11 kB)
+Downloading smart_open-7.6.0-py3-none-any.whl (64 kB)
+Downloading starlette-1.0.0-py3-none-any.whl (72 kB)
+Downloading anyio-4.13.0-py3-none-any.whl (114 kB)
+Downloading sympy-1.14.0-py3-none-any.whl (6.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 6.3/6.3 MB 15.0 MB/s  0:00:00
+Downloading mpmath-1.3.0-py3-none-any.whl (536 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 536.2/536.2 kB 8.6 MB/s  0:00:00
+Downloading textsearch-0.0.24-py2.py3-none-any.whl (7.6 kB)
+Downloading threadpoolctl-3.6.0-py3-none-any.whl (18 kB)
+Downloading tifffile-2026.5.2-py3-none-any.whl (266 kB)
+Downloading typing_extensions-4.15.0-py3-none-any.whl (44 kB)
+Downloading typing_inspection-0.4.2-py3-none-any.whl (14 kB)
+Downloading httptools-0.7.1-cp314-cp314-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl (472 kB)
+Downloading python_dotenv-1.2.2-py3-none-any.whl (22 kB)
+Downloading uvloop-0.22.1-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (4.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 4.3/4.3 MB 31.5 MB/s  0:00:00
+Downloading watchfiles-1.1.1-cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (455 kB)
+Downloading websockets-16.0-cp314-cp314-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl (185 kB)
+Downloading anyascii-0.3.3-py3-none-any.whl (345 kB)
+Downloading cloudpickle-3.1.2-py3-none-any.whl (22 kB)
+Downloading jinja2-3.1.6-py3-none-any.whl (134 kB)
+Downloading markupsafe-3.0.3-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (23 kB)
+Downloading llvmlite-0.47.0-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (56.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 56.3/56.3 MB 43.5 MB/s  0:00:01
+Downloading numba-0.65.1-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (3.8 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.8/3.8 MB 30.7 MB/s  0:00:00
+Downloading psutil-7.2.2-cp36-abi3-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl (155 kB)
+Downloading pyahocorasick-2.3.1-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (114 kB)
+Downloading wrapt-2.1.2-cp314-cp314-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl (120 kB)
+Downloading xxhash-3.7.0-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (194 kB)
+Building wheels for collected packages: langdetect, lime
+  Building wheel for langdetect (pyproject.toml): started
+  Building wheel for langdetect (pyproject.toml): finished with status 'done'
+  Created wheel for langdetect: filename=langdetect-1.0.9-py3-none-any.whl size=993332 sha256=ec697bb068adbe0dc67ff362b612adb0a434c3d59e191a61f2cbd18e6ff9163b
+  Stored in directory: /opt/render/.cache/wheels/13/60/5a/f2012969b3f7413b62b7b7063d6c9b45c93004a978cbe8ea2f
+  Building wheel for lime (pyproject.toml): started
+  Building wheel for lime (pyproject.toml): finished with status 'done'
+  Created wheel for lime: filename=lime-0.2.0.1-py3-none-any.whl size=283913 sha256=901ec5a82375e83a125b817fd0a8602ce73bfa50cb7cbcb161f58de233ee18d0
+  Stored in directory: /opt/render/.cache/wheels/eb/51/d9/c707b8fa7dee923cf3cb03edaf5c7f2bfeed5b91f5ca72f468
+Successfully built langdetect lime
+Installing collected packages: nvidia-cusparselt-cu13, mpmath, cuda-toolkit, xxhash, wrapt, websockets, wasabi, uvloop, urllib3, typing-extensions, triton, tqdm, threadpoolctl, tarsafe, sympy, spacy-loggers, spacy-legacy, slicer, six, shellingham, setuptools, safetensors, regex, pyyaml, python-dotenv, pyparsing, pygments, pyarrow, pyahocorasick, psutil, propcache, portalocker, pillow, packaging, nvidia-nvtx, nvidia-nvshmem-cu13, nvidia-nvjitlink, nvidia-nccl-cu13, nvidia-curand, nvidia-cufile, nvidia-cuda-runtime, nvidia-cuda-nvrtc, nvidia-cuda-cupti, nvidia-cublas, numpy, networkx, murmurhash, multidict, mdurl, MarkupSafe, llvmlite, kiwisolver, joblib, idna, httptools, hf-xet, h11, fsspec, frozenlist, fonttools, filelock, dill, cymem, cycler, cuda-pathfinder, confection, cloudpickle, cloudpathlib, click, charset_normalizer, certifi, catalogue, attrs, anyascii, annotated-types, annotated-doc, aiohappyeyeballs, yarl, uvicorn, typing-inspection, tifffile, textsearch, srsly, smart-open, scipy, requests, reportlab, python-dateutil, pydantic-core, preshed, nvidia-cusparse, nvidia-cufft, nvidia-cudnn-cu13, numba, nltk, multiprocess, markdown-it-py, lazy-loader, langdetect, jinja2, imageio, httpcore, gunicorn, cuda-bindings, contourpy, blis, anyio, aiosignal, watchfiles, vaderSentiment, starlette, scikit-learn, scikit-image, rich, pydantic, pandas, nvidia-cusolver, matplotlib, httpx, contractions, aiohttp, wordcloud, typer, thinc, shap, seaborn, lime, fastapi, weasel, torch, huggingface-hub, tokenizers, spacy, datasets, accelerate, transformers, sentence-transformers
+Successfully installed MarkupSafe-3.0.3 accelerate-1.13.0 aiohappyeyeballs-2.6.1 aiohttp-3.13.5 aiosignal-1.4.0 annotated-doc-0.0.4 annotated-types-0.7.0 anyascii-0.3.3 anyio-4.13.0 attrs-26.1.0 blis-1.3.3 catalogue-2.0.10 certifi-2026.4.22 charset_normalizer-3.4.7 click-8.3.3 cloudpathlib-0.24.0 cloudpickle-3.1.2 confection-1.3.3 contourpy-1.3.3 contractions-0.1.73 cuda-bindings-13.2.0 cuda-pathfinder-1.5.4 cuda-toolkit-13.0.2 cycler-0.12.1 cymem-2.0.13 datasets-4.8.5 dill-0.4.1 fastapi-0.136.1 filelock-3.29.0 fonttools-4.62.1 frozenlist-1.8.0 fsspec-2026.2.0 gunicorn-25.3.0 h11-0.16.0 hf-xet-1.4.3 httpcore-1.0.9 httptools-0.7.1 httpx-0.28.1 huggingface-hub-1.13.0 idna-3.13 imageio-2.37.3 jinja2-3.1.6 joblib-1.5.3 kiwisolver-1.5.0 langdetect-1.0.9 lazy-loader-0.5 lime-0.2.0.1 llvmlite-0.47.0 markdown-it-py-4.0.0 matplotlib-3.10.9 mdurl-0.1.2 mpmath-1.3.0 multidict-6.7.1 multiprocess-0.70.19 murmurhash-1.0.15 networkx-3.6.1 nltk-3.9.4 numba-0.65.1 numpy-2.4.4 nvidia-cublas-13.1.0.3 nvidia-cuda-cupti-13.0.85 nvidia-cuda-nvrtc-13.0.88 nvidia-cuda-runtime-13.0.96 nvidia-cudnn-cu13-9.19.0.56 nvidia-cufft-12.0.0.61 nvidia-cufile-1.15.1.6 nvidia-curand-10.4.0.35 nvidia-cusolver-12.0.4.66 nvidia-cusparse-12.6.3.3 nvidia-cusparselt-cu13-0.8.0 nvidia-nccl-cu13-2.28.9 nvidia-nvjitlink-13.0.88 nvidia-nvshmem-cu13-3.4.5 nvidia-nvtx-13.0.85 packaging-26.2 pandas-3.0.2 pillow-12.2.0 portalocker-3.2.0 preshed-3.0.13 propcache-0.4.1 psutil-7.2.2 pyahocorasick-2.3.1 pyarrow-24.0.0 pydantic-2.13.3 pydantic-core-2.46.3 pygments-2.20.0 pyparsing-3.3.2 python-dateutil-2.9.0.post0 python-dotenv-1.2.2 pyyaml-6.0.3 regex-2026.4.4 reportlab-4.5.0 requests-2.33.1 rich-15.0.0 safetensors-0.7.0 scikit-image-0.26.0 scikit-learn-1.8.0 scipy-1.17.1 seaborn-0.13.2 sentence-transformers-5.4.1 setuptools-81.0.0 shap-0.51.0 shellingham-1.5.4 six-1.17.0 slicer-0.0.8 smart-open-7.6.0 spacy-3.8.13 spacy-legacy-3.0.12 spacy-loggers-1.0.5 srsly-2.5.3 starlette-1.0.0 sympy-1.14.0 tarsafe-0.0.5 textsearch-0.0.24 thinc-8.3.13 threadpoolctl-3.6.0 tifffile-2026.5.2 tokenizers-0.22.2 torch-2.11.0 tqdm-4.67.3 transformers-5.7.0 triton-3.6.0 typer-0.25.1 typing-extensions-4.15.0 typing-inspection-0.4.2 urllib3-2.6.3 uvicorn-0.46.0 uvloop-0.22.1 vaderSentiment-3.3.2 wasabi-1.1.3 watchfiles-1.1.1 weasel-1.0.0 websockets-16.0 wordcloud-1.9.6 wrapt-2.1.2 xxhash-3.7.0 yarl-1.23.0
+[notice] A new release of pip is available: 25.3 -> 26.1
+[notice] To update, run: pip install --upgrade pip
+==> Uploading build...
+==> Uploaded in 85.5s. Compression took 57.8s
+==> Build successful 🎉
+==> Deploying...
+==> Setting WEB_CONCURRENCY=1 by default, based on available CPUs in the instance
+==> No open ports detected, continuing to scan...
+==> Docs on specifying a port: https://render.com/docs/web-services#port-binding
+==> Running 'gunicorn app:app'
+Traceback (most recent call last):
+  File "/opt/render/project/src/.venv/bin/gunicorn", line 7, in <module>
+    sys.exit(run())
+             ~~~^^
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/gunicorn/app/wsgiapp.py", line 66, in run
+    WSGIApplication("%(prog)s [OPTIONS] [APP_MODULE]", prog=prog).run()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/gunicorn/app/base.py", line 235, in run
+    super().run()
+    ~~~~~~~~~~~^^
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/gunicorn/app/base.py", line 71, in run
+    Arbiter(self).run()
+    ~~~~~~~^^^^^^
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/gunicorn/arbiter.py", line 63, in __init__
+    self.setup(app)
+    ~~~~~~~~~~^^^^^
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/gunicorn/arbiter.py", line 139, in setup
+    self.app.wsgi()
+    ~~~~~~~~~~~~~^^
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/gunicorn/app/base.py", line 66, in wsgi
+    self.callable = self.load()
+                    ~~~~~~~~~^^
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/gunicorn/app/wsgiapp.py", line 57, in load
+    return self.load_wsgiapp()
+           ~~~~~~~~~~~~~~~~~^^
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/gunicorn/app/wsgiapp.py", line 47, in load_wsgiapp
+    return util.import_app(self.app_uri)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "/opt/render/project/src/.venv/lib/python3.14/site-packages/gunicorn/util.py", line 377, in import_app
+    mod = importlib.import_module(module)
+  File "/opt/render/project/python/Python-3.14.3/lib/python3.14/importlib/__init__.py", line 88, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1398, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1371, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1335, in _find_and_load_unlocked
+ModuleNotFoundError: No module named 'app'
+==> Exited with status 1
+==> Common ways to troubleshoot your deploy: https://render.com/docs/troubleshooting-deploys
