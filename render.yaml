@@ -2,17 +2,20 @@ services:
   - type: web
     name: truthlens-ai
     runtime: python
+    pythonVersion: "3.12.0"
     buildCommand: >-
       pip install 'torch>=2.1,<3.0' --index-url https://download.pytorch.org/whl/cpu &&
       pip install -r requirements.txt &&
       python -m spacy download en_core_web_sm &&
       python -c "import nltk; nltk.download('stopwords', quiet=True); nltk.download('wordnet', quiet=True); nltk.download('punkt', quiet=True); nltk.download('punkt_tab', quiet=True); nltk.download('averaged_perceptron_tagger', quiet=True); nltk.download('omw-1.4', quiet=True)"
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --worker-class uvicorn.workers.UvicornWorker --workers 1 --timeout 120
+    startCommand: gunicorn app:app
     envVars:
       - key: TOKENIZERS_PARALLELISM
         value: "false"
       - key: PYTHONUNBUFFERED
         value: "1"
       - key: PYTHONDONTWRITEBYTECODE
+        value: "1"
+      - key: WEB_CONCURRENCY
         value: "1"
     healthCheckPath: /health
