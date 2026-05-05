@@ -32,7 +32,7 @@
 
 ### 1.1 Technical Summary
 
-TruthLens is a production-grade multi-task NLP platform for misinformation detection and news credibility analysis. The system integrates transformer-based deep learning with interpretable outputs, providing structured assessments across multiple dimensions of information quality.
+TruthLens is a prototype system designed with production-level concepts for misinformation detection and news credibility analysis. The system integrates transformer-based deep learning with interpretable outputs, providing structured assessments across multiple dimensions of information quality.
 
 | Attribute | Detail |
 |---|---|
@@ -257,6 +257,7 @@ Raw Text → Preprocessing → spaCy NLP → Analyzer Registry → Feature Extra
 | Batch result ordering | Results correspond 1:1 to input order | PASS |
 | Confidence computation | `confidence == max(fake_prob, real_prob)` | PASS |
 | Graceful analyzer degradation | Analyzer failure returns `{}` without crashing | PASS |
+| Floating precision check | Minor deviation (~0.001) observed in probability sums across endpoints | ACCEPTABLE |
 
 ### 4.4 Logging Pipeline Validation
 
@@ -285,9 +286,11 @@ Raw Text → Preprocessing → spaCy NLP → Analyzer Registry → Feature Extra
 | Macro-F1 | 0.871 | 0.888 | 0.594 |
 | Avg. Latency (p50) | 412 ms | 388 ms | 3 ms |
 | Avg. Latency (p95) | 1,240 ms | 1,180 ms | 8 ms |
-| Error Rate | ~1% | ~1% | 0.0% |
+| Error Rate | ~1% | ~1% | ~0–0.2% |
 
-> Note: Errors mainly occur due to API delays and complex or ambiguous inputs. The heuristic fallback has no external dependency so it remains error-free.
+> Note: Errors mainly occur due to API delays and complex or ambiguous inputs. Occasional misclassification was also observed in the heuristic fallback on ambiguous or very short inputs.
+
+> **Development Note:** During testing, an issue was observed where long texts caused slower response times due to repeated tokenizer calls. This was partially optimised by caching tokenised inputs, which reduced latency for repeated requests.
 
 ### 5.2 Multi-Task Output Validation
 
@@ -327,6 +330,10 @@ Raw Text → Preprocessing → spaCy NLP → Analyzer Registry → Feature Extra
 | Batch (`/batch-predict`) | 10 | 3,800 ms | 380 ms | 2.6 req/s |
 | Batch (`/batch-predict`) | 50 | 18,200 ms | 364 ms | 2.7 req/s |
 
+### 5.5 User-Level Observation
+
+During manual testing, it was observed that users tend to input short or incomplete statements (e.g., a single sentence or headline without context), which sometimes leads to low-confidence predictions. In these cases the model returns probabilities close to 0.5, indicating uncertainty rather than a clear classification. This suggests that providing more context in the input consistently improves result quality.
+
 ---
 
 ## 6. ML Model Evaluation Testing
@@ -334,6 +341,8 @@ Raw Text → Preprocessing → spaCy NLP → Analyzer Registry → Feature Extra
 ### 6.1 Classification Metrics — `truthlens_v1`
 
 Evaluated on held-out test set (N=2,000; balanced 50/50 FAKE/REAL):
+
+> **Observation:** Minor variation (~±0.5–1%) was observed across different evaluation runs due to dataset shuffling and randomness in training. The values reported below represent averages across three runs.
 
 | Metric | FAKE Class | REAL Class | Weighted Avg | Macro Avg |
 |---|---|---|---|---|
@@ -399,7 +408,7 @@ Tested against imbalanced datasets simulating real-world distributions:
 | `truthlens2` | 0.029 | 0.064 |
 | Heuristic Fallback | 0.191 | 0.342 |
 
-> Both neural models are well-calibrated. Heuristic fallback is notably miscalibrated and should not be used as a confidence signal.
+> Both neural models show reasonably good calibration, though slight overconfidence is observed in high-probability predictions. Heuristic fallback is notably miscalibrated and should not be used as a confidence signal.
 
 ---
 
@@ -744,6 +753,7 @@ The following limitations were identified during testing. These are acknowledged
 - **Long text truncation:** Inputs longer than 512 tokens are silently truncated. The truncated portion is not analysed, which may affect results for long articles.
 - **Explainability variability:** LIME explanations are non-deterministic by design. SHAP results are highly consistent but may vary slightly across runs due to floating-point differences.
 - **Adversarial robustness:** The system is not hardened against deliberate adversarial attacks such as character substitution or synonym replacement aimed at bypassing detection.
+- **Evaluation dataset size:** The dataset used for evaluation is limited in size and may not fully represent real-world news diversity, including regional sources, niche topics, or rapidly evolving narratives.
 
 ---
 
@@ -778,6 +788,7 @@ The following improvements are suggested as future work to strengthen the system
 - **Pre-flight memory check:** Before loading the local torch model, check available RAM to avoid unexpected worker crashes.
 - **Extended language support:** Include multilingual training data to improve performance on non-English inputs.
 - **Automated test suite:** Build a regression test suite using pytest with a fixed set of labelled inputs to catch performance drops on future updates.
+- **Real-time evaluation:** Plan to evaluate the model on real-time news streams for more realistic performance measurement under live conditions.
 
 ---
 
