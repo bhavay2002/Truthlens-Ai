@@ -36,3 +36,9 @@ id = "gA2UCCWhnvA5PQoz97sYn"
 uri = "file://explainability.md"
 type = "text"
 title = "explainability.md — Explainability System Documentation"
+
+[[outputs]]
+id = "DJ8tNYV8PRyQ38NhApx9F"
+uri = "file://testing.md"
+type = "text"
+title = "TruthLens AI — QA & Validation Report"
