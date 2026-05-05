@@ -42,3 +42,9 @@ id = "DJ8tNYV8PRyQ38NhApx9F"
 uri = "file://testing.md"
 type = "text"
 title = "TruthLens AI — QA & Validation Report"
+
+[[outputs]]
+id = "u0-XPGbr5rwxgq2FqHDIQ"
+uri = "file://error_handling_flowchart.md"
+type = "text"
+title = "TruthLens AI — Error Handling Flowchart (Full System)"

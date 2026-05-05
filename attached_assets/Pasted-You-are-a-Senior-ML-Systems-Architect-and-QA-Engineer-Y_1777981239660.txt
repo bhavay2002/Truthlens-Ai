@@ -1,0 +1,64 @@
+You are a Senior ML Systems Architect and QA Engineer.
+
+Your task is to analyze the provided "testing.md" document of the TruthLens system and generate a complete "Error Handling Flowchart (Full System)".
+
+Instructions:
+
+1. Deeply analyze the testing.md content, especially:
+   - Error Handling & Recovery Testing section
+   - Integration Testing (pipeline flow)
+   - System Architecture (components and data flow)
+   - Failure Injection Tests
+   - Logging & Monitoring sections
+
+2. Identify ALL possible failure points across the system:
+   - Input validation errors (empty, malformed, schema issues)
+   - Preprocessing failures (tokenization, encoding)
+   - Model inference failures (API errors, timeouts, crashes)
+   - Explainability failures (SHAP/LIME issues)
+   - Aggregation conflicts
+   - Analyzer failures
+   - External dependency failures (HuggingFace API)
+   - System-level failures (memory, latency, concurrency)
+
+3. Map each failure point to its handling strategy:
+   - Retry mechanisms
+   - Fallback models or heuristic engines
+   - Graceful degradation
+   - Logging and alerting
+   - Safe error responses
+
+4. Generate a FULL SYSTEM FLOWCHART that includes:
+   - End-to-end pipeline:
+     User Input → Validation → Preprocessing → Model → Explainability → Aggregation → Output
+   - All decision branches (success vs failure paths)
+   - Retry loops and fallback paths
+   - Logging & monitoring integration
+   - Final response handling
+
+5. Output the flowchart in THREE formats:
+
+   A. Mermaid Diagram (for documentation tools)
+   B. ASCII Flowchart (for universal compatibility)
+   C. Step-by-step textual explanation
+
+6. Ensure:
+   - Industry-level clarity (used in MLOps systems)
+   - Explicit labeling of failure types
+   - No missing edge cases
+   - Clean structured layout
+   - Logical sequencing (no broken flow)
+
+7. Add a final section:
+   "Design Justification"
+   explaining why this error-handling architecture is robust and production-ready.
+
+Important:
+- Do NOT simplify the system
+- Include fallback mechanisms (heuristic engine, degraded mode)
+- Include retry logic (HF API retry)
+- Include logging + monitoring triggers
+- Reflect real behavior from testing.md
+
+Input:
+<PASTE FULL testing.md HERE>
