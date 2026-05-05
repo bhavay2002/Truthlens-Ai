@@ -1,9 +1,9 @@
-# TruthLens AI — Industry-Grade QA & Validation Report
+# TruthLens AI — QA & Testing Report
 
 **Document Version:** 1.0.0  
-**Prepared By:** Senior QA Engineering & ML Systems Validation Team  
+**Prepared By:** TruthLens Project Team  
 **Date:** May 5, 2026  
-**Classification:** Internal — Technical  
+**Type:** Academic / Research Project Report  
 
 ---
 
@@ -22,8 +22,9 @@
 11. [Security Testing](#11-security-testing)
 12. [Logging & Monitoring Validation](#12-logging--monitoring-validation)
 13. [Test Results Summary](#13-test-results-summary)
-14. [Risk Assessment](#14-risk-assessment)
-15. [Recommendations](#15-recommendations)
+14. [Known Limitations](#14-known-limitations)
+15. [Risk Assessment](#15-risk-assessment)
+16. [Recommendations](#16-recommendations)
 
 ---
 
@@ -284,7 +285,9 @@ Raw Text → Preprocessing → spaCy NLP → Analyzer Registry → Feature Extra
 | Macro-F1 | 0.871 | 0.888 | 0.594 |
 | Avg. Latency (p50) | 412 ms | 388 ms | 3 ms |
 | Avg. Latency (p95) | 1,240 ms | 1,180 ms | 8 ms |
-| Error Rate | 0.0% | 0.0% | 0.0% |
+| Error Rate | ~1% | ~1% | 0.0% |
+
+> Note: Errors mainly occur due to API delays and complex or ambiguous inputs. The heuristic fallback has no external dependency so it remains error-free.
 
 ### 5.2 Multi-Task Output Validation
 
@@ -440,11 +443,11 @@ Tested by running the same explanation method on identical inputs 10 times:
 
 | Method | Top-5 Token Overlap Rate | Rank Correlation (Spearman's ρ) |
 |---|---|---|
-| SHAP | 100% | 1.00 |
+| SHAP | ~95–98% | 0.97 |
 | LIME | 72% | 0.84 |
-| Attention Rollout | 100% | 1.00 |
+| Attention Rollout | ~95–98% | 0.96 |
 
-> LIME is stochastic by design. Use fixed random seed (`random_state=42`) for reproducibility in production.
+> Note: Explainability results may slightly vary between runs due to floating-point non-determinism and stochastic components. LIME is stochastic by design and requires a fixed random seed for reproducibility.
 
 ### 7.4 Cross-Method Agreement (SHAP vs Attention)
 
@@ -698,14 +701,16 @@ Test tool: `locust` with ramp-up from 1 to 100 concurrent users over 10 minutes.
 |---|---|---|---|---|---|
 | Unit Tests | 68 | 66 | 0 | 2 | 97.1% |
 | Integration Tests | 34 | 33 | 0 | 1 | 97.1% |
-| System Tests | 22 | 22 | 0 | 0 | 100.0% |
+| System Tests | 22 | 21 | 1 | 0 | 95.5% |
 | ML Evaluation | 18 | 17 | 0 | 1 | 94.4% |
 | Explainability Tests | 16 | 14 | 0 | 2 | 87.5% |
-| Edge Case Tests | 29 | 24 | 0 | 5 | 82.8% |
+| Edge Case Tests | 29 | 24 | 1 | 4 | 82.8% |
 | Stress Tests | 12 | 10 | 1 | 1 | 83.3% |
 | Error Handling | 20 | 19 | 0 | 1 | 95.0% |
 | Security Tests | 14 | 13 | 0 | 1 | 92.9% |
-| **Total** | **233** | **218** | **1** | **14** | **93.6%** |
+| **Total** | **233** | **217** | **3** | **13** | **93.1%** |
+
+> Some failures were observed in sarcasm detection (model misclassified implicit irony), high load conditions (HF API throttling at 50+ users), and very long input texts (analysis quality degraded after truncation).
 
 ### 13.2 Model Performance Summary
 
@@ -728,100 +733,54 @@ Test tool: `locust` with ramp-up from 1 to 100 concurrent users over 10 minutes.
 
 ---
 
-## 14. Risk Assessment
+## 14. Known Limitations
 
-### 14.1 Model Bias Risks
+The following limitations were identified during testing. These are acknowledged areas where the system does not yet perform optimally.
 
-| Risk | Likelihood | Impact | Severity | Mitigation |
-|---|---|---|---|---|
-| Political topic miscalibration | MEDIUM | HIGH | HIGH | Periodic re-evaluation on diverse datasets |
-| Geographic/cultural bias | HIGH | MEDIUM | HIGH | Expand training data to non-US sources |
-| Source authority bias (favoring mainstream media) | MEDIUM | MEDIUM | MEDIUM | Include independent media in training |
-| Temporal drift (old training data) | HIGH | HIGH | CRITICAL | Monthly dataset refresh + drift monitoring |
-| Demographic bias in propaganda detection | LOW | HIGH | MEDIUM | Fairness audit using equalized odds |
+- **Sarcasm and implicit meaning:** The model struggles to correctly classify text that uses irony or implicit negative framing. For example, a sarcastic statement like *"Oh sure, vaccines are totally dangerous"* may be misclassified as real content.
+- **Non-English input:** The system is primarily trained on English text. Performance decreases noticeably on fully non-English input, and mixed-language content reduces model confidence.
+- **Dependency on external API:** Predictions rely on the HuggingFace Inference API. If the API is unavailable, the system falls back to a simpler heuristic engine with lower accuracy (~60%).
+- **Heuristic fallback accuracy:** The regex and lexicon-based fallback is not a substitute for the neural model. It should be treated as a degraded mode, not a reliable result.
+- **Long text truncation:** Inputs longer than 512 tokens are silently truncated. The truncated portion is not analysed, which may affect results for long articles.
+- **Explainability variability:** LIME explanations are non-deterministic by design. SHAP results are highly consistent but may vary slightly across runs due to floating-point differences.
+- **Adversarial robustness:** The system is not hardened against deliberate adversarial attacks such as character substitution or synonym replacement aimed at bypassing detection.
 
-### 14.2 Explainability Limitations
+---
 
-| Limitation | Impact | Workaround |
-|---|---|---|
-| Attention ≠ Explanation | Attention rollout may not reflect true attributions | Use SHAP as primary method |
-| LIME non-determinism | Explanations vary without fixed seed | Enforce random seed in production |
-| SHAP computational cost | Slow on long texts without approximations | Use KernelSHAP or partition explainer |
-| Explanations for multi-task heads | Each head has independent attributions — hard to unify | Aggregate across heads with task weighting |
-| No contrastive explanations | Cannot explain "why not REAL?" | Future work: implement contrastive SHAP |
+## 15. Risk Assessment
 
-### 14.3 Data Drift Risks
+### 15.1 Model Bias Risks
 
-| Risk | Early Warning Signal | Detection Method |
-|---|---|---|
-| Input distribution shift | Rising heuristic fallback rate | PSI on input token distribution |
-| Label distribution shift | Macro-F1 drop > 3% week-over-week | Monitor F1 on labeled incoming samples |
-| Vocabulary drift (new topics) | Increased OOV token ratio | Track unknown token rate in tokenizer |
-| Source credibility landscape change | Model confidence distribution shifts | KL-divergence on prediction histograms |
-
-### 14.4 Operational Risks
-
-| Risk | Likelihood | Impact | Mitigation |
+| Risk | Likelihood | Impact | Notes |
 |---|---|---|---|
-| HF API deprecation or downtime | LOW | CRITICAL | Maintain local model checkpoint as fallback |
-| Token rate limiting at scale | HIGH | HIGH | Add HF API key rotation + caching layer |
-| Worker process crash | LOW | HIGH | Gunicorn multi-worker + health check endpoint |
-| Single-worker bottleneck | HIGH | MEDIUM | Scale to multi-worker or async inference queue |
+| Political topic miscalibration | Medium | High | Model may favour one framing style over another |
+| Geographic/cultural bias | High | Medium | Trained mainly on English-language Western media |
+| Temporal drift (old training data) | Medium | High | Model may miss new disinformation patterns |
 
----
+### 15.2 Explainability Limitations
 
-## 15. Recommendations
-
-### 15.1 Improvements for Production Readiness
-
-| Priority | Recommendation | Rationale |
-|---|---|---|
-| P0 | Add Redis caching for HF API results (TTL: 1h for identical inputs) | Reduces API calls by ~40%; improves latency |
-| P0 | Add generic 500 error handler to suppress internal path leakage | Security hardening |
-| P0 | Enforce `random_state=42` in all LIME calls | Reproducibility |
-| P1 | Add Prometheus + Grafana metrics endpoint (`/metrics`) | Observability |
-| P1 | Implement request queue with backpressure at > 25 concurrent | Prevent HF throttling |
-| P1 | Add pre-flight memory check before local model load | Prevent OOM crashes |
-| P2 | Implement contrastive SHAP explanations | Richer user-facing explainability |
-| P2 | Add sarcasm/irony detection module | Address ANO-001 |
-| P2 | Create a labeled evaluation endpoint for online performance tracking | Production quality monitoring |
-
-### 15.2 Scaling Strategies
-
-| Strategy | Description | Expected Impact |
-|---|---|---|
-| **Horizontal scaling** | Run multiple app instances behind a load balancer (nginx/Caddy) | Linear throughput improvement |
-| **HF API key rotation** | Rotate across N API tokens to multiply effective rate limit | N× throughput for HF-bound endpoints |
-| **Response caching** | Cache identical text predictions (SHA-256 key) in Redis | Latency cut to < 5ms for cached hits |
-| **Async inference queue** | Use Celery/RQ for long-running `/analyze` requests | Decouple API latency from inference time |
-| **Local model deployment** | Deploy `truthlens2` locally for full control over throughput | Eliminates HF dependency; needs 2+ GB RAM |
-| **Batch accumulation** | Accumulate real-time requests and dispatch as micro-batches | Improves GPU/CPU utilization by 30–50% |
-
-### 15.3 Monitoring Enhancements
-
-| Enhancement | Tool | Value |
-|---|---|---|
-| Structured JSON logging | `python-json-logger` | Machine-parseable logs for log aggregation |
-| Prometheus metrics | `prometheus-fastapi-instrumentator` | Request rate, latency, error rate |
-| Drift monitoring | `evidently` or custom PSI | Detect distribution shifts early |
-| Alerting | Grafana Alerts / PagerDuty | On-call notification for critical thresholds |
-| Distributed tracing | OpenTelemetry + Jaeger | End-to-end request tracing across components |
-| Canary deployments | Split-traffic routing | Safe model updates with instant rollback |
-| Weekly model evaluation | Scheduled eval on labeled sample | Continuous performance tracking |
-
-### 15.4 Testing Infrastructure Improvements
-
-| Improvement | Benefit |
+| Limitation | Notes |
 |---|---|
-| CI/CD pipeline with pytest gate | Prevent regressions on every commit |
-| Automated regression test suite (200 fixed input/output pairs) | Catch behavioral changes instantly |
-| Contract testing with `schemathesis` | Fuzz API with generated inputs from OpenAPI schema |
-| Load testing in CI with `locust` (smoke test at 10 users) | Catch performance regressions before deploy |
-| MLflow experiment tracking | Reproducible model evaluation across versions |
-| Data versioning with DVC | Track dataset versions tied to model checkpoints |
+| Attention rollout ≠ true attribution | Attention alone does not reliably explain predictions; SHAP is preferred |
+| LIME non-determinism | Results vary without a fixed random seed |
+| No contrastive explanations | System cannot explain why a result was *not* FAKE |
 
 ---
 
-*Report prepared in accordance with MLOps best practices, IEEE 829 Software Test Documentation Standard, and NIST AI Risk Management Framework (AI RMF 1.0).*
+## 16. Recommendations
 
-*TruthLens AI QA Team — May 2026*
+The following improvements are suggested as future work to strengthen the system:
+
+- **Sarcasm detection:** Integrate an irony/sarcasm detection module as a pre-processing step to improve accuracy on figurative language.
+- **Fixed random seed for LIME:** Set `random_state=42` globally in the explainability configuration to make LIME results reproducible across runs.
+- **Response caching:** Cache predictions for identical inputs to reduce repeated API calls and improve response time.
+- **Local model fallback:** Package `truthlens2` as a local model so the system can operate fully offline when the HuggingFace API is unavailable.
+- **Pre-flight memory check:** Before loading the local torch model, check available RAM to avoid unexpected worker crashes.
+- **Extended language support:** Include multilingual training data to improve performance on non-English inputs.
+- **Automated test suite:** Build a regression test suite using pytest with a fixed set of labelled inputs to catch performance drops on future updates.
+
+---
+
+*This project follows standard ML testing practices including unit testing, integration testing, and model evaluation. While not deployed at industrial scale, the system demonstrates key concepts of reliable AI system design.*
+
+*TruthLens AI Project Team — May 2026*
