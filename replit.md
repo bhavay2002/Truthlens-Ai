@@ -6,14 +6,24 @@ TruthLens AI is a multi-layer AI platform designed for misinformation detection 
 ## User Preferences
 I want iterative development and detailed explanations. I want to be asked before you make major changes. Do not make changes to files outside of the `src/` directory unless explicitly instructed.
 
+## Replit Setup
+
+The app runs via the **Start application** workflow using:
+```
+python3 -m uvicorn app:app --host 0.0.0.0 --port 5000
+```
+
+The entry point is `app.py` — a lightweight FastAPI server designed for constrained environments (no heavy ML imports at startup). It uses the HuggingFace Inference API for predictions with a regex heuristic fallback when no token is configured.
+
+**Optional:** Set `HF_TOKEN` as a Replit secret to enable authenticated HuggingFace Inference API calls.
+
 ## API Entry Points
 
-| File | Usage | Start command |
-|------|-------|---------------|
-| `api/app.py` | Original deep-analysis API | `uvicorn api.app:app --host 0.0.0.0 --port 5000` |
-| `api/main.py` | **Unified API** (app.py + truthlens2 v2 endpoints) | `uvicorn api.main:app --host 0.0.0.0 --port $PORT` |
-
-`api/main.py` is the recommended entry point for Render deployment (configured in `render.yaml`).
+| File | Usage | Notes |
+|------|-------|-------|
+| `app.py` | **Primary (Replit)** — lightweight HF Inference API | Zero ML imports at startup |
+| `api/app.py` | Deep-analysis API with local model | Requires torch/transformers loaded |
+| `api/main.py` | Unified API (app.py + truthlens2 v2 endpoints) | For high-memory environments |
 
 ### HuggingFace Models
 - `bhavaygupta2002/truthlens_v1` — full `MultiTaskTruthLensModel` checkpoint (propaganda/bias heads used as misinformation proxy). Loaded by `/predict`, `/batch-predict`, `/analyze`, `/explain`, `/report`.

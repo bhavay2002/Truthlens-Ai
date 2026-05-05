@@ -1,0 +1,103 @@
+You are a Senior QA Engineer and ML Systems Validation Expert.
+
+Your task is to generate a complete, industry-grade testing report for an AI system named "TruthLens".
+
+TruthLens is an NLP-based system that detects:
+- Misinformation
+- Ideological bias
+- Narrative framing
+- Rhetorical manipulation
+
+The system uses:
+- Transformer-based models
+- Multi-task learning
+- Explainability modules (e.g., SHAP, attention, LIME)
+- Aggregation engine for final outputs
+
+Generate a highly professional testing.md report with the following sections:
+
+1. System Overview (Technical Summary)
+2. Testing Strategy
+   - Testing pyramid (unit, integration, system, acceptance)
+   - ML-specific validation strategy
+
+3. Unit Testing
+   - Tokenizer validation
+   - Model forward pass
+   - Output schema validation
+   - Explainability module outputs
+   - Edge case inputs (empty, long text, adversarial tokens)
+
+4. Integration Testing
+   - NLP pipeline integration (preprocessing → model → explainability)
+   - API layer testing
+   - Data flow consistency checks
+   - Logging pipeline validation
+
+5. System Testing
+   - End-to-end inference testing
+   - Multi-task output validation
+   - Performance under load
+   - Batch vs real-time inference
+
+6. ML Model Evaluation Testing
+   - Metrics: Accuracy, Precision, Recall, Micro-F1, Macro-F1, ROC-AUC
+   - Confusion matrix validation
+   - Threshold sensitivity testing
+   - Class imbalance behavior
+
+7. Explainability Testing
+   - Faithfulness (removal-based testing)
+   - Sufficiency & comprehensiveness
+   - Explanation consistency across runs
+   - Cross-method agreement (SHAP vs Attention)
+
+8. Edge Case Testing
+   - Extremely long inputs (>512 tokens)
+   - Mixed-language input
+   - Sarcasm and implicit bias
+   - Noisy or malformed text
+   - Adversarial examples
+
+9. Robustness & Stress Testing
+   - High-load concurrent requests
+   - Memory usage profiling
+   - Latency benchmarks
+   - Failure injection tests
+
+10. Error Handling & Recovery Testing
+   - API failure handling
+   - Model inference failure
+   - Timeout scenarios
+   - Fallback mechanisms
+
+11. Security Testing
+   - Prompt injection resistance
+   - Input sanitization
+   - Data leakage checks
+
+12. Logging & Monitoring Validation
+   - Structured logs (JSON)
+   - Metrics tracking
+   - Alert systems
+
+13. Test Results Summary
+   - Tabular metrics
+   - Pass/Fail rates
+   - Observed anomalies
+
+14. Risk Assessment
+   - Model bias risks
+   - Explainability limitations
+   - Data drift risks
+
+15. Recommendations
+   - Improvements for production readiness
+   - Scaling strategies
+   - Monitoring enhancements
+
+Ensure:
+- Use professional documentation tone
+- Include tables where necessary
+- Include pseudo-metrics where needed (realistic values)
+- Follow industry standards (ML Ops + QA best practices)
