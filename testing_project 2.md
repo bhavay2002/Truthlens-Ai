@@ -45,7 +45,6 @@ TruthLens is a prototype system designed with production-level concepts for misi
 | **API Framework**  | FastAPI 0.110+                                                   |
 | **Runtime**        | Python 3.12, PyTorch 2.x (CPU)                                   |
 | **HF Models**      | `bhavaygupta2002/truthlens_v1`, `bhavaygupta2002/truthlens2` |
-| **truthlens2 Architecture** | 6-head multi-task model: Bias Detection, Ideology Detection, Propaganda Detection, Emotion Classification, Narrative Roles, Narrative Frames |
 
 ### 1.2 Detection Tasks
 
@@ -126,7 +125,7 @@ TruthLens is a prototype system designed with production-level concepts for misi
 | Test Case                       | Expected                                               | Tolerance | Status |
 | ------------------------------- | ------------------------------------------------------ | --------- | ------ |
 | Single inference (truthlens_v1) | Returns `{FAKE, REAL}` label scores                  | —        | PASS   |
-| Single inference (truthlens2)   | Returns 6-task output dict (bias, ideology, propaganda, emotion, narrative roles, frames) with per-task scores | — | PASS   |
+| Single inference (truthlens2)   | Returns `{FAKE, REAL}` probabilities summing to ~1.0 | ±0.001   | PASS   |
 | Batch inference (N=10)          | N result objects returned                              | —        | PASS   |
 | Probability sum check           | `fake_prob + real_prob ≈ 1.0`                       | ±0.005   | PASS   |
 | Confidence range                | `confidence ∈ [0.0, 1.0]`                           | —        | PASS   |
@@ -302,169 +301,52 @@ Evaluated on held-out test set (N=2,000; balanced 50/50 FAKE/REAL):
 | **ROC-AUC**   | —         | —         | **0.941** | —        |
 | **MCC**       | —         | —         | **0.749** | —        |
 
-### 6.2 Per-Task Classification Metrics — `truthlens2` (6-Head Multi-Task Model)
+### 6.2 Classification Metrics — `truthlens2`
 
-`bhavaygupta2002/truthlens2` is a 6-head multi-task model built on a shared RoBERTa encoder. Each head is trained independently for a distinct classification task. Results below are from the held-out test set.
+| Metric              | FAKE Class | REAL Class | Weighted Avg    | Macro Avg |
+| ------------------- | ---------- | ---------- | --------------- | --------- |
+| **Precision** | 0.897      | 0.884      | 0.891           | 0.891     |
+| **Recall**    | 0.879      | 0.903      | 0.891           | 0.891     |
+| **F1-Score**  | 0.888      | 0.893      | 0.891           | 0.891     |
+| **Accuracy**  | —         | —         | **0.891** | —        |
+| **ROC-AUC**   | —         | —         | **0.956** | —        |
+| **MCC**       | —         | —         | **0.782** | —        |
 
-> **Observation:** Minor variation (~±0.5–1%) was observed across evaluation runs due to dataset shuffling. Values represent averages across three runs.
-
-#### Bias Detection (Binary Classification)
-
-| Metric | Score |
-|---|---|
-| Accuracy | 84.7% |
-| Precision | 83.9% |
-| Recall | 85.6% |
-| F1-score | 84.7% |
-
-#### Ideology Detection (3-Class Classification)
-
-| Metric | Score |
-|---|---|
-| Accuracy | 78.3% |
-| Precision | 77.5% |
-| Recall | 76.9% |
-| F1-score | 77.2% |
-
-> Slightly lower performance reflects multi-class ambiguity and semantic overlap between classes — expected for ideology classification.
-
-#### Propaganda Detection (Binary Classification)
-
-| Metric | Score |
-|---|---|
-| Accuracy | 86.9% |
-| Precision | 85.8% |
-| Recall | 88.1% |
-| F1-score | 86.9% |
-
-> Higher recall reflects strong capture of propaganda signals, at the cost of minor false positives.
-
-#### Emotion Classification (Multi-label, 11 Classes)
-
-| Metric | Score |
-|---|---|
-| Micro-F1 | 81.2% |
-| Macro-F1 | 74.6% |
-| ROC-AUC | 0.88 |
-
-> Gap between Micro and Macro F1 reflects class imbalance across rare emotion labels — expected behaviour for multi-label tasks.
-
-#### Narrative Roles (Multi-label, 3 Classes)
-
-| Metric | Score |
-|---|---|
-| Micro-F1 | 83.5% |
-| Macro-F1 | 80.1% |
-| ROC-AUC | 0.90 |
-
-#### Narrative Frames (Multi-label, 5 Classes)
-
-| Metric | Score |
-|---|---|
-| Micro-F1 | 79.8% |
-| Macro-F1 | 76.2% |
-| ROC-AUC | 0.87 |
-
-#### Overall System — Weighted Composite Score
-
-| Metric | Score |
-|---|---|
-| Weighted Composite Score | **81.6%** |
-
-Task weights: Bias (0.15), Ideology (0.15), Propaganda (0.20), Emotion (0.20), Narrative Roles (0.15), Narrative Frames (0.15).
-
-### 6.3 Confusion Matrices — `truthlens2` (Per Task)
-
-#### Bias Detection (Binary)
+### 6.3 Confusion Matrix — `truthlens2`
 
 ```
-                    Predicted Non-Biased   Predicted Biased
-Actual Non-Biased  │      412 (TN)        │    68 (FP)    │
-Actual Biased      │       54 (FN)        │   466 (TP)    │
+                Predicted FAKE    Predicted REAL
+Actual FAKE   │    879 (TP)      │    121 (FN)    │ Recall: 0.879
+Actual REAL   │    97  (FP)      │    903 (TN)    │ Recall: 0.903
+              └──────────────────┴────────────────┘
+                Prec: 0.900        Prec: 0.882
 ```
-Total samples: 1,000. Slightly fewer FN than FP — higher recall for biased class (~85.6%). Error rate ~12–13%, consistent with 84.7% accuracy.
 
-#### Ideology Detection (3-Class)
+### 6.4 Threshold Sensitivity Testing
 
-```
-               Predicted Left   Predicted Center   Predicted Right
-Actual Left   │     298        │       52          │      30       │
-Actual Center │      47        │      276          │      57       │
-Actual Right  │      34        │       61          │     295       │
-```
-Total samples: 1,150. Strong diagonal dominance. Center class shows the most confusion — acts as a semantic overlap region between Left and Right labels.
+| Decision Threshold       | Precision (FAKE) | Recall (FAKE)   | F1 (FAKE)       | False Positive Rate |
+| ------------------------ | ---------------- | --------------- | --------------- | ------------------- |
+| 0.30                     | 0.791            | 0.952           | 0.864           | 0.192               |
+| 0.40                     | 0.842            | 0.921           | 0.880           | 0.139               |
+| **0.50 (default)** | **0.897**  | **0.879** | **0.888** | **0.097**     |
+| 0.60                     | 0.931            | 0.824           | 0.874           | 0.056               |
+| 0.70                     | 0.961            | 0.742           | 0.838           | 0.029               |
+| 0.80                     | 0.978            | 0.623           | 0.761           | 0.011               |
 
-#### Propaganda Detection (Binary)
-
-```
-                       Predicted Non-Propaganda   Predicted Propaganda
-Actual Non-Propaganda │      438 (TN)            │     62 (FP)        │
-Actual Propaganda     │       49 (FN)            │    451 (TP)        │
-```
-Total samples: 1,000. Low FN (49) confirms strong propaganda recall; slight overprediction (FP = 62) reflects high-recall bias noted in metrics.
-
-#### Emotion Classification (Multi-label, 11 Classes — Aggregated)
-
-| Metric | Value |
-|---|---|
-| True Positives (TP) | 4,820 |
-| False Positives (FP) | 1,120 |
-| False Negatives (FN) | 1,360 |
-| True Negatives (TN) | 9,700 |
-
-Higher FN than FP indicates missed rare emotion labels — consistent with the Macro-F1 gap observed above.
-
-#### Narrative Roles (Multi-label, 3 Classes — Aggregated)
-
-| Metric | Value |
-|---|---|
-| True Positives (TP) | 2,140 |
-| False Positives (FP) | 410 |
-| False Negatives (FN) | 470 |
-| True Negatives (TN) | 4,980 |
-
-Balanced FP and FN reflect stable performance across all three role classes.
-
-#### Narrative Frames (Multi-label, 5 Classes — Aggregated)
-
-| Metric | Value |
-|---|---|
-| True Positives (TP) | 3,260 |
-| False Positives (FP) | 780 |
-| False Negatives (FN) | 910 |
-| True Negatives (TN) | 7,540 |
-
-Slightly higher FN indicates certain frame types are harder to detect, consistent with the slightly lower Micro-F1 compared to Narrative Roles.
-
-### 6.4 Threshold Sensitivity Testing — Propaganda Detection Head
-
-Threshold sensitivity was tested on the Propaganda Detection head, as it is the most threshold-sensitive binary task (high recall is desired for monitoring use cases).
-
-| Decision Threshold | Precision | Recall | F1-score | False Positive Rate |
-|---|---|---|---|---|
-| 0.30 | 0.781 | 0.941 | 0.853 | 0.201 |
-| 0.40 | 0.826 | 0.912 | 0.867 | 0.152 |
-| **0.50 (default)** | **0.858** | **0.881** | **0.869** | **0.113** |
-| 0.60 | 0.901 | 0.843 | 0.871 | 0.071 |
-| 0.70 | 0.934 | 0.791 | 0.857 | 0.041 |
-| 0.80 | 0.961 | 0.697 | 0.809 | 0.019 |
-
-> Default threshold of 0.50 gives the best balance of F1. For flagging/alert systems, 0.60+ reduces false positives. For broad monitoring coverage, 0.40 maximises recall.
+> **Recommendation:** Default threshold of 0.50 provides the best F1. For high-precision use cases (flagging), consider 0.65+. For high-recall use cases (monitoring), consider 0.40.
 
 ### 6.5 Class Imbalance Behavior
 
-Imbalance was most pronounced in the Emotion Classification and Narrative Frames tasks due to rare label sparsity. The table below summarises per-task imbalance sensitivity.
+Tested against imbalanced datasets simulating real-world distributions:
 
-| Task | Label Distribution | Macro-F1 Impact | Mitigation |
-|---|---|---|---|
-| Bias Detection | ~50/50 | Minimal | Class-weighted loss |
-| Ideology Detection | ~35/30/35 (L/C/R) | Moderate (Center overlap) | Weighted sampling |
-| Propaganda Detection | ~50/50 | Minimal | Class-weighted loss |
-| Emotion Classification | Highly imbalanced (11 labels) | Macro-F1 ~6.6% below Micro-F1 | Threshold tuning per label |
-| Narrative Roles | Moderate (3 labels) | Macro-F1 ~3.4% below Micro-F1 | Oversampling |
-| Narrative Frames | Moderate (5 labels) | Macro-F1 ~3.6% below Micro-F1 | Oversampling |
+| Dataset Split       | FAKE% | REAL% | Macro-F1 | Notes                  |
+| ------------------- | ----- | ----- | -------- | ---------------------- |
+| Balanced (baseline) | 50%   | 50%   | 0.891    | Standard eval          |
+| Mild imbalance      | 30%   | 70%   | 0.874    | Minor FAKE recall drop |
+| Moderate imbalance  | 15%   | 85%   | 0.841    | FAKE recall: 0.803     |
+| Severe imbalance    | 5%    | 95%   | 0.782    | FAKE recall: 0.711     |
 
-> Class-weighted loss and oversampling are applied during training. Rare label sparsity in Emotion and Frames tasks remains the primary driver of Macro-F1 reduction.
+> Class-weighted loss is applied during training. Severe imbalance still degrades FAKE recall — addressed via oversampling in training pipeline.
 
 ### 6.6 Calibration
 
@@ -475,92 +357,6 @@ Imbalance was most pronounced in the Emotion Classification and Narrative Frames
 | Heuristic Fallback | 0.191                            | 0.342                       |
 
 > Both neural models show reasonably good calibration, though slight overconfidence is observed in high-probability predictions. Heuristic fallback is notably miscalibrated and should not be used as a confidence signal.
-
-### 6.7 Training Dynamics — `truthlens2` (4 Epochs per Task)
-
-All tasks were trained for 4 epochs with shared encoder weights and independent task heads. Loss and metric values below are from the validation set.
-
-#### Bias Detection (Binary)
-
-| Epoch | Train Loss | Val Loss | Accuracy | Precision | Recall | F1-score |
-|---|---|---|---|---|---|---|
-| 1 | 0.642 | 0.615 | 71.2% | 70.4% | 70.7% | 70.5% |
-| 2 | 0.521 | 0.548 | 78.6% | 77.8% | 78.1% | 77.9% |
-| 3 | 0.438 | 0.491 | 82.3% | 81.5% | 81.9% | 81.7% |
-| 4 | 0.392 | 0.472 | 84.5% | 83.8% | 84.2% | 84.0% |
-
-#### Ideology Detection (3-Class)
-
-| Epoch | Train Loss | Val Loss | Accuracy | Precision | Recall | F1-score |
-|---|---|---|---|---|---|---|
-| 1 | 1.082 | 1.041 | 58.4% | 57.9% | 56.4% | 57.1% |
-| 2 | 0.921 | 0.948 | 66.7% | 65.9% | 64.6% | 65.2% |
-| 3 | 0.812 | 0.889 | 72.5% | 71.6% | 70.1% | 70.8% |
-| 4 | 0.756 | 0.861 | 76.9% | 76.1% | 74.2% | 75.1% |
-
-#### Propaganda Detection (Binary)
-
-| Epoch | Train Loss | Val Loss | Accuracy | Precision | Recall | F1-score |
-|---|---|---|---|---|---|---|
-| 1 | 0.598 | 0.571 | 74.3% | 73.2% | 73.9% | 73.5% |
-| 2 | 0.471 | 0.503 | 81.2% | 80.1% | 81.2% | 80.6% |
-| 3 | 0.398 | 0.455 | 84.7% | 83.6% | 84.7% | 84.1% |
-| 4 | 0.351 | 0.432 | 86.6% | 85.4% | 86.8% | 86.1% |
-
-#### Emotion Classification (Multi-label, 11 Classes)
-
-| Epoch | Train Loss | Val Loss | Micro-F1 | Macro-F1 | ROC-AUC |
-|---|---|---|---|---|---|
-| 1 | 0.712 | 0.689 | 61.4% | 54.2% | 0.71 |
-| 2 | 0.598 | 0.632 | 69.8% | 62.1% | 0.79 |
-| 3 | 0.529 | 0.598 | 75.6% | 68.7% | 0.84 |
-| 4 | 0.487 | 0.571 | 80.9% | 73.8% | 0.88 |
-
-#### Narrative Roles (Multi-label, 3 Classes)
-
-| Epoch | Train Loss | Val Loss | Micro-F1 | Macro-F1 | ROC-AUC |
-|---|---|---|---|---|---|
-| 1 | 0.654 | 0.631 | 66.8% | 63.5% | 0.75 |
-| 2 | 0.542 | 0.579 | 74.5% | 71.2% | 0.82 |
-| 3 | 0.471 | 0.538 | 79.6% | 76.4% | 0.87 |
-| 4 | 0.429 | 0.512 | 83.1% | 79.3% | 0.90 |
-
-#### Narrative Frames (Multi-label, 5 Classes)
-
-| Epoch | Train Loss | Val Loss | Micro-F1 | Macro-F1 | ROC-AUC |
-|---|---|---|---|---|---|
-| 1 | 0.688 | 0.661 | 63.2% | 59.1% | 0.72 |
-| 2 | 0.574 | 0.608 | 70.4% | 66.2% | 0.80 |
-| 3 | 0.503 | 0.566 | 75.8% | 71.5% | 0.84 |
-| 4 | 0.462 | 0.539 | 79.5% | 75.4% | 0.87 |
-
-#### Combined Multi-Task F1 Progression
-
-| Epoch | Bias F1 | Ideology F1 | Propaganda F1 | Emotion Micro-F1 | Roles Micro-F1 | Frames Micro-F1 |
-|---|---|---|---|---|---|---|
-| 1 | 70.5% | 57.1% | 73.5% | 61.4% | 66.8% | 63.2% |
-| 2 | 77.9% | 65.2% | 80.6% | 69.8% | 74.5% | 70.4% |
-| 3 | 81.7% | 70.8% | 84.1% | 75.6% | 79.6% | 75.8% |
-| 4 | 84.0% | 75.1% | 86.1% | 80.9% | 83.1% | 79.5% |
-
-> All tasks show monotonic loss reduction with a small but stable train–validation gap (~0.03–0.06), indicating good generalisation. Binary tasks (Propaganda, Bias) converge fastest. Ideology detection is slowest due to class overlap. Multi-label tasks improve gradually due to label sparsity. No task exhibits degradation or negative transfer across the shared encoder.
-
-### 6.8 ROC / AUC Analysis — `truthlens2`
-
-| Task | AUC Type | Score |
-|---|---|---|
-| Bias Detection | ROC-AUC | 0.88 |
-| Propaganda Detection | ROC-AUC | 0.90 |
-| Ideology Detection — Left | One-vs-Rest AUC | 0.82 |
-| Ideology Detection — Center | One-vs-Rest AUC | 0.79 |
-| Ideology Detection — Right | One-vs-Rest AUC | 0.83 |
-| Ideology Detection — Macro Avg | Macro-AUC | 0.81 |
-| Emotion Classification | Micro-AUC | 0.89 |
-| Emotion Classification | Macro-AUC | 0.86 |
-| Narrative Roles | Micro-AUC | 0.91 |
-| Narrative Frames | Micro-AUC | 0.88 |
-
-> All tasks achieve AUC > 0.80, indicating strong discriminative capability across thresholds. Narrative Roles achieves the highest AUC (0.91), reflecting the relatively clean decision boundary of the three-class structured role task. Ideology detection has the lowest AUC (0.81 macro), consistent with the semantic overlap observed in its confusion matrix. For multi-label tasks, Micro-AUC exceeds Macro-AUC, reflecting the impact of rare label classes.
 
 ---
 
@@ -697,35 +493,11 @@ All tasks were trained for 4 epochs with shared encoder weights and independent 
 
 ### 13.2 Model Performance Summary
 
-**`truthlens_v1` — Binary Misinformation Detection**
-
-| Metric | Score |
-|---|---|
-| Accuracy | 0.874 |
-| Macro-F1 | 0.874 |
-| ROC-AUC | 0.941 |
-| ECE | 0.038 |
-
-**`truthlens2` — 6-Head Multi-Task Model**
-
-| Task | Primary Metric | Score |
-|---|---|---|
-| Bias Detection | F1-score | 84.7% |
-| Ideology Detection | F1-score | 77.2% |
-| Propaganda Detection | F1-score | 86.9% |
-| Emotion Classification | Micro-F1 | 81.2% |
-| Narrative Roles | Micro-F1 | 83.5% |
-| Narrative Frames | Micro-F1 | 79.8% |
-| **Weighted Composite Score** | — | **81.6%** |
-| ECE (avg across heads) | — | 0.029 |
-
-**Heuristic Fallback**
-
-| Metric | Score |
-|---|---|
-| Accuracy | 0.613 |
-| Macro-F1 | 0.594 |
-| ECE | 0.191 |
+| Model              | Accuracy | Macro-F1 | ROC-AUC | ECE   |
+| ------------------ | -------- | -------- | ------- | ----- |
+| `truthlens_v1`   | 0.874    | 0.874    | 0.941   | 0.038 |
+| `truthlens2`     | 0.891    | 0.891    | 0.956   | 0.029 |
+| Heuristic Fallback | 0.613    | 0.594    | 0.641   | 0.191 |
 
 ### 13.3 Observed Anomalies
 

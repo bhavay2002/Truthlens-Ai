@@ -48,3 +48,9 @@ id = "u0-XPGbr5rwxgq2FqHDIQ"
 uri = "file://error_handling_flowchart.md"
 type = "text"
 title = "TruthLens AI — Error Handling Flowchart (Full System)"
+
+[[outputs]]
+id = "_y3g2QVclLDnb-kANJ7KH"
+uri = "file://testing_project.md"
+type = "text"
+title = "TruthLens AI — QA & Testing Report (truthlens2 updated to 6-head model)"
