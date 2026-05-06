@@ -19,11 +19,11 @@
 8. [ML Model Evaluation Testing](#8-ml-model-evaluation-testing)
 9. [Explainability Testing](#9-explainability-testing)
 10. [Edge Case Testing](#10-edge-case-testing)
-11. [Robustness &amp; Stress Testing](#11-robustness--stress-testing)
-12. [Error Handling &amp; Recovery Testing](#12-error-handling--recovery-testing)
+11. [Robustness & Stress Testing](#11-robustness--stress-testing)
+12. [Error Handling & Recovery Testing](#12-error-handling--recovery-testing)
 13. [Security Testing](#13-security-testing)
 14. [Test Results Summary](#14-test-results-summary)
-15. [Development Constraints &amp; Known Limitations](#15-development-constraints--known-limitations)
+15. [Development Constraints & Known Limitations](#15-development-constraints--known-limitations)
 16. [Risk Assessment](#16-risk-assessment)
 17. [Recommendations](#17-recommendations)
 
@@ -155,9 +155,9 @@ Augmentation (train split only): synonym replacement, random swap, random deleti
 
 ---
 
-## 3. Unit Testing
+## 5. Unit Testing
 
-### 3.1 Tokenizer Validation
+### 5.1 Tokenizer Validation
 
 | Test Case                       | Input                                    | Expected                                   | Status |
 | ------------------------------- | ---------------------------------------- | ------------------------------------------ | ------ |
@@ -169,7 +169,7 @@ Augmentation (train split only): synonym replacement, random swap, random deleti
 | Special tokens in input         | `"[CLS] breaking news [SEP]"`          | Treated as literal text, not model tokens  | PASS   |
 | Numeric/code content            | `"var x = 1 + 2; // result is 3"`      | Tokenized without exception                | PASS   |
 
-### 3.2 Model Forward Pass
+### 5.2 Model Forward Pass
 
 | Test Case                       | Expected                                               | Tolerance | Status |
 | ------------------------------- | ------------------------------------------------------ | --------- | ------ |
@@ -181,7 +181,7 @@ Augmentation (train split only): synonym replacement, random swap, random deleti
 | HF API 503 handling             | Single retry after 10s delay                           | —        | PASS   |
 | HF API total failure            | Returns heuristic fallback result                      | —        | PASS   |
 
-### 3.3 Output Schema Validation
+### 5.3 Output Schema Validation
 
 **`/predict` response schema:**
 
@@ -201,24 +201,24 @@ Augmentation (train split only): synonym replacement, random swap, random deleti
 | All required fields present                        | PASS   |
 | `prediction` is exactly `"FAKE"` or `"REAL"` | PASS   |
 | Probabilities are valid floats in [0, 1]           | PASS   |
-| `confidence == max(fake_prob, real_prob)`        | PASS   |
+| `confidence == max(fake_prob, real_prob)`        | PARTIAL — minor floating-point rounding difference observed; delta < 0.001 |
 | `source` identifies inference method             | PASS   |
 | Text preview truncated to ≤ 200 characters        | PASS   |
 
-### 3.4 Analyzer Unit Tests
+### 5.4 Analyzer Unit Tests
 
 | Analyzer                        | Test Input               | Expected Behavior                 | Status |
 | ------------------------------- | ------------------------ | --------------------------------- | ------ |
 | `ArgumentMiningAnalyzer`      | Argumentative paragraph  | Premise/claim extraction          | PASS   |
-| `NarrativeRoleExtractor`      | Story with hero/villain  | Entity role dict returned         | PASS   |
+| `NarrativeRoleExtractor`      | Story with hero/villain  | Entity role dict returned         | PARTIAL — entity roles incomplete for short texts under 3 sentences |
 | `PropagandaPatternDetector`   | Loaded propaganda text   | Pattern labels + confidence       | PASS   |
-| `DiscourseCoherenceAnalyzer`  | Multi-sentence text      | Coherence score ∈ [0, 1]         | PASS   |
+| `DiscourseCoherenceAnalyzer`  | Multi-sentence text      | Coherence score ∈ [0, 1]         | PARTIAL — returns None for single-sentence input; multi-sentence works correctly |
 | `EmotionLexiconAnalyzer`      | Emotional text           | Emotion category scores dict      | PASS   |
 | `FramingAnalyzer`             | News article excerpt     | Frame taxonomy label              | PASS   |
 | `IdeologicalLanguageDetector` | Politically charged text | Ideology score + signals          | PASS   |
-| `SourceAttributionAnalyzer`   | Text with citations      | Source count + credibility signal | PASS   |
+| `SourceAttributionAnalyzer`   | Text with citations      | Source count + credibility signal | PARTIAL — source count works; credibility signal unreliable without explicit URLs |
 
-### 3.5 Edge Case — Unit Level
+### 5.5 Edge Case — Unit Level
 
 | Case                               | Expected                                      | Status |
 | ---------------------------------- | --------------------------------------------- | ------ |
@@ -232,9 +232,9 @@ Augmentation (train split only): synonym replacement, random swap, random deleti
 
 ---
 
-## 4. Integration Testing
+## 6. Integration Testing
 
-### 4.1 NLP Pipeline Integration
+### 6.1 NLP Pipeline Integration
 
 The full analysis pipeline is validated as a chain:
 
@@ -248,12 +248,12 @@ Raw Text → Preprocessing → spaCy NLP → Analyzer Registry → Feature Extra
 | Text → spaCy Doc              | `doc.text == input_text`               | PASS   |
 | spaCy Doc → Analyzer          | Doc passed correctly, no vocab mismatch  | PASS   |
 | Analyzer → Feature Dict       | Output is a valid, non-empty dict        | PASS   |
-| Feature Dict → Graph Pipeline | Entities resolved, graph built           | PASS   |
+| Feature Dict → Graph Pipeline | Entities resolved, graph built           | PARTIAL — graph builds correctly but node count varies for very short inputs |
 | Graph → Prediction            | Prediction includes graph-based features | PASS   |
 | Prediction → Aggregation      | `credibility_score` in output          | PASS   |
-| Aggregation → Explainability  | Explanation references correct tokens    | PASS   |
+| Aggregation → Explainability  | Explanation references correct tokens    | FAIL — explainability requires local model; not available in HF API-only mode |
 
-### 4.2 API Layer Testing
+### 6.2 API Layer Testing
 
 | Endpoint     | Method | Test                  | Expected                                   | Status |
 | ------------ | ------ | --------------------- | ------------------------------------------ | ------ |
@@ -271,9 +271,9 @@ Raw Text → Preprocessing → spaCy NLP → Analyzer Registry → Feature Extra
 
 ---
 
-## 5. System Testing
+## 7. System Testing
 
-### 5.1 End-to-End Inference Testing
+### 7.1 End-to-End Inference Testing
 
 **Test Suite:** 500 articles drawn from held-out evaluation set (250 REAL, 250 FAKE).
 
@@ -289,7 +289,7 @@ Raw Text → Preprocessing → spaCy NLP → Analyzer Registry → Feature Extra
 
 > **Development Note:** During testing, an issue was observed where long texts caused slower response times due to repeated tokenizer calls. This was partially optimised by caching tokenised inputs, which reduced latency for repeated requests.
 
-### 5.2 Multi-Task Output Validation
+### 7.2 Multi-Task Output Validation
 
 | Output Key                 | Present in Response | Valid Format           | Non-null When Analyzers Loaded |
 | -------------------------- | ------------------- | ---------------------- | ------------------------------ |
@@ -303,15 +303,15 @@ Raw Text → Preprocessing → spaCy NLP → Analyzer Registry → Feature Extra
 | `rhetorical_devices`     | Yes                 | dict                   | Yes                            |
 | `propaganda_patterns`    | Yes                 | dict                   | Yes                            |
 | `credibility_profile`    | Yes                 | dict                   | Yes                            |
-| `discourse_coherence`    | Yes                 | dict                   | Yes                            |
+| `discourse_coherence`    | Yes                 | dict                   | Partial — occasionally returns empty dict for single-sentence input |
 | `ideological_language`   | Yes                 | dict                   | Yes                            |
-| `source_attribution`     | Yes                 | dict                   | Yes                            |
+| `source_attribution`     | Yes                 | dict                   | Partial — unreliable when no citation patterns present in text |
 
-### 5.3 Performance Under Load
+### 7.3 Performance Under Load
 
 Basic stress testing was conducted by simulating concurrent requests against the API. At low concurrency (1–5 users), the system responded within about 400–1,100 ms on average. Once concurrent users exceeded approximately 20, response times grew significantly and error rates began appearing — primarily due to HuggingFace Inference API throttling rather than any internal failure. At around 50 simultaneous requests, error rates occasionally exceeded 8%. These results are expected for an API-dependent system without a request queue and are noted as a known constraint of the current architecture.
 
-### 5.4 Batch vs Real-Time Inference
+### 7.4 Batch vs Real-Time Inference
 
 | Mode                       | Input Size | Avg. Total Time | Avg. Per-Item Time | Throughput |
 | -------------------------- | ---------- | --------------- | ------------------ | ---------- |
@@ -319,15 +319,15 @@ Basic stress testing was conducted by simulating concurrent requests against the
 | Batch (`/batch-predict`) | 10         | 3,800 ms        | 380 ms             | 2.6 req/s  |
 | Batch (`/batch-predict`) | 50         | 18,200 ms       | 364 ms             | 2.7 req/s  |
 
-### 5.5 User-Level Observation
+### 7.5 User-Level Observation
 
 During manual testing, it was observed that users tend to input short or incomplete statements (e.g., a single sentence or headline without context), which sometimes leads to low-confidence predictions. In these cases the model returns probabilities close to 0.5, indicating uncertainty rather than a clear classification. This suggests that providing more context in the input consistently improves result quality.
 
 ---
 
-## 6. ML Model Evaluation Testing
+## 8. ML Model Evaluation Testing
 
-### 6.1 Classification Metrics — `truthlens_v1`
+### 8.1 Classification Metrics — `truthlens_v1`
 
 Evaluated on held-out test set (N=2,000; balanced 50/50 FAKE/REAL):
 
@@ -342,7 +342,7 @@ Evaluated on held-out test set (N=2,000; balanced 50/50 FAKE/REAL):
 | **ROC-AUC**   | —         | —         | **0.938** | —        |
 | **MCC**       | —         | —         | **0.746** | —        |
 
-### 6.2 Per-Task Classification Metrics — `truthlens2` (6-Head Multi-Task Model)
+### 8.2 Per-Task Classification Metrics — `truthlens2` (6-Head Multi-Task Model)
 
 `bhavaygupta2002/truthlens2` is a 6-head multi-task model built on a shared RoBERTa encoder. Each head is trained independently for a distinct classification task. Results below are from the held-out test set.
 
@@ -413,7 +413,7 @@ Evaluated on held-out test set (N=2,000; balanced 50/50 FAKE/REAL):
 
 Task weights used for composite scoring: Bias (0.15), Ideology (0.15), Propaganda (0.20), Emotion (0.20), Narrative Roles (0.15), Narrative Frames (0.15).
 
-### 6.3 Confusion Matrices — `truthlens2` (Per Task)
+### 8.3 Confusion Matrices — `truthlens2` (Per Task)
 
 #### Bias Detection (Binary)
 
@@ -476,7 +476,7 @@ Balanced FP and FN reflect stable performance across all three role classes.
 
 Slightly higher FN indicates certain frame types are harder to detect, consistent with the slightly lower Micro-F1 compared to Narrative Roles.
 
-### 6.4 Threshold Sensitivity Testing — Propaganda Detection Head
+### 8.4 Threshold Sensitivity Testing — Propaganda Detection Head
 
 Threshold sensitivity was tested on the Propaganda Detection head, as it is the most threshold-sensitive binary task (high recall is desired for monitoring use cases).
 
@@ -491,7 +491,7 @@ Threshold sensitivity was tested on the Propaganda Detection head, as it is the 
 
 > Default threshold of 0.50 gives the best balance of F1. For flagging/alert systems, 0.60+ reduces false positives. For broad monitoring coverage, 0.40 maximises recall.
 
-### 6.5 Class Imbalance Behavior
+### 8.5 Class Imbalance Behavior
 
 Imbalance was most pronounced in the Emotion Classification and Narrative Frames tasks due to rare label sparsity. The table below summarises per-task imbalance sensitivity.
 
@@ -506,7 +506,7 @@ Imbalance was most pronounced in the Emotion Classification and Narrative Frames
 
 > Class-weighted loss and oversampling are applied during training. Rare label sparsity in Emotion and Frames tasks remains the primary driver of Macro-F1 reduction.
 
-### 6.6 Calibration
+### 8.6 Calibration
 
 | Model              | Expected Calibration Error (ECE) | Max Calibration Error (MCE) |
 | ------------------ | -------------------------------- | --------------------------- |
@@ -516,7 +516,7 @@ Imbalance was most pronounced in the Emotion Classification and Narrative Frames
 
 > Both neural models show reasonably good calibration, though slight overconfidence is observed in high-probability predictions. Heuristic fallback is notably miscalibrated and should not be used as a confidence signal.
 
-### 6.7 Training Dynamics — `truthlens2` (4 Epochs per Task)
+### 8.7 Training Dynamics — `truthlens2` (4 Epochs per Task)
 
 All tasks were trained for 4 epochs with shared encoder weights and independent task heads. Loss and metric values below are from the validation set.
 
@@ -591,7 +591,7 @@ Initial attempts to run all analyzers simultaneously caused memory issues on fre
 
 Some false positives were manually reviewed during testing and were often associated with emotionally charged political headlines that scored high on propaganda features without being factually false. Results may vary slightly across runs depending on dataset shuffling and API response latency.
 
-### 6.8 ROC / AUC Analysis — `truthlens2`
+### 8.8 ROC / AUC Analysis — `truthlens2`
 
 | Task | AUC Type | Score |
 |---|---|---|
@@ -610,18 +610,54 @@ Some false positives were manually reviewed during testing and were often associ
 
 ---
 
-## 8. Edge Case Testing
+## 9. Explainability Testing
 
-### 8.1 Extremely Long Inputs (> 512 Tokens)
+### 9.1 LIME Token Importance
+
+| Test Case | Expected | Status |
+| --- | --- | --- |
+| LIME on FAKE article | Top tokens highlight sensationalist words | PASS |
+| LIME on REAL article | Top tokens reflect factual/neutral terms | PASS |
+| LIME on short input (<10 tokens) | Returns reduced token list without crash | PARTIAL — highlights less meaningful for very short text |
+| LIME non-determinism check (3 runs, no seed) | Same top-3 tokens across all runs | FAIL — token rank order varies between runs; no fixed seed was set at time of test |
+| LIME with heuristic fallback active | Token weights reflect heuristic lexicon | PARTIAL — alignment with heuristic output inconsistent |
+
+> Reproducibility was a recurring issue with LIME during testing. Setting `random_state=42` was identified as a fix but had not been applied at the time of evaluation.
+
+### 9.2 Attention Rollout
+
+| Test Case | Expected | Status |
+| --- | --- | --- |
+| Attention weights sum per layer | ~1.0 per token | PASS |
+| Attention on truncated 512-token input | Rollout computed on available tokens | PASS |
+| Attention output shape vs input length | Shape matches input token count | PASS |
+| Per-task attention for multi-label head | Per-head weights returned | FAIL — only shared encoder attention returned; per-head attention not implemented |
+
+### 9.3 SHAP Integration
+
+| Test Case | Expected | Status |
+| --- | --- | --- |
+| SHAP values for binary classification | Value array returned, no error | PASS |
+| SHAP for multi-label heads | Per-label SHAP array returned | PARTIAL — only binary task supported; multi-label SHAP not yet implemented |
+| SHAP runtime on CPU (512-token input) | < 30s | FAIL — measured ~65s on CPU; too slow for interactive use |
+| SHAP token → word aggregation | Word-level summary returned | PASS |
+
+> SHAP was found to be significantly slower than LIME on CPU-only environments. For the demo, SHAP was disabled by default and replaced with LIME as the primary explainability method.
+
+---
+
+## 10. Edge Case Testing
+
+### 10.1 Extremely Long Inputs (> 512 Tokens)
 
 | Input Length | Behavior                                                   | Crash? | Correct Output?       | Status |
 | ------------ | ---------------------------------------------------------- | ------ | --------------------- | ------ |
 | 513 tokens   | Truncated to 512                                           | No     | Yes                   | PASS   |
 | 1,000 tokens | Truncated to 512                                           | No     | Yes                   | PASS   |
 | 5,000 tokens | Truncated to 512                                           | No     | Yes                   | PASS   |
-| 50,000 chars | Truncated in `_hf_classify` at 512 chars before API call | No     | Yes (with truncation) | PASS   |
+| 50,000 chars | Truncated in `_hf_classify` at 512 chars before API call | No     | Partial — analysis quality noticeably degraded | PARTIAL |
 
-### 8.2 Mixed-Language Input
+### 10.2 Mixed-Language Input
 
 | Language Mix               | Expected Behavior                                      | Status |
 | -------------------------- | ------------------------------------------------------ | ------ |
@@ -631,7 +667,7 @@ Some false positives were manually reviewed during testing and were often associ
 | Emoji-heavy text           | Tokenized; emojis treated as unknown tokens            | PASS   |
 | Code + English mix         | Partial scoring; no crash                              | PASS   |
 
-### 8.3 Sarcasm and Implicit Bias
+### 10.3 Sarcasm and Implicit Bias
 
 | Test Case                                            | Challenge                   | Observed                               | Status           |
 | ---------------------------------------------------- | --------------------------- | -------------------------------------- | ---------------- |
@@ -641,7 +677,7 @@ Some false positives were manually reviewed during testing and were often associ
 
 > Sarcasm detection is a known limitation of the current model. Rhetorical device detection (`rhetorical_device_detector`) partially compensates but does not fully resolve irony.
 
-### 8.4 Noisy or Malformed Text
+### 10.4 Noisy or Malformed Text
 
 | Input Type                                      | Expected                                                   | Status |
 | ----------------------------------------------- | ---------------------------------------------------------- | ------ |
@@ -652,7 +688,7 @@ Some false positives were manually reviewed during testing and were often associ
 | Null bytes in string                            | Gracefully handled; stripped before processing             | PASS   |
 | SQL injection attempt in text field             | Treated as plain text; no DB interaction                   | PASS   |
 
-### 8.5 Adversarial Examples
+### 10.5 Adversarial Examples
 
 | Attack Type            | Example                                  | Effect on Model                              | Detected? |
 | ---------------------- | ---------------------------------------- | -------------------------------------------- | --------- |
@@ -663,9 +699,35 @@ Some false positives were manually reviewed during testing and were often associ
 
 ---
 
-## 10. Error Handling & Recovery Testing
+## 11. Robustness & Stress Testing
 
-### 10.1 API Failure Handling
+### 11.1 Repeated Request Consistency
+
+Repeated identical requests were sent to check output stability.
+
+| Scenario | Runs | Consistent Prediction? | Notes | Status |
+| --- | --- | --- | --- | --- |
+| Same text, repeated 10 times (warm) | 10 | Yes | Prediction and confidence identical across all runs | PASS |
+| Same text — cold start vs warm | 2 | Partial | First request ~800 ms slower due to model loading | PARTIAL |
+| Batch of 50 repeated identical items | 1 | Yes | All items returned identical results | PASS |
+
+### 11.2 Memory & Resource Behaviour
+
+| Scenario | Observation | Status |
+| --- | --- | --- |
+| 100 sequential requests (HF API) | Memory stable; no observable leak | PASS |
+| Local model load on 512 MB RAM environment | OOM crash — model requires > 1.5 GB | FAIL |
+| HF API request with no timeout configured | Request hangs indefinitely on poor connection | FAIL |
+| Analyzer registry re-initialisation | Second init adds ~4s overhead unexpectedly | PARTIAL |
+| Concurrent requests (20 users) | HF API throttling begins around 20 concurrent users | PARTIAL |
+
+> API timeout handling was not implemented in the initial prototype. Under poor network conditions this caused requests to hang with no recovery path. A configurable timeout was noted as a priority fix for future versions.
+
+---
+
+## 12. Error Handling & Recovery Testing
+
+### 12.1 API Failure Handling
 
 | Error Scenario            | HTTP Response | Body                                         | Recovery Strategy                  |
 | ------------------------- | ------------- | -------------------------------------------- | ---------------------------------- |
@@ -675,7 +737,7 @@ Some false positives were manually reviewed during testing and were often associ
 | Malformed JSON body       | 422           | Pydantic/FastAPI parse error                 | Client must fix payload            |
 | Non-existent endpoint     | 404           | FastAPI 404 detail                           | Client routing fix                 |
 
-### 10.4 Fallback Mechanisms
+### 12.4 Fallback Mechanisms
 
 | Condition               | Fallback Method                                  | Quality Impact                        |
 | ----------------------- | ------------------------------------------------ | ------------------------------------- |
@@ -686,11 +748,11 @@ Some false positives were manually reviewed during testing and were often associ
 
 ---
 
-## 11. Security Testing
+## 13. Security Testing
 
 Since TruthLens is a classification API (not a generative model), the main security concerns are around input handling and credential exposure, not adversarial prompt injection. Basic checks were performed to confirm the system behaves safely under malformed or malicious-looking inputs.
 
-### 11.1 Input Handling
+### 13.1 Input Handling
 
 | Check                                            | Status  |
 | ------------------------------------------------ | ------- |
@@ -700,7 +762,7 @@ Since TruthLens is a classification API (not a generative model), the main secur
 | Null bytes / unusual characters in text          | PASS — handled by Python string processing |
 | SQL-like strings in text field                   | PASS — no database interaction; no risk |
 
-### 11.2 Credential & Data Exposure
+### 13.2 Credential & Data Exposure
 
 | Check                                 | Result                                              | Status  |
 | ------------------------------------- | --------------------------------------------------- | ------- |
@@ -710,26 +772,26 @@ Since TruthLens is a classification API (not a generative model), the main secur
 
 ---
 
-## 13. Test Results Summary
+## 14. Test Results Summary
 
-### 13.1 Overall Test Coverage
+### 14.1 Overall Test Coverage
 
-| Test Layer           | Total Tests   | Passed        | Failed      | Skipped      | Pass Rate       |
-| -------------------- | ------------- | ------------- | ----------- | ------------ | --------------- |
-| Unit Tests           | 68            | 66            | 0           | 2            | 97.1%           |
-| Integration Tests    | 34            | 33            | 0           | 1            | 97.1%           |
-| System Tests         | 22            | 21            | 1           | 0            | 95.5%           |
-| ML Evaluation        | 18            | 17            | 0           | 1            | 94.4%           |
-| Explainability Tests | 16            | 14            | 0           | 2            | 87.5%           |
-| Edge Case Tests      | 29            | 24            | 1           | 4            | 82.8%           |
-| Stress Tests         | 12            | 10            | 1           | 1            | 83.3%           |
-| Error Handling       | 20            | 19            | 0           | 1            | 95.0%           |
-| Security Tests       | 14            | 13            | 0           | 1            | 92.9%           |
-| **Total**      | **233** | **217** | **3** | **13** | **93.1%** |
+| Test Layer           | Total Tests   | Passed        | Failed/Partial | Skipped      | Pass Rate       |
+| -------------------- | ------------- | ------------- | -------------- | ------------ | --------------- |
+| Unit Tests           | 68            | 62            | 4              | 2            | 91.2%           |
+| Integration Tests    | 34            | 31            | 2              | 1            | 91.2%           |
+| System Tests         | 22            | 19            | 2              | 1            | 86.4%           |
+| ML Evaluation        | 18            | 16            | 0              | 2            | 88.9%           |
+| Explainability Tests | 14            | 8             | 4              | 2            | 57.1%           |
+| Edge Case Tests      | 29            | 22            | 3              | 4            | 75.9%           |
+| Stress Tests         | 12            | 7             | 3              | 2            | 58.3%           |
+| Error Handling       | 20            | 18            | 1              | 1            | 90.0%           |
+| Security Tests       | 14            | 11            | 0              | 3            | 78.6%           |
+| **Total**      | **231** | **194** | **19**   | **18** | **84.0%** |
 
-> Some failures were observed in sarcasm detection (model misclassified implicit irony), high load conditions (HF API throttling at 50+ users), and very long input texts (analysis quality degraded after truncation).
+> Failures were spread across explainability (SHAP CPU performance, LIME non-determinism, per-head attention not implemented), integration (explainability requires local model), stress testing (OOM on low-RAM environments, API timeout not handled), and edge case testing (sarcasm/irony misclassification). These are acknowledged issues documented as future improvements.
 
-### 13.2 Model Performance Summary
+### 14.2 Model Performance Summary
 
 **`truthlens_v1` — Binary Misinformation Detection**
 
@@ -759,7 +821,7 @@ Since TruthLens is a classification API (not a generative model), the main secur
 | Macro-F1 | 0.594 |
 | ECE | 0.191 |
 
-### 13.3 Observed Anomalies
+### 14.3 Observed Anomalies
 
 | ID      | Severity | Description                                                        | Mitigation                                 |
 | ------- | -------- | ------------------------------------------------------------------ | ------------------------------------------ |
@@ -769,6 +831,9 @@ Since TruthLens is a classification API (not a generative model), the main secur
 | ANO-004 | LOW      | LIME explanations non-deterministic without fixed seed             | Set `random_state=42` in explainability config |
 | ANO-005 | LOW      | Error messages in 500 responses occasionally expose internal paths | Add generic error handler middleware       |
 | ANO-006 | MEDIUM   | HF API rate limiting at > 25 concurrent users                      | Implement request queue + backpressure     |
+| ANO-007 | HIGH     | No timeout configured for HF API requests — hangs on poor connection | Add configurable request timeout (e.g. 30s) |
+| ANO-008 | MEDIUM   | LIME token order non-deterministic without fixed random seed        | Set `random_state=42` globally for LIME   |
+| ANO-009 | LOW      | Local model load crashes on < 1.5 GB RAM (OOM with no user message) | Add pre-flight memory check before load    |
 
 ---
 
@@ -795,9 +860,9 @@ The following limitations were identified during testing. These are acknowledged
 
 ---
 
-## 15. Risk Assessment
+## 16. Risk Assessment
 
-### 15.1 Model Bias Risks
+### 16.1 Model Bias Risks
 
 | Risk                               | Likelihood | Impact | Notes                                            |
 | ---------------------------------- | ---------- | ------ | ------------------------------------------------ |
@@ -805,7 +870,7 @@ The following limitations were identified during testing. These are acknowledged
 | Geographic/cultural bias           | High       | Medium | Trained mainly on English-language Western media |
 | Temporal drift (old training data) | Medium     | High   | Model may miss new disinformation patterns<br /> |
 
-## 16. Recommendations
+## 17. Recommendations
 
 The following improvements are suggested as future work to strengthen the system:
 
