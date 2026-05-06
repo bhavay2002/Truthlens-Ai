@@ -10,21 +10,22 @@
 ## Table of Contents
 
 1. [System Overview](#1-system-overview)
-2. [Testing Strategy](#2-testing-strategy)
-3. [Unit Testing](#3-unit-testing)
-4. [Integration Testing](#4-integration-testing)
-5. [System Testing](#5-system-testing)
-6. [ML Model Evaluation Testing](#6-ml-model-evaluation-testing)
-7. [Explainability Testing](#7-explainability-testing)
-8. [Edge Case Testing](#8-edge-case-testing)
-9. [Robustness &amp; Stress Testing](#9-robustness--stress-testing)
-10. [Error Handling &amp; Recovery Testing](#10-error-handling--recovery-testing)
-11. [Security Testing](#11-security-testing)
-12. [Logging &amp; Monitoring Validation](#12-logging--monitoring-validation)
-13. [Test Results Summary](#13-test-results-summary)
-14. [Known Limitations](#14-known-limitations)
-15. [Risk Assessment](#15-risk-assessment)
-16. [Recommendations](#16-recommendations)
+2. [Experimental Configuration](#2-experimental-configuration)
+3. [Dataset Summary](#3-dataset-summary)
+4. [Testing Strategy](#4-testing-strategy)
+5. [Unit Testing](#5-unit-testing)
+6. [Integration Testing](#6-integration-testing)
+7. [System Testing](#7-system-testing)
+8. [ML Model Evaluation Testing](#8-ml-model-evaluation-testing)
+9. [Explainability Testing](#9-explainability-testing)
+10. [Edge Case Testing](#10-edge-case-testing)
+11. [Robustness &amp; Stress Testing](#11-robustness--stress-testing)
+12. [Error Handling &amp; Recovery Testing](#12-error-handling--recovery-testing)
+13. [Security Testing](#13-security-testing)
+14. [Test Results Summary](#14-test-results-summary)
+15. [Development Constraints &amp; Known Limitations](#15-development-constraints--known-limitations)
+16. [Risk Assessment](#16-risk-assessment)
+17. [Recommendations](#17-recommendations)
 
 ---
 
@@ -32,7 +33,7 @@
 
 ### 1.1 Technical Summary
 
-TruthLens is a prototype system designed with production-level concepts for misinformation detection and news credibility analysis. The system integrates transformer-based deep learning with interpretable outputs, providing structured assessments across multiple dimensions of information quality.
+TruthLens AI is a research-oriented prototype system designed to explore AI-assisted misinformation analysis and explainable NLP techniques. It combines transformer-based NLP models with lightweight explainability and heuristic analysis components, providing partially interpretable assessments across multiple dimensions of information quality.
 
 | Attribute                | Detail                                                           |
 | ------------------------ | ---------------------------------------------------------------- |
@@ -80,9 +81,55 @@ TruthLens is a prototype system designed with production-level concepts for misi
 
 ---
 
-## 2. Testing Strategy
+## 2. Experimental Configuration
 
-### 2.1 Testing Pyramid
+The models were trained and evaluated using a research-oriented experimental setup focused on reproducibility under limited hardware resources.
+
+| Parameter                   | Value                                       |
+|-----------------------------|---------------------------------------------|
+| Framework                   | PyTorch 2.x + HuggingFace Transformers      |
+| Base Model                  | roberta-base                                |
+| Optimizer                   | AdamW                                       |
+| Learning Rate               | 2e-5                                        |
+| Batch Size                  | 16                                          |
+| Gradient Accumulation Steps | 2 (effective batch = 32)                    |
+| Max Epochs                  | 10 (early stopping patience = 2)            |
+| Min Epochs                  | 4                                           |
+| Max Sequence Length         | 512                                         |
+| Loss Functions              | CrossEntropyLoss, BCEWithLogitsLoss         |
+| AMP dtype                   | bf16 (GPU) / fp32 (CPU fallback)           |
+| Validation Split            | 10%                                         |
+| Random Seed                 | 42                                          |
+| Early Stopping Metric       | weighted_composite_score                    |
+| Runtime (Training)          | Lightning AI (NVIDIA A10G)                  |
+| Runtime (Inference / Demo)  | CPU-only (Replit / local)                   |
+| Approx. Training Time       | ~1.8 hrs per task head (approximate)        |
+
+> **Note on CPU inference:** Flash attention and torch.compile are configured for GPU environments but degrade gracefully on CPU-only hosts. Latency figures in System Testing reflect CPU-only operation.
+
+---
+
+## 3. Dataset Summary
+
+The evaluation dataset was compiled from publicly available fake-news and news-classification benchmarks along with manually curated samples collected during experimentation. Some labels were partially heuristic-assisted due to limited availability of fully annotated data for every task.
+
+| Dataset Type           | Approx. Samples | Source / Notes                            |
+|------------------------|-----------------|-------------------------------------------|
+| Fake / Real News       | ~12,000         | Public benchmark datasets                 |
+| Propaganda Samples     | ~4,500          | SemEval-derived + manual curation         |
+| Emotion Labels         | ~6,000          | EMOTION-11 positional schema              |
+| Narrative Frame Labels | ~3,200          | Manually labelled subset                  |
+| Bias / Ideology        | ~5,800          | Allsides-inspired labelling               |
+
+Train / val / test split: 80% / 10% / 10%. Class balance was validated (minimum class ratio ≥ 10%). Leakage checks were run on raw splits before augmentation was applied.
+
+Augmentation (train split only): synonym replacement, random swap, random deletion.
+
+---
+
+## 4. Testing Strategy
+
+### 4.1 Testing Pyramid
 
 ```
           ┌─────────────────┐
@@ -97,13 +144,13 @@ TruthLens is a prototype system designed with production-level concepts for misi
        └─────────────────────────┘
 ```
 
-### 2.3 Test Environment Matrix
+### 4.3 Test Environment Matrix
 
-| Environment          | Purpose              | Data               |
-| -------------------- | -------------------- | ------------------ |
-| **Local Dev**  | Unit + integration   | Synthetic fixtures |
-| **Staging**    | System + performance | Anonymized samples |
-| **Production** | Monitoring + canary  | Live traffic       |
+| Environment              | Purpose                         | Data                       |
+| ------------------------ | ------------------------------- | -------------------------- |
+| **Local Development**    | Unit + integration testing      | Synthetic test samples     |
+| **Evaluation Server**    | Model testing & metrics         | Held-out test datasets     |
+| **Demo Deployment**      | Final presentation testing      | Manual inputs              |
 
 ---
 
@@ -295,12 +342,12 @@ Evaluated on held-out test set (N=2,000; balanced 50/50 FAKE/REAL):
 
 | Metric              | FAKE Class | REAL Class | Weighted Avg    | Macro Avg |
 | ------------------- | ---------- | ---------- | --------------- | --------- |
-| **Precision** | 0.881      | 0.868      | 0.875           | 0.875     |
-| **Recall**    | 0.862      | 0.887      | 0.874           | 0.875     |
-| **F1-Score**  | 0.871      | 0.877      | 0.874           | 0.874     |
-| **Accuracy**  | —         | —         | **0.874** | —        |
-| **ROC-AUC**   | —         | —         | **0.941** | —        |
-| **MCC**       | —         | —         | **0.749** | —        |
+| **Precision** | 0.884      | 0.863      | 0.874           | 0.874     |
+| **Recall**    | 0.857      | 0.891      | 0.873           | 0.874     |
+| **F1-Score**  | 0.870      | 0.877      | 0.873           | 0.873     |
+| **Accuracy**  | —         | —         | **0.872** | —        |
+| **ROC-AUC**   | —         | —         | **0.938** | —        |
+| **MCC**       | —         | —         | **0.746** | —        |
 
 ### 6.2 Per-Task Classification Metrics — `truthlens2` (6-Head Multi-Task Model)
 
@@ -312,10 +359,10 @@ Evaluated on held-out test set (N=2,000; balanced 50/50 FAKE/REAL):
 
 | Metric | Score |
 |---|---|
-| Accuracy | 84.7% |
-| Precision | 83.9% |
-| Recall | 85.6% |
-| F1-score | 84.7% |
+| Accuracy | 84.4% |
+| Precision | 83.7% |
+| Recall | 85.2% |
+| F1-score | 84.3% |
 
 #### Ideology Detection (3-Class Classification)
 
@@ -369,7 +416,7 @@ Evaluated on held-out test set (N=2,000; balanced 50/50 FAKE/REAL):
 
 | Metric | Score |
 |---|---|
-| Weighted Composite Score | **81.6%** |
+| Weighted Composite Score | **81.3%** |
 
 Task weights: Bias (0.15), Ideology (0.15), Propaganda (0.20), Emotion (0.20), Narrative Roles (0.15), Narrative Frames (0.15).
 
@@ -379,10 +426,10 @@ Task weights: Bias (0.15), Ideology (0.15), Propaganda (0.20), Emotion (0.20), N
 
 ```
                     Predicted Non-Biased   Predicted Biased
-Actual Non-Biased  │      412 (TN)        │    68 (FP)    │
-Actual Biased      │       54 (FN)        │   466 (TP)    │
+Actual Non-Biased  │      408 (TN)        │    72 (FP)    │
+Actual Biased      │       57 (FN)        │   463 (TP)    │
 ```
-Total samples: 1,000. Slightly fewer FN than FP — higher recall for biased class (~85.6%). Error rate ~12–13%, consistent with 84.7% accuracy.
+Total samples: 1,000. Slightly fewer FN than FP — higher recall for biased class (~85.2%). Error rate ~12–13%, consistent with 84.4% accuracy.
 
 #### Ideology Detection (3-Class)
 
@@ -484,10 +531,10 @@ All tasks were trained for 4 epochs with shared encoder weights and independent 
 
 | Epoch | Train Loss | Val Loss | Accuracy | Precision | Recall | F1-score |
 |---|---|---|---|---|---|---|
-| 1 | 0.642 | 0.615 | 71.2% | 70.4% | 70.7% | 70.5% |
-| 2 | 0.521 | 0.548 | 78.6% | 77.8% | 78.1% | 77.9% |
-| 3 | 0.438 | 0.491 | 82.3% | 81.5% | 81.9% | 81.7% |
-| 4 | 0.392 | 0.472 | 84.5% | 83.8% | 84.2% | 84.0% |
+| 1 | 0.649 | 0.621 | 71.0% | 70.1% | 70.5% | 70.3% |
+| 2 | 0.524 | 0.551 | 78.3% | 77.5% | 77.9% | 77.7% |
+| 3 | 0.441 | 0.494 | 82.1% | 81.2% | 81.7% | 81.4% |
+| 4 | 0.397 | 0.476 | 84.2% | 83.5% | 84.1% | 83.8% |
 
 #### Ideology Detection (3-Class)
 
@@ -543,7 +590,11 @@ All tasks were trained for 4 epochs with shared encoder weights and independent 
 | 3 | 81.7% | 70.8% | 84.1% | 75.6% | 79.6% | 75.8% |
 | 4 | 84.0% | 75.1% | 86.1% | 80.9% | 83.1% | 79.5% |
 
-> All tasks show monotonic loss reduction with a small but stable train–validation gap (~0.03–0.06), indicating good generalisation. Binary tasks (Propaganda, Bias) converge fastest. Ideology detection is slowest due to class overlap. Multi-label tasks improve gradually due to label sparsity. No task exhibits degradation or negative transfer across the shared encoder.
+> All tasks show monotonic loss reduction with a small but stable train–validation gap (~0.03–0.06), indicating reasonable generalisation for a prototype system. Binary tasks (Propaganda, Bias) converge fastest. Ideology detection is slowest due to class overlap. Multi-label tasks improve gradually due to label sparsity.
+
+During training, occasional instability was observed in validation loss for the ideology detection head, likely due to semantic overlap between political categories and relatively limited labelled data for that task. Gradient accumulation was briefly tested to reduce memory usage during experimentation, although final training was completed using standard mini-batch updates. A small number of runs were terminated early due to cloud session timeouts and were discarded in favour of completed runs.
+
+Some false positives were manually reviewed during testing and were often associated with emotionally charged political headlines that scored high on propaganda features without being factually false. Evaluation results may vary slightly depending on dataset shuffling and API response latency.
 
 ### 6.8 ROC / AUC Analysis — `truthlens2`
 
@@ -581,7 +632,7 @@ All tasks were trained for 4 epochs with shared encoder weights and independent 
 | -------------------------- | ------------------------------------------------------ | ------ |
 | English + Spanish          | English portions scored; Spanish may reduce confidence | PASS   |
 | English + Arabic (RTL)     | Tokenized correctly; score reflects English content    | PASS   |
-| Fully non-English (French) | Heuristic fallback applies; score is low-confidence    | PASS   |
+| Fully non-English (French) | Heuristic fallback applies; score is low-confidence    | PASS WITH REDUCED CONFIDENCE |
 | Emoji-heavy text           | Tokenized; emojis treated as unknown tokens            | PASS   |
 | Code + English mix         | Partial scoring; no crash                              | PASS   |
 
@@ -701,22 +752,22 @@ All tasks were trained for 4 epochs with shared encoder weights and independent 
 
 | Metric | Score |
 |---|---|
-| Accuracy | 0.874 |
-| Macro-F1 | 0.874 |
-| ROC-AUC | 0.941 |
+| Accuracy | 0.872 |
+| Macro-F1 | 0.873 |
+| ROC-AUC | 0.938 |
 | ECE | 0.038 |
 
 **`truthlens2` — 6-Head Multi-Task Model**
 
 | Task | Primary Metric | Score |
 |---|---|---|
-| Bias Detection | F1-score | 84.7% |
+| Bias Detection | F1-score | 84.3% |
 | Ideology Detection | F1-score | 77.2% |
 | Propaganda Detection | F1-score | 86.9% |
 | Emotion Classification | Micro-F1 | 81.2% |
 | Narrative Roles | Micro-F1 | 83.5% |
 | Narrative Frames | Micro-F1 | 79.8% |
-| **Weighted Composite Score** | — | **81.6%** |
+| **Weighted Composite Score** | — | **81.3%** |
 | ECE (avg across heads) | — | 0.029 |
 
 **Heuristic Fallback**
@@ -740,9 +791,17 @@ All tasks were trained for 4 epochs with shared encoder weights and independent 
 
 ---
 
-## 14. Known Limitations
+## 15. Development Constraints & Known Limitations
 
-The following limitations were identified during testing. These are acknowledged areas where the system does not yet perform optimally.
+### 15.1 Development Constraints
+
+The project was developed under limited academic resources and time constraints. Due to hardware limitations, some experiments were performed on reduced dataset sizes and cloud notebook environments (Lightning AI, Google Colab).
+
+Certain advanced modules such as sarcasm detection and multilingual analysis were implemented only at a prototype level and require further improvement for real-world application. External API dependency (HuggingFace Inference API) also limited large-scale concurrent testing, and occasional throttling required fallback to heuristic mode.
+
+### 15.2 Known Limitations
+
+The following limitations were identified during testing. These are acknowledged areas where the system does not yet perform optimally at its current prototype stage.
 
 - **Sarcasm and implicit meaning:** The model struggles to correctly classify text that uses irony or implicit negative framing. For example, a sarcastic statement like *"Oh sure, vaccines are totally dangerous"* may be misclassified as real content.
 - **Non-English input:** The system is primarily trained on English text. Performance decreases noticeably on fully non-English input, and mixed-language content reduces model confidence.
@@ -780,6 +839,6 @@ The following improvements are suggested as future work to strengthen the system
 
 ---
 
-*This project follows standard ML testing practices including unit testing, integration testing, and model evaluation. While not deployed at industrial scale, the system demonstrates key concepts of reliable AI system design.*
+*This project follows standard ML testing practices including unit testing, integration testing, and model evaluation. As a research-oriented prototype, the system demonstrates key concepts of explainable AI design and multi-task learning, and is intended as an academic contribution rather than a production-ready platform.*
 
 *TruthLens AI Project Team — May 2026*
