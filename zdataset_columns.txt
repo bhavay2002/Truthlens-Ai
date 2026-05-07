@@ -42,13 +42,5 @@ emotion_7
 emotion_8
 emotion_9
 emotion_10
-emotion_11
-emotion_12
-emotion_13
-emotion_14
-emotion_15
-emotion_16
-emotion_17
-emotion_18
-emotion_19}
+}
 
